@@ -1,1 +1,7 @@
-# skein
+# Skein
+
+Skein is an embedded Rust graph database intended for the Nowledge local graph
+data plane. It uses Cypher as its query language and a Cascades-style optimizer
+for deterministic, explainable planning.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the current design.
