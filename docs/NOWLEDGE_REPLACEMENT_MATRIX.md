@@ -18,7 +18,7 @@ needs. The source product boundary is:
 |---|---|---|
 | Embedded open/create by path | One local database object per workspace path | Partial: `Database::open`, `GraphStore::open` |
 | Storage version | Boot compatibility checks | Partial: `storage_version()` |
-| Cypher reads | `MATCH`, `WHERE`, `RETURN`, parameters later | Partial: single-node `MATCH` plus one-hop outgoing relationship expansion |
+| Cypher reads | `MATCH`, `WHERE`, `RETURN`, parameter binding | Partial: single-node `MATCH`, one-hop outgoing relationship expansion, and typed parameters for query/explain/transaction APIs |
 | DDL/schema | Node/rel labels and migrations | Partial: catalog tokens only |
 | Node mutations | `CREATE`, `MERGE`, `SET`, `DELETE` | Partial: `CREATE` node only |
 | Relationship mutations | relationship tables/groups | Partial: `CREATE (:Label {...})-[:TYPE {...}]->(:Label {...})` |
@@ -64,11 +64,12 @@ search is rebuildable, and large content is not duplicated into the graph store.
 
 ## Next Implementation Slices
 
-1. Add snapshot read transactions and MVCC reader isolation.
-2. Add persistent index descriptors and richer index statistics.
-3. Add projected graph snapshots for PageRank/Louvain-compatible workflows.
-4. Add vector embedding rebuild hooks and model/dimension manifests.
-5. Add BM25-style scoring and tokenizer parity with Nowledge search.
-6. Split the flat crate into chryso-style `core`, `parser`, `planner`,
+1. Add a dual-engine Nowledge compatibility fixture harness.
+2. Add snapshot read transactions and MVCC reader isolation.
+3. Add persistent index descriptors and richer index statistics.
+4. Add projected graph snapshots for PageRank/Louvain-compatible workflows.
+5. Add vector embedding rebuild hooks and model/dimension manifests.
+6. Add BM25-style scoring and tokenizer parity with Nowledge search.
+7. Split the flat crate into chryso-style `core`, `parser`, `planner`,
    `optimizer`, `store`, `search`, and root facade crates once the current
    MVP API surface stabilizes.

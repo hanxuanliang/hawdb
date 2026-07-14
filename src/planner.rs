@@ -1,4 +1,4 @@
-use crate::cypher::{PropertyPredicate, ReturnItem, Statement};
+use crate::cypher::{PropertyPredicate, ReturnItem, Statement, ValueExpression};
 use crate::error::{Result, SkeinError};
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,18 +55,25 @@ pub struct Projection {
 }
 
 pub fn plan(statement: &Statement) -> Result<LogicalPlan> {
+    plan_with_params(statement, &BTreeMap::new())
+}
+
+pub fn plan_with_params(
+    statement: &Statement,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<LogicalPlan> {
     match statement {
         Statement::CreateNode(node) => Ok(LogicalPlan::CreateNode {
             label: node.label.clone(),
-            properties: node.properties.clone(),
+            properties: bind_properties(&node.properties, parameters)?,
         }),
         Statement::CreateRelationship(relationship) => Ok(LogicalPlan::CreateRelationship {
             source_label: relationship.source.label.clone(),
-            source_properties: relationship.source.properties.clone(),
+            source_properties: bind_properties(&relationship.source.properties, parameters)?,
             rel_type: relationship.rel_type.clone(),
-            rel_properties: relationship.properties.clone(),
+            rel_properties: bind_properties(&relationship.properties, parameters)?,
             target_label: relationship.target.label.clone(),
-            target_properties: relationship.target.properties.clone(),
+            target_properties: bind_properties(&relationship.target.properties, parameters)?,
         }),
         Statement::MatchReturn(query) => {
             let mut scope = BTreeSet::from([query.variable.clone()]);
@@ -94,7 +101,7 @@ pub fn plan(statement: &Statement) -> Result<LogicalPlan> {
                     predicate: Predicate::PropertyEq {
                         variable: predicate.variable.clone(),
                         property: predicate.property.clone(),
-                        value: predicate.value.clone(),
+                        value: bind_value(&predicate.value, parameters)?,
                     },
                     input: Box::new(input),
                 };
@@ -104,6 +111,26 @@ pub fn plan(statement: &Statement) -> Result<LogicalPlan> {
                 input: Box::new(input),
             })
         }
+    }
+}
+
+fn bind_properties(
+    properties: &BTreeMap<String, ValueExpression>,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<BTreeMap<String, Value>> {
+    properties
+        .iter()
+        .map(|(name, value)| Ok((name.clone(), bind_value(value, parameters)?)))
+        .collect()
+}
+
+fn bind_value(expression: &ValueExpression, parameters: &BTreeMap<String, Value>) -> Result<Value> {
+    match expression {
+        ValueExpression::Literal(value) => Ok(value.clone()),
+        ValueExpression::Parameter(name) => parameters
+            .get(name)
+            .cloned()
+            .ok_or_else(|| SkeinError::Semantic(format!("missing parameter '${name}'"))),
     }
 }
 

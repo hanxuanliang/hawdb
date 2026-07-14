@@ -12,14 +12,14 @@ pub enum Statement {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateNode {
     pub label: String,
-    pub properties: BTreeMap<String, Value>,
+    pub properties: BTreeMap<String, ValueExpression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateRelationship {
     pub source: CreateNode,
     pub rel_type: String,
-    pub properties: BTreeMap<String, Value>,
+    pub properties: BTreeMap<String, ValueExpression>,
     pub target: CreateNode,
 }
 
@@ -43,7 +43,13 @@ pub struct RelationshipExpand {
 pub struct PropertyPredicate {
     pub variable: String,
     pub property: String,
-    pub value: Value,
+    pub value: ValueExpression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValueExpression {
+    Literal(Value),
+    Parameter(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,7 +129,9 @@ impl<'a> Parser<'a> {
         Ok((variable, label))
     }
 
-    fn parse_relationship_pattern(&mut self) -> Result<(String, BTreeMap<String, Value>)> {
+    fn parse_relationship_pattern(
+        &mut self,
+    ) -> Result<(String, BTreeMap<String, ValueExpression>)> {
         self.expect_char('[')?;
         self.expect_char(':')?;
         let rel_type = self.parse_ident()?;
@@ -214,7 +222,7 @@ impl<'a> Parser<'a> {
         Ok(items)
     }
 
-    fn parse_properties(&mut self) -> Result<BTreeMap<String, Value>> {
+    fn parse_properties(&mut self) -> Result<BTreeMap<String, ValueExpression>> {
         let mut properties = BTreeMap::new();
         self.expect_char('{')?;
         loop {
@@ -241,14 +249,24 @@ impl<'a> Parser<'a> {
         Ok(properties)
     }
 
-    fn parse_value(&mut self) -> Result<Value> {
+    fn parse_value(&mut self) -> Result<ValueExpression> {
         self.skip_ws();
         match self.peek_char() {
-            Some('\'') | Some('"') => self.parse_string().map(Value::String),
-            Some(ch) if ch.is_ascii_digit() || ch == '-' => self.parse_int().map(Value::Int),
-            _ if self.consume_keyword("true") => Ok(Value::Bool(true)),
-            _ if self.consume_keyword("false") => Ok(Value::Bool(false)),
-            _ if self.consume_keyword("null") => Ok(Value::Null),
+            Some('$') => {
+                self.pos += 1;
+                self.parse_ident().map(ValueExpression::Parameter)
+            }
+            Some('\'') | Some('"') => self
+                .parse_string()
+                .map(Value::String)
+                .map(ValueExpression::Literal),
+            Some(ch) if ch.is_ascii_digit() || ch == '-' => self
+                .parse_int()
+                .map(Value::Int)
+                .map(ValueExpression::Literal),
+            _ if self.consume_keyword("true") => Ok(ValueExpression::Literal(Value::Bool(true))),
+            _ if self.consume_keyword("false") => Ok(ValueExpression::Literal(Value::Bool(false))),
+            _ if self.consume_keyword("null") => Ok(ValueExpression::Literal(Value::Null)),
             _ => Err(self.error("expected value")),
         }
     }
@@ -351,7 +369,7 @@ impl<'a> Parser<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, Statement};
+    use super::{parse, Statement, ValueExpression};
 
     #[test]
     fn parses_create_node() {
@@ -372,5 +390,17 @@ mod tests {
         assert_eq!(query.variable, "m");
         assert_eq!(query.label, "Memory");
         assert_eq!(query.returns[0].alias.as_deref(), Some("title"));
+    }
+
+    #[test]
+    fn parses_parameter_value_without_binding_it() {
+        let statement = parse("MATCH (m:Memory) WHERE m.id = $id RETURN m.title").unwrap();
+        let Statement::MatchReturn(query) = statement else {
+            panic!("expected match return");
+        };
+        assert_eq!(
+            query.predicate.unwrap().value,
+            ValueExpression::Parameter("id".to_string())
+        );
     }
 }

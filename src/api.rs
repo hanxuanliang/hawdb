@@ -5,6 +5,8 @@ use crate::optimizer::{CascadesOptimizer, OptimizerTrace, PhysicalPlan};
 use crate::planner;
 use crate::schema::Catalog;
 use crate::store::{DurabilityPolicy, GraphMutation, GraphStore};
+use crate::value::Value;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 #[derive(Debug, Default)]
@@ -55,8 +57,16 @@ impl Database {
     }
 
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
+        self.query_with_params(cypher_text, &BTreeMap::new())
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
-        let logical = planner::plan(&statement)?;
+        let logical = planner::plan_with_params(&statement, parameters)?;
         let physical = self.optimizer.optimize(&logical);
         let rows = executor::execute(&physical, &mut self.catalog, &mut self.store)?;
         Ok(QueryOutput { rows })
@@ -71,8 +81,16 @@ impl Database {
     }
 
     pub fn explain_query(&self, cypher_text: &str) -> Result<ExplainOutput> {
+        self.explain_query_with_params(cypher_text, &BTreeMap::new())
+    }
+
+    pub fn explain_query_with_params(
+        &self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
-        let logical = planner::plan(&statement)?;
+        let logical = planner::plan_with_params(&statement, parameters)?;
         let (physical_plan, trace) = self.optimizer.optimize_with_trace(&logical);
         Ok(ExplainOutput {
             physical_plan,
@@ -91,8 +109,16 @@ impl Database {
 
 impl DatabaseTransaction<'_> {
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
+        self.query_with_params(cypher_text, &BTreeMap::new())
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
-        let logical = planner::plan(&statement)?;
+        let logical = planner::plan_with_params(&statement, parameters)?;
         let physical = self.db.optimizer.optimize(&logical);
         let Some(mutation) = executor::mutation_command(&physical)? else {
             return Err(SkeinError::Execution(
@@ -122,6 +148,7 @@ impl DatabaseTransaction<'_> {
 mod tests {
     use super::Database;
     use crate::Value;
+    use std::collections::BTreeMap;
 
     #[test]
     fn runs_create_match_return_demo() {
@@ -381,6 +408,56 @@ mod tests {
             output.rows[0].get("title"),
             Some(&Value::String("Indexed memory".to_string()))
         );
+    }
+
+    #[test]
+    fn parameterized_create_and_index_seek_execute_end_to_end() {
+        let mut db = Database::new();
+        db.query_with_params(
+            "CREATE (:Memory {id: $id, title: $title})",
+            &BTreeMap::from([
+                ("id".to_string(), Value::Int(42)),
+                (
+                    "title".to_string(),
+                    Value::String("Parameterized memory".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+
+        let params = BTreeMap::from([("id".to_string(), Value::Int(42))]);
+        let explain = db
+            .explain_query_with_params(
+                "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
+                &params,
+            )
+            .unwrap();
+        assert!(explain.trace.selected_plan.contains("IndexNodeSeek"));
+
+        let output = db
+            .query_with_params(
+                "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
+                &params,
+            )
+            .unwrap();
+        assert_eq!(
+            output.rows[0].get("title"),
+            Some(&Value::String("Parameterized memory".to_string()))
+        );
+    }
+
+    #[test]
+    fn missing_parameter_fails_before_mutation() {
+        let mut db = Database::new();
+        let error = db
+            .query("CREATE (:Memory {id: $id, title: 'missing'})")
+            .unwrap_err();
+        assert!(error.to_string().contains("missing parameter '$id'"));
+
+        let output = db
+            .query("MATCH (m:Memory) RETURN m.title AS title")
+            .unwrap();
+        assert!(output.rows.is_empty());
     }
 
     fn unique_test_dir(name: &str) -> std::path::PathBuf {
