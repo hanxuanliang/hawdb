@@ -6,7 +6,7 @@ use skein::{
 };
 
 fn main() -> Result<()> {
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
     if let Some(command) = args.next() {
         if command == "scan-nowledge-inventory" {
             let root = args.next().unwrap_or_else(|| ".".to_string());
@@ -27,21 +27,25 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if command == "nowledge-cypher-migration-gate" {
+            let require_ready = args.peek().is_some_and(|arg| arg == "--require-ready");
+            if require_ready {
+                args.next();
+            }
             let root = args.next().ok_or_else(|| {
                 SkeinError::Semantic(
-                    "nowledge-cypher-migration-gate requires <root> <shadow-name> <program> [args...]"
+                    "nowledge-cypher-migration-gate requires [--require-ready] <root> <shadow-name> <program> [args...]"
                         .to_string(),
                 )
             })?;
             let shadow_name = args.next().ok_or_else(|| {
                 SkeinError::Semantic(
-                    "nowledge-cypher-migration-gate requires <root> <shadow-name> <program> [args...]"
+                    "nowledge-cypher-migration-gate requires [--require-ready] <root> <shadow-name> <program> [args...]"
                         .to_string(),
                 )
             })?;
             let program = args.next().ok_or_else(|| {
                 SkeinError::Semantic(
-                    "nowledge-cypher-migration-gate requires <root> <shadow-name> <program> [args...]"
+                    "nowledge-cypher-migration-gate requires [--require-ready] <root> <shadow-name> <program> [args...]"
                         .to_string(),
                 )
             })?;
@@ -49,7 +53,19 @@ fn main() -> Result<()> {
             let mut shadow = ExternalShadowCommand::spawn(shadow_name, program, program_args)?;
             let json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
-            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            let rendered = serde_json::to_string_pretty(&json).unwrap();
+            println!("{rendered}");
+            if require_ready
+                && json
+                    .get("migration_gate")
+                    .and_then(|gate| gate.get("decision"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("ready")
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge migration gate is blocked".to_string(),
+                ));
+            }
             return Ok(());
         }
         return Err(SkeinError::Semantic(format!("unknown command '{command}'")));

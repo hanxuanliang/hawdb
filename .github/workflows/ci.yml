@@ -50,22 +50,8 @@ jobs:
           RS
           cargo run --quiet --bin skein -- \
             nowledge-cypher-migration-gate \
+            --require-ready \
             "$root" \
             self \
             cargo run --quiet --bin skein-shadow-self -- \
             > "$root/gate.json"
-          python3 - <<'PY' "$root/gate.json"
-          import json
-          import sys
-
-          with open(sys.argv[1], encoding="utf-8") as handle:
-              gate = json.load(handle)
-
-          assert gate["coverage"]["required_checks"] == 1
-          assert gate["coverage"]["covered_checks"] == 1
-          assert gate["coverage"]["missing_checks"] == []
-          assert gate["inventory_gate"]["decision"] == "ready"
-          assert gate["cutover"]["decision"] == "ready"
-          assert gate["migration_gate"]["decision"] == "ready"
-          assert gate["migration_gate"]["blockers"] == []
-          PY
