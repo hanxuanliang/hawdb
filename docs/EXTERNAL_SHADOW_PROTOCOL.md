@@ -14,6 +14,10 @@ The parent process starts the shadow engine with piped stdin and stdout. Each
 request is one UTF-8 JSON object followed by a newline. Each response must be
 one UTF-8 JSON object followed by a newline.
 
+`request_id` is a monotonically increasing per-process identifier assigned by
+Skein. It matches the external shadow trace `sequence` value for the same
+request.
+
 The child process must keep its graph state for the lifetime of the process.
 Skein sends fixture setup statements and checks to the same process so the
 shadow engine can model an embedded database instance.
@@ -23,6 +27,7 @@ Every request includes:
 ```json
 {
   "protocol_version": 1,
+  "request_id": 1,
   "op": "execute"
 }
 ```
@@ -57,6 +62,7 @@ Request:
 ```json
 {
   "protocol_version": 1,
+  "request_id": 1,
   "op": "execute",
   "role": "read",
   "access": "read",
@@ -96,6 +102,7 @@ Request:
 ```json
 {
   "protocol_version": 1,
+  "request_id": 1,
   "op": "execute_session",
   "access": "mutation",
   "statements": [
@@ -164,6 +171,7 @@ Request:
 ```json
 {
   "protocol_version": 1,
+  "request_id": 1,
   "op": "project_graph",
   "rel_type": "MENTIONS",
   "expected_incoming_nodes": [1],

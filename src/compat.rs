@@ -342,15 +342,21 @@ impl ExternalShadowCommand {
     }
 
     fn request(&mut self, mut request: serde_json::Value) -> Result<serde_json::Value> {
-        let object = request.as_object_mut().ok_or_else(|| {
-            SkeinError::Execution("external shadow request must be a JSON object".to_string())
-        })?;
-        object.insert(
-            "protocol_version".to_string(),
-            serde_json::Value::Number(EXTERNAL_SHADOW_PROTOCOL_VERSION.into()),
-        );
         let trace_sequence = self.next_trace_sequence;
         self.next_trace_sequence += 1;
+        {
+            let object = request.as_object_mut().ok_or_else(|| {
+                SkeinError::Execution("external shadow request must be a JSON object".to_string())
+            })?;
+            object.insert(
+                "protocol_version".to_string(),
+                serde_json::Value::Number(EXTERNAL_SHADOW_PROTOCOL_VERSION.into()),
+            );
+            object.insert(
+                "request_id".to_string(),
+                serde_json::Value::Number(trace_sequence.into()),
+            );
+        }
         self.trace_event(trace_sequence, "request", &request);
         let line = serde_json::to_string(&request).map_err(|error| {
             SkeinError::Execution(format!("failed to encode shadow request: {error}"))
@@ -27239,6 +27245,41 @@ done
     }
 
     #[test]
+    fn sends_external_shadow_request_id() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-request-id",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"request_id":1'*) echo '{"ok":{"rows":[]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"missing request id"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-request-id", "sh", [script]).unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-request-id-fixture".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::RowCount(0),
+            ))],
+        };
+
+        let report =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
+
+        assert_eq!(
+            report.shadow_checks[0].status,
+            CompatibilityShadowStatus::Matched
+        );
+    }
+
+    #[test]
     fn runs_session_fixture_against_external_shadow_command() {
         let mut primary = Database::new();
         let script = write_external_shadow_script(
@@ -27443,6 +27484,7 @@ done
         assert!(trace.contains("\"event\":\"request\""));
         assert!(trace.contains("\"event\":\"response\""));
         assert!(trace.contains("\"protocol_version\":1"));
+        assert!(trace.contains("\"request_id\":1"));
         assert!(trace.contains("\"access\":\"mutation\""));
         assert!(trace.contains("\"access\":\"read\""));
         let _ = fs::remove_file(trace_path);
