@@ -1886,6 +1886,175 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     "CREATE (:Entity {id: 'entity-life-delete-source'})",
                 )),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label lifecycle snapshot read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label {id: $id}) RETURN l.id, l.name, l.canonical_name, l.color, l.description, l.metadata, l.updated_at",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("label-lifecycle-snapshot".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "l.id",
+                            Value::String("label-lifecycle-snapshot".to_string()),
+                        ),
+                        ("l.name", Value::String("Lifecycle Snapshot".to_string())),
+                        (
+                            "l.canonical_name",
+                            Value::String("lifecycle_snapshot".to_string()),
+                        ),
+                        ("l.color", Value::String("#3b82f6".to_string())),
+                        (
+                            "l.description",
+                            Value::String("snapshot description".to_string()),
+                        ),
+                        ("l.metadata", Value::String("{}".to_string())),
+                        ("l.updated_at", Value::Int(21)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-lifecycle-snapshot', name: 'Lifecycle Snapshot', canonical_name: 'lifecycle_snapshot', color: '#3b82f6', description: 'snapshot description', metadata: '{}', updated_at: 21})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label {id: 'label-lifecycle-snapshot'}) DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label governance receipt read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (o:GovernanceOperation {id: $id}) RETURN o.operation_type, o.source_id, o.target_id, o.payload",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("label-governance-receipt".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("o.operation_type", Value::String("merge".to_string())),
+                        ("o.source_id", Value::String("label-source".to_string())),
+                        ("o.target_id", Value::String("label-target".to_string())),
+                        ("o.payload", Value::String("{\"ok\":true}".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:GovernanceOperation {id: 'label-governance-receipt', operation_type: 'merge', source_id: 'label-source', target_id: 'label-target', payload: '{\"ok\":true}', created_at: 22})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (o:GovernanceOperation {id: 'label-governance-receipt'}) DETACH DELETE o",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label governance receipt create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (o:GovernanceOperation { id: $id, operation_type: $operation_type, source_id: $source_id, target_id: $target_id, payload: $payload, created_at: $created_at })",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("label-governance-create".to_string()),
+                            ),
+                            (
+                                "operation_type".to_string(),
+                                Value::String("delete".to_string()),
+                            ),
+                            ("source_id".to_string(), Value::String("label-a".to_string())),
+                            ("target_id".to_string(), Value::String(String::new())),
+                            (
+                                "payload".to_string(),
+                                Value::String("{\"done\":true}".to_string()),
+                            ),
+                            ("created_at".to_string(), Value::Int(23)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (o:GovernanceOperation {id: 'label-governance-create'}) DETACH DELETE o",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label canonical usage read",
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label) WHERE l.canonical_name IS NOT NULL OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) AS usage RETURN l.id, l.name, l.canonical_name, usage",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("l.id", Value::String("label-canonical-usage".to_string())),
+                        ("l.name", Value::String("Canonical Usage".to_string())),
+                        (
+                            "l.canonical_name",
+                            Value::String("canonical_usage".to_string()),
+                        ),
+                        ("usage", Value::Int(1)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-canonical-usage', name: 'Canonical Usage', canonical_name: 'canonical_usage'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-canonical-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-canonical-memory'}), (l:Label {id: 'label-canonical-usage'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['label-canonical-usage', 'label-canonical-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label row usage read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label {id: $label_id}) OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) as usage_count RETURN l.id, l.name, l.color, l.description, l.created_at, l.updated_at, usage_count",
+                        BTreeMap::from([(
+                            "label_id".to_string(),
+                            Value::String("label-row-usage".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("l.id", Value::String("label-row-usage".to_string())),
+                        ("l.name", Value::String("Label Row Usage".to_string())),
+                        ("l.color", Value::String("#3b82f6".to_string())),
+                        (
+                            "l.description",
+                            Value::String("row usage description".to_string()),
+                        ),
+                        ("l.created_at", Value::Int(24)),
+                        ("l.updated_at", Value::Int(25)),
+                        ("usage_count", Value::Int(1)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-row-usage', name: 'Label Row Usage', color: '#3b82f6', description: 'row usage description', created_at: 24, updated_at: 25})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-row-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-row-memory'}), (l:Label {id: 'label-row-usage'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['label-row-usage', 'label-row-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "whole node projection",
                 CypherFixtureStatement::with_parameters(
@@ -10790,6 +10959,36 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (source:Entity {id: $source_id}) DETACH DELETE source"),
             CompatibilityQueryCallSite::new(
+                "label lifecycle snapshot read",
+                "label_lifecycle_read",
+                "nmem-graph::label_write::load_label_snapshot",
+            )
+            .with_cypher("MATCH (l:Label {id: $id}) RETURN l.id, l.name, l.canonical_name, l.color, l.description, l.metadata, l.updated_at"),
+            CompatibilityQueryCallSite::new(
+                "label governance receipt read",
+                "label_lifecycle_read",
+                "nmem-graph::label_write::prior_lifecycle_receipt",
+            )
+            .with_cypher("MATCH (o:GovernanceOperation {id: $id}) RETURN o.operation_type, o.source_id, o.target_id, o.payload"),
+            CompatibilityQueryCallSite::new(
+                "label governance receipt create",
+                "label_lifecycle_write",
+                "nmem-graph::label_write::write_lifecycle_receipt",
+            )
+            .with_cypher("CREATE (o:GovernanceOperation { id: $id, operation_type: $operation_type, source_id: $source_id, target_id: $target_id, payload: $payload, created_at: $created_at })"),
+            CompatibilityQueryCallSite::new(
+                "label canonical usage read",
+                "label_lifecycle_read",
+                "nmem-graph::label_write::find_canonical_duplicate_groups",
+            )
+            .with_cypher("MATCH (l:Label) WHERE l.canonical_name IS NOT NULL OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) AS usage RETURN l.id, l.name, l.canonical_name, usage"),
+            CompatibilityQueryCallSite::new(
+                "label row usage read",
+                "label_lifecycle_read",
+                "nmem-graph::label_write::label_row_json",
+            )
+            .with_cypher("MATCH (l:Label {id: $label_id}) OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) as usage_count RETURN l.id, l.name, l.color, l.description, l.created_at, l.updated_at, usage_count"),
+            CompatibilityQueryCallSite::new(
                 "whole node projection",
                 "record_projection_read",
                 "nmem-graph::repo::get_by_id",
@@ -14137,7 +14336,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 309);
+        assert_eq!(report.checks.len(), 314);
     }
 
     #[test]
@@ -14153,13 +14352,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 309);
-        assert_eq!(coverage.covered_checks, 309);
+        assert_eq!(coverage.required_checks, 314);
+        assert_eq!(coverage.covered_checks, 314);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 309);
+        assert_eq!(coverage_json["covered_checks"], 314);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -14189,10 +14388,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 309);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 314);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 309);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 314);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -14417,15 +14616,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 309);
-        assert_eq!(report.shadow_checks.len(), 309);
+        assert_eq!(report.primary_checks.len(), 314);
+        assert_eq!(report.shadow_checks.len(), 314);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            309
+            314
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -14434,7 +14633,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 309);
+        assert_eq!(cutover.matched_checks, 314);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
