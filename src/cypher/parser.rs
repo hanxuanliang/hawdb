@@ -14,6 +14,7 @@ mod scalar;
 pub fn parse(input: &str) -> Result<Statement> {
     let mut parser = Parser::new(input);
     let statement = parser.parse_statement()?;
+    parser.consume_char(';');
     parser.expect_eof()?;
     Ok(statement)
 }
@@ -25,6 +26,7 @@ enum StatementDispatch {
     Merge,
     Match,
     Call,
+    Checkpoint,
 }
 
 const TOP_LEVEL_STATEMENTS: &[(&str, StatementDispatch)] = &[
@@ -33,6 +35,7 @@ const TOP_LEVEL_STATEMENTS: &[(&str, StatementDispatch)] = &[
     ("MERGE", StatementDispatch::Merge),
     ("MATCH", StatementDispatch::Match),
     ("CALL", StatementDispatch::Call),
+    ("CHECKPOINT", StatementDispatch::Checkpoint),
 ];
 
 pub(super) struct Parser<'a> {
@@ -57,13 +60,14 @@ impl<'a> Parser<'a> {
             StatementDispatch::Merge => self.parse_merge_statement(),
             StatementDispatch::Match => self.parse_match_statement(),
             StatementDispatch::Call => self.parse_call_statement(),
+            StatementDispatch::Checkpoint => Ok(Statement::Checkpoint),
         }
     }
 
     fn parse_statement_dispatch(&mut self) -> Result<StatementDispatch> {
         self.parse_keyword_choice(
             TOP_LEVEL_STATEMENTS,
-            "expected CREATE, ALTER, MERGE, MATCH, or CALL",
+            "expected CREATE, ALTER, MERGE, MATCH, CALL, or CHECKPOINT",
         )
     }
 

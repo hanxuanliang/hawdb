@@ -29,6 +29,12 @@ fn parser_accepts_keyword_case_and_spacing_variants() {
 }
 
 #[test]
+fn parses_checkpoint_control_statement() {
+    let statement = parse("CHECKPOINT;").unwrap();
+    assert_eq!(statement, Statement::Checkpoint);
+}
+
+#[test]
 fn parses_unlabeled_node_match() {
     let statement = parse("MATCH (n) WHERE n.id IN $ids RETURN n.id").unwrap();
     let Statement::MatchReturn(query) = statement else {

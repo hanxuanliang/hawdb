@@ -3,6 +3,7 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
+    Checkpoint,
     CreateNodeLabel(String),
     CreateRelationshipType(String),
     CreateNodeTable(String),

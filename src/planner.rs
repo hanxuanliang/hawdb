@@ -650,6 +650,9 @@ pub fn plan_with_params(
     parameters: &BTreeMap<String, Value>,
 ) -> Result<LogicalPlan> {
     match statement {
+        Statement::Checkpoint => Err(SkeinError::Semantic(
+            "CHECKPOINT is executed by the database session".to_string(),
+        )),
         Statement::CreateNodeLabel(label) => Ok(LogicalPlan::CreateNodeLabel {
             label: label.clone(),
         }),

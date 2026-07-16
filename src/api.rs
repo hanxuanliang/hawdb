@@ -461,6 +461,15 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
+        if matches!(statement, cypher::Statement::Checkpoint) {
+            if !parameters.is_empty() {
+                return Err(SkeinError::Semantic(
+                    "CHECKPOINT does not accept parameters".to_string(),
+                ));
+            }
+            self.checkpoint()?;
+            return Ok(QueryOutput { rows: Vec::new() });
+        }
         let logical = planner::plan_with_params(&statement, parameters)?;
         let physical = self
             .optimizer
@@ -4846,6 +4855,24 @@ mod tests {
                 Some(&Value::String("Graph foundations".to_string()))
             );
         }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn checkpoint_query_invokes_storage_checkpoint() {
+        let path = unique_test_dir("checkpoint_query");
+        {
+            let mut db = Database::open(&path).unwrap();
+            db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
+                .unwrap();
+            let output = db.query("CHECKPOINT;").unwrap();
+            assert!(output.rows.is_empty());
+        }
+
+        let checkpoint = read_test_durable_text(&path.join("checkpoint.skein")).unwrap();
+        assert!(checkpoint.contains("node\t"));
+        assert_eq!(std::fs::read_to_string(path.join("wal.skein")).unwrap(), "");
+
         std::fs::remove_dir_all(path).unwrap();
     }
 
