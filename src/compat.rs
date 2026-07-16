@@ -2200,6 +2200,57 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest list label row aliased usage read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label {id: $label_id}) OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) as usage_count RETURN l.id as id, l.name as name, l.color as color, l.description as description, l.created_at as created_at, l.updated_at as updated_at, usage_count",
+                        BTreeMap::from([(
+                            "label_id".to_string(),
+                            Value::String("rest-list-label-row-usage".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'rest-list-label-row-usage', name: 'REST List Label', color: '#778899', description: 'rest list label', created_at: 108, updated_at: 109})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-list-label-row-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-list-label-row-memory'}), (l:Label {id: 'rest-list-label-row-usage'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-list-label-row-usage', 'rest-list-label-row-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest list label health usage read",
+                CypherFixtureStatement::new(
+                    "MATCH (l:Label) OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) AS u RETURN u",
+                ),
+                ExpectedRows::RowCount(1),
+            )
+            .with_setup_query(CypherFixtureStatement::new(
+                "CREATE (:Label {id: 'rest-list-health-label-1', name: 'Health Label'})",
+            ))
+            .with_effect_query(
+                CypherFixtureStatement::new(
+                    "MATCH (l:Label {id: 'rest-list-health-label-1'}) DETACH DELETE l",
+                ),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest list memory label health count read",
+                CypherFixtureStatement::new(
+                    "MATCH (m:Memory) OPTIONAL MATCH (m)-[:HAS_LABEL]->(l:Label) WITH m, COUNT(l) AS k RETURN k",
+                ),
+                ExpectedRows::RowCount(3),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "label canonical merge write",
                     CypherFixtureStatement::with_parameters(
                         "MERGE (l:Label {id: $label_id}) ON CREATE SET l.name = $label_name, l.canonical_name = $canonical, l.color = $color, l.description = $description, l.created_at = $now, l.updated_at = $now, l.metadata = $metadata ON MATCH SET l.updated_at = $now, l.canonical_name = COALESCE(l.canonical_name, $canonical)",
@@ -20387,6 +20438,30 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread {id: $thread_uuid})-[:COMPACTS_TO]->(m:Memory)-[:MENTIONS]->(e:Entity) RETURN DISTINCT e.name ORDER BY e.name LIMIT 20",
             ),
             CompatibilityQueryCallSite::new(
+                "rest list label row aliased usage read",
+                "rest_list_read",
+                "nmem-server::rest_lists::get_label_handler",
+            )
+            .with_cypher(
+                "MATCH (l:Label {id: $label_id}) OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) as usage_count RETURN l.id as id, l.name as name, l.color as color, l.description as description, l.created_at as created_at, l.updated_at as updated_at, usage_count",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest list label health usage read",
+                "rest_list_read",
+                "nmem-server::rest_lists::label_health_handler.usage_rows",
+            )
+            .with_cypher(
+                "MATCH (l:Label) OPTIONAL MATCH (l)<-[:HAS_LABEL]-(n) WITH l, COUNT(n) AS u RETURN u",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest list memory label health count read",
+                "rest_list_read",
+                "nmem-server::rest_lists::label_health_handler.per_memory_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) OPTIONAL MATCH (m)-[:HAS_LABEL]->(l:Label) WITH m, COUNT(l) AS k RETURN k",
+            ),
+            CompatibilityQueryCallSite::new(
                 "label distinct memory count aggregate read",
                 "label_stats_read",
                 "nmem-server::rest_fs::label_distribution",
@@ -22378,7 +22453,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 524);
+        assert_eq!(report.checks.len(), 527);
     }
 
     #[test]
@@ -22394,13 +22469,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 524);
-        assert_eq!(coverage.covered_checks, 524);
+        assert_eq!(coverage.required_checks, 527);
+        assert_eq!(coverage.covered_checks, 527);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 524);
+        assert_eq!(coverage_json["covered_checks"], 527);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -22430,10 +22505,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 524);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 527);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 524);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 527);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -22658,15 +22733,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 524);
-        assert_eq!(report.shadow_checks.len(), 524);
+        assert_eq!(report.primary_checks.len(), 527);
+        assert_eq!(report.shadow_checks.len(), 527);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            524
+            527
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -22675,7 +22750,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 524);
+        assert_eq!(cutover.matched_checks, 527);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
