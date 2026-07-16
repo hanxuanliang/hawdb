@@ -300,12 +300,14 @@ impl Parser<'_> {
                 aggregate_with: None,
             }
         };
-        let aggregate_with_filter =
-            if with_clause.aggregate_with.is_some() && self.consume_keyword("WHERE") {
-                Some(self.parse_with_alias_filter()?)
-            } else {
-                None
-            };
+        let aggregate_with_filter = if (with_clause.aggregate_with.is_some()
+            || with_clause.optional_with.is_some())
+            && self.consume_keyword("WHERE")
+        {
+            Some(self.parse_with_alias_filter()?)
+        } else {
+            None
+        };
         let mut with_order_by = Vec::new();
         let mut with_offset = None;
         let mut with_limit = None;

@@ -8344,6 +8344,110 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(13),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "wiki entity listing mention-count cursor read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+                        BTreeMap::from([
+                            ("after_count".to_string(), Value::Int(4)),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            (
+                                "e.id",
+                                Value::String("wiki-cursor-entity-beta".to_string()),
+                            ),
+                            ("e.name", Value::String("Cursor Beta".to_string())),
+                            ("e.updated_at", Value::Int(200)),
+                            ("mention_count", Value::Int(3)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "e.id",
+                                Value::String("wiki-cursor-entity-gamma".to_string()),
+                            ),
+                            ("e.name", Value::String("Cursor Gamma".to_string())),
+                            ("e.updated_at", Value::Int(100)),
+                            ("mention_count", Value::Int(2)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-cursor-entity-alpha', name: 'Cursor Alpha', updated_at: 300})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-cursor-entity-beta', name: 'Cursor Beta', updated_at: 200})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-cursor-entity-gamma', name: 'Cursor Gamma', updated_at: 100})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-cursor-entity-missing-name', updated_at: 50})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-3'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-4'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-5'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-6'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-7'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-8'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-1'}), (e:Entity {id: 'wiki-cursor-entity-alpha'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-2'}), (e:Entity {id: 'wiki-cursor-entity-alpha'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-3'}), (e:Entity {id: 'wiki-cursor-entity-alpha'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-4'}), (e:Entity {id: 'wiki-cursor-entity-alpha'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-5'}), (e:Entity {id: 'wiki-cursor-entity-beta'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-6'}), (e:Entity {id: 'wiki-cursor-entity-beta'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-7'}), (e:Entity {id: 'wiki-cursor-entity-beta'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-8'}), (e:Entity {id: 'wiki-cursor-entity-gamma'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-cursor-memory-9'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-cursor-memory-9'}), (e:Entity {id: 'wiki-cursor-entity-gamma'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['wiki-cursor-entity-alpha', 'wiki-cursor-entity-beta', 'wiki-cursor-entity-gamma', 'wiki-cursor-entity-missing-name', 'wiki-cursor-memory-1', 'wiki-cursor-memory-2', 'wiki-cursor-memory-3', 'wiki-cursor-memory-4', 'wiki-cursor-memory-5', 'wiki-cursor-memory-6', 'wiki-cursor-memory-7', 'wiki-cursor-memory-8', 'wiki-cursor-memory-9'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(13),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "wiki export summary entity count",
                 CypherFixtureStatement::new("MATCH (e:Entity) RETURN COUNT(e)"),
@@ -10873,6 +10977,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki entity listing mention-count cursor read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::ls_wiki_entities.cursor_count",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "wiki export summary entity count",
                 "wiki_export_read",
                 "nmem-server::wiki_export::wiki_export_summary.entity_count",
@@ -12292,7 +12404,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 261);
+        assert_eq!(report.checks.len(), 262);
     }
 
     #[test]
@@ -12308,13 +12420,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 261);
-        assert_eq!(coverage.covered_checks, 261);
+        assert_eq!(coverage.required_checks, 262);
+        assert_eq!(coverage.covered_checks, 262);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 261);
+        assert_eq!(coverage_json["covered_checks"], 262);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -12344,10 +12456,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 261);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 262);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 261);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 262);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12541,15 +12653,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 261);
-        assert_eq!(report.shadow_checks.len(), 261);
+        assert_eq!(report.primary_checks.len(), 262);
+        assert_eq!(report.shadow_checks.len(), 262);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            261
+            262
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12558,7 +12670,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 261);
+        assert_eq!(cutover.matched_checks, 262);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

@@ -1264,6 +1264,28 @@ fn parses_with_variable_group_multiple_count_aggregates_and_filter() {
 }
 
 #[test]
+fn parses_optional_count_with_alias_filter() {
+    let statement = parse(
+        "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let optional_with = query.optional_with.expect("optional with");
+    assert_eq!(optional_with.group_variable, "e");
+    assert_eq!(optional_with.count_variable, "r");
+    assert_eq!(optional_with.alias, "mention_count");
+    let filter = query.aggregate_with_filter.expect("aggregate filter");
+    assert_eq!(filter.alias, "mention_count");
+    assert_eq!(filter.op, WithAliasFilterOp::Lt);
+    assert_eq!(
+        filter.value,
+        ValueExpression::Parameter("after_count".to_string())
+    );
+}
+
+#[test]
 fn parses_post_aggregate_community_lookup() {
     let statement = parse(
         "MATCH (e1:Entity)-[:RELATES_TO]-(e2:Entity) WHERE e1.community_id = $cid AND e2.community_id IS NOT NULL AND e2.community_id <> $cid WITH e2.community_id AS other_cid, COUNT(*) AS shared_edge_count ORDER BY shared_edge_count DESC LIMIT $limit MATCH (c:Community) WHERE c.community_id = other_cid RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count, shared_edge_count",

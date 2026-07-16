@@ -1417,6 +1417,14 @@ pub fn plan_with_params(
                             "OPTIONAL MATCH WITH supports only projection returns".to_string(),
                         ));
                     }
+                    if let Some(filter) = &query.aggregate_with_filter {
+                        if filter.alias != optional_with.alias {
+                            return Err(SkeinError::Semantic(format!(
+                                "unknown OPTIONAL MATCH WITH filter column '{}'",
+                                filter.alias
+                            )));
+                        }
+                    }
                 } else {
                     let aggregate_with = optional_with_as_aggregate(optional_with);
                     validate_aggregate_with_match_return(query, &aggregate_with)?;
@@ -1537,6 +1545,12 @@ pub fn plan_with_params(
                     alias: optional_with.alias.clone(),
                     input: Box::new(input),
                 };
+                if let Some(filter) = &query.aggregate_with_filter {
+                    input = LogicalPlan::Filter {
+                        predicate: plan_with_alias_filter(filter, parameters)?,
+                        input: Box::new(input),
+                    };
+                }
                 let projections = query
                     .returns
                     .iter()
