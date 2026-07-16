@@ -6,6 +6,7 @@ use skein::{
     CanonicalSnapshotIdentityAudit, Database, DatabaseConfig, ExternalShadowCommand,
     ExternalShadowReady, GraphLightningBootstrapManifest, Result, SkeinError, Value,
 };
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -356,6 +357,22 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             return Ok(());
         }
+        if command == "graph-lightning-gc-staging-report" {
+            let staging_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_gc_staging_report_usage()))?;
+            let publish_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_gc_staging_report_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(
+                    graph_lightning_gc_staging_report_usage(),
+                ));
+            }
+            let report = graph_lightning_gc_staging_report(staging_dir, publish_dir)?;
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            return Ok(());
+        }
         if command == "graph-lightning-graph-stream" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
@@ -471,6 +488,10 @@ fn graph_lightning_publish_staging_usage() -> String {
 
 fn graph_lightning_verify_published_usage() -> String {
     "graph-lightning-verify-published requires <staging-dir> <publish-dir>".to_string()
+}
+
+fn graph_lightning_gc_staging_report_usage() -> String {
+    "graph-lightning-gc-staging-report requires <staging-dir> <publish-dir>".to_string()
 }
 
 fn graph_lightning_graph_stream_usage() -> String {
@@ -1074,6 +1095,169 @@ fn verify_graph_lightning_published_manifest(
     }))
 }
 
+fn graph_lightning_gc_staging_report(
+    staging_dir: impl AsRef<Path>,
+    publish_dir: impl AsRef<Path>,
+) -> Result<serde_json::Value> {
+    let staging_dir = staging_dir.as_ref();
+    let publish_dir = publish_dir.as_ref();
+    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let catalog_bytes = fs::read(&catalog_path)?;
+    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes).map_err(|error| {
+        SkeinError::Execution(format!(
+            "invalid JSON at {}: {error}",
+            catalog_path.display()
+        ))
+    })?;
+    let candidates = graph_lightning_staging_gc_candidates(&catalog, &catalog_bytes)?;
+    let published_path = publish_dir.join("graph_lightning_published_manifest.json");
+    let mut errors = Vec::new();
+    let mut pinned_paths = BTreeSet::new();
+    let pointer_state = if published_path.exists() {
+        let verification = verify_graph_lightning_published_manifest(staging_dir, publish_dir)?;
+        if verification
+            .get("validation_gate")
+            .and_then(|gate| gate.get("decision"))
+            .and_then(serde_json::Value::as_str)
+            == Some("ready")
+        {
+            pinned_paths = candidates
+                .iter()
+                .filter_map(|candidate| {
+                    candidate
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+                .collect();
+            "verified"
+        } else {
+            errors.push("published pointer verification failed; refusing to mark staging artifacts deletable".to_string());
+            if let Some(verification_errors) = verification
+                .get("validation_gate")
+                .and_then(|gate| gate.get("errors"))
+                .and_then(serde_json::Value::as_array)
+            {
+                errors.extend(
+                    verification_errors
+                        .iter()
+                        .filter_map(serde_json::Value::as_str)
+                        .map(str::to_string),
+                );
+            }
+            "verification_failed"
+        }
+    } else {
+        "missing"
+    };
+
+    let fail_closed = pointer_state == "verification_failed";
+    let candidate_reports = candidates
+        .into_iter()
+        .map(|candidate| {
+            let path = candidate
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let pinned_by_published_pointer = pinned_paths.contains(path);
+            let deletable = !fail_closed && !pinned_by_published_pointer;
+            let reason = if pinned_by_published_pointer {
+                "published_pointer"
+            } else if fail_closed {
+                "published_pointer_unverified"
+            } else {
+                "not_pinned"
+            };
+            serde_json::json!({
+                "kind": candidate["kind"].clone(),
+                "path": candidate["path"].clone(),
+                "byte_len": candidate["byte_len"].clone(),
+                "checksum": candidate["checksum"].clone(),
+                "pinned_by_published_pointer": pinned_by_published_pointer,
+                "deletable": deletable,
+                "reason": reason,
+            })
+        })
+        .collect::<Vec<_>>();
+    let deletable_count = candidate_reports
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .get("deletable")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .count();
+    let pinned_count = candidate_reports
+        .iter()
+        .filter(|candidate| {
+            candidate
+                .get("pinned_by_published_pointer")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+        })
+        .count();
+    let decision = if errors.is_empty() {
+        "ready"
+    } else {
+        "blocked"
+    };
+    Ok(serde_json::json!({
+        "protocol": "graph-lightning-staging-gc-report",
+        "protocol_version": 1,
+        "published_pointer_state": pointer_state,
+        "candidate_count": candidate_reports.len(),
+        "pinned_count": pinned_count,
+        "deletable_count": deletable_count,
+        "candidates": candidate_reports,
+        "gc_gate": {
+            "decision": decision,
+            "errors": errors,
+        },
+    }))
+}
+
+fn graph_lightning_staging_gc_candidates(
+    catalog: &serde_json::Value,
+    catalog_bytes: &[u8],
+) -> Result<Vec<serde_json::Value>> {
+    let mut candidates = Vec::new();
+    candidates.push(serde_json::json!({
+        "kind": "staging_catalog",
+        "path": "graph_lightning_staging_catalog.json",
+        "byte_len": catalog_bytes.len(),
+        "checksum": checksum_bytes(catalog_bytes),
+    }));
+    let artifacts = catalog
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SkeinError::Execution("staging catalog missing artifacts array".to_string())
+        })?;
+    for artifact in artifacts {
+        let kind = artifact
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SkeinError::Execution("staging artifact missing kind".to_string()))?;
+        let path = artifact
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| SkeinError::Execution("staging artifact missing path".to_string()))?;
+        if path.contains('/') || path.contains('\\') {
+            return Err(SkeinError::Execution(format!(
+                "staging artifact {kind} uses non-local path {path}"
+            )));
+        }
+        candidates.push(serde_json::json!({
+            "kind": kind,
+            "path": path,
+            "byte_len": artifact.get("byte_len").cloned().unwrap_or(serde_json::Value::Null),
+            "checksum": artifact.get("checksum").cloned().unwrap_or(serde_json::Value::Null),
+        }));
+    }
+    Ok(candidates)
+}
+
 fn read_staging_artifact_json(
     catalog: &serde_json::Value,
     staging_dir: &Path,
@@ -1257,14 +1441,14 @@ mod tests {
         add_shadow_ready_report, add_shadow_trace_report, canonical_snapshot_validation_json,
         graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
-        graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
-        graph_lightning_publish_staging_usage, graph_lightning_stage_bootstrap_usage,
-        graph_lightning_verify_export_usage, graph_lightning_verify_published_usage,
-        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog, should_run_shadow_ready,
-        stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
-        validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
-        verify_graph_lightning_staging_catalog,
+        graph_lightning_gc_staging_report, graph_lightning_graph_stream_usage,
+        graph_lightning_graph_stream_validation_json, graph_lightning_publish_staging_usage,
+        graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
+        graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
+        is_self_shadow_command, parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
+        should_run_shadow_ready, stable_identity_audit_json,
+        stage_graph_lightning_bootstrap_export, validate_canonical_snapshot_usage, value_json,
+        verify_graph_lightning_published_manifest, verify_graph_lightning_staging_catalog,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -1774,6 +1958,113 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("staging catalog checksum mismatch")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+        std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn gc_staging_report_pins_published_artifacts() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_gc_published_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_gc_published_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+
+        let report = graph_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["protocol"], "graph-lightning-staging-gc-report");
+        assert_eq!(report["published_pointer_state"], "verified");
+        assert_eq!(report["candidate_count"], 4);
+        assert_eq!(report["pinned_count"], 4);
+        assert_eq!(report["deletable_count"], 0);
+        assert_eq!(report["gc_gate"]["decision"], "ready");
+        assert!(report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| {
+                candidate["pinned_by_published_pointer"] == true && candidate["deletable"] == false
+            }));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+        std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn gc_staging_report_allows_unpublished_artifacts() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_gc_unpublished_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_gc_unpublished_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+
+        let report = graph_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["published_pointer_state"], "missing");
+        assert_eq!(report["candidate_count"], 4);
+        assert_eq!(report["pinned_count"], 0);
+        assert_eq!(report["deletable_count"], 4);
+        assert_eq!(report["gc_gate"]["decision"], "ready");
+        assert!(report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| {
+                candidate["pinned_by_published_pointer"] == false && candidate["deletable"] == true
+            }));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn gc_staging_report_fails_closed_when_published_pointer_cannot_verify() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_gc_tampered_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_gc_tampered_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+        let tampered = std::fs::read_to_string(&catalog_path).unwrap().replace(
+            "\"stage_state\": \"READY\"",
+            "\"stage_state\": \"QUARANTINED\"",
+        );
+        std::fs::write(&catalog_path, tampered).unwrap();
+
+        let report = graph_lightning_gc_staging_report(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["published_pointer_state"], "verification_failed");
+        assert_eq!(report["candidate_count"], 4);
+        assert_eq!(report["pinned_count"], 0);
+        assert_eq!(report["deletable_count"], 0);
+        assert_eq!(report["gc_gate"]["decision"], "blocked");
+        assert!(report["candidates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|candidate| candidate["deletable"] == false));
+        assert!(report["gc_gate"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("refusing to mark staging artifacts deletable")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
         std::fs::remove_dir_all(publish_dir).unwrap();
