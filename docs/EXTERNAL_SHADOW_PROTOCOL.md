@@ -240,6 +240,7 @@ for protocol and CI smoke tests, not cutover evidence.
 
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is
-`request` or `response`. The transcript is intended for previous-wrapper parity
-debugging and should be treated as local diagnostic output because Cypher
-parameters may contain graph data.
+`request`, `response`, or `error`. Error events include the failure message and
+the current stderr tail when available. The transcript is intended for
+previous-wrapper parity debugging and should be treated as local diagnostic
+output because Cypher parameters may contain graph data.

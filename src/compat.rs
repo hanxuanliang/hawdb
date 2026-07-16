@@ -349,33 +349,43 @@ impl ExternalShadowCommand {
             SkeinError::Execution(format!("failed to encode shadow request: {error}"))
         })?;
         writeln!(self.stdin, "{line}").map_err(|error| {
-            self.request_error(format!(
+            let message = format!(
                 "failed to write request to shadow engine '{}': {error}",
                 self.name
-            ))
+            );
+            self.trace_error(trace_sequence, &message);
+            self.request_error(message)
         })?;
         self.stdin.flush().map_err(|error| {
-            self.request_error(format!(
+            let message = format!(
                 "failed to flush request to shadow engine '{}': {error}",
                 self.name
-            ))
+            );
+            self.trace_error(trace_sequence, &message);
+            self.request_error(message)
         })?;
 
         let mut response = String::new();
         let bytes = self.stdout.read_line(&mut response).map_err(|error| {
-            self.request_error(format!(
+            let message = format!(
                 "failed to read response from shadow engine '{}': {error}",
                 self.name
-            ))
+            );
+            self.trace_error(trace_sequence, &message);
+            self.request_error(message)
         })?;
         if bytes == 0 {
-            return Err(self.request_error(format!("shadow engine '{}' closed stdout", self.name)));
+            let message = format!("shadow engine '{}' closed stdout", self.name);
+            self.trace_error(trace_sequence, &message);
+            return Err(self.request_error(message));
         }
         let response = serde_json::from_str(response.trim_end()).map_err(|error| {
-            self.request_error(format!(
+            let message = format!(
                 "shadow engine '{}' returned invalid JSON: {error}",
                 self.name
-            ))
+            );
+            self.trace_error(trace_sequence, &message);
+            self.request_error(message)
         })?;
         self.trace_event(trace_sequence, "response", &response);
         Ok(response)
@@ -399,6 +409,14 @@ impl ExternalShadowCommand {
         });
         let _ = writeln!(trace, "{record}");
         let _ = trace.flush();
+    }
+
+    fn trace_error(&mut self, sequence: u64, message: &str) {
+        let payload = serde_json::json!({
+            "message": message,
+            "stderr_tail": self.stderr.tail(),
+        });
+        self.trace_event(sequence, "error", &payload);
     }
 }
 
@@ -27230,8 +27248,14 @@ while IFS= read -r line; do
 done
 "#,
         );
-        let mut shadow =
-            ExternalShadowCommand::spawn("external-shadow-stderr-tail", "sh", [script]).unwrap();
+        let trace_path = unique_test_path("external-shadow-error-trace.jsonl");
+        let mut shadow = ExternalShadowCommand::spawn_with_trace_path(
+            "external-shadow-stderr-tail",
+            "sh",
+            [script],
+            &trace_path,
+        )
+        .unwrap();
         let fixture = CompatibilityFixture {
             name: "external-shadow-stderr-tail-fixture".to_string(),
             setup: Vec::new(),
@@ -27251,6 +27275,12 @@ done
         assert!(error
             .to_string()
             .contains("stderr tail: wrapper boot failed"));
+        drop(shadow);
+        let trace = fs::read_to_string(&trace_path).unwrap();
+        assert!(trace.contains("\"event\":\"request\""));
+        assert!(trace.contains("\"event\":\"error\""));
+        assert!(trace.contains("wrapper boot failed"));
+        let _ = fs::remove_file(trace_path);
     }
 
     #[test]
