@@ -401,6 +401,12 @@ impl ExternalShadowCommand {
             self.request_error(message)
         })?;
         self.trace_event(trace_sequence, "response", &response);
+        if let Err(error) =
+            validate_external_response_request_id(&self.name, trace_sequence, &response)
+        {
+            self.trace_error(trace_sequence, &error.to_string());
+            return Err(error);
+        }
         Ok(response)
     }
 
@@ -1094,6 +1100,27 @@ fn decode_external_query_response(
     Ok(QueryOutput {
         rows: rows_from_json(engine_name, rows)?,
     })
+}
+
+fn validate_external_response_request_id(
+    engine_name: &str,
+    expected_request_id: u64,
+    response: &serde_json::Value,
+) -> Result<()> {
+    let Some(request_id) = response.get("request_id") else {
+        return Ok(());
+    };
+    let actual_request_id = request_id.as_u64().ok_or_else(|| {
+        SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' response request_id must be an unsigned integer"
+        ))
+    })?;
+    if actual_request_id != expected_request_id {
+        return Err(SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' response request_id {actual_request_id} did not match request_id {expected_request_id}"
+        )));
+    }
+    Ok(())
 }
 
 fn decode_external_session_response(
@@ -27277,6 +27304,80 @@ done
             report.shadow_checks[0].status,
             CompatibilityShadowStatus::Matched
         );
+    }
+
+    #[test]
+    fn accepts_external_shadow_response_request_id_echo() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-response-request-id-echo",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"request_id":1'*) echo '{"request_id":1,"ok":{"rows":[]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"missing request id"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow = ExternalShadowCommand::spawn(
+            "external-shadow-response-request-id-echo",
+            "sh",
+            [script],
+        )
+        .unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-response-request-id-echo-fixture".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::RowCount(0),
+            ))],
+        };
+
+        let report =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
+
+        assert_eq!(
+            report.shadow_checks[0].status,
+            CompatibilityShadowStatus::Matched
+        );
+    }
+
+    #[test]
+    fn rejects_external_shadow_response_request_id_mismatch() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-response-request-id-mismatch",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  echo '{"request_id":99,"ok":{"rows":[]}}'
+done
+"#,
+        );
+        let mut shadow = ExternalShadowCommand::spawn(
+            "external-shadow-response-request-id-mismatch",
+            "sh",
+            [script],
+        )
+        .unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-response-request-id-mismatch-fixture".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::RowCount(0),
+            ))],
+        };
+
+        let error =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("response request_id 99 did not match request_id 1"));
     }
 
     #[test]

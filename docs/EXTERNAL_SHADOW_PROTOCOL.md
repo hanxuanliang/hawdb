@@ -35,6 +35,11 @@ Every request includes:
 Unknown top-level fields must be ignored by compatible shadow engines. A shadow
 engine should reject unsupported protocol versions with an `execution` error.
 
+Responses may include a top-level `request_id` echo. The echo is optional for
+backward compatibility, but when present it must match the request `request_id`.
+Skein rejects mismatched response identifiers as an `execution` error because
+they indicate a stale, reordered, or misrouted shadow response.
+
 ## Values
 
 Cypher parameters and result rows use JSON values:
