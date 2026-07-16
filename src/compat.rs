@@ -5480,6 +5480,132 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(1),
                 ),
             ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "reindex memory projection page read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (m:Memory) RETURN m.id, m.title, m.content, m.importance, m.confidence, m.created_at, m.updated_at, m.is_latest, m.is_crystal, m.unit_type, m.review_status, m.space_id, m.metadata ORDER BY m.id SKIP $offset LIMIT $limit",
+                    BTreeMap::from([
+                        ("offset".to_string(), Value::Int(3)),
+                        ("limit".to_string(), Value::Int(1)),
+                    ]),
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([
+                    (
+                        "m.id",
+                        Value::String("000-reindex-memory-1".to_string()),
+                    ),
+                    (
+                        "m.title",
+                        Value::String("Reindex Memory".to_string()),
+                    ),
+                    ("m.content", Value::String("projection body".to_string())),
+                    ("m.importance", Value::Float(0.61)),
+                    ("m.confidence", Value::Float(0.71)),
+                    ("m.created_at", Value::Int(41)),
+                    ("m.updated_at", Value::Int(42)),
+                    ("m.is_latest", Value::Bool(true)),
+                    ("m.is_crystal", Value::Bool(false)),
+                    ("m.unit_type", Value::String("fact".to_string())),
+                    ("m.review_status", Value::String("approved".to_string())),
+                    ("m.space_id", Value::String("default".to_string())),
+                    ("m.metadata", Value::String("{\"kind\":\"reindex\"}".to_string())),
+                ])]),
+            )
+            .with_setup_query(CypherFixtureStatement::new(
+                "CREATE (:Memory {id: '000-reindex-memory-1', title: 'Reindex Memory', content: 'projection body', importance: 0.61, confidence: 0.71, created_at: 41, updated_at: 42, is_latest: true, is_crystal: false, unit_type: 'fact', review_status: 'approved', space_id: 'default', metadata: '{\"kind\":\"reindex\"}'})",
+            ))
+            .with_effect_query(
+                CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: '000-reindex-memory-1'}) DETACH DELETE m",
+                ),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "reindex entity projection page read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (e:Entity) RETURN e.id, e.name, e.description, e.entity_type, e.created_at ORDER BY e.id SKIP $offset LIMIT $limit",
+                    BTreeMap::from([
+                        ("offset".to_string(), Value::Int(0)),
+                        ("limit".to_string(), Value::Int(1)),
+                    ]),
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([
+                    ("e.id", Value::Int(10)),
+                    ("e.name", Value::String("Rust".to_string())),
+                    ("e.description", Value::Null),
+                    ("e.entity_type", Value::Null),
+                    ("e.created_at", Value::Null),
+                ])]),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "reindex community projection page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) RETURN c.id, c.community_id, COALESCE(c.name, ''), COALESCE(c.description, ''), COALESCE(c.ai_summary, ''), COALESCE(c.member_count, 0), c.created_at ORDER BY c.id SKIP $offset LIMIT $limit",
+                        BTreeMap::from([
+                            ("offset".to_string(), Value::Int(0)),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "c.id",
+                            Value::String("000-reindex-community-1".to_string()),
+                        ),
+                        ("c.community_id", Value::Int(42)),
+                        ("coalesce", Value::String(String::new())),
+                        (
+                            "coalesce#2",
+                            Value::String("Community description".to_string()),
+                        ),
+                        ("coalesce#3", Value::String(String::new())),
+                        ("coalesce#4", Value::Int(0)),
+                        ("c.created_at", Value::Int(31)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: '000-reindex-community-1', community_id: 42, description: 'Community description', created_at: 31})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: '000-reindex-community-1'}) DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "reindex thread projection page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) RETURN t.id, t.thread_id, COALESCE(t.title, ''), COALESCE(t.source, ''), COALESCE(t.project, ''), COALESCE(t.workspace, ''), COALESCE(t.space_id, 'default') ORDER BY t.id SKIP $offset LIMIT $limit",
+                        BTreeMap::from([
+                            ("offset".to_string(), Value::Int(0)),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("t.id", Value::String("000-reindex-thread-1".to_string())),
+                        (
+                            "t.thread_id",
+                            Value::String("thread-logical-1".to_string()),
+                        ),
+                        ("coalesce", Value::String(String::new())),
+                        ("coalesce#2", Value::String("codex".to_string())),
+                        ("coalesce#3", Value::String(String::new())),
+                        ("coalesce#4", Value::String("workspace".to_string())),
+                        ("coalesce#5", Value::String("default".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: '000-reindex-thread-1', thread_id: 'thread-logical-1', source: 'codex', workspace: 'workspace'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: '000-reindex-thread-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "source overview memory-count ranking read",
@@ -15409,6 +15535,38 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source) RETURN s.id, COALESCE(s.original_name, ''), COALESCE(s.summary, ''), COALESCE(s.mime_type, ''), COALESCE(s.source_type, 'file'), COALESCE(s.source_url, ''), COALESCE(s.size_bytes, 0), COALESCE(s.version, 1), COALESCE(s.memory_count, 0), COALESCE(s.chunk_count, 0), COALESCE(s.lifecycle_state, 'indexed'), COALESCE(s.space_id, 'default'), s.created_at, s.updated_at ORDER BY s.id SKIP $offset LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "reindex memory projection page read",
+                "reindex_read",
+                "nmem-server::reindex::reindex_memories",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) RETURN m.id, m.title, m.content, m.importance, m.confidence, m.created_at, m.updated_at, m.is_latest, m.is_crystal, m.unit_type, m.review_status, m.space_id, m.metadata ORDER BY m.id SKIP $offset LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "reindex entity projection page read",
+                "reindex_read",
+                "nmem-server::reindex::reindex_entities",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) RETURN e.id, e.name, e.description, e.entity_type, e.created_at ORDER BY e.id SKIP $offset LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "reindex community projection page read",
+                "reindex_read",
+                "nmem-server::reindex::reindex_communities",
+            )
+            .with_cypher(
+                "MATCH (c:Community) RETURN c.id, c.community_id, COALESCE(c.name, ''), COALESCE(c.description, ''), COALESCE(c.ai_summary, ''), COALESCE(c.member_count, 0), c.created_at ORDER BY c.id SKIP $offset LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "reindex thread projection page read",
+                "reindex_read",
+                "nmem-server::reindex::reindex_messages.thread_page",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) RETURN t.id, t.thread_id, COALESCE(t.title, ''), COALESCE(t.source, ''), COALESCE(t.project, ''), COALESCE(t.workspace, ''), COALESCE(t.space_id, 'default') ORDER BY t.id SKIP $offset LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "source overview memory-count ranking read",
                 "source_read",
                 "nmem-server::source_repo::overview_by_memory_count",
@@ -19214,7 +19372,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 433);
+        assert_eq!(report.checks.len(), 437);
     }
 
     #[test]
@@ -19230,13 +19388,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 433);
-        assert_eq!(coverage.covered_checks, 433);
+        assert_eq!(coverage.required_checks, 437);
+        assert_eq!(coverage.covered_checks, 437);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 433);
+        assert_eq!(coverage_json["covered_checks"], 437);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -19266,10 +19424,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 433);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 437);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 433);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 437);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -19494,15 +19652,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 433);
-        assert_eq!(report.shadow_checks.len(), 433);
+        assert_eq!(report.primary_checks.len(), 437);
+        assert_eq!(report.shadow_checks.len(), 437);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            433
+            437
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -19511,7 +19669,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 433);
+        assert_eq!(cutover.matched_checks, 437);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
