@@ -341,6 +341,17 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         decode_external_query_response(&self.name, response)
     }
 
+    fn execute_session(
+        &mut self,
+        statements: &[CypherFixtureStatement],
+    ) -> Result<Vec<QueryOutput>> {
+        let response = self.request(serde_json::json!({
+            "op": "execute_session",
+            "statements": statements.iter().map(json_from_statement).collect::<Vec<_>>(),
+        }))?;
+        decode_external_session_response(&self.name, response)
+    }
+
     fn project_graph(
         &mut self,
         check: &ProjectedGraphFixtureCheck,
@@ -780,6 +791,13 @@ fn json_object_from_parameters(parameters: &BTreeMap<String, Value>) -> serde_js
     )
 }
 
+fn json_from_statement(statement: &CypherFixtureStatement) -> serde_json::Value {
+    serde_json::json!({
+        "cypher": statement.cypher,
+        "parameters": json_object_from_parameters(&statement.parameters),
+    })
+}
+
 fn json_from_value(value: &Value) -> serde_json::Value {
     match value {
         Value::Null => serde_json::Value::Null,
@@ -821,6 +839,41 @@ fn decode_external_query_response(
     Ok(QueryOutput {
         rows: rows_from_json(engine_name, rows)?,
     })
+}
+
+fn decode_external_session_response(
+    engine_name: &str,
+    response: serde_json::Value,
+) -> Result<Vec<QueryOutput>> {
+    if let Some(error) = response.get("error") {
+        return Err(error_from_external_response(engine_name, error));
+    }
+    let ok = response.get("ok").ok_or_else(|| {
+        SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' session response missing 'ok' or 'error'"
+        ))
+    })?;
+    let outputs = ok
+        .get("outputs")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "shadow engine '{engine_name}' session response missing outputs"
+            ))
+        })?;
+    outputs
+        .iter()
+        .map(|output| {
+            let rows = output.get("rows").ok_or_else(|| {
+                SkeinError::Execution(format!(
+                    "shadow engine '{engine_name}' session output missing rows"
+                ))
+            })?;
+            Ok(QueryOutput {
+                rows: rows_from_json(engine_name, rows)?,
+            })
+        })
+        .collect()
 }
 
 fn decode_external_projected_graph_response(
@@ -26842,6 +26895,56 @@ done
             run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
 
         assert_eq!(report.shadow_engine, "external-shadow");
+        assert_eq!(
+            report.shadow_checks[0].status,
+            CompatibilityShadowStatus::Matched
+        );
+    }
+
+    #[test]
+    fn runs_session_fixture_against_external_shadow_command() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-session",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *execute_session*) echo '{"ok":{"outputs":[{"rows":[]},{"rows":[{}]},{"rows":[{"title":"New"}]}]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected execute_session"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-session", "sh", [script]).unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-session-fixture".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "session set title",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id = 1 SET m.title = 'New'",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 1, title: 'Old'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title",
+                    ),
+                    ExpectedRows::Exact(vec![row([("title", Value::String("New".to_string()))])]),
+                )
+                .with_session_execution(),
+            )],
+        };
+
+        let report =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
+
+        assert_eq!(report.shadow_engine, "external-shadow-session");
         assert_eq!(
             report.shadow_checks[0].status,
             CompatibilityShadowStatus::Matched
