@@ -5327,6 +5327,72 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest favorite memories paged metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.metadata CONTAINS 'is_favorite' RETURN m ORDER BY m.updated_at DESC SKIP $offset LIMIT $limit",
+                        BTreeMap::from([
+                            ("offset".to_string(), Value::Int(0)),
+                            ("limit".to_string(), Value::Int(10)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-favorite-memory-1', metadata: '{\"is_favorite\":true}', updated_at: 91})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-favorite-memory-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest favorite threads paged metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.metadata CONTAINS 'is_favorite' RETURN t.thread_id, t.title, t.summary, COALESCE(t.message_count, 0), t.source, t.id, t.created_at, t.updated_at, t.metadata, CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END ORDER BY t.updated_at DESC SKIP $offset LIMIT $limit",
+                        BTreeMap::from([
+                            ("offset".to_string(), Value::Int(0)),
+                            ("limit".to_string(), Value::Int(10)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-favorite-thread-node-1', thread_id: 'rest-favorite-thread-1', title: 'Favorite thread', summary: 'summary', source: 'rest', created_at: 92, updated_at: 93, metadata: '{\"is_favorite\":true}', space_id: ''})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-favorite-thread-node-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest thread metadata lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.thread_id = $thread_id OR t.id = $thread_id RETURN t.id, t.thread_id, COALESCE(t.message_count, 0), t.metadata LIMIT 1",
+                        BTreeMap::from([(
+                            "thread_id".to_string(),
+                            Value::String("rest-thread-lookup-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-thread-lookup-node-1', thread_id: 'rest-thread-lookup-1', message_count: 3, metadata: '{}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-thread-lookup-node-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory label name list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory {id: $memory_id})-[:HAS_LABEL]->(l:Label) RETURN l.name LIMIT $limit",
@@ -20099,6 +20165,30 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity {community_id: $community_id})<-[:MENTIONS]-(m:Memory) WHERE COALESCE(m.is_crystal, false) = false WITH m, COUNT(e) AS entity_count RETURN m.id, COALESCE(m.title, ''), COALESCE(m.content, ''), entity_count ORDER BY entity_count DESC, COALESCE(m.importance, 0.5) DESC LIMIT 10",
             ),
             CompatibilityQueryCallSite::new(
+                "rest favorite memories paged metadata read",
+                "rest_list_read",
+                "nmem-server::rest_lists::favorite_memories_handler",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.metadata CONTAINS 'is_favorite' RETURN m ORDER BY m.updated_at DESC SKIP $offset LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest favorite threads paged metadata read",
+                "rest_list_read",
+                "nmem-server::rest_lists::favorite_threads_handler",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.metadata CONTAINS 'is_favorite' RETURN t.thread_id, t.title, t.summary, COALESCE(t.message_count, 0), t.source, t.id, t.created_at, t.updated_at, t.metadata, CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END ORDER BY t.updated_at DESC SKIP $offset LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest thread metadata lookup read",
+                "rest_list_read",
+                "nmem-server::rest_lists::thread_metadata_lookup",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.thread_id = $thread_id OR t.id = $thread_id RETURN t.id, t.thread_id, COALESCE(t.message_count, 0), t.metadata LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
                 "label distinct memory count aggregate read",
                 "label_stats_read",
                 "nmem-server::rest_fs::label_distribution",
@@ -22090,7 +22180,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 516);
+        assert_eq!(report.checks.len(), 519);
     }
 
     #[test]
@@ -22106,13 +22196,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 516);
-        assert_eq!(coverage.covered_checks, 516);
+        assert_eq!(coverage.required_checks, 519);
+        assert_eq!(coverage.covered_checks, 519);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 516);
+        assert_eq!(coverage_json["covered_checks"], 519);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -22142,10 +22232,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 516);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 519);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 516);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 519);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -22370,15 +22460,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 516);
-        assert_eq!(report.shadow_checks.len(), 516);
+        assert_eq!(report.primary_checks.len(), 519);
+        assert_eq!(report.shadow_checks.len(), 519);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            516
+            519
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -22387,7 +22477,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 516);
+        assert_eq!(cutover.matched_checks, 519);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
