@@ -2258,6 +2258,26 @@ fn parses_string_prefix_and_suffix_predicates() {
 }
 
 #[test]
+fn parses_regex_match_predicate() {
+    let statement =
+        parse("MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE l.name =~ $pattern RETURN m")
+            .unwrap();
+    match statement {
+        Statement::MatchReturn(match_return) => {
+            assert_eq!(
+                match_return.predicate,
+                Some(PropertyPredicate::RegexMatch {
+                    variable: "l".to_string(),
+                    property: "name".to_string(),
+                    pattern: ValueExpression::Parameter("pattern".to_string()),
+                })
+            );
+        }
+        statement => panic!("unexpected statement: {statement:?}"),
+    }
+}
+
+#[test]
 fn parses_and_predicates() {
     let statement =
         parse("MATCH (m:Memory) WHERE m.created_at >= 10 AND m.created_at < 20 RETURN m.title")

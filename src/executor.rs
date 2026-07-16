@@ -3001,6 +3001,16 @@ fn evaluate_predicate(
                 _ => None,
             })
             .unwrap_or(false),
+        Predicate::PropertyRegexMatch {
+            variable,
+            property,
+            pattern,
+        } => binding_property(binding, variable, property)
+            .and_then(|actual| match actual {
+                Value::String(actual) => Some(crate::regex_cache::regex_is_match(pattern, actual)),
+                _ => None,
+            })
+            .unwrap_or(false),
         Predicate::PropertyIsNull { variable, property } => {
             binding_property(binding, variable, property)
                 .map(|actual| actual == &Value::Null)
@@ -3219,6 +3229,12 @@ fn property_filter_from_predicate(predicate: &Predicate) -> Result<PropertyFilte
         } => Ok(PropertyFilter::EndsWith {
             property: property.clone(),
             value: value.clone(),
+        }),
+        Predicate::PropertyRegexMatch {
+            property, pattern, ..
+        } => Ok(PropertyFilter::RegexMatch {
+            property: property.clone(),
+            pattern: pattern.clone(),
         }),
         Predicate::PropertyIsNull { property, .. } => Ok(PropertyFilter::IsNull {
             property: property.clone(),

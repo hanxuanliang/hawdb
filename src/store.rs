@@ -391,6 +391,10 @@ pub enum PropertyFilter {
         property: String,
         value: String,
     },
+    RegexMatch {
+        property: String,
+        pattern: String,
+    },
     DefaultIfNullOrEq {
         property: String,
         empty: Value,
@@ -7118,6 +7122,13 @@ fn property_filter_matches(
             .get(property)
             .and_then(|actual| match actual {
                 Value::String(actual) => Some(actual.ends_with(value)),
+                _ => None,
+            })
+            .unwrap_or(false),
+        PropertyFilter::RegexMatch { property, pattern } => properties
+            .get(property)
+            .and_then(|actual| match actual {
+                Value::String(actual) => Some(crate::regex_cache::regex_is_match(pattern, actual)),
                 _ => None,
             })
             .unwrap_or(false),

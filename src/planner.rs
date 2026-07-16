@@ -402,6 +402,11 @@ pub enum Predicate {
         property: String,
         value: String,
     },
+    PropertyRegexMatch {
+        variable: String,
+        property: String,
+        pattern: String,
+    },
     PropertyIsNull {
         variable: String,
         property: String,
@@ -3649,6 +3654,23 @@ fn plan_predicate(
                 "ENDS WITH predicate requires a string value, got {value:?}"
             ))),
         },
+        PropertyPredicate::RegexMatch {
+            variable,
+            property,
+            pattern,
+        } => match bind_value(pattern, parameters)? {
+            Value::String(pattern) => {
+                crate::regex_cache::validate_regex_pattern(&pattern)?;
+                Ok(Predicate::PropertyRegexMatch {
+                    variable: variable.clone(),
+                    property: property.clone(),
+                    pattern,
+                })
+            }
+            value => Err(SkeinError::Semantic(format!(
+                "regex match predicate requires a string value, got {value:?}"
+            ))),
+        },
         PropertyPredicate::IsNull { variable, property } => Ok(Predicate::PropertyIsNull {
             variable: variable.clone(),
             property: property.clone(),
@@ -3874,6 +3896,7 @@ fn predicate_variable(predicate: &PropertyPredicate) -> Option<&str> {
         | PropertyPredicate::Contains { variable, .. }
         | PropertyPredicate::StartsWith { variable, .. }
         | PropertyPredicate::EndsWith { variable, .. }
+        | PropertyPredicate::RegexMatch { variable, .. }
         | PropertyPredicate::IsNull { variable, .. }
         | PropertyPredicate::IsNotNull { variable, .. }
         | PropertyPredicate::In { variable, .. } => Some(variable),

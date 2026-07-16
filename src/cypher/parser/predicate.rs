@@ -153,6 +153,13 @@ impl Parser<'_> {
                 property,
                 value,
             })
+        } else if self.consume_token("=~") {
+            let pattern = self.parse_value()?;
+            Ok(PropertyPredicate::RegexMatch {
+                variable,
+                property,
+                pattern,
+            })
         } else if self.consume_char('<') {
             if self.consume_char('>') {
                 return match self.parse_property_predicate_right()? {

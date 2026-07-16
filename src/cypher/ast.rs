@@ -537,6 +537,11 @@ pub enum PropertyPredicate {
         property: String,
         value: ValueExpression,
     },
+    RegexMatch {
+        variable: String,
+        property: String,
+        pattern: ValueExpression,
+    },
     IsNull {
         variable: String,
         property: String,

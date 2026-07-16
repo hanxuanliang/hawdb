@@ -4425,6 +4425,19 @@ fn write_predicate(output: &mut String, predicate: &Predicate) {
             write_identifier(output, value);
             output.push(')');
         }
+        Predicate::PropertyRegexMatch {
+            variable,
+            property,
+            pattern,
+        } => {
+            output.push_str("PropertyRegexMatch(");
+            write_identifier(output, variable);
+            output.push('.');
+            write_identifier(output, property);
+            output.push_str(" =~ ");
+            write_identifier(output, pattern);
+            output.push(')');
+        }
         Predicate::PropertyIsNull { variable, property } => {
             output.push_str("PropertyIsNull(");
             write_identifier(output, variable);

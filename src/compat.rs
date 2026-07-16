@@ -9768,6 +9768,52 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "label regex memory connection aggregate read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[hl:HAS_LABEL]->(l:Label) WHERE l.name =~ $pattern RETURN DISTINCT m, l.name as label_name, COUNT(*) as label_connections ORDER BY label_connections DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "pattern".to_string(),
+                                Value::String("^regex-(alpha|beta)$".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(10)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-regex-m1', importance: 0.9})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-regex-m2', importance: 0.8})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-regex-alpha', name: 'regex-alpha'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-regex-beta', name: 'regex-beta'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-regex-gamma', name: 'regex-gamma'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-regex-m1'}), (l:Label {id: 'label-regex-alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-regex-m2'}), (l:Label {id: 'label-regex-beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-regex-m2'}), (l:Label {id: 'label-regex-gamma'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['label-regex-m1', 'label-regex-m2', 'label-regex-alpha', 'label-regex-beta', 'label-regex-gamma'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(5),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "okf export label rows read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WITH l, COUNT(DISTINCT m) AS member_count RETURN l.name, member_count ORDER BY member_count DESC, l.name ASC LIMIT $limit",
@@ -13359,6 +13405,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WITH l, COUNT(DISTINCT m) AS memory_count RETURN l.name, memory_count ORDER BY memory_count DESC, l.name ASC SKIP $offset LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "label regex memory connection aggregate read",
+                "label_stats_read",
+                "nmem-graph::repo::memories_by_label_pattern",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[hl:HAS_LABEL]->(l:Label) WHERE l.name =~ $pattern RETURN DISTINCT m, l.name as label_name, COUNT(*) as label_connections ORDER BY label_connections DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "okf export label rows read",
                 "okf_export_read",
                 "nmem-server::okf_export::fetch_label_rows",
@@ -15124,7 +15178,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 334);
+        assert_eq!(report.checks.len(), 335);
     }
 
     #[test]
@@ -15140,13 +15194,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 334);
-        assert_eq!(coverage.covered_checks, 334);
+        assert_eq!(coverage.required_checks, 335);
+        assert_eq!(coverage.covered_checks, 335);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 334);
+        assert_eq!(coverage_json["covered_checks"], 335);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15176,10 +15230,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 334);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 335);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 334);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 335);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -15404,15 +15458,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 334);
-        assert_eq!(report.shadow_checks.len(), 334);
+        assert_eq!(report.primary_checks.len(), 335);
+        assert_eq!(report.shadow_checks.len(), 335);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            334
+            335
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -15421,7 +15475,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 334);
+        assert_eq!(cutover.matched_checks, 335);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

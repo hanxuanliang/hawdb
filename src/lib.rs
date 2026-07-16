@@ -9,6 +9,8 @@ pub mod planner;
 pub mod search;
 pub mod store;
 
+mod regex_cache;
+
 pub mod error {
     pub use skein_core::error::*;
 }
