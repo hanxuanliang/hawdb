@@ -89,6 +89,10 @@ The CLI command `skein validate-canonical-snapshot [--require-valid]
 <database-path>` opens the database read-only, exports the current canonical
 snapshot, prints the validation report as JSON, and returns a non-zero status
 when `--require-valid` is set and the snapshot is invalid.
+The storage-equivalence regression coverage compares canonical exports from the
+same graph after live mutation, WAL replay, checkpoint publication, and
+checkpoint recovery, and requires byte-for-byte equal export structures plus a
+valid self-validation report.
 This is the local export boundary for future GraphStream encoding; it does not
 copy local pages, WAL records, adjacency pointers, or rebuildable projection
 artifacts.

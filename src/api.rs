@@ -6392,6 +6392,48 @@ mod tests {
     }
 
     #[test]
+    fn canonical_snapshot_export_matches_wal_and_checkpoint_recovery() {
+        let path = unique_test_dir("canonical_snapshot_storage_equivalence");
+        let live_snapshot = {
+            let mut db = Database::open(&path).unwrap();
+            db.query(
+                "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid', weight: 7}]->(:Entity {id: 'mid', name: 'Mid'})",
+            )
+            .unwrap();
+            db.query(
+                "MATCH (m:Memory {id: 'root'}), (e:Entity {id: 'mid'}) CREATE (m)-[:MENTIONS {id: 'edge-root-mention'}]->(e)",
+            )
+            .unwrap();
+            let snapshot = db.export_canonical_graph_snapshot();
+            assert!(snapshot.validate().is_valid);
+            snapshot
+        };
+
+        {
+            let db = Database::open(&path).unwrap();
+            let recovered = db.export_canonical_graph_snapshot();
+            assert_eq!(recovered, live_snapshot);
+            assert!(recovered.validate().is_valid);
+        }
+
+        {
+            let mut db = Database::open(&path).unwrap();
+            db.checkpoint().unwrap();
+            let checkpointed = db.export_canonical_graph_snapshot();
+            assert_eq!(checkpointed, live_snapshot);
+            assert!(checkpointed.validate().is_valid);
+        }
+
+        {
+            let db = Database::open(&path).unwrap();
+            let recovered = db.export_canonical_graph_snapshot();
+            assert_eq!(recovered, live_snapshot);
+            assert!(recovered.validate().is_valid);
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn read_transaction_keeps_typed_knowledge_snapshot() {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Before snapshot'})-[:LINKS]->(:Entity {id: 'mid', name: 'Mid'})")
