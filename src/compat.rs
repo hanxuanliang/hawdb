@@ -5371,6 +5371,38 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory unit type update returning id",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id}) SET m.unit_type = $unit_type, m.updated_at = $updated_at RETURN m.id",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("memory-unit-type-update-1".to_string()),
+                            ),
+                            (
+                                "unit_type".to_string(),
+                                Value::String("context".to_string()),
+                            ),
+                            ("updated_at".to_string(), Value::Int(1_700_000_017)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "m.id",
+                        Value::String("memory-unit-type-update-1".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'memory-unit-type-update-1', unit_type: 'fact', updated_at: 1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'memory-unit-type-update-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory id-list normalized-space move returning ids",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory) WHERE m.id IN $memory_ids AND CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END = $source_space_id SET m.space_id = $target_space_id, m.updated_at = $updated_at RETURN m.id",
@@ -12444,6 +12476,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory) WHERE CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END = $source_space_id RETURN m.id LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "memory unit type update returning id",
+                "memory_write",
+                "nmem-graph::repo::update_memory_unit_type",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $id}) SET m.unit_type = $unit_type, m.updated_at = $updated_at RETURN m.id",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory id-list normalized-space move returning ids",
                 "memory_write",
                 "nmem-server::memory_repo::move_memory_ids_to_space_returning",
@@ -15505,7 +15545,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 343);
+        assert_eq!(report.checks.len(), 344);
     }
 
     #[test]
@@ -15521,13 +15561,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 343);
-        assert_eq!(coverage.covered_checks, 343);
+        assert_eq!(coverage.required_checks, 344);
+        assert_eq!(coverage.covered_checks, 344);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 343);
+        assert_eq!(coverage_json["covered_checks"], 344);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15557,10 +15597,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 343);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 344);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 343);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 344);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -15785,15 +15825,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 343);
-        assert_eq!(report.shadow_checks.len(), 343);
+        assert_eq!(report.primary_checks.len(), 344);
+        assert_eq!(report.shadow_checks.len(), 344);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            343
+            344
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -15802,7 +15842,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 343);
+        assert_eq!(cutover.matched_checks, 344);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
