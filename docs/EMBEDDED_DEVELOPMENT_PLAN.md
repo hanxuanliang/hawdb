@@ -590,10 +590,10 @@ row fetches, floor-zero engagement `CASE` ordering, and decay scheduler
 EVOLVES/crystal synthesis count reads,
 wiki export summary entity/crystal/community count reads and community top
 memory ranking reads,
-OKF export community list, crystal list, and crystal-source entity community
-reads, shared OKF/wiki entity mention detail reads, and shared OKF/wiki related
-entity reads, plus OKF memory row exports with row-preserving label collection
-and OKF label row exports,
+OKF export community list, entity list, crystal list, and crystal-source entity
+community reads, shared OKF/wiki entity mention detail reads, and shared OKF/wiki
+related entity reads, plus OKF memory row exports with row-preserving label
+collection and OKF label row exports,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label
