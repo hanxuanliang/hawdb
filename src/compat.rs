@@ -1448,6 +1448,89 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ]),
                 ]),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community node cleanup delete",
+                    CypherFixtureStatement::new("MATCH (c:Community) DELETE c"),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'community-cleanup-temp', community_id: 8100})",
+                )),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "community detection result create",
+                CypherFixtureStatement::with_parameters(
+                    "CREATE (c:Community { id: $id, community_id: $community_id, name: $name, description: $description, ai_summary: $ai_summary, member_count: $member_count, algorithm: 'louvain', resolution: $resolution, created_at: CURRENT_TIMESTAMP(), updated_at: CURRENT_TIMESTAMP() })",
+                    BTreeMap::from([
+                        (
+                            "id".to_string(),
+                            Value::String("community-detection-result".to_string()),
+                        ),
+                        ("community_id".to_string(), Value::Int(8101)),
+                        (
+                            "name".to_string(),
+                            Value::String("Detection Community".to_string()),
+                        ),
+                        (
+                            "description".to_string(),
+                            Value::String("detected community".to_string()),
+                        ),
+                        (
+                            "ai_summary".to_string(),
+                            Value::String("detected summary".to_string()),
+                        ),
+                        ("member_count".to_string(), Value::Int(3)),
+                        ("resolution".to_string(), Value::Float(0.8)),
+                    ]),
+                ),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "community latest updated read",
+                CypherFixtureStatement::new(
+                    "MATCH (c:Community) WHERE c.updated_at IS NOT NULL RETURN c.updated_at ORDER BY c.updated_at DESC LIMIT 1",
+                ),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community summary corpus read",
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 RETURN c.ai_summary",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "c.ai_summary",
+                        Value::String("detected summary".to_string()),
+                    )])]),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: 'community-detection-result'}) DELETE c",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community graph meta update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:GraphMeta {meta_id: 'main'}) SET m.community_detection_applied = true, m.community_algorithm = 'louvain', m.community_resolution = $resolution, m.community_count = $count, m.community_detection_computed_at = CURRENT_TIMESTAMP(), m.last_augmentation_at = CURRENT_TIMESTAMP(), m.updated_at = CURRENT_TIMESTAMP()",
+                        BTreeMap::from([
+                            ("resolution".to_string(), Value::Float(0.8)),
+                            ("count".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MERGE (:GraphMeta {meta_id: 'main'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new("MATCH (m:GraphMeta {meta_id: 'main'}) DELETE m"),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "whole node projection",
                 CypherFixtureStatement::with_parameters(
@@ -10250,6 +10333,36 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.id IN $entity_ids RETURN e.id, m.id, m.metadata, COALESCE(m.is_latest, true)"),
             CompatibilityQueryCallSite::new(
+                "community node cleanup delete",
+                "community_write",
+                "nmem-graph::community::replace_communities",
+            )
+            .with_cypher("MATCH (c:Community) DELETE c"),
+            CompatibilityQueryCallSite::new(
+                "community detection result create",
+                "community_write",
+                "nmem-graph::community::replace_communities",
+            )
+            .with_cypher("CREATE (c:Community { id: $id, community_id: $community_id, name: $name, description: $description, ai_summary: $ai_summary, member_count: $member_count, algorithm: 'louvain', resolution: $resolution, created_at: CURRENT_TIMESTAMP(), updated_at: CURRENT_TIMESTAMP() })"),
+            CompatibilityQueryCallSite::new(
+                "community graph meta update",
+                "community_write",
+                "nmem-graph::community::replace_communities",
+            )
+            .with_cypher("MATCH (m:GraphMeta {meta_id: 'main'}) SET m.community_detection_applied = true, m.community_algorithm = 'louvain', m.community_resolution = $resolution, m.community_count = $count, m.community_detection_computed_at = CURRENT_TIMESTAMP(), m.last_augmentation_at = CURRENT_TIMESTAMP(), m.updated_at = CURRENT_TIMESTAMP()"),
+            CompatibilityQueryCallSite::new(
+                "community latest updated read",
+                "community_read",
+                "nmem-graph::community_plan::latest_community_update",
+            )
+            .with_cypher("MATCH (c:Community) WHERE c.updated_at IS NOT NULL RETURN c.updated_at ORDER BY c.updated_at DESC LIMIT 1"),
+            CompatibilityQueryCallSite::new(
+                "community summary corpus read",
+                "community_read",
+                "nmem-graph::community_plan::load_summary_corpus",
+            )
+            .with_cypher("MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 RETURN c.ai_summary"),
+            CompatibilityQueryCallSite::new(
                 "whole node projection",
                 "record_projection_read",
                 "nmem-graph::repo::get_by_id",
@@ -13597,7 +13710,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 292);
+        assert_eq!(report.checks.len(), 297);
     }
 
     #[test]
@@ -13613,13 +13726,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 292);
-        assert_eq!(coverage.covered_checks, 292);
+        assert_eq!(coverage.required_checks, 297);
+        assert_eq!(coverage.covered_checks, 297);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 292);
+        assert_eq!(coverage_json["covered_checks"], 297);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -13649,10 +13762,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 292);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 297);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 292);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 297);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -13877,15 +13990,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 292);
-        assert_eq!(report.shadow_checks.len(), 292);
+        assert_eq!(report.primary_checks.len(), 297);
+        assert_eq!(report.shadow_checks.len(), 297);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            292
+            297
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -13894,7 +14007,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 292);
+        assert_eq!(cutover.matched_checks, 297);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
