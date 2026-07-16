@@ -9462,6 +9462,401 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest skills imported draft create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (s:Skill { id: $id, stage: 'draft', title: $title, kind: 'procedure', rationale: $null_str, evidence_count: 0, confidence: 0.0, demand_signal: 0.0, rejected_at: $null_ts, name: $name, description: $description, triggers: $empty_strs, tools: $empty_strs, bundle_path: $bundle_path, content_hash: $content_hash, version: 1, invalidation_reason: $null_str, write_origin: 'imported', scope: 'personal', freshness: 1.0, pinned: false, use_count: 0, success_rate: 0.0, last_activity_at: $null_ts, space_id: $space_id, created_at: $now, updated_at: $now, last_evidence_at: $null_ts, metadata: $metadata })",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-skill-imported-draft".to_string()),
+                            ),
+                            (
+                                "title".to_string(),
+                                Value::String("Imported Draft".to_string()),
+                            ),
+                            ("null_str".to_string(), Value::Null),
+                            ("null_ts".to_string(), Value::Null),
+                            (
+                                "name".to_string(),
+                                Value::String("imported-draft".to_string()),
+                            ),
+                            (
+                                "description".to_string(),
+                                Value::String("imported description".to_string()),
+                            ),
+                            ("empty_strs".to_string(), Value::List(Vec::new())),
+                            (
+                                "bundle_path".to_string(),
+                                Value::String("/tmp/imported-draft".to_string()),
+                            ),
+                            (
+                                "content_hash".to_string(),
+                                Value::String("hash-imported".to_string()),
+                            ),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("now".to_string(), Value::Int(100)),
+                            (
+                                "metadata".to_string(),
+                                Value::String("{\"kind\":\"imported\"}".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-imported-draft'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills promotable create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (s:Skill { id: $id, stage: 'promotable', title: $title, kind: 'procedure', rationale: $rationale, evidence_count: $evidence_count, confidence: 0.0, demand_signal: 0.0, rejected_at: $null_ts, name: $null_str, description: $null_str, triggers: $empty_strs, tools: $empty_strs, bundle_path: $null_str, content_hash: $null_str, version: 1, invalidation_reason: $null_str, write_origin: 'user', scope: 'personal', freshness: 1.0, pinned: false, use_count: 0, success_rate: 0.0, last_activity_at: $null_ts, space_id: $space_id, created_at: $now, updated_at: $now, last_evidence_at: $null_ts, metadata: $metadata })",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-skill-promotable-create".to_string()),
+                            ),
+                            (
+                                "title".to_string(),
+                                Value::String("Promotable Skill".to_string()),
+                            ),
+                            (
+                                "rationale".to_string(),
+                                Value::String("evidence supports promotion".to_string()),
+                            ),
+                            ("evidence_count".to_string(), Value::Int(2)),
+                            ("null_ts".to_string(), Value::Null),
+                            ("null_str".to_string(), Value::Null),
+                            ("empty_strs".to_string(), Value::List(Vec::new())),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("now".to_string(), Value::Int(101)),
+                            (
+                                "metadata".to_string(),
+                                Value::String("{\"kind\":\"promotable\"}".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-promotable-create'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills thread compact memory ids read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {thread_id: $tid})-[:COMPACTS_TO]->(m:Memory) RETURN m.id",
+                        BTreeMap::from([(
+                            "tid".to_string(),
+                            Value::String("rest-skill-thread-logical".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-skill-thread-node', thread_id: 'rest-skill-thread-logical'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-skill-thread-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'rest-skill-thread-node'}), (m:Memory {id: 'rest-skill-thread-memory'}) CREATE (t)-[:COMPACTS_TO]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-skill-thread-node', 'rest-skill-thread-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills reject mutation",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) SET s.stage = 'rejected', s.rejected_at = $rejected_at, s.updated_at = $updated_at",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-skill-reject".to_string()),
+                            ),
+                            ("rejected_at".to_string(), Value::Int(201)),
+                            ("updated_at".to_string(), Value::Int(202)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-reject', stage: 'candidate'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-reject'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills stage metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.stage, s.metadata",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-stage-metadata".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-stage-metadata', stage: 'draft', metadata: '{\"stage\":\"draft\"}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-stage-metadata'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills full write state read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.stage, s.metadata, s.version, s.use_count, s.bundle_path, s.content_hash, s.name, s.description, s.title",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-full-state".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-full-state', stage: 'draft', metadata: '{}', version: 1, use_count: 0, bundle_path: '/tmp/full', content_hash: 'hash-full', name: 'full-state', description: 'full state', title: 'Full State'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-full-state'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills stage update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) SET s.stage = $stage, s.updated_at = $updated_at",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-skill-stage-update".to_string()),
+                            ),
+                            ("stage".to_string(), Value::String("active".to_string())),
+                            ("updated_at".to_string(), Value::Int(301)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-stage-update', stage: 'draft'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-stage-update'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills compiled update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) SET s.version = $version, s.title = $name, s.name = $name, s.description = $description, s.content_hash = $content_hash, s.bundle_path = $bundle_path, s.metadata = $metadata, s.updated_at = $updated_at",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-skill-compiled-update".to_string()),
+                            ),
+                            ("version".to_string(), Value::Int(2)),
+                            (
+                                "name".to_string(),
+                                Value::String("compiled-skill".to_string()),
+                            ),
+                            (
+                                "description".to_string(),
+                                Value::String("compiled description".to_string()),
+                            ),
+                            (
+                                "content_hash".to_string(),
+                                Value::String("hash-compiled-rest".to_string()),
+                            ),
+                            (
+                                "bundle_path".to_string(),
+                                Value::String("/tmp/compiled-rest".to_string()),
+                            ),
+                            (
+                                "metadata".to_string(),
+                                Value::String("{\"compiled\":true}".to_string()),
+                            ),
+                            ("updated_at".to_string(), Value::Int(401)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-compiled-update', stage: 'draft'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-compiled-update'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills stage rejection update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) SET s.stage = $stage, s.rejected_at = $rejected_at, s.updated_at = $updated_at",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-skill-stage-rejection".to_string()),
+                            ),
+                            ("stage".to_string(), Value::String("rejected".to_string())),
+                            ("rejected_at".to_string(), Value::Int(501)),
+                            ("updated_at".to_string(), Value::Int(502)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-stage-rejection', stage: 'candidate'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-stage-rejection'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills source merge",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $skill_id}), (m:Memory {id: $memory_id}) MERGE (s)-[r:SYNTHESIZED_FROM]->(m) ON CREATE SET r.weight = 1.0, r.occasion_key = '', r.created_at = $now",
+                        BTreeMap::from([
+                            (
+                                "skill_id".to_string(),
+                                Value::String("rest-skill-source-merge".to_string()),
+                            ),
+                            (
+                                "memory_id".to_string(),
+                                Value::String("rest-skill-source-merge-memory".to_string()),
+                            ),
+                            ("now".to_string(), Value::Int(601)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-source-merge'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-skill-source-merge-memory'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-skill-source-merge', 'rest-skill-source-merge-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills memory title content read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.title, m.content ORDER BY m.created_at",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("rest-skill-memory-title".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-skill-memory-title', title: 'Skill Memory Title', content: 'skill memory content', created_at: 1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-skill-memory-title'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills metadata version read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.metadata, s.version",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-metadata-version".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-metadata-version', metadata: '{\"version\":3}', version: 3})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-metadata-version'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills content hash metadata update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) SET s.content_hash = $content_hash, s.metadata = $metadata, s.updated_at = $updated_at",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-skill-content-hash-update".to_string()),
+                            ),
+                            (
+                                "content_hash".to_string(),
+                                Value::String("hash-updated".to_string()),
+                            ),
+                            (
+                                "metadata".to_string(),
+                                Value::String("{\"updated\":true}".to_string()),
+                            ),
+                            ("updated_at".to_string(), Value::Int(701)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-content-hash-update', content_hash: 'old', metadata: '{}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-content-hash-update'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "skill builder list read",
                     CypherFixtureStatement::new(
                         "MATCH (s:Skill) RETURN s ORDER BY s.updated_at DESC LIMIT 60",
@@ -20334,6 +20729,102 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.title"),
             CompatibilityQueryCallSite::new(
+                "rest skills imported draft create",
+                "skill_write",
+                "nmem-server::rest_skills_write::imported_draft_create",
+            )
+            .with_cypher(
+                "CREATE (s:Skill { id: $id, stage: 'draft', title: $title, kind: 'procedure', rationale: $null_str, evidence_count: 0, confidence: 0.0, demand_signal: 0.0, rejected_at: $null_ts, name: $name, description: $description, triggers: $empty_strs, tools: $empty_strs, bundle_path: $bundle_path, content_hash: $content_hash, version: 1, invalidation_reason: $null_str, write_origin: 'imported', scope: 'personal', freshness: 1.0, pinned: false, use_count: 0, success_rate: 0.0, last_activity_at: $null_ts, space_id: $space_id, created_at: $now, updated_at: $now, last_evidence_at: $null_ts, metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills promotable create",
+                "skill_write",
+                "nmem-server::rest_skills_write::promotable_create",
+            )
+            .with_cypher(
+                "CREATE (s:Skill { id: $id, stage: 'promotable', title: $title, kind: 'procedure', rationale: $rationale, evidence_count: $evidence_count, confidence: 0.0, demand_signal: 0.0, rejected_at: $null_ts, name: $null_str, description: $null_str, triggers: $empty_strs, tools: $empty_strs, bundle_path: $null_str, content_hash: $null_str, version: 1, invalidation_reason: $null_str, write_origin: 'user', scope: 'personal', freshness: 1.0, pinned: false, use_count: 0, success_rate: 0.0, last_activity_at: $null_ts, space_id: $space_id, created_at: $now, updated_at: $now, last_evidence_at: $null_ts, metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills thread compact memory ids read",
+                "skill_read",
+                "nmem-server::rest_skills_write::thread_compacts_memory_ids",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {thread_id: $tid})-[:COMPACTS_TO]->(m:Memory) RETURN m.id",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills reject mutation",
+                "skill_write",
+                "nmem-server::rest_skills_write::reject_skill",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id}) SET s.stage = 'rejected', s.rejected_at = $rejected_at, s.updated_at = $updated_at",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills stage metadata read",
+                "skill_read",
+                "nmem-server::rest_skills_write::stage_metadata_read",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.stage, s.metadata"),
+            CompatibilityQueryCallSite::new(
+                "rest skills full write state read",
+                "skill_read",
+                "nmem-server::rest_skills_write::full_write_state_read",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id}) RETURN s.stage, s.metadata, s.version, s.use_count, s.bundle_path, s.content_hash, s.name, s.description, s.title",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills stage update",
+                "skill_write",
+                "nmem-server::rest_skills_write::stage_update",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) SET s.stage = $stage, s.updated_at = $updated_at"),
+            CompatibilityQueryCallSite::new(
+                "rest skills compiled update",
+                "skill_write",
+                "nmem-server::rest_skills_write::compiled_update",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id}) SET s.version = $version, s.title = $name, s.name = $name, s.description = $description, s.content_hash = $content_hash, s.bundle_path = $bundle_path, s.metadata = $metadata, s.updated_at = $updated_at",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills stage rejection update",
+                "skill_write",
+                "nmem-server::rest_skills_write::stage_rejection_update",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id}) SET s.stage = $stage, s.rejected_at = $rejected_at, s.updated_at = $updated_at",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills source merge",
+                "skill_write",
+                "nmem-server::rest_skills_write::source_merge",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $skill_id}), (m:Memory {id: $memory_id}) MERGE (s)-[r:SYNTHESIZED_FROM]->(m) ON CREATE SET r.weight = 1.0, r.occasion_key = '', r.created_at = $now",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills memory title content read",
+                "skill_read",
+                "nmem-server::rest_skills_write::memory_title_content_read",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id IN $ids RETURN m.title, m.content ORDER BY m.created_at"),
+            CompatibilityQueryCallSite::new(
+                "rest skills metadata version read",
+                "skill_read",
+                "nmem-server::rest_skills_write::metadata_version_read",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.metadata, s.version"),
+            CompatibilityQueryCallSite::new(
+                "rest skills content hash metadata update",
+                "skill_write",
+                "nmem-server::rest_skills_write::content_hash_metadata_update",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id}) SET s.content_hash = $content_hash, s.metadata = $metadata, s.updated_at = $updated_at",
+            ),
+            CompatibilityQueryCallSite::new(
                 "skill builder list read",
                 "skill_read",
                 "nmem-server::skill_builder::list_skills",
@@ -23523,7 +24014,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 560);
+        assert_eq!(report.checks.len(), 573);
     }
 
     #[test]
@@ -23539,13 +24030,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 560);
-        assert_eq!(coverage.covered_checks, 560);
+        assert_eq!(coverage.required_checks, 573);
+        assert_eq!(coverage.covered_checks, 573);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 560);
+        assert_eq!(coverage_json["covered_checks"], 573);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -23575,10 +24066,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 560);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 573);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 560);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 573);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -23803,15 +24294,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 560);
-        assert_eq!(report.shadow_checks.len(), 560);
+        assert_eq!(report.primary_checks.len(), 573);
+        assert_eq!(report.shadow_checks.len(), 573);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            560
+            573
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -23820,7 +24311,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 560);
+        assert_eq!(cutover.matched_checks, 573);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
