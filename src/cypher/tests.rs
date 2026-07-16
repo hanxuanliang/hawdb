@@ -1548,6 +1548,31 @@ fn parses_source_search_projection_with_coalesce_ordering() {
 }
 
 #[test]
+fn parses_thread_search_projection_with_coalesce_ordering() {
+    let statement = parse(
+        "MATCH (t:Thread) WITH t, CASE WHEN t.title IS NOT NULL THEN lower(t.title) ELSE '' END AS t_title, CASE WHEN t.summary IS NOT NULL THEN lower(t.summary) ELSE '' END AS t_summary, CASE WHEN t.source IS NOT NULL THEN lower(t.source) ELSE '' END AS t_source, CASE WHEN t.project IS NOT NULL THEN lower(t.project) ELSE '' END AS t_project, CASE WHEN t.workspace IS NOT NULL THEN lower(t.workspace) ELSE '' END AS t_workspace WHERE t_title CONTAINS $raw_query OR t_workspace CONTAINS $normalized_query RETURN t.id, COALESCE(t.title, t.source, 'Thread'), CASE WHEN t_title = $raw_query THEN 3 WHEN t_title = $normalized_query THEN 3 WHEN t_title CONTAINS $raw_query THEN 2 WHEN t_title CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, COALESCE(t.message_count, 0) DESC LIMIT $limit",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let with_projection = query
+        .with_projection
+        .as_ref()
+        .expect("expected WITH projection");
+    assert_eq!(with_projection.items.len(), 6);
+    assert!(query.aggregate_with_filter.is_some());
+    assert!(matches!(
+        query.returns[1].expression,
+        ReturnExpression::Coalesce(_)
+    ));
+    assert!(matches!(
+        query.order_by[1].expression,
+        OrderExpression::Value(ReturnValueExpression::Coalesce(_))
+    ));
+}
+
+#[test]
 fn parses_cleanup_active_consumption_order_expression() {
     let statement = parse(
         "MATCH (m:Memory) RETURN m.id ORDER BY CASE WHEN COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) < 0 THEN 0 ELSE COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) END ASC",

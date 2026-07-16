@@ -11077,6 +11077,87 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "search projection thread candidate read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WITH t, CASE WHEN t.title IS NOT NULL THEN lower(t.title) ELSE '' END AS t_title, CASE WHEN t.summary IS NOT NULL THEN lower(t.summary) ELSE '' END AS t_summary, CASE WHEN t.source IS NOT NULL THEN lower(t.source) ELSE '' END AS t_source, CASE WHEN t.project IS NOT NULL THEN lower(t.project) ELSE '' END AS t_project, CASE WHEN t.workspace IS NOT NULL THEN lower(t.workspace) ELSE '' END AS t_workspace WHERE t_title CONTAINS $raw_query OR t_title CONTAINS $normalized_query OR t_summary CONTAINS $raw_query OR t_summary CONTAINS $normalized_query OR t_source CONTAINS $raw_query OR t_source CONTAINS $normalized_query OR t_project CONTAINS $raw_query OR t_project CONTAINS $normalized_query OR t_workspace CONTAINS $raw_query OR t_workspace CONTAINS $normalized_query RETURN t.id, COALESCE(t.title, t.source, 'Thread'), t.source, t.summary, t.message_count, t.project, t.workspace, CASE WHEN t_title = $raw_query THEN 3 WHEN t_title = $normalized_query THEN 3 WHEN t_title CONTAINS $raw_query THEN 2 WHEN t_title CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, COALESCE(t.message_count, 0) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "raw_query".to_string(),
+                                Value::String("graph thread".to_string()),
+                            ),
+                            (
+                                "normalized_query".to_string(),
+                                Value::String("graph thread".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(3)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("t.id", Value::String("search-thread-exact".to_string())),
+                            ("coalesce", Value::String("graph thread".to_string())),
+                            ("t.source", Value::String("codex".to_string())),
+                            ("t.summary", Value::String("exact thread summary".to_string())),
+                            ("t.message_count", Value::Int(1)),
+                            ("t.project", Value::String("skein".to_string())),
+                            ("t.workspace", Value::String("local".to_string())),
+                            ("match_level", Value::Int(3)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "t.id",
+                                Value::String("search-thread-title-contains".to_string()),
+                            ),
+                            ("coalesce", Value::String("Graph Thread Notes".to_string())),
+                            ("t.source", Value::String("codex".to_string())),
+                            (
+                                "t.summary",
+                                Value::String("title contains query".to_string()),
+                            ),
+                            ("t.message_count", Value::Null),
+                            ("t.project", Value::String("skein".to_string())),
+                            ("t.workspace", Value::String("local".to_string())),
+                            ("match_level", Value::Int(2)),
+                        ]),
+                        compatibility_row([
+                            ("t.id", Value::String("search-thread-summary".to_string())),
+                            ("coalesce", Value::String("thread-source".to_string())),
+                            ("t.source", Value::String("thread-source".to_string())),
+                            (
+                                "t.summary",
+                                Value::String("contains graph thread context".to_string()),
+                            ),
+                            ("t.message_count", Value::Int(8)),
+                            ("t.project", Value::String("skein".to_string())),
+                            ("t.workspace", Value::String("local".to_string())),
+                            ("match_level", Value::Int(1)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'search-thread-exact', title: 'graph thread', source: 'codex', summary: 'exact thread summary', message_count: 1, project: 'skein', workspace: 'local'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'search-thread-title-contains', title: 'Graph Thread Notes', source: 'codex', summary: 'title contains query', message_count: NULL, project: 'skein', workspace: 'local'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'search-thread-summary', title: NULL, source: 'thread-source', summary: 'contains graph thread context', message_count: 8, project: 'skein', workspace: 'local'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'search-thread-workspace', title: NULL, source: 'workspace-source', summary: 'workspace candidate', message_count: 4, project: 'other', workspace: 'graph thread workspace'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'search-thread-outside', title: 'unrelated', source: 'outside', summary: 'outside', message_count: 99, project: 'other', workspace: 'other'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread) WHERE t.id IN ['search-thread-exact', 'search-thread-title-contains', 'search-thread-summary', 'search-thread-workspace', 'search-thread-outside'] DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(5),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "community bridge lookup after aggregate read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (e1:Entity)-[:RELATES_TO]-(e2:Entity) WHERE e1.community_id = $cid AND e2.community_id IS NOT NULL AND e2.community_id <> $cid WITH e2.community_id AS other_cid, COUNT(*) AS shared_edge_count ORDER BY shared_edge_count DESC LIMIT $limit MATCH (c:Community) WHERE c.community_id = other_cid RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count, shared_edge_count",
@@ -13854,6 +13935,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source) WITH s, CASE WHEN s.original_name IS NOT NULL THEN lower(s.original_name) ELSE '' END AS s_name, CASE WHEN s.summary IS NOT NULL THEN lower(s.summary) ELSE '' END AS s_summary, CASE WHEN s.file_path IS NOT NULL THEN lower(s.file_path) ELSE '' END AS s_path, CASE WHEN s.source_type IS NOT NULL THEN lower(s.source_type) ELSE '' END AS s_type WHERE s_name CONTAINS $raw_query OR s_name CONTAINS $normalized_query OR s_summary CONTAINS $raw_query OR s_summary CONTAINS $normalized_query OR s_path CONTAINS $raw_query OR s_path CONTAINS $normalized_query OR s_type CONTAINS $raw_query OR s_type CONTAINS $normalized_query RETURN s.id, COALESCE(s.original_name, s.file_path, s.source_type, 'Source'), s.source_type, s.summary, s.file_path, s.memory_count, s.chunk_count, CASE WHEN s_name = $raw_query THEN 3 WHEN s_name = $normalized_query THEN 3 WHEN s_name CONTAINS $raw_query THEN 2 WHEN s_name CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, COALESCE(s.memory_count, 0) DESC, COALESCE(s.chunk_count, 0) DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "search projection thread candidate read",
+                "search_projection_read",
+                "nmem-graph::search_projection::search_thread_candidate_rows",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WITH t, CASE WHEN t.title IS NOT NULL THEN lower(t.title) ELSE '' END AS t_title, CASE WHEN t.summary IS NOT NULL THEN lower(t.summary) ELSE '' END AS t_summary, CASE WHEN t.source IS NOT NULL THEN lower(t.source) ELSE '' END AS t_source, CASE WHEN t.project IS NOT NULL THEN lower(t.project) ELSE '' END AS t_project, CASE WHEN t.workspace IS NOT NULL THEN lower(t.workspace) ELSE '' END AS t_workspace WHERE t_title CONTAINS $raw_query OR t_title CONTAINS $normalized_query OR t_summary CONTAINS $raw_query OR t_summary CONTAINS $normalized_query OR t_source CONTAINS $raw_query OR t_source CONTAINS $normalized_query OR t_project CONTAINS $raw_query OR t_project CONTAINS $normalized_query OR t_workspace CONTAINS $raw_query OR t_workspace CONTAINS $normalized_query RETURN t.id, COALESCE(t.title, t.source, 'Thread'), t.source, t.summary, t.message_count, t.project, t.workspace, CASE WHEN t_title = $raw_query THEN 3 WHEN t_title = $normalized_query THEN 3 WHEN t_title CONTAINS $raw_query THEN 2 WHEN t_title CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, COALESCE(t.message_count, 0) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "search projection community seed entity read",
                 "search_projection_read",
                 "nmem-graph::search_projection::community_seed_entities",
@@ -16441,7 +16530,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 362);
+        assert_eq!(report.checks.len(), 363);
     }
 
     #[test]
@@ -16457,13 +16546,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 362);
-        assert_eq!(coverage.covered_checks, 362);
+        assert_eq!(coverage.required_checks, 363);
+        assert_eq!(coverage.covered_checks, 363);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 362);
+        assert_eq!(coverage_json["covered_checks"], 363);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16493,10 +16582,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 362);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 363);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 362);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 363);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16721,15 +16810,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 362);
-        assert_eq!(report.shadow_checks.len(), 362);
+        assert_eq!(report.primary_checks.len(), 363);
+        assert_eq!(report.shadow_checks.len(), 363);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            362
+            363
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16738,7 +16827,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 362);
+        assert_eq!(cutover.matched_checks, 363);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
