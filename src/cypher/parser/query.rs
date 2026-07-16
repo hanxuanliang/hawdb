@@ -9,6 +9,7 @@ struct ParsedWithClause {
     optional_with: Option<OptionalWithAggregate>,
     collect_with: Option<WithCollect>,
     distinct_with: Option<WithDistinctProjection>,
+    with_projection: Option<WithProjection>,
     aggregate_with: Option<WithAggregateProjection>,
 }
 
@@ -228,6 +229,7 @@ impl Parser<'_> {
                     optional_with: None,
                     collect_with: None,
                     distinct_with: None,
+                    with_projection: None,
                     aggregate_with: None,
                     aggregate_with_filter: None,
                     post_with_match: None,
@@ -296,11 +298,13 @@ impl Parser<'_> {
                 optional_with: None,
                 collect_with: None,
                 distinct_with: None,
+                with_projection: None,
                 aggregate_with: None,
             }
         };
         let aggregate_with_filter = if (with_clause.aggregate_with.is_some()
-            || with_clause.optional_with.is_some())
+            || with_clause.optional_with.is_some()
+            || with_clause.with_projection.is_some())
             && self.consume_keyword("WHERE")
         {
             Some(self.parse_with_alias_filter()?)
@@ -407,6 +411,7 @@ impl Parser<'_> {
             optional_with: with_clause.optional_with,
             collect_with: with_clause.collect_with,
             distinct_with: with_clause.distinct_with,
+            with_projection: with_clause.with_projection,
             aggregate_with: with_clause.aggregate_with,
             aggregate_with_filter,
             post_with_match,
@@ -571,6 +576,7 @@ impl Parser<'_> {
                 optional_with: None,
                 collect_with: None,
                 distinct_with: Some(WithDistinctProjection { items }),
+                with_projection: None,
                 aggregate_with: None,
             });
         }
@@ -580,6 +586,7 @@ impl Parser<'_> {
                 optional_with: None,
                 collect_with: None,
                 distinct_with: None,
+                with_projection: None,
                 aggregate_with: Some(WithAggregateProjection { items }),
             });
         }
@@ -605,6 +612,7 @@ impl Parser<'_> {
                 optional_with: None,
                 collect_with: None,
                 distinct_with: None,
+                with_projection: None,
                 aggregate_with: Some(WithAggregateProjection { items }),
             });
         }
@@ -632,6 +640,7 @@ impl Parser<'_> {
                     }),
                     collect_with: None,
                     distinct_with: None,
+                    with_projection: None,
                     aggregate_with: None,
                 });
             }
@@ -650,6 +659,7 @@ impl Parser<'_> {
                 optional_with: None,
                 collect_with: None,
                 distinct_with: None,
+                with_projection: None,
                 aggregate_with: Some(WithAggregateProjection { items }),
             });
         }
@@ -694,6 +704,7 @@ impl Parser<'_> {
                     optional_with: None,
                     collect_with: None,
                     distinct_with: None,
+                    with_projection: None,
                     aggregate_with: Some(WithAggregateProjection { items }),
                 });
             }
@@ -702,6 +713,7 @@ impl Parser<'_> {
                     optional_with: None,
                     collect_with: None,
                     distinct_with: None,
+                    with_projection: None,
                     aggregate_with: Some(WithAggregateProjection {
                         items: vec![
                             ReturnItem {
@@ -723,6 +735,22 @@ impl Parser<'_> {
                     alias,
                 }),
                 distinct_with: None,
+                with_projection: None,
+                aggregate_with: None,
+            });
+        }
+        if self.next_keyword_is("CASE") {
+            let mut items = vec![ReturnItem {
+                expression: ReturnExpression::Variable(group_variable),
+                alias: None,
+            }];
+            let mut projections = self.parse_return_items()?;
+            items.append(&mut projections);
+            return Ok(ParsedWithClause {
+                optional_with: None,
+                collect_with: None,
+                distinct_with: None,
+                with_projection: Some(WithProjection { items }),
                 aggregate_with: None,
             });
         }
@@ -812,6 +840,8 @@ impl Parser<'_> {
             WithAliasFilterOp::Lt
         } else if self.consume_char('>') {
             WithAliasFilterOp::Gt
+        } else if self.consume_keyword("CONTAINS") {
+            WithAliasFilterOp::Contains
         } else {
             return Err(self.error("expected WITH alias comparison operator"));
         };

@@ -165,6 +165,7 @@ pub struct MatchReturn {
     pub optional_with: Option<OptionalWithAggregate>,
     pub collect_with: Option<WithCollect>,
     pub distinct_with: Option<WithDistinctProjection>,
+    pub with_projection: Option<WithProjection>,
     pub aggregate_with: Option<WithAggregateProjection>,
     pub aggregate_with_filter: Option<WithAliasFilter>,
     pub post_with_match: Option<PostWithNodeLookup>,
@@ -258,6 +259,11 @@ pub struct WithDistinctProjection {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithProjection {
+    pub items: Vec<ReturnItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WithAggregateProjection {
     pub items: Vec<ReturnItem>,
 }
@@ -270,6 +276,7 @@ pub enum WithAliasFilterOp {
     Lte,
     Gt,
     Gte,
+    Contains,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -632,11 +639,17 @@ pub enum ReturnValueExpression {
         non_empty: ValueExpression,
         null_or_empty: ValueExpression,
     },
+    CaseLowerPropertyDefault {
+        variable: String,
+        property: String,
+        default: ValueExpression,
+    },
     CaseCoalesceDifferenceFloorZero {
         variable: String,
         terms: Vec<CoalesceDifferenceTerm>,
     },
     CaseEntitySearchRank(Box<CaseEntitySearchRankExpression>),
+    CaseColumnSearchRank(Box<CaseColumnSearchRankExpression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -678,11 +691,17 @@ pub enum ReturnExpression {
         non_empty: ValueExpression,
         null_or_empty: ValueExpression,
     },
+    CaseLowerPropertyDefault {
+        variable: String,
+        property: String,
+        default: ValueExpression,
+    },
     CaseCoalesceDifferenceFloorZero {
         variable: String,
         terms: Vec<CoalesceDifferenceTerm>,
     },
     CaseEntitySearchRank(Box<CaseEntitySearchRankExpression>),
+    CaseColumnSearchRank(Box<CaseColumnSearchRankExpression>),
     CountAll,
     CountVariable {
         variable: String,
@@ -726,6 +745,16 @@ pub struct CaseEntitySearchRankExpression {
     pub raw_input: ValueExpression,
     pub exact_rank: ValueExpression,
     pub alias_rank: ValueExpression,
+    pub fallback_rank: ValueExpression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseColumnSearchRankExpression {
+    pub column: String,
+    pub raw_query: ValueExpression,
+    pub normalized_query: ValueExpression,
+    pub exact_rank: ValueExpression,
+    pub contains_rank: ValueExpression,
     pub fallback_rank: ValueExpression,
 }
 

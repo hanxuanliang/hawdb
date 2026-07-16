@@ -8,7 +8,7 @@ use crate::cypher::{
     SchemaTableKind as CypherSchemaTableKind, SetProperty, SetValueExpression, ShortestPathReturn,
     ShortestPathReturnExpression, Statement, ValueExpression, WithAggregateProjection,
     WithAliasFilter, WithAliasFilterExpression, WithAliasFilterOp, WithCollect,
-    WithDistinctProjection,
+    WithDistinctProjection, WithProjection,
 };
 use crate::error::{Result, SkeinError};
 use crate::value::Value;
@@ -596,11 +596,17 @@ pub enum ProjectionExpression {
         non_empty: Value,
         null_or_empty: Value,
     },
+    CaseLowerPropertyDefault {
+        variable: String,
+        property: String,
+        default: Value,
+    },
     CaseCoalesceDifferenceFloorZero {
         variable: String,
         terms: Vec<CoalesceDifferenceProjectionTerm>,
     },
     CaseEntitySearchRank(Box<CaseEntitySearchRankProjection>),
+    CaseColumnSearchRank(Box<CaseColumnSearchRankProjection>),
     ColumnDefaultIfNullOrEq {
         column: String,
         property: String,
@@ -634,6 +640,16 @@ pub struct CaseEntitySearchRankProjection {
     pub raw_input: Value,
     pub exact_rank: Value,
     pub alias_rank: Value,
+    pub fallback_rank: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseColumnSearchRankProjection {
+    pub column: String,
+    pub raw_query: Value,
+    pub normalized_query: Value,
+    pub exact_rank: Value,
+    pub contains_rank: Value,
     pub fallback_rank: Value,
 }
 
@@ -1522,6 +1538,9 @@ pub fn plan_with_params(
             if let Some(distinct_with) = &query.distinct_with {
                 validate_distinct_with_match_return(query, distinct_with)?;
             }
+            if let Some(with_projection) = &query.with_projection {
+                validate_with_projection_match_return(query, &scope, with_projection)?;
+            }
             if let Some(aggregate_with) = &query.aggregate_with {
                 validate_aggregate_with_match_return(query, aggregate_with)?;
             }
@@ -1602,6 +1621,66 @@ pub fn plan_with_params(
                     aggregate_with,
                     parameters,
                 );
+            }
+            if let Some(with_projection) = &query.with_projection {
+                input = plan_with_projection(input, &scope, with_projection, parameters)?;
+                let column_names = with_projection_column_names(with_projection);
+                if let Some(filter) = &query.aggregate_with_filter {
+                    input = LogicalPlan::Filter {
+                        predicate: plan_with_alias_filter(filter, parameters)?,
+                        input: Box::new(input),
+                    };
+                }
+                let projections = query
+                    .returns
+                    .iter()
+                    .map(|item| {
+                        plan_projection_with_columns(&scope, &column_names, item, parameters)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let projection_names = projections
+                    .iter()
+                    .map(|projection| projection.name.clone())
+                    .collect::<BTreeSet<_>>();
+                input = LogicalPlan::Project {
+                    items: projections,
+                    input: Box::new(input),
+                };
+                if query.distinct {
+                    input = LogicalPlan::Distinct {
+                        input: Box::new(input),
+                    };
+                }
+                if !query.order_by.is_empty() {
+                    input = LogicalPlan::Sort {
+                        items: plan_sort_items(
+                            &scope,
+                            &projection_names,
+                            &query.order_by,
+                            parameters,
+                        )?,
+                        input: Box::new(input),
+                    };
+                }
+                let offset = query
+                    .offset
+                    .as_ref()
+                    .map(|offset| bind_pagination_value(offset, parameters, "offset"))
+                    .transpose()?
+                    .unwrap_or(0);
+                let limit = query
+                    .limit
+                    .as_ref()
+                    .map(|limit| bind_pagination_value(limit, parameters, "limit"))
+                    .transpose()?;
+                if offset > 0 || limit.is_some() {
+                    input = LogicalPlan::Limit {
+                        offset,
+                        limit,
+                        input: Box::new(input),
+                    };
+                }
+                return Ok(input);
             }
             if let Some(optional_with) = &query.optional_with {
                 if query.optional_expand.is_none() {
@@ -2008,6 +2087,90 @@ fn plan_collect_with_match_return(
     })
 }
 
+fn validate_with_projection_match_return(
+    query: &MatchReturn,
+    scope: &BTreeSet<String>,
+    with_projection: &WithProjection,
+) -> Result<()> {
+    if query.expand.is_some()
+        || query.optional_expand.is_some()
+        || query.optional_with.is_some()
+        || query.collect_with.is_some()
+        || query.distinct_with.is_some()
+        || query.aggregate_with.is_some()
+    {
+        return Err(SkeinError::Semantic(
+            "WITH projection currently supports only a direct node MATCH".to_string(),
+        ));
+    }
+    if with_projection.items.len() < 2 {
+        return Err(SkeinError::Semantic(
+            "WITH projection requires the source variable and at least one alias".to_string(),
+        ));
+    }
+    let ReturnExpression::Variable(variable) = &with_projection.items[0].expression else {
+        return Err(SkeinError::Semantic(
+            "WITH projection must start with the source variable".to_string(),
+        ));
+    };
+    if variable != &query.variable || with_projection.items[0].alias.is_some() {
+        return Err(SkeinError::Semantic(
+            "WITH projection must preserve the source variable without alias".to_string(),
+        ));
+    }
+    for item in &with_projection.items[1..] {
+        if item.alias.is_none() {
+            return Err(SkeinError::Semantic(
+                "WITH projection expressions require aliases".to_string(),
+            ));
+        }
+        if !return_expression_is_scoped(&item.expression, scope, &BTreeSet::new()) {
+            return Err(SkeinError::Semantic(
+                "WITH projection expression references an unknown variable".to_string(),
+            ));
+        }
+    }
+    validate_with_alias_filter(
+        query.aggregate_with_filter.as_ref(),
+        scope,
+        &with_projection_column_names(with_projection),
+    )
+}
+
+fn plan_with_projection(
+    input: LogicalPlan,
+    scope: &BTreeSet<String>,
+    with_projection: &WithProjection,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<LogicalPlan> {
+    let projections = with_projection
+        .items
+        .iter()
+        .map(|item| plan_projection(scope, item, parameters))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(LogicalPlan::Project {
+        items: projections,
+        input: Box::new(input),
+    })
+}
+
+fn with_projection_column_names(with_projection: &WithProjection) -> BTreeSet<String> {
+    with_projection
+        .items
+        .iter()
+        .map(|item| match &item.alias {
+            Some(alias) => alias.clone(),
+            None => match &item.expression {
+                ReturnExpression::Variable(variable) => variable.clone(),
+                ReturnExpression::Property { variable, property } => {
+                    format!("{variable}.{property}")
+                }
+                _ => "expression".to_string(),
+            },
+        })
+        .collect()
+}
+
 fn validate_distinct_with_match_return(
     query: &MatchReturn,
     distinct_with: &WithDistinctProjection,
@@ -2261,11 +2424,15 @@ fn return_expression_is_scoped(
         ReturnExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnExpression::DefaultIfNull { variable, .. }
         | ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
         }
         ReturnExpression::CaseEntitySearchRank(expression) => {
             column_names.contains(&expression.variable) || scope.contains(&expression.variable)
+        }
+        ReturnExpression::CaseColumnSearchRank(expression) => {
+            column_names.contains(&expression.column)
         }
         ReturnExpression::Id(_)
         | ReturnExpression::RelationshipType(_)
@@ -2292,11 +2459,15 @@ fn return_value_expression_is_scoped(
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
         }
         ReturnValueExpression::CaseEntitySearchRank(expression) => {
             column_names.contains(&expression.variable) || scope.contains(&expression.variable)
+        }
+        ReturnValueExpression::CaseColumnSearchRank(expression) => {
+            column_names.contains(&expression.column)
         }
         ReturnValueExpression::Value(_) => true,
         ReturnValueExpression::Coalesce(expressions) => expressions
@@ -2465,6 +2636,7 @@ fn optional_direct_count_alias(
                 has_projection = true;
             }
             ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+            | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
             | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
                 if variable != &optional.source_variable {
                     return Ok(None);
@@ -2477,6 +2649,7 @@ fn optional_direct_count_alias(
                 }
                 has_projection = true;
             }
+            ReturnExpression::CaseColumnSearchRank(_) => return Ok(None),
             ReturnExpression::CountAll
             | ReturnExpression::CountProperty { .. }
             | ReturnExpression::CollectVariable { .. }
@@ -2557,6 +2730,7 @@ fn optional_direct_collect_alias(
                 has_projection = true;
             }
             ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+            | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
             | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
                 if variable != &optional.source_variable {
                     return Ok(None);
@@ -2569,6 +2743,7 @@ fn optional_direct_collect_alias(
                 }
                 has_projection = true;
             }
+            ReturnExpression::CaseColumnSearchRank(_) => return Ok(None),
             ReturnExpression::CountAll
             | ReturnExpression::CountVariable { .. }
             | ReturnExpression::CountProperty { .. }
@@ -2610,6 +2785,7 @@ fn optional_direct_row_projection_expression(
         | ReturnExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnExpression::DefaultIfNull { variable, .. }
         | ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             optional_direct_row_projection_variable(
                 variable,
@@ -2626,6 +2802,7 @@ fn optional_direct_row_projection_expression(
                 rel_variable,
             )
         }
+        ReturnExpression::CaseColumnSearchRank(_) => false,
         ReturnExpression::Value(_) => true,
         ReturnExpression::Coalesce(expressions) => expressions.iter().all(|expression| {
             optional_direct_row_projection_value_expression(
@@ -2669,6 +2846,7 @@ fn optional_direct_row_projection_value_expression(
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             optional_direct_row_projection_variable(
                 variable,
@@ -2685,6 +2863,7 @@ fn optional_direct_row_projection_value_expression(
                 rel_variable,
             )
         }
+        ReturnValueExpression::CaseColumnSearchRank(_) => false,
         ReturnValueExpression::Value(_) => true,
         ReturnValueExpression::Coalesce(expressions) => expressions.iter().all(|expression| {
             optional_direct_row_projection_value_expression(
@@ -2818,12 +2997,14 @@ fn return_value_expression_is_source_only(
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             variable == source_variable
         }
         ReturnValueExpression::CaseEntitySearchRank(expression) => {
             expression.variable == source_variable
         }
+        ReturnValueExpression::CaseColumnSearchRank(_) => false,
         ReturnValueExpression::Value(_) => true,
         ReturnValueExpression::Coalesce(expressions) => {
             return_value_expressions_are_source_only(expressions, source_variable)
@@ -2945,6 +3126,7 @@ fn plan_with_alias_filter(
                     op: ComparisonOp::Gte,
                     value,
                 },
+                WithAliasFilterOp::Contains => Predicate::ExpressionContains { expression, value },
             }
         }
     })
@@ -4125,12 +4307,16 @@ fn collect_return_value_expression_variables(
         ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. } => {
             variables.insert(variable.clone());
         }
+        ReturnValueExpression::CaseLowerPropertyDefault { variable, .. } => {
+            variables.insert(variable.clone());
+        }
         ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             variables.insert(variable.clone());
         }
         ReturnValueExpression::CaseEntitySearchRank(expression) => {
             variables.insert(expression.variable.clone());
         }
+        ReturnValueExpression::CaseColumnSearchRank(_) => {}
     }
 }
 
@@ -4418,8 +4604,10 @@ fn plan_return_items(
                 | ReturnExpression::DefaultIfNullOrEq { .. }
                 | ReturnExpression::DefaultIfNull { .. }
                 | ReturnExpression::CasePropertyNotNullOrEq { .. }
+                | ReturnExpression::CaseLowerPropertyDefault { .. }
                 | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. }
-                | ReturnExpression::CaseEntitySearchRank(_) => {
+                | ReturnExpression::CaseEntitySearchRank(_)
+                | ReturnExpression::CaseColumnSearchRank(_) => {
                     group_keys.push(plan_projection(scope, item, parameters)?);
                 }
                 ReturnExpression::CountAll
@@ -4679,6 +4867,25 @@ fn plan_projection_with_columns(
                 "case".to_string(),
             )
         }
+        ReturnExpression::CaseLowerPropertyDefault {
+            variable,
+            property,
+            default,
+        } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in return item"
+                )));
+            }
+            (
+                ProjectionExpression::CaseLowerPropertyDefault {
+                    variable: variable.clone(),
+                    property: property.clone(),
+                    default: bind_value(default, parameters)?,
+                },
+                "case".to_string(),
+            )
+        }
         ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
             if !scope.contains(variable) {
                 return Err(SkeinError::Semantic(format!(
@@ -4717,6 +4924,17 @@ fn plan_projection_with_columns(
                 "case".to_string(),
             )
         }
+        ReturnExpression::CaseColumnSearchRank(expression) => (
+            ProjectionExpression::CaseColumnSearchRank(Box::new(CaseColumnSearchRankProjection {
+                column: expression.column.clone(),
+                raw_query: bind_value(&expression.raw_query, parameters)?,
+                normalized_query: bind_value(&expression.normalized_query, parameters)?,
+                exact_rank: bind_value(&expression.exact_rank, parameters)?,
+                contains_rank: bind_value(&expression.contains_rank, parameters)?,
+                fallback_rank: bind_value(&expression.fallback_rank, parameters)?,
+            })),
+            "case".to_string(),
+        ),
         ReturnExpression::CountAll
         | ReturnExpression::CountVariable { .. }
         | ReturnExpression::CountProperty { .. }
@@ -4994,8 +5212,10 @@ fn plan_aggregation(scope: &BTreeSet<String>, item: &ReturnItem) -> Result<Aggre
         | ReturnExpression::DefaultIfNullOrEq { .. }
         | ReturnExpression::DefaultIfNull { .. }
         | ReturnExpression::CasePropertyNotNullOrEq { .. }
+        | ReturnExpression::CaseLowerPropertyDefault { .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. }
-        | ReturnExpression::CaseEntitySearchRank(_) => {
+        | ReturnExpression::CaseEntitySearchRank(_)
+        | ReturnExpression::CaseColumnSearchRank(_) => {
             return Err(SkeinError::Semantic(
                 "expected aggregate return item".to_string(),
             ));
@@ -5189,6 +5409,22 @@ fn plan_return_value_expression_with_columns(
                 null_or_empty: bind_value(null_or_empty, parameters)?,
             })
         }
+        ReturnValueExpression::CaseLowerPropertyDefault {
+            variable,
+            property,
+            default,
+        } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in expression"
+                )));
+            }
+            Ok(ProjectionExpression::CaseLowerPropertyDefault {
+                variable: variable.clone(),
+                property: property.clone(),
+                default: bind_value(default, parameters)?,
+            })
+        }
         ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
             if !scope.contains(variable) {
                 return Err(SkeinError::Semantic(format!(
@@ -5217,6 +5453,24 @@ fn plan_return_value_expression_with_columns(
                     raw_input: bind_value(&expression.raw_input, parameters)?,
                     exact_rank: bind_value(&expression.exact_rank, parameters)?,
                     alias_rank: bind_value(&expression.alias_rank, parameters)?,
+                    fallback_rank: bind_value(&expression.fallback_rank, parameters)?,
+                },
+            )))
+        }
+        ReturnValueExpression::CaseColumnSearchRank(expression) => {
+            if !column_scope.contains(&expression.column) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown column '{}' in expression",
+                    expression.column
+                )));
+            }
+            Ok(ProjectionExpression::CaseColumnSearchRank(Box::new(
+                CaseColumnSearchRankProjection {
+                    column: expression.column.clone(),
+                    raw_query: bind_value(&expression.raw_query, parameters)?,
+                    normalized_query: bind_value(&expression.normalized_query, parameters)?,
+                    exact_rank: bind_value(&expression.exact_rank, parameters)?,
+                    contains_rank: bind_value(&expression.contains_rank, parameters)?,
                     fallback_rank: bind_value(&expression.fallback_rank, parameters)?,
                 },
             )))

@@ -10822,6 +10822,67 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "search projection community candidate read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WITH c, CASE WHEN c.name IS NOT NULL THEN lower(c.name) ELSE '' END AS c_name, CASE WHEN c.description IS NOT NULL THEN lower(c.description) ELSE '' END AS c_description, CASE WHEN c.ai_summary IS NOT NULL THEN lower(c.ai_summary) ELSE '' END AS c_summary WHERE c_name CONTAINS $raw_query OR c_name CONTAINS $normalized_query OR c_description CONTAINS $raw_query OR c_description CONTAINS $normalized_query OR c_summary CONTAINS $raw_query OR c_summary CONTAINS $normalized_query RETURN c.community_id, c.name, c.description, c.ai_summary, c.member_count, CASE WHEN c_name = $raw_query THEN 3 WHEN c_name = $normalized_query THEN 3 WHEN c_name CONTAINS $raw_query THEN 2 WHEN c_name CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, c.member_count DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "raw_query".to_string(),
+                                Value::String("graph search".to_string()),
+                            ),
+                            (
+                                "normalized_query".to_string(),
+                                Value::String("graph search".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("c.community_id", Value::Int(6530)),
+                            ("c.name", Value::String("graph search".to_string())),
+                            (
+                                "c.description",
+                                Value::String("exact community description".to_string()),
+                            ),
+                            (
+                                "c.ai_summary",
+                                Value::String("exact community summary".to_string()),
+                            ),
+                            ("c.member_count", Value::Int(10)),
+                            ("match_level", Value::Int(3)),
+                        ]),
+                        compatibility_row([
+                            ("c.community_id", Value::Int(6531)),
+                            (
+                                "c.name",
+                                Value::String("Community Projection".to_string()),
+                            ),
+                            (
+                                "c.description",
+                                Value::String("contains graph search in description".to_string()),
+                            ),
+                            ("c.ai_summary", Value::Null),
+                            ("c.member_count", Value::Int(50)),
+                            ("match_level", Value::Int(1)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'search-projection-community-exact', community_id: 6530, name: 'graph search', description: 'exact community description', ai_summary: 'exact community summary', member_count: 10})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'search-projection-community-description', community_id: 6531, name: 'Community Projection', description: 'contains graph search in description', ai_summary: NULL, member_count: 50})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.id IN ['search-projection-community-exact', 'search-projection-community-description'] DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "community bridge lookup after aggregate read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (e1:Entity)-[:RELATES_TO]-(e2:Entity) WHERE e1.community_id = $cid AND e2.community_id IS NOT NULL AND e2.community_id <> $cid WITH e2.community_id AS other_cid, COUNT(*) AS shared_edge_count ORDER BY shared_edge_count DESC LIMIT $limit MATCH (c:Community) WHERE c.community_id = other_cid RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count, shared_edge_count",
@@ -14389,6 +14450,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e1:Entity)-[:RELATES_TO]-(e2:Entity) WHERE e1.community_id = $cid AND e2.community_id IS NOT NULL AND e2.community_id <> $cid WITH e2.community_id AS other_cid, COUNT(*) AS shared_edge_count ORDER BY shared_edge_count DESC LIMIT $limit MATCH (c:Community) WHERE c.community_id = other_cid RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count, shared_edge_count",
             ),
             CompatibilityQueryCallSite::new(
+                "search projection community candidate read",
+                "search_projection_read",
+                "nmem-graph::search_projection::search_community_candidates",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WITH c, CASE WHEN c.name IS NOT NULL THEN lower(c.name) ELSE '' END AS c_name, CASE WHEN c.description IS NOT NULL THEN lower(c.description) ELSE '' END AS c_description, CASE WHEN c.ai_summary IS NOT NULL THEN lower(c.ai_summary) ELSE '' END AS c_summary WHERE c_name CONTAINS $raw_query OR c_name CONTAINS $normalized_query OR c_description CONTAINS $raw_query OR c_description CONTAINS $normalized_query OR c_summary CONTAINS $raw_query OR c_summary CONTAINS $normalized_query RETURN c.community_id, c.name, c.description, c.ai_summary, c.member_count, CASE WHEN c_name = $raw_query THEN 3 WHEN c_name = $normalized_query THEN 3 WHEN c_name CONTAINS $raw_query THEN 2 WHEN c_name CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, c.member_count DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "community memory count optional lookup read",
                 "community_memory_read",
                 "nmem-server::rest_read_batch::community_memory_counts",
@@ -16162,7 +16231,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 359);
+        assert_eq!(report.checks.len(), 360);
     }
 
     #[test]
@@ -16178,13 +16247,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 359);
-        assert_eq!(coverage.covered_checks, 359);
+        assert_eq!(coverage.required_checks, 360);
+        assert_eq!(coverage.covered_checks, 360);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 359);
+        assert_eq!(coverage_json["covered_checks"], 360);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16214,10 +16283,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 359);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 360);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 359);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 360);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16442,15 +16511,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 359);
-        assert_eq!(report.shadow_checks.len(), 359);
+        assert_eq!(report.primary_checks.len(), 360);
+        assert_eq!(report.shadow_checks.len(), 360);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            359
+            360
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16459,7 +16528,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 359);
+        assert_eq!(cutover.matched_checks, 360);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

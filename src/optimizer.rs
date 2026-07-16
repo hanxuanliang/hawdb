@@ -4745,6 +4745,19 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             write_value(output, null_or_empty);
             output.push(')');
         }
+        ProjectionExpression::CaseLowerPropertyDefault {
+            variable,
+            property,
+            default,
+        } => {
+            output.push_str("case_lower_property_default(");
+            write_identifier(output, variable);
+            output.push('.');
+            write_identifier(output, property);
+            output.push(',');
+            write_value(output, default);
+            output.push(')');
+        }
         ProjectionExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
             output.push_str("case_coalesce_difference_floor_zero(");
             for (index, term) in terms.iter().enumerate() {
@@ -4780,6 +4793,21 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             write_value(output, &expression.exact_rank);
             output.push(',');
             write_value(output, &expression.alias_rank);
+            output.push(',');
+            write_value(output, &expression.fallback_rank);
+            output.push(')');
+        }
+        ProjectionExpression::CaseColumnSearchRank(expression) => {
+            output.push_str("case_column_search_rank(");
+            write_identifier(output, &expression.column);
+            output.push(',');
+            write_value(output, &expression.raw_query);
+            output.push(',');
+            write_value(output, &expression.normalized_query);
+            output.push(',');
+            write_value(output, &expression.exact_rank);
+            output.push(',');
+            write_value(output, &expression.contains_rank);
             output.push(',');
             write_value(output, &expression.fallback_rank);
             output.push(')');

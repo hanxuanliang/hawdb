@@ -207,11 +207,23 @@ impl Parser<'_> {
                 non_empty,
                 null_or_empty,
             },
+            ReturnValueExpression::CaseLowerPropertyDefault {
+                variable,
+                property,
+                default,
+            } => ReturnExpression::CaseLowerPropertyDefault {
+                variable,
+                property,
+                default,
+            },
             ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
                 ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, terms }
             }
             ReturnValueExpression::CaseEntitySearchRank(expression) => {
                 ReturnExpression::CaseEntitySearchRank(expression)
+            }
+            ReturnValueExpression::CaseColumnSearchRank(expression) => {
+                ReturnExpression::CaseColumnSearchRank(expression)
             }
             ReturnValueExpression::Value(value) => ReturnExpression::Value(value),
         })
@@ -291,6 +303,14 @@ impl Parser<'_> {
                 return Ok(expression);
             }
             self.pos = start;
+            if let Ok(expression) = self.parse_case_column_search_rank_expression() {
+                return Ok(expression);
+            }
+            self.pos = start;
+            if let Ok(expression) = self.parse_case_lower_property_default_expression() {
+                return Ok(expression);
+            }
+            self.pos = start;
             if let Ok(expression) = self.parse_default_if_null_or_eq_expression() {
                 return Ok(expression);
             }
@@ -309,6 +329,105 @@ impl Parser<'_> {
         } else {
             Ok(ReturnValueExpression::Variable(variable))
         }
+    }
+
+    fn parse_case_lower_property_default_expression(&mut self) -> Result<ReturnValueExpression> {
+        self.expect_keyword("WHEN")?;
+        let variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let property = self.parse_ident()?;
+        self.expect_keyword("IS")?;
+        self.expect_keyword("NOT")?;
+        self.expect_keyword("NULL")?;
+        self.expect_keyword("THEN")?;
+        let function = self.parse_ident()?;
+        if !function.eq_ignore_ascii_case("lower") {
+            return Err(self.error("CASE lower-default expression THEN requires lower"));
+        }
+        self.expect_char('(')?;
+        let lower_variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let lower_property = self.parse_ident()?;
+        self.expect_char(')')?;
+        if lower_variable != variable || lower_property != property {
+            return Err(self.error("CASE lower-default expression must lower the checked property"));
+        }
+        self.expect_keyword("ELSE")?;
+        let default = self.parse_value()?;
+        self.expect_keyword("END")?;
+        Ok(ReturnValueExpression::CaseLowerPropertyDefault {
+            variable,
+            property,
+            default,
+        })
+    }
+
+    fn parse_case_column_search_rank_expression(&mut self) -> Result<ReturnValueExpression> {
+        self.expect_keyword("WHEN")?;
+        let (column, raw_query) = self.parse_column_equals_value()?;
+        self.expect_keyword("THEN")?;
+        let exact_rank = self.parse_value()?;
+
+        self.expect_keyword("WHEN")?;
+        let (normalized_column, normalized_query) = self.parse_column_equals_value()?;
+        if normalized_column != column {
+            return Err(self.error("CASE column search rank must compare one column"));
+        }
+        self.expect_keyword("THEN")?;
+        let normalized_rank = self.parse_value()?;
+        if normalized_rank != exact_rank {
+            return Err(self.error("CASE column search rank exact branches must share a rank"));
+        }
+
+        self.expect_keyword("WHEN")?;
+        let (contains_column, raw_contains) = self.parse_column_contains_value()?;
+        if contains_column != column || raw_contains != raw_query {
+            return Err(self.error("CASE column search rank raw contains must match raw equality"));
+        }
+        self.expect_keyword("THEN")?;
+        let contains_rank = self.parse_value()?;
+
+        self.expect_keyword("WHEN")?;
+        let (normalized_contains_column, normalized_contains) =
+            self.parse_column_contains_value()?;
+        if normalized_contains_column != column || normalized_contains != normalized_query {
+            return Err(self.error(
+                "CASE column search rank normalized contains must match normalized equality",
+            ));
+        }
+        self.expect_keyword("THEN")?;
+        let normalized_contains_rank = self.parse_value()?;
+        if normalized_contains_rank != contains_rank {
+            return Err(self.error("CASE column search rank contains branches must share a rank"));
+        }
+        self.expect_keyword("ELSE")?;
+        let fallback_rank = self.parse_value()?;
+        self.expect_keyword("END")?;
+
+        Ok(ReturnValueExpression::CaseColumnSearchRank(Box::new(
+            CaseColumnSearchRankExpression {
+                column,
+                raw_query,
+                normalized_query,
+                exact_rank,
+                contains_rank,
+                fallback_rank,
+            },
+        )))
+    }
+
+    fn parse_column_equals_value(&mut self) -> Result<(String, ValueExpression)> {
+        let column = self.parse_ident()?;
+        self.expect_char('=')?;
+        let value = self.parse_value()?;
+        Ok((column, value))
+    }
+
+    fn parse_column_contains_value(&mut self) -> Result<(String, ValueExpression)> {
+        let column = self.parse_ident()?;
+        self.expect_keyword("CONTAINS")?;
+        let value = self.parse_value()?;
+        Ok((column, value))
     }
 
     fn parse_case_entity_search_rank_expression(&mut self) -> Result<ReturnValueExpression> {

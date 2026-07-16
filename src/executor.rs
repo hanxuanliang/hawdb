@@ -2209,6 +2209,24 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 Ok(null_or_empty.clone())
             }
         }
+        ProjectionExpression::CaseLowerPropertyDefault {
+            variable,
+            property,
+            default,
+        } => {
+            if !binding_has_variable(binding, variable) {
+                return Err(SkeinError::Execution(format!(
+                    "missing variable '{variable}' during projection"
+                )));
+            }
+            match binding_property(binding, variable, property) {
+                Some(Value::String(value)) => Ok(Value::String(value.to_lowercase())),
+                Some(Value::Null) | None => Ok(default.clone()),
+                Some(value) => Err(SkeinError::Execution(format!(
+                    "CASE lower-default requires a string value, got {value:?}"
+                ))),
+            }
+        }
         ProjectionExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
             if !binding_has_variable(binding, variable) {
                 return Err(SkeinError::Execution(format!(
@@ -2251,6 +2269,29 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 };
             if alias_matches {
                 Ok(expression.alias_rank.clone())
+            } else {
+                Ok(expression.fallback_rank.clone())
+            }
+        }
+        ProjectionExpression::CaseColumnSearchRank(expression) => {
+            let column = binding.values.get(&expression.column).ok_or_else(|| {
+                SkeinError::Execution(format!(
+                    "missing column '{}' during projection",
+                    expression.column
+                ))
+            })?;
+            let Value::String(value) = column else {
+                return Ok(expression.fallback_rank.clone());
+            };
+            if matches!(&expression.raw_query, Value::String(query) if value == query)
+                || matches!(&expression.normalized_query, Value::String(query) if value == query)
+            {
+                return Ok(expression.exact_rank.clone());
+            }
+            if matches!(&expression.raw_query, Value::String(query) if value.contains(query))
+                || matches!(&expression.normalized_query, Value::String(query) if value.contains(query))
+            {
+                Ok(expression.contains_rank.clone())
             } else {
                 Ok(expression.fallback_rank.clone())
             }
