@@ -14,6 +14,9 @@ Files:
 - `projected_graphs.skein`: checksummed, checkpoint-generated CSR/CSC
   projection artifacts derived from persisted projected graph definitions,
   written through the default zstd compression envelope.
+- `stable_ids.skein`: checksummed persisted stable-ID mapping for records that
+  do not carry an `id` property at the physical export boundary, written
+  through the default zstd compression envelope.
 - `wal.skein`: append-only committed mutation log.
 
 Recovery:
@@ -43,6 +46,10 @@ metadata and append-only mutation records stay inspectable and avoid compression
 work on every mutation. This keeps publication durable while avoiding
 per-mutation directory syncs, manifest writes, or WAL compression write
 amplification.
+Stable-ID mapping publication uses the same synced temp-file rename and parent
+directory sync boundary as checkpointed artifacts. It is intentionally outside
+the graph WAL: first physical export may create mapping entries, but that action
+does not mutate graph records or increase WAL replay work.
 Search projection snapshots use the same temporary-file, file sync, atomic
 rename, and parent-directory sync boundary when `SearchIndex::checkpoint`
 publishes `search_projection.skein`; the snapshot uses the same zstd envelope
@@ -90,6 +97,11 @@ that do not carry an `id` property. Applying the mapping recomputes the
 stable-identity audit and logical checksum, so `validate().is_import_ready`
 remains the gate before first physical import, resumed export, reimport, or
 delta comparison.
+`Database::export_canonical_graph_snapshot_with_persisted_stable_ids` is the
+local physical-export entry point for this path. It generates missing stable IDs
+once, writes them to `stable_ids.skein`, and reuses the same mapping after
+reopen. The default `export_canonical_graph_snapshot` remains read-only and does
+not create persistent export metadata.
 The CLI command `skein validate-canonical-snapshot [--require-valid]
 [--require-import-ready] <database-path>` opens the database read-only, exports
 the current canonical snapshot, and prints the validation report as JSON.

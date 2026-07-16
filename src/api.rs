@@ -17,7 +17,7 @@ use crate::search::{
 };
 use crate::store::{
     DurabilityPolicy, GraphMutation, GraphStore, NodeId, NodeRecord, ProjectedGraphStatus,
-    RecoveryMode, RelRecord, StorageReclamationWatermark, WalReplayConfig,
+    RecoveryMode, RelRecord, StorageReclamationWatermark, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::value::Value;
 use std::cell::RefCell;
@@ -194,6 +194,23 @@ pub struct CanonicalSnapshotIdentityAudit {
     pub relationships_without_stable_id: Vec<u64>,
     pub duplicate_node_stable_ids: Vec<Value>,
     pub duplicate_relationship_stable_ids: Vec<Value>,
+}
+
+impl From<StoreStableIdMapping> for CanonicalStableIdMapping {
+    fn from(mapping: StoreStableIdMapping) -> Self {
+        Self {
+            node_stable_ids: mapping
+                .node_stable_ids
+                .into_iter()
+                .map(|(id, stable_id)| (id.0, stable_id))
+                .collect(),
+            relationship_stable_ids: mapping
+                .relationship_stable_ids
+                .into_iter()
+                .map(|(id, stable_id)| (id.0, stable_id))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -709,6 +726,16 @@ impl Database {
 
     pub fn export_canonical_graph_snapshot(&self) -> CanonicalGraphSnapshotExport {
         export_canonical_graph_snapshot_for(&self.catalog, &self.store)
+    }
+
+    pub fn export_canonical_graph_snapshot_with_persisted_stable_ids(
+        &mut self,
+    ) -> Result<CanonicalGraphSnapshotExport> {
+        self.ensure_writable()?;
+        let mapping = CanonicalStableIdMapping::from(self.store.ensure_stable_id_mapping()?);
+        Ok(self
+            .export_canonical_graph_snapshot()
+            .with_stable_id_mapping(&mapping))
     }
 
     pub fn storage_version(&self) -> &'static str {
@@ -6503,6 +6530,71 @@ mod tests {
                 .duplicate_relationship_stable_ids,
             vec![Value::String("duplicate-rel".to_string())]
         );
+    }
+
+    #[test]
+    fn persisted_stable_id_mapping_survives_reopen_without_wal_write() {
+        let path = unique_test_dir("persisted_stable_id_mapping");
+        let first_stable_id = {
+            let mut db = Database::open(&path).unwrap();
+            db.query(
+                "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid', name: 'Mid'})",
+            )
+            .unwrap();
+            let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+            let snapshot = db
+                .export_canonical_graph_snapshot_with_persisted_stable_ids()
+                .unwrap();
+            let validation = snapshot.validate();
+            let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+            assert!(path.join("stable_ids.skein").exists());
+            assert_eq!(wal_after, wal_before);
+            assert!(validation.is_import_ready);
+            assert!(validation.stable_identity_ready);
+            snapshot.relationships[0].stable_id.clone().unwrap()
+        };
+
+        {
+            let mut db = Database::open(&path).unwrap();
+            let snapshot = db
+                .export_canonical_graph_snapshot_with_persisted_stable_ids()
+                .unwrap();
+
+            assert_eq!(snapshot.relationships[0].stable_id, Some(first_stable_id));
+            assert!(snapshot.validate().is_import_ready);
+        }
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_stable_id_mapping_respects_read_only_open() {
+        let path = unique_test_dir("persisted_stable_id_mapping_read_only");
+        {
+            let mut db = Database::open(&path).unwrap();
+            db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
+                .unwrap();
+        }
+
+        {
+            let mut db = Database::open_with_config(
+                &path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .unwrap();
+            let error = db
+                .export_canonical_graph_snapshot_with_persisted_stable_ids()
+                .unwrap_err();
+
+            assert!(error.to_string().contains("read-only mode"));
+            assert!(!path.join("stable_ids.skein").exists());
+        }
+
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
