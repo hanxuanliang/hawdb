@@ -12069,6 +12069,62 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats non-crystal memory count",
+                CypherFixtureStatement::new(
+                    "MATCH (m:Memory) WHERE m.is_crystal IS NULL OR m.is_crystal = false RETURN COUNT(m)",
+                ),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats thread count",
+                CypherFixtureStatement::new("MATCH (t:Thread) RETURN COUNT(t)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats community count",
+                CypherFixtureStatement::new("MATCH (c:Community) RETURN COUNT(c)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats label count",
+                CypherFixtureStatement::new("MATCH (l:Label) RETURN COUNT(l)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats mentions relationship count",
+                CypherFixtureStatement::new("MATCH ()-[r:MENTIONS]->() RETURN COUNT(r)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats relates relationship count",
+                CypherFixtureStatement::new("MATCH ()-[r:RELATES_TO]->() RETURN COUNT(r)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats memory relation count",
+                CypherFixtureStatement::new("MATCH ()-[r:MEMORY_RELATES_TO]->() RETURN COUNT(r)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats contains relationship count",
+                CypherFixtureStatement::new("MATCH ()-[r:CONTAINS]->() RETURN COUNT(r)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "rest graph stats compacts relationship count",
+                CypherFixtureStatement::new("MATCH ()-[r:COMPACTS_TO]->() RETURN COUNT(r)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph community analysis list read",
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) RETURN c.community_id, c.name, c.description, c.member_count, c.algorithm, c.resolution ORDER BY c.member_count DESC",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "pagerank mention edge count",
                 CypherFixtureStatement::new(
                     "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN COUNT(r)",
@@ -18137,6 +18193,70 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.community_detection_applied, m.pagerank_applied, m.community_algorithm, m.community_resolution, m.community_count, m.pagerank_algorithm, m.pagerank_damping, m.pagerank_iterations, m.last_augmentation_at, m.schema_version, m.community_detection_computed_at, m.pagerank_computed_at",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph stats non-crystal memory count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.is_crystal IS NULL OR m.is_crystal = false RETURN COUNT(m)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats thread count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH (t:Thread) RETURN COUNT(t)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats community count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH (c:Community) RETURN COUNT(c)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats label count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH (l:Label) RETURN COUNT(l)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats mentions relationship count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH ()-[r:MENTIONS]->() RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats relates relationship count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH ()-[r:RELATES_TO]->() RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats memory relation count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH ()-[r:MEMORY_RELATES_TO]->() RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats contains relationship count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH ()-[r:CONTAINS]->() RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph stats compacts relationship count",
+                "graph_stats_read",
+                "nmem-server::rest_graph::graph_statistics",
+            )
+            .with_cypher("MATCH ()-[r:COMPACTS_TO]->() RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "rest graph community analysis list read",
+                "graph_analysis_read",
+                "nmem-server::rest_graph::graph_analysis_payload",
+            )
+            .with_cypher(
+                "MATCH (c:Community) RETURN c.community_id, c.name, c.description, c.member_count, c.algorithm, c.resolution ORDER BY c.member_count DESC",
+            ),
+            CompatibilityQueryCallSite::new(
                 "node detail neighbor counts",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::query_node_detail",
@@ -21374,7 +21494,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 486);
+        assert_eq!(report.checks.len(), 496);
     }
 
     #[test]
@@ -21390,13 +21510,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 486);
-        assert_eq!(coverage.covered_checks, 486);
+        assert_eq!(coverage.required_checks, 496);
+        assert_eq!(coverage.covered_checks, 496);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 486);
+        assert_eq!(coverage_json["covered_checks"], 496);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -21426,10 +21546,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 486);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 496);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 486);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 496);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -21654,15 +21774,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 486);
-        assert_eq!(report.shadow_checks.len(), 486);
+        assert_eq!(report.primary_checks.len(), 496);
+        assert_eq!(report.shadow_checks.len(), 496);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            486
+            496
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -21671,7 +21791,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 486);
+        assert_eq!(cutover.matched_checks, 496);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
