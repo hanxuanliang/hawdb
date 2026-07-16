@@ -1022,16 +1022,18 @@ pub fn plan_with_params(
                         )));
                     }
                 }
-                let (source_predicate, rel_predicate) = plan_relationship_mutation_predicate(
+                let mutation_predicate = plan_relationship_mutation_predicate(
                     update.predicate.as_ref(),
                     &update.variable,
                     rel_variable,
+                    &expand.target_variable,
+                    &expand.target_properties,
                     parameters,
                 )?;
                 let predicate = combine_pattern_and_optional_predicate(
                     &update.variable,
                     &update.properties,
-                    source_predicate,
+                    mutation_predicate.source_predicate,
                     parameters,
                 )?;
                 let assignments = update
@@ -1056,10 +1058,10 @@ pub fn plan_with_params(
                         rel_variable: rel_variable.clone(),
                         rel_type: expand.rel_type.clone(),
                         rel_properties: bind_properties(&expand.properties, parameters)?,
-                        rel_predicate,
+                        rel_predicate: mutation_predicate.rel_predicate,
                         target_variable: expand.target_variable.clone(),
                         target_label: expand.target_label.clone(),
-                        target_properties: bind_properties(&expand.target_properties, parameters)?,
+                        target_properties: mutation_predicate.target_properties,
                         property: assignment.property,
                         value: assignment.value,
                     });
@@ -1071,10 +1073,10 @@ pub fn plan_with_params(
                     rel_variable: rel_variable.clone(),
                     rel_type: expand.rel_type.clone(),
                     rel_properties: bind_properties(&expand.properties, parameters)?,
-                    rel_predicate,
+                    rel_predicate: mutation_predicate.rel_predicate,
                     target_variable: expand.target_variable.clone(),
                     target_label: expand.target_label.clone(),
-                    target_properties: bind_properties(&expand.target_properties, parameters)?,
+                    target_properties: mutation_predicate.target_properties,
                     assignments,
                 });
             }
@@ -1215,16 +1217,18 @@ pub fn plan_with_params(
                         rel_variable, delete.delete_variable
                     )));
                 }
-                let (source_predicate, rel_predicate) = plan_relationship_mutation_predicate(
+                let mutation_predicate = plan_relationship_mutation_predicate(
                     delete.predicate.as_ref(),
                     &delete.variable,
                     rel_variable,
+                    &expand.target_variable,
+                    &expand.target_properties,
                     parameters,
                 )?;
                 let predicate = combine_pattern_and_optional_predicate(
                     &delete.variable,
                     &delete.properties,
-                    source_predicate,
+                    mutation_predicate.source_predicate,
                     parameters,
                 )?;
                 return Ok(LogicalPlan::DeleteRelationship {
@@ -1234,10 +1238,10 @@ pub fn plan_with_params(
                     rel_variable: rel_variable.clone(),
                     rel_type: expand.rel_type.clone(),
                     rel_properties: bind_properties(&expand.properties, parameters)?,
-                    rel_predicate,
+                    rel_predicate: mutation_predicate.rel_predicate,
                     target_variable: expand.target_variable.clone(),
                     target_label: expand.target_label.clone(),
-                    target_properties: bind_properties(&expand.target_properties, parameters)?,
+                    target_properties: mutation_predicate.target_properties,
                 });
             }
             let scope = BTreeSet::from([delete.variable.clone()]);
@@ -3754,25 +3758,56 @@ fn plan_predicate(
     }
 }
 
+struct RelationshipMutationPredicatePlan {
+    source_predicate: Option<Predicate>,
+    rel_predicate: Option<Predicate>,
+    target_properties: BTreeMap<String, Value>,
+}
+
 fn plan_relationship_mutation_predicate(
     predicate: Option<&PropertyPredicate>,
     source_variable: &str,
     rel_variable: &str,
+    target_variable: &str,
+    target_pattern_properties: &BTreeMap<String, ValueExpression>,
     parameters: &BTreeMap<String, Value>,
-) -> Result<(Option<Predicate>, Option<Predicate>)> {
+) -> Result<RelationshipMutationPredicatePlan> {
+    let mut target_properties = bind_properties(target_pattern_properties, parameters)?;
     let Some(predicate) = predicate else {
-        return Ok((None, None));
+        return Ok(RelationshipMutationPredicatePlan {
+            source_predicate: None,
+            rel_predicate: None,
+            target_properties,
+        });
     };
-    split_relationship_mutation_predicate(predicate, source_variable, rel_variable, parameters)
+    let (source_predicate, rel_predicate) = split_relationship_mutation_predicate(
+        predicate,
+        source_variable,
+        rel_variable,
+        target_variable,
+        &mut target_properties,
+        parameters,
+    )?;
+    Ok(RelationshipMutationPredicatePlan {
+        source_predicate,
+        rel_predicate,
+        target_properties,
+    })
 }
 
 fn split_relationship_mutation_predicate(
     predicate: &PropertyPredicate,
     source_variable: &str,
     rel_variable: &str,
+    target_variable: &str,
+    target_properties: &mut BTreeMap<String, Value>,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<(Option<Predicate>, Option<Predicate>)> {
-    let scope = BTreeSet::from([source_variable.to_string(), rel_variable.to_string()]);
+    let scope = BTreeSet::from([
+        source_variable.to_string(),
+        rel_variable.to_string(),
+        target_variable.to_string(),
+    ]);
     match predicate {
         PropertyPredicate::And(predicates) => {
             let mut source_predicates = Vec::new();
@@ -3782,6 +3817,8 @@ fn split_relationship_mutation_predicate(
                     predicate,
                     source_variable,
                     rel_variable,
+                    target_variable,
+                    target_properties,
                     parameters,
                 )?;
                 if let Some(source) = source {
@@ -3813,6 +3850,7 @@ fn split_relationship_mutation_predicate(
                 variable,
                 source_variable,
                 rel_variable,
+                target_variable,
                 planned,
             )
         }
@@ -3833,6 +3871,7 @@ fn split_relationship_mutation_predicate(
                 variable,
                 source_variable,
                 rel_variable,
+                target_variable,
                 planned,
             )
         }
@@ -3848,11 +3887,20 @@ fn split_relationship_mutation_predicate(
                     "relationship mutation predicate must bind one variable".to_string(),
                 )
             })?;
+            if variable == target_variable {
+                return bind_relationship_mutation_target_predicate(
+                    predicate,
+                    target_variable,
+                    target_properties,
+                    parameters,
+                );
+            }
             let planned = plan_predicate(predicate, &scope, parameters)?;
             predicate_for_relationship_mutation_variable(
                 variable,
                 source_variable,
                 rel_variable,
+                target_variable,
                 planned,
             )
         }
@@ -3863,6 +3911,7 @@ fn predicate_for_relationship_mutation_variable(
     variable: &str,
     source_variable: &str,
     rel_variable: &str,
+    target_variable: &str,
     predicate: Predicate,
 ) -> Result<(Option<Predicate>, Option<Predicate>)> {
     if variable == source_variable {
@@ -3871,9 +3920,35 @@ fn predicate_for_relationship_mutation_variable(
     if variable == rel_variable {
         return Ok((None, Some(predicate)));
     }
+    if variable == target_variable {
+        return Err(SkeinError::Semantic(
+            "relationship mutation target predicates support only equality filters".to_string(),
+        ));
+    }
     Err(SkeinError::Semantic(format!(
         "unknown variable '{variable}' in relationship mutation predicate"
     )))
+}
+
+fn bind_relationship_mutation_target_predicate(
+    predicate: &PropertyPredicate,
+    target_variable: &str,
+    target_properties: &mut BTreeMap<String, Value>,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<(Option<Predicate>, Option<Predicate>)> {
+    match predicate {
+        PropertyPredicate::Eq {
+            variable,
+            property,
+            value,
+        } if variable == target_variable => {
+            insert_endpoint_property(target_properties, property, bind_value(value, parameters)?)?;
+            Ok((None, None))
+        }
+        _ => Err(SkeinError::Semantic(
+            "relationship mutation target predicates support only equality filters".to_string(),
+        )),
+    }
 }
 
 fn combine_predicates(predicates: Vec<Predicate>) -> Option<Predicate> {
