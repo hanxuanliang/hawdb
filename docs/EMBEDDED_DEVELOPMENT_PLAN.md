@@ -575,6 +575,8 @@ The current fixture covers indexed parameter lookup, null predicates, list
 predicates with pagination, entity alias list lookup, entity reuse lookup reads,
 entity temporal metadata create/update writes, current timestamp writes,
 entity `MENTIONS` and temporal `RELATES_TO` creation writes, entity count reads,
+label resolver null-canonical scans/backfills, label rename collision guards,
+label existence reads, label remove-all count/delete writes,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label

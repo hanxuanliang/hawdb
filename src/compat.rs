@@ -6243,6 +6243,126 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "label null-canonical bounded scan",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label) WHERE l.canonical_name IS NULL RETURN l.id, l.name LIMIT $cap",
+                        BTreeMap::from([("cap".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-null-scan-1', name: 'Null Scan Label', canonical_name: NULL})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label {id: 'label-null-scan-1'}) DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label null-canonical backfill write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label {id: $id}) SET l.canonical_name = $c",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("label-backfill-1".to_string()),
+                            ),
+                            (
+                                "c".to_string(),
+                                Value::String("label_backfill".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-backfill-1', name: 'Label Backfill', canonical_name: NULL})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label {id: 'label-backfill-1'}) DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label rename collision lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label) WHERE l.canonical_name = $c AND l.id <> $label_id RETURN l.id LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "c".to_string(),
+                                Value::String("collision_canonical".to_string()),
+                            ),
+                            (
+                                "label_id".to_string(),
+                                Value::String("label-collision-source".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "l.id",
+                        Value::String("label-collision-target".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-collision-source', name: 'Collision Source', canonical_name: 'collision_source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-collision-target', name: 'Collision Target', canonical_name: 'collision_canonical'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label) WHERE l.id IN ['label-collision-source', 'label-collision-target'] DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label rename null-canonical collision scan",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label) WHERE l.canonical_name IS NULL AND l.id <> $label_id RETURN l.id, l.name LIMIT 500",
+                        BTreeMap::from([(
+                            "label_id".to_string(),
+                            Value::String("label-null-collision-source".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(3),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-null-collision-source', name: 'Null Collision Source', canonical_name: 'null_collision_source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-null-collision-target', name: 'Null Collision Target', canonical_name: NULL})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label) WHERE l.id IN ['label-null-collision-source', 'label-null-collision-target'] DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "label existence lookup",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (l:Label {id: $label_id}) RETURN l.id LIMIT 1",
+                    BTreeMap::from([(
+                        "label_id".to_string(),
+                        Value::String("label-canonical-1".to_string()),
+                    )]),
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([(
+                    "l.id",
+                    Value::String("label-canonical-1".to_string()),
+                )])]),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "label dynamic update set",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (l:Label {id: $label_id}) SET l.updated_at = $updated_at, l.name = $name, l.canonical_name = $canonical",
@@ -6292,6 +6412,74 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (m:Memory {id: 1})-[r:HAS_LABEL]->(l:Label {id: 'label-1'}) RETURN count(r) AS total",
                     ),
                     ExpectedRows::Exact(vec![compatibility_row([("total", Value::Int(0))])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label remove all from memory count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id})-[r:HAS_LABEL]->(:Label) RETURN COUNT(r)",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("label-remove-all-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([("count(r)", Value::Int(2))])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-remove-all-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-remove-all-a', name: 'Remove All A'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-remove-all-b', name: 'Remove All B'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-remove-all-memory'}), (l:Label {id: 'label-remove-all-a'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-remove-all-memory'}), (l:Label {id: 'label-remove-all-b'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['label-remove-all-memory', 'label-remove-all-a', 'label-remove-all-b'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "label remove all from memory delete",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id})-[r:HAS_LABEL]->(:Label) DELETE r",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("label-remove-all-delete-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-remove-all-delete-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-remove-all-delete-a', name: 'Remove Delete A'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-remove-all-delete-b', name: 'Remove Delete B'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-remove-all-delete-memory'}), (l:Label {id: 'label-remove-all-delete-a'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-remove-all-delete-memory'}), (l:Label {id: 'label-remove-all-delete-b'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['label-remove-all-delete-memory', 'label-remove-all-delete-a', 'label-remove-all-delete-b'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
                 ),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
@@ -8120,6 +8308,42 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (l:Label) WHERE l.canonical_name = $c RETURN l.id LIMIT 1"),
             CompatibilityQueryCallSite::new(
+                "label null-canonical bounded scan",
+                "label_write",
+                "nmem-graph::label_write::resolve_or_create_label",
+            )
+            .with_cypher(
+                "MATCH (l:Label) WHERE l.canonical_name IS NULL RETURN l.id, l.name LIMIT $cap",
+            ),
+            CompatibilityQueryCallSite::new(
+                "label null-canonical backfill write",
+                "label_write",
+                "nmem-graph::label_write::resolve_or_create_label",
+            )
+            .with_cypher("MATCH (l:Label {id: $id}) SET l.canonical_name = $c"),
+            CompatibilityQueryCallSite::new(
+                "label rename collision lookup",
+                "label_write",
+                "nmem-graph::label_write::update_label",
+            )
+            .with_cypher(
+                "MATCH (l:Label) WHERE l.canonical_name = $c AND l.id <> $label_id RETURN l.id LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "label rename null-canonical collision scan",
+                "label_write",
+                "nmem-graph::label_write::update_label",
+            )
+            .with_cypher(
+                "MATCH (l:Label) WHERE l.canonical_name IS NULL AND l.id <> $label_id RETURN l.id, l.name LIMIT 500",
+            ),
+            CompatibilityQueryCallSite::new(
+                "label existence lookup",
+                "label_write",
+                "nmem-graph::label_write::update_label",
+            )
+            .with_cypher("MATCH (l:Label {id: $label_id}) RETURN l.id LIMIT 1"),
+            CompatibilityQueryCallSite::new(
                 "label dynamic update set",
                 "label_write",
                 "nmem-graph::label_write::update_label",
@@ -8135,6 +8359,18 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             .with_cypher(
                 "MATCH (m:Memory {id: $memory_id})-[r:HAS_LABEL]->(l:Label {id: $label_id}) DELETE r",
             ),
+            CompatibilityQueryCallSite::new(
+                "label remove all from memory count",
+                "label_write",
+                "nmem-graph::label_write::remove_all_labels_from_memory",
+            )
+            .with_cypher("MATCH (m:Memory {id: $id})-[r:HAS_LABEL]->(:Label) RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "label remove all from memory delete",
+                "label_write",
+                "nmem-graph::label_write::remove_all_labels_from_memory",
+            )
+            .with_cypher("MATCH (m:Memory {id: $id})-[r:HAS_LABEL]->(:Label) DELETE r"),
             CompatibilityQueryCallSite::new(
                 "label detach delete",
                 "label_write",
@@ -9549,7 +9785,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 199);
+        assert_eq!(report.checks.len(), 206);
     }
 
     #[test]
@@ -9565,13 +9801,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 199);
-        assert_eq!(coverage.covered_checks, 199);
+        assert_eq!(coverage.required_checks, 206);
+        assert_eq!(coverage.covered_checks, 206);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 199);
+        assert_eq!(coverage_json["covered_checks"], 206);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -9601,10 +9837,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 199);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 206);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 199);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 206);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -9798,15 +10034,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 199);
-        assert_eq!(report.shadow_checks.len(), 199);
+        assert_eq!(report.primary_checks.len(), 206);
+        assert_eq!(report.shadow_checks.len(), 206);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            199
+            206
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -9815,7 +10051,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 199);
+        assert_eq!(cutover.matched_checks, 206);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

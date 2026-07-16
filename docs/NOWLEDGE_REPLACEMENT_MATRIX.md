@@ -36,7 +36,9 @@ needs. The source product boundary is:
 Note: the current compatibility fixture also covers Nowledge-used entity reuse
 exact, case-insensitive, alias-containment, same-type bounded scan reads, and
 entity temporal metadata create/update writes, entity total count reads, and
-entity `MENTIONS`/`RELATES_TO` creation writes.
+entity `MENTIONS`/`RELATES_TO` creation writes. It also covers Nowledge-used
+label resolver null-canonical scans/backfills, rename collision guards,
+existence reads, and remove-all count/delete writes.
 
 ## LanceDB Replacement Surface
 
