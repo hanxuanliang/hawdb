@@ -12474,6 +12474,165 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest read batch community member count ranking",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.member_count > 0 RETURN c.name, c.member_count, c.description ORDER BY c.member_count DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(2))]),
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'read-batch-community-low', name: 'Batch Low', description: 'low community', member_count: 3})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'read-batch-community-high', name: 'Batch High', description: 'high community', member_count: 7})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'read-batch-community-empty', name: 'Batch Empty', description: 'empty community', member_count: 0})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.id IN ['read-batch-community-low', 'read-batch-community-high', 'read-batch-community-empty'] DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest read batch entity relation pair count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) RETURN e1.name, e2.name, COUNT(r) as count ORDER BY count DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(2))]),
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'read-batch-rel-e1', name: 'Batch Relation One'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'read-batch-rel-e2', name: 'Batch Relation Two'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'read-batch-rel-e3', name: 'Batch Relation Three'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'read-batch-rel-e1'}), (b:Entity {id: 'read-batch-rel-e2'}) CREATE (a)-[:RELATES_TO]->(b)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'read-batch-rel-e1'}), (b:Entity {id: 'read-batch-rel-e3'}) CREATE (a)-[:RELATES_TO]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['read-batch-rel-e1', 'read-batch-rel-e2', 'read-batch-rel-e3'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest read batch entity detail",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $entity_id}) RETURN e",
+                        BTreeMap::from([(
+                            "entity_id".to_string(),
+                            Value::String("read-batch-entity-detail".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'read-batch-entity-detail', name: 'Batch Entity Detail', entity_type: 'concept'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'read-batch-entity-detail'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest read batch entity related detail",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $entity_id})-[r:RELATES_TO]-(related:Entity) RETURN e.id, e.name, e.entity_type, related.id, related.name, related.entity_type, related.description, COALESCE(r.relation_type, 'RELATES_TO'), COALESCE(r.confidence, 0.5), COALESCE(r.strength, 0.5) ORDER BY COALESCE(r.confidence, 0.5) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "entity_id".to_string(),
+                                Value::String("read-batch-related-source".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'read-batch-related-source', name: 'Related Source', entity_type: 'concept'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'read-batch-related-target', name: 'Related Target', entity_type: 'concept', description: 'related description'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'read-batch-related-source'}), (b:Entity {id: 'read-batch-related-target'}) CREATE (a)-[:RELATES_TO {relation_type: 'supports', confidence: 0.8, strength: 0.7}]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['read-batch-related-source', 'read-batch-related-target'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest read batch entity memory mentions",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity {id: $entity_id}) RETURN m.id, COALESCE(m.title, ''), LEFT(COALESCE(m.content, ''), 200), COALESCE(r.confidence, 0.5), COALESCE(r.mention_count, 1) ORDER BY COALESCE(r.confidence, 0.5) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "entity_id".to_string(),
+                                Value::String("read-batch-mentions-entity".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'read-batch-mentions-memory', title: 'Mention Memory', content: 'mention memory content'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'read-batch-mentions-entity', name: 'Mention Entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'read-batch-mentions-memory'}), (e:Entity {id: 'read-batch-mentions-entity'}) CREATE (m)-[:MENTIONS {confidence: 0.9, mention_count: 2}]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['read-batch-mentions-memory', 'read-batch-mentions-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest read batch community detail by cid",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.community_id = $cid RETURN c.name, c.ai_summary, c.description, c.member_count LIMIT 1",
+                        BTreeMap::from([("cid".to_string(), Value::Int(180001))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'read-batch-community-detail', community_id: 180001, name: 'Batch Community Detail', ai_summary: 'batch summary', description: 'batch detail', member_count: 11})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: 'read-batch-community-detail'}) DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "rest graph node detail memory lookup",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (n:Memory {id: $node_id}) RETURN n",
@@ -19309,6 +19468,52 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Community) RETURN c.community_id, c.name, c.description, c.member_count, c.algorithm, c.resolution ORDER BY c.member_count DESC",
             ),
             CompatibilityQueryCallSite::new(
+                "rest read batch community member count ranking",
+                "read_batch_stats",
+                "nmem-server::rest_read_batch::top_communities",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.member_count > 0 RETURN c.name, c.member_count, c.description ORDER BY c.member_count DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest read batch entity relation pair count",
+                "read_batch_stats",
+                "nmem-server::rest_read_batch::top_entity_relations",
+            )
+            .with_cypher(
+                "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) RETURN e1.name, e2.name, COUNT(r) as count ORDER BY count DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest read batch entity detail",
+                "read_batch_detail",
+                "nmem-server::rest_read_batch::entity_detail",
+            )
+            .with_cypher("MATCH (e:Entity {id: $entity_id}) RETURN e"),
+            CompatibilityQueryCallSite::new(
+                "rest read batch entity related detail",
+                "read_batch_detail",
+                "nmem-server::rest_read_batch::entity_related_detail",
+            )
+            .with_cypher(
+                "MATCH (e:Entity {id: $entity_id})-[r:RELATES_TO]-(related:Entity) RETURN e.id, e.name, e.entity_type, related.id, related.name, related.entity_type, related.description, COALESCE(r.relation_type, 'RELATES_TO'), COALESCE(r.confidence, 0.5), COALESCE(r.strength, 0.5) ORDER BY COALESCE(r.confidence, 0.5) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest read batch entity memory mentions",
+                "read_batch_detail",
+                "nmem-server::rest_read_batch::entity_memory_mentions",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity {id: $entity_id}) RETURN m.id, COALESCE(m.title, ''), LEFT(COALESCE(m.content, ''), 200), COALESCE(r.confidence, 0.5), COALESCE(r.mention_count, 1) ORDER BY COALESCE(r.confidence, 0.5) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest read batch community detail by cid",
+                "read_batch_detail",
+                "nmem-server::rest_read_batch::community_detail",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.community_id = $cid RETURN c.name, c.ai_summary, c.description, c.member_count LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest graph node detail memory lookup",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::node_details_payload",
@@ -22804,7 +23009,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 538);
+        assert_eq!(report.checks.len(), 544);
     }
 
     #[test]
@@ -22820,13 +23025,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 538);
-        assert_eq!(coverage.covered_checks, 538);
+        assert_eq!(coverage.required_checks, 544);
+        assert_eq!(coverage.covered_checks, 544);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 538);
+        assert_eq!(coverage_json["covered_checks"], 544);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -22856,10 +23061,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 538);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 544);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 538);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 544);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -23084,15 +23289,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 538);
-        assert_eq!(report.shadow_checks.len(), 538);
+        assert_eq!(report.primary_checks.len(), 544);
+        assert_eq!(report.shadow_checks.len(), 544);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            538
+            544
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -23101,7 +23306,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 538);
+        assert_eq!(cutover.matched_checks, 544);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
