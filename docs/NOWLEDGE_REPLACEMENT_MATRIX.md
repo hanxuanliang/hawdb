@@ -43,7 +43,7 @@ includes Source endpoint checks, full `SOURCED_FROM` creation writes,
 edge-existence/global counts, exact repair candidate scans, and source
 memory-count reads. PageRank coverage includes membership/visibility reads,
 score persist/clear writes, central-entity lookup, GraphMeta clear stamps, and
-plan edge/change count reads.
+planner node/relationship totals and changed count reads.
 
 ## LanceDB Replacement Surface
 

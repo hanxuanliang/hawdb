@@ -6436,12 +6436,62 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "pagerank memory node count",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN COUNT(m)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "pagerank entity node count",
+                CypherFixtureStatement::new("MATCH (e:Entity) RETURN COUNT(e)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank entity relation count",
+                    CypherFixtureStatement::new(
+                        "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN COUNT(r)",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-relates-source'})-[:RELATES_TO]->(:Entity {id: 'pagerank-relates-target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['pagerank-relates-source', 'pagerank-relates-target'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "pagerank mention edge count",
                 CypherFixtureStatement::new(
                     "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN COUNT(r)",
                 ),
                 ExpectedRows::RowCount(1),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank changed memory count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.created_at > timestamp($cutoff) OR m.updated_at > timestamp($cutoff) RETURN COUNT(m)",
+                        BTreeMap::from([(
+                            "cutoff".to_string(),
+                            Value::String("1970-01-01T00:00:00".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-changed-memory', created_at: 2, updated_at: 3})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'pagerank-changed-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "pagerank changed entity count",
@@ -6494,6 +6544,28 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "pagerank changed entity relation count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > timestamp($cutoff) RETURN COUNT(r)",
+                        BTreeMap::from([(
+                            "cutoff".to_string(),
+                            Value::String("1970-01-01T00:00:00".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-changed-rel-source'})-[:RELATES_TO {created_at: 2}]->(:Entity {id: 'pagerank-changed-rel-target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['pagerank-changed-rel-source', 'pagerank-changed-rel-target'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "pagerank active memory relation count",
                     CypherFixtureStatement::new(
                         "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN COUNT(r)",
@@ -6506,6 +6578,28 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (m:Memory) WHERE m.id IN ['pagerank-rel-source', 'pagerank-rel-target'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank changed memory relation count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > timestamp($cutoff) OR r.updated_at > timestamp($cutoff)) RETURN COUNT(r)",
+                        BTreeMap::from([(
+                            "cutoff".to_string(),
+                            Value::String("1970-01-01T00:00:00".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-changed-memory-rel-source'})-[:MEMORY_RELATES_TO {status: 'active', created_at: 2, updated_at: 3}]->(:Memory {id: 'pagerank-changed-memory-rel-target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['pagerank-changed-memory-rel-source', 'pagerank-changed-memory-rel-target'] DETACH DELETE m",
                     ),
                     ExpectedRows::RowCount(2),
                 ),
@@ -8885,11 +8979,37 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = false, m.pagerank_computed_at = NULL, m.updated_at = CURRENT_TIMESTAMP()",
             ),
             CompatibilityQueryCallSite::new(
+                "pagerank memory node count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::graph_counts",
+            )
+            .with_cypher("MATCH (m:Memory) RETURN COUNT(m)"),
+            CompatibilityQueryCallSite::new(
+                "pagerank entity node count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::graph_counts",
+            )
+            .with_cypher("MATCH (e:Entity) RETURN COUNT(e)"),
+            CompatibilityQueryCallSite::new(
+                "pagerank entity relation count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::graph_counts",
+            )
+            .with_cypher("MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
                 "pagerank mention edge count",
                 "pagerank_plan_read",
                 "nmem-graph::pagerank_plan::graph_counts",
             )
             .with_cypher("MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "pagerank changed memory count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::changed_counts",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.created_at > timestamp($cutoff) OR m.updated_at > timestamp($cutoff) RETURN COUNT(m)",
+            ),
             CompatibilityQueryCallSite::new(
                 "pagerank changed entity count",
                 "pagerank_plan_read",
@@ -8907,12 +9027,28 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > timestamp($cutoff) RETURN COUNT(r)",
             ),
             CompatibilityQueryCallSite::new(
+                "pagerank changed entity relation count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::changed_counts",
+            )
+            .with_cypher(
+                "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.created_at > timestamp($cutoff) RETURN COUNT(r)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "pagerank active memory relation count",
                 "pagerank_plan_read",
                 "nmem-graph::pagerank_plan::graph_counts",
             )
             .with_cypher(
                 "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN COUNT(r)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "pagerank changed memory relation count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::changed_counts",
+            )
+            .with_cypher(
+                "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > timestamp($cutoff) OR r.updated_at > timestamp($cutoff)) RETURN COUNT(r)",
             ),
             CompatibilityQueryCallSite::new(
                 "label merge node on create seed",
@@ -10430,7 +10566,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 225);
+        assert_eq!(report.checks.len(), 231);
     }
 
     #[test]
@@ -10446,13 +10582,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 225);
-        assert_eq!(coverage.covered_checks, 225);
+        assert_eq!(coverage.required_checks, 231);
+        assert_eq!(coverage.covered_checks, 231);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 225);
+        assert_eq!(coverage_json["covered_checks"], 231);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -10482,10 +10618,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 225);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 231);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 225);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 231);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -10679,15 +10815,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 225);
-        assert_eq!(report.shadow_checks.len(), 225);
+        assert_eq!(report.primary_checks.len(), 231);
+        assert_eq!(report.shadow_checks.len(), 231);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            225
+            231
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -10696,7 +10832,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 225);
+        assert_eq!(cutover.matched_checks, 231);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
