@@ -73,6 +73,40 @@ Rows are JSON objects keyed by projected column name. Relationship and node
 identities used by projected graph output are unsigned integer identifiers from
 the corresponding engine.
 
+## `ready`
+
+`ready` is an optional preflight operation used by the migration gate when
+`--shadow-ready` is passed. It lets a previous-wrapper adapter fail fast before
+the full fixture set is executed.
+
+Request:
+
+```json
+{
+  "protocol_version": 1,
+  "request_id": 1,
+  "op": "ready",
+  "required_protocol_version": 1,
+  "required_capabilities": ["execute", "execute_session", "project_graph"]
+}
+```
+
+Success response:
+
+```json
+{
+  "ok": {
+    "protocol_version": 1,
+    "capabilities": ["execute", "execute_session", "project_graph"]
+  }
+}
+```
+
+`protocol_version` must match the request protocol version. `capabilities` must
+include `execute`, `execute_session`, and `project_graph`; an adapter that cannot
+materialize projected graph metadata should still advertise `project_graph` when
+it can return a valid `primary_only` response for that operation.
+
 ## `execute`
 
 `execute` runs one Cypher statement against the shadow engine.
@@ -312,7 +346,7 @@ Skein-side error with the shadow engine name.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--allow-self-shadow] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -323,6 +357,11 @@ blocked.
 `--require-ready` requires a previous-wrapper shadow by default. `skein-shadow-self`
 is allowed only when `--allow-self-shadow` is passed, and that flag is intended
 for protocol and CI smoke tests, not cutover evidence.
+
+`--shadow-ready` sends the optional `ready` preflight before fixture setup. Use
+it for previous-wrapper adapter integration runs when failing fast on protocol
+version or capability drift is more useful than discovering the same problem
+partway through the fixture.
 
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is

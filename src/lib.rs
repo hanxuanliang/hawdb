@@ -52,8 +52,8 @@ pub use compat::{
     CompatibilityQueryInventory, CompatibilityQueryInventoryItem, CompatibilityReport,
     CompatibilityShadowCheckReport, CompatibilityShadowEngine, CompatibilityShadowReport,
     CompatibilityShadowStatus, CypherFixtureCheck, CypherFixtureStatement, ExpectedErrorClass,
-    ExpectedRows, ExternalShadowCommand, ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput,
-    EXTERNAL_SHADOW_PROTOCOL_VERSION,
+    ExpectedRows, ExternalShadowCommand, ExternalShadowReady, ProjectedGraphFixtureCheck,
+    ProjectedGraphShadowOutput, EXTERNAL_SHADOW_PROTOCOL_VERSION,
 };
 pub use cypher::RelationshipDirection;
 pub use error::{Result, SkeinError};

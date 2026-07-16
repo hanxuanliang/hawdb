@@ -31,6 +31,7 @@ fn handle_request(db: &mut Database, request: &serde_json::Value) -> serde_json:
     }
     let op = request.get("op").and_then(serde_json::Value::as_str);
     match op {
+        Some("ready") => handle_ready(),
         Some("execute") => handle_execute(db, request),
         Some("execute_session") => handle_execute_session(db, request),
         Some("project_graph") => handle_project_graph(db, request),
@@ -55,6 +56,19 @@ fn validate_protocol_version(
         )),
         None => Err(json_error("execution", "shadow request missing protocol_version")),
     }
+}
+
+fn handle_ready() -> serde_json::Value {
+    serde_json::json!({
+        "ok": {
+            "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+            "capabilities": [
+                "execute",
+                "execute_session",
+                "project_graph"
+            ]
+        }
+    })
 }
 
 fn handle_execute(db: &mut Database, request: &serde_json::Value) -> serde_json::Value {
@@ -345,6 +359,27 @@ mod tests {
         assert_eq!(
             response["ok"]["rows"],
             serde_json::json!([{ "node_id": 0 }])
+        );
+    }
+
+    #[test]
+    fn reports_ready_capabilities() {
+        let mut db = Database::new();
+        let response = handle_request(
+            &mut db,
+            &serde_json::json!({
+                "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                "op": "ready"
+            }),
+        );
+
+        assert_eq!(
+            response["ok"]["protocol_version"],
+            EXTERNAL_SHADOW_PROTOCOL_VERSION
+        );
+        assert_eq!(
+            response["ok"]["capabilities"],
+            serde_json::json!(["execute", "execute_session", "project_graph"])
         );
     }
 }

@@ -52,6 +52,7 @@ jobs:
             nowledge-cypher-migration-gate \
             --require-ready \
             --allow-self-shadow \
+            --shadow-ready \
             "$root" \
             self \
             cargo run --quiet --bin skein-shadow-self -- \

@@ -186,6 +186,12 @@ pub enum ProjectedGraphShadowResult {
     PrimaryOnly { reason: Option<String> },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalShadowReady {
+    pub protocol_version: u64,
+    pub capabilities: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompatibilityCutoverPolicy {
     pub require_shadow_for_all_checks: bool,
@@ -452,6 +458,19 @@ impl ExternalShadowCommand {
             next_trace_sequence: 1,
             request_timeout,
         })
+    }
+
+    pub fn require_ready(&mut self) -> Result<ExternalShadowReady> {
+        let response = self.request(serde_json::json!({
+            "op": "ready",
+            "required_protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+            "required_capabilities": [
+                "execute",
+                "execute_session",
+                "project_graph"
+            ],
+        }))?;
+        decode_external_ready_response(&self.name, response)
     }
 
     fn request(&mut self, mut request: serde_json::Value) -> Result<serde_json::Value> {
@@ -1410,6 +1429,38 @@ fn validate_external_response_request_id(
     Ok(())
 }
 
+fn decode_external_ready_response(
+    engine_name: &str,
+    response: serde_json::Value,
+) -> Result<ExternalShadowReady> {
+    if let Some(error) = response.get("error") {
+        return Err(error_from_external_response(engine_name, error));
+    }
+    let ok = response.get("ok").ok_or_else(|| {
+        SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' ready response missing 'ok' or 'error'"
+        ))
+    })?;
+    let protocol_version = required_u64(engine_name, ok, "protocol_version")?;
+    if protocol_version != EXTERNAL_SHADOW_PROTOCOL_VERSION {
+        return Err(SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' ready protocol_version {protocol_version} did not match expected {EXTERNAL_SHADOW_PROTOCOL_VERSION}"
+        )));
+    }
+    let capabilities = required_string_array(engine_name, ok, "capabilities")?;
+    for capability in ["execute", "execute_session", "project_graph"] {
+        if !capabilities.iter().any(|value| value == capability) {
+            return Err(SkeinError::Execution(format!(
+                "shadow engine '{engine_name}' ready response missing required capability '{capability}'"
+            )));
+        }
+    }
+    Ok(ExternalShadowReady {
+        protocol_version,
+        capabilities,
+    })
+}
+
 fn external_shadow_stdout_tail(response: &str) -> &str {
     if response.len() <= EXTERNAL_SHADOW_STDOUT_TAIL_BYTES {
         return response;
@@ -1647,6 +1698,25 @@ fn optional_external_string(
                 ))
             }),
     }
+}
+
+fn required_string_array(
+    engine_name: &str,
+    object: &serde_json::Value,
+    field: &str,
+) -> Result<Vec<String>> {
+    let values = required_array(engine_name, object, field)?;
+    values
+        .iter()
+        .enumerate()
+        .map(|(index, value)| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                SkeinError::Execution(format!(
+                    "shadow engine '{engine_name}' field '{field}' item {index} must be a string"
+                ))
+            })
+        })
+        .collect()
 }
 
 fn tuple_vec_u64_list(
@@ -27141,7 +27211,7 @@ mod tests {
         CompatibilityShadowCheckReport, CompatibilityShadowEngine, CompatibilityShadowReport,
         CompatibilityShadowStatus, CompatibilityTolerance, CypherFixtureCheck,
         CypherFixtureStatement, ExpectedRows, ExternalShadowCommand, ProjectedGraphFixtureCheck,
-        ProjectedGraphShadowOutput, ProjectedGraphShadowResult,
+        ProjectedGraphShadowOutput, ProjectedGraphShadowResult, EXTERNAL_SHADOW_PROTOCOL_VERSION,
     };
     use crate::{Database, QueryOutput, Result, Value};
     use std::collections::BTreeMap;
@@ -27654,6 +27724,61 @@ done
             report.shadow_checks[0].status,
             CompatibilityShadowStatus::Matched
         );
+    }
+
+    #[test]
+    fn accepts_external_shadow_ready_preflight() {
+        let script = write_external_shadow_script(
+            "external-shadow-ready",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"op":"ready"'*) echo '{"ok":{"protocol_version":1,"capabilities":["execute","execute_session","project_graph"]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected ready"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-ready", "sh", [script]).unwrap();
+
+        let ready = shadow.require_ready().unwrap();
+
+        assert_eq!(ready.protocol_version, EXTERNAL_SHADOW_PROTOCOL_VERSION);
+        assert_eq!(
+            ready.capabilities,
+            vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn rejects_external_shadow_ready_missing_required_capability() {
+        let script = write_external_shadow_script(
+            "external-shadow-ready-missing-capability",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"op":"ready"'*) echo '{"ok":{"protocol_version":1,"capabilities":["execute","execute_session"]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected ready"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow = ExternalShadowCommand::spawn(
+            "external-shadow-ready-missing-capability",
+            "sh",
+            [script],
+        )
+        .unwrap();
+
+        let error = shadow.require_ready().unwrap_err();
+
+        assert!(error.to_string().contains("missing required capability"));
+        assert!(error.to_string().contains("project_graph"));
     }
 
     #[test]

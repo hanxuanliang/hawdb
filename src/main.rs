@@ -30,6 +30,7 @@ fn main() -> Result<()> {
         if command == "nowledge-cypher-migration-gate" {
             let mut require_ready = false;
             let mut allow_self_shadow = false;
+            let mut shadow_ready = false;
             let mut shadow_trace = None;
             let mut shadow_timeout = None;
             while let Some(flag) = args.peek() {
@@ -40,6 +41,10 @@ fn main() -> Result<()> {
                     }
                     "--allow-self-shadow" => {
                         allow_self_shadow = true;
+                        args.next();
+                    }
+                    "--shadow-ready" => {
+                        shadow_ready = true;
                         args.next();
                     }
                     "--shadow-trace" => {
@@ -101,6 +106,9 @@ fn main() -> Result<()> {
                 )?,
                 (None, None) => ExternalShadowCommand::spawn(shadow_name, program, program_args)?,
             };
+            if shadow_ready {
+                shadow.require_ready()?;
+            }
             let json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
             let rendered = serde_json::to_string_pretty(&json).unwrap();
@@ -143,7 +151,7 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--allow-self-shadow] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate requires [--require-ready] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 
