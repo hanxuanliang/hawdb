@@ -114,17 +114,21 @@ impl CanonicalGraphSnapshotExport {
             .collect::<Vec<_>>();
         let checksum_matches = self.logical_checksum == expected_logical_checksum;
         let stable_identity_matches = self.stable_identity == expected_stable_identity;
+        let stable_identity_ready = !expected_stable_identity.requires_stable_id_mapping;
         let is_valid = checksum_matches
             && stable_identity_matches
             && duplicate_node_ids.is_empty()
             && duplicate_relationship_ids.is_empty()
             && missing_sources.is_empty()
             && missing_targets.is_empty();
+        let is_import_ready = is_valid && stable_identity_ready;
         CanonicalGraphSnapshotValidation {
             is_valid,
+            is_import_ready,
             checksum_matches,
             expected_logical_checksum,
             stable_identity_matches,
+            stable_identity_ready,
             expected_stable_identity,
             duplicate_node_ids,
             duplicate_relationship_ids,
@@ -137,9 +141,11 @@ impl CanonicalGraphSnapshotExport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalGraphSnapshotValidation {
     pub is_valid: bool,
+    pub is_import_ready: bool,
     pub checksum_matches: bool,
     pub expected_logical_checksum: u64,
     pub stable_identity_matches: bool,
+    pub stable_identity_ready: bool,
     pub expected_stable_identity: CanonicalSnapshotIdentityAudit,
     pub duplicate_node_ids: Vec<u64>,
     pub duplicate_relationship_ids: Vec<u64>,
@@ -6274,9 +6280,13 @@ mod tests {
             .unwrap();
 
         let snapshot = read_tx.export_canonical_graph_snapshot();
+        let validation = snapshot.validate();
         assert_eq!(snapshot.graph_commit_epoch, 1);
         assert_eq!(snapshot.nodes.len(), 2);
         assert_eq!(snapshot.relationships.len(), 1);
+        assert!(validation.is_valid);
+        assert!(!validation.is_import_ready);
+        assert!(!validation.stable_identity_ready);
         assert!(snapshot.stable_identity.requires_stable_id_mapping);
         assert!(snapshot.stable_identity.nodes_without_stable_id.is_empty());
         assert_eq!(
@@ -6342,8 +6352,10 @@ mod tests {
         let validation = snapshot.validate();
 
         assert!(validation.is_valid);
+        assert!(validation.is_import_ready);
         assert!(validation.checksum_matches);
         assert!(validation.stable_identity_matches);
+        assert!(validation.stable_identity_ready);
         assert_eq!(
             validation.expected_logical_checksum,
             snapshot.logical_checksum
@@ -6375,8 +6387,10 @@ mod tests {
         let validation = snapshot.validate();
 
         assert!(!validation.is_valid);
+        assert!(!validation.is_import_ready);
         assert!(!validation.checksum_matches);
         assert!(!validation.stable_identity_matches);
+        assert!(!validation.stable_identity_ready);
         assert_eq!(validation.duplicate_node_ids, vec![0]);
         assert!(validation.duplicate_relationship_ids.is_empty());
         assert!(validation.missing_sources.is_empty());

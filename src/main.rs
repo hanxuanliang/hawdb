@@ -139,10 +139,15 @@ fn main() -> Result<()> {
         }
         if command == "validate-canonical-snapshot" {
             let mut require_valid = false;
+            let mut require_import_ready = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-valid" => {
                         require_valid = true;
+                        args.next();
+                    }
+                    "--require-import-ready" => {
+                        require_import_ready = true;
                         args.next();
                     }
                     _ => break,
@@ -174,6 +179,11 @@ fn main() -> Result<()> {
             if require_valid && !validation.is_valid {
                 return Err(SkeinError::Execution(
                     "canonical snapshot validation failed".to_string(),
+                ));
+            }
+            if require_import_ready && !validation.is_import_ready {
+                return Err(SkeinError::Execution(
+                    "canonical snapshot import readiness failed".to_string(),
                 ));
             }
             return Ok(());
@@ -208,7 +218,8 @@ fn nowledge_cypher_migration_gate_usage() -> String {
 }
 
 fn validate_canonical_snapshot_usage() -> String {
-    "validate-canonical-snapshot requires [--require-valid] <database-path>".to_string()
+    "validate-canonical-snapshot requires [--require-valid] [--require-import-ready] <database-path>"
+        .to_string()
 }
 
 fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
@@ -284,9 +295,11 @@ fn canonical_snapshot_validation_json(
         "relationship_count": relationship_count,
         "validation": {
             "is_valid": validation.is_valid,
+            "is_import_ready": validation.is_import_ready,
             "checksum_matches": validation.checksum_matches,
             "expected_logical_checksum": validation.expected_logical_checksum,
             "stable_identity_matches": validation.stable_identity_matches,
+            "stable_identity_ready": validation.stable_identity_ready,
             "expected_stable_identity": stable_identity_audit_json(&validation.expected_stable_identity),
             "duplicate_node_ids": validation.duplicate_node_ids,
             "duplicate_relationship_ids": validation.duplicate_relationship_ids,
@@ -474,9 +487,11 @@ mod tests {
     fn renders_canonical_snapshot_validation_json() {
         let validation = CanonicalGraphSnapshotValidation {
             is_valid: false,
+            is_import_ready: false,
             checksum_matches: false,
             expected_logical_checksum: 77,
             stable_identity_matches: false,
+            stable_identity_ready: false,
             expected_stable_identity: CanonicalSnapshotIdentityAudit {
                 requires_stable_id_mapping: true,
                 nodes_without_stable_id: vec![1],
@@ -503,7 +518,9 @@ mod tests {
         assert_eq!(json["node_count"], 3);
         assert_eq!(json["relationship_count"], 2);
         assert_eq!(json["validation"]["is_valid"], false);
+        assert_eq!(json["validation"]["is_import_ready"], false);
         assert_eq!(json["validation"]["expected_logical_checksum"], 77);
+        assert_eq!(json["validation"]["stable_identity_ready"], false);
         assert_eq!(
             json["validation"]["expected_stable_identity"]["duplicate_node_stable_ids"],
             serde_json::json!(["dup-node"])
@@ -565,5 +582,6 @@ mod tests {
     #[test]
     fn validates_canonical_snapshot_usage_text() {
         assert!(validate_canonical_snapshot_usage().contains("<database-path>"));
+        assert!(validate_canonical_snapshot_usage().contains("--require-import-ready"));
     }
 }

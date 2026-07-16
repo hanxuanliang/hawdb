@@ -86,9 +86,12 @@ recomputes the logical checksum and stable-identity audit, checks node and
 relationship ID uniqueness, and reports missing relationship endpoints before an
 export is handed to an importer, shadow gate, or storage-equivalence oracle.
 The CLI command `skein validate-canonical-snapshot [--require-valid]
-<database-path>` opens the database read-only, exports the current canonical
-snapshot, prints the validation report as JSON, and returns a non-zero status
-when `--require-valid` is set and the snapshot is invalid.
+[--require-import-ready] <database-path>` opens the database read-only, exports
+the current canonical snapshot, and prints the validation report as JSON.
+`--require-valid` returns a non-zero status when the snapshot is internally
+inconsistent. `--require-import-ready` additionally requires every node and
+relationship to have unique stable identity, so the export can enter a physical
+import path without first creating an external ID mapping.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
