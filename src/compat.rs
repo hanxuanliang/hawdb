@@ -8409,6 +8409,35 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "wiki entity community context read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.community_id = $cid RETURN c.name, c.ai_summary, c.description LIMIT 1",
+                        BTreeMap::from([("cid".to_string(), Value::Int(9780))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("c.name", Value::String("Wiki Entity Community".to_string())),
+                        (
+                            "c.ai_summary",
+                            Value::String("entity community summary".to_string()),
+                        ),
+                        (
+                            "c.description",
+                            Value::String("entity community description".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'wiki-entity-community', community_id: 9780, name: 'Wiki Entity Community', ai_summary: 'entity community summary', description: 'entity community description'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: 'wiki-entity-community'}) DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "okf export community list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
@@ -10668,6 +10697,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE e.id = $key OR LOWER(e.name) = LOWER($key) RETURN e.id, e.name, e.entity_type, e.description, e.aliases, e.confidence, e.community_id, e.created_at LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki entity community context read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::render_single_entity_page.community",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.community_id = $cid RETURN c.name, c.ai_summary, c.description LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
                 "okf export community list read",
                 "okf_export_read",
                 "nmem-server::okf_export::list_communities",
@@ -12019,7 +12056,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 257);
+        assert_eq!(report.checks.len(), 258);
     }
 
     #[test]
@@ -12035,13 +12072,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 257);
-        assert_eq!(coverage.covered_checks, 257);
+        assert_eq!(coverage.required_checks, 258);
+        assert_eq!(coverage.covered_checks, 258);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 257);
+        assert_eq!(coverage_json["covered_checks"], 258);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -12071,10 +12108,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 257);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 258);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 257);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 258);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12268,15 +12305,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 257);
-        assert_eq!(report.shadow_checks.len(), 257);
+        assert_eq!(report.primary_checks.len(), 258);
+        assert_eq!(report.shadow_checks.len(), 258);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            257
+            258
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12285,7 +12322,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 257);
+        assert_eq!(cutover.matched_checks, 258);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
