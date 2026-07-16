@@ -545,6 +545,11 @@ pub enum ProjectionExpression {
         empty: Value,
         default: Value,
     },
+    DefaultIfNull {
+        variable: String,
+        property: String,
+        default: Value,
+    },
     CasePropertyNotNullOrEq {
         variable: String,
         property: String,
@@ -560,6 +565,10 @@ pub enum ProjectionExpression {
         column: String,
         property: String,
         empty: Value,
+        default: Value,
+    },
+    ColumnValueDefaultIfNull {
+        column: String,
         default: Value,
     },
     ColumnValueCasePropertyNotNullOrEq {
@@ -2084,6 +2093,7 @@ fn return_expression_is_scoped(
         ReturnExpression::Property { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
         }
+        ReturnExpression::Value(_) => true,
         ReturnExpression::Coalesce(expressions) => expressions
             .iter()
             .all(|expression| return_value_expression_is_scoped(expression, scope, column_names)),
@@ -2091,6 +2101,7 @@ fn return_expression_is_scoped(
             return_value_expression_is_scoped(expression, scope, column_names)
         }
         ReturnExpression::DefaultIfNullOrEq { variable, .. }
+        | ReturnExpression::DefaultIfNull { variable, .. }
         | ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
@@ -2117,6 +2128,7 @@ fn return_value_expression_is_scoped(
         ReturnValueExpression::Variable(variable)
         | ReturnValueExpression::Property { variable, .. }
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
+        | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
@@ -2258,6 +2270,9 @@ fn optional_direct_count_alias(
                 }
                 has_projection = true;
             }
+            ReturnExpression::Value(_) => {
+                has_projection = true;
+            }
             ReturnExpression::Coalesce(expressions) => {
                 if !return_value_expressions_are_source_only(expressions, &optional.source_variable)
                 {
@@ -2277,7 +2292,8 @@ fn optional_direct_count_alias(
                 }
                 has_projection = true;
             }
-            ReturnExpression::DefaultIfNullOrEq { variable, .. } => {
+            ReturnExpression::DefaultIfNullOrEq { variable, .. }
+            | ReturnExpression::DefaultIfNull { variable, .. } => {
                 if variable != &optional.source_variable {
                     return Ok(None);
                 }
@@ -2339,6 +2355,9 @@ fn optional_direct_collect_alias(
                 }
                 has_projection = true;
             }
+            ReturnExpression::Value(_) => {
+                has_projection = true;
+            }
             ReturnExpression::Coalesce(expressions) => {
                 if !return_value_expressions_are_source_only(expressions, &optional.source_variable)
                 {
@@ -2358,7 +2377,8 @@ fn optional_direct_collect_alias(
                 }
                 has_projection = true;
             }
-            ReturnExpression::DefaultIfNullOrEq { variable, .. } => {
+            ReturnExpression::DefaultIfNullOrEq { variable, .. }
+            | ReturnExpression::DefaultIfNull { variable, .. } => {
                 if variable != &optional.source_variable {
                     return Ok(None);
                 }
@@ -2483,6 +2503,7 @@ fn return_value_expression_is_source_only(
         | ReturnValueExpression::RelationshipType(variable)
         | ReturnValueExpression::DatePart { variable, .. }
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
+        | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             variable == source_variable
@@ -2510,6 +2531,7 @@ fn aggregate_with_column_names(aggregate_with: &WithAggregateProjection) -> BTre
                     ReturnExpression::Property { variable, property } => {
                         format!("{variable}.{property}")
                     }
+                    ReturnExpression::Value(_) => "literal".to_string(),
                     ReturnExpression::DatePart {
                         part,
                         variable,
@@ -3640,7 +3662,8 @@ fn collect_return_value_expression_variables(
         ReturnValueExpression::DatePart { variable, .. } => {
             variables.insert(variable.clone());
         }
-        ReturnValueExpression::DefaultIfNullOrEq { variable, .. } => {
+        ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
+        | ReturnValueExpression::DefaultIfNull { variable, .. } => {
             variables.insert(variable.clone());
         }
         ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. } => {
@@ -3759,6 +3782,20 @@ fn plan_order_value_expression(
             });
         }
     }
+    if let ReturnValueExpression::DefaultIfNull {
+        variable,
+        property,
+        default,
+    } = expression
+    {
+        let projected_property = format!("{variable}.{property}");
+        if projection_names.contains(&projected_property) {
+            return Ok(ProjectionExpression::ColumnValueDefaultIfNull {
+                column: projected_property,
+                default: bind_value(default, parameters)?,
+            });
+        }
+    }
     plan_return_value_expression_with_columns(scope, projection_names, expression, parameters)
 }
 
@@ -3873,6 +3910,7 @@ fn plan_return_items(
             match item.expression {
                 ReturnExpression::Variable(_)
                 | ReturnExpression::Property { .. }
+                | ReturnExpression::Value(_)
                 | ReturnExpression::Id(_)
                 | ReturnExpression::RelationshipType(_)
                 | ReturnExpression::Coalesce(_)
@@ -3880,6 +3918,7 @@ fn plan_return_items(
                 | ReturnExpression::Lower(_)
                 | ReturnExpression::DatePart { .. }
                 | ReturnExpression::DefaultIfNullOrEq { .. }
+                | ReturnExpression::DefaultIfNull { .. }
                 | ReturnExpression::CasePropertyNotNullOrEq { .. }
                 | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. } => {
                     group_keys.push(plan_projection(scope, item, parameters)?);
@@ -4006,6 +4045,10 @@ fn plan_projection_with_columns(
                 format!("label({variable})"),
             )
         }
+        ReturnExpression::Value(value) => (
+            ProjectionExpression::Literal(bind_value(value, parameters)?),
+            "literal".to_string(),
+        ),
         ReturnExpression::Coalesce(expressions) => (
             ProjectionExpression::Coalesce(
                 expressions
@@ -4089,6 +4132,25 @@ fn plan_projection_with_columns(
                     variable: variable.clone(),
                     property: property.clone(),
                     empty: bind_value(empty, parameters)?,
+                    default: bind_value(default, parameters)?,
+                },
+                property.clone(),
+            )
+        }
+        ReturnExpression::DefaultIfNull {
+            variable,
+            property,
+            default,
+        } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in return item"
+                )));
+            }
+            (
+                ProjectionExpression::DefaultIfNull {
+                    variable: variable.clone(),
+                    property: property.clone(),
                     default: bind_value(default, parameters)?,
                 },
                 property.clone(),
@@ -4362,12 +4424,14 @@ fn plan_aggregation(scope: &BTreeSet<String>, item: &ReturnItem) -> Result<Aggre
         }
         ReturnExpression::Id(_)
         | ReturnExpression::Variable(_)
+        | ReturnExpression::Value(_)
         | ReturnExpression::RelationshipType(_)
         | ReturnExpression::Coalesce(_)
         | ReturnExpression::Left { .. }
         | ReturnExpression::Lower(_)
         | ReturnExpression::DatePart { .. }
         | ReturnExpression::DefaultIfNullOrEq { .. }
+        | ReturnExpression::DefaultIfNull { .. }
         | ReturnExpression::CasePropertyNotNullOrEq { .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. } => {
             return Err(SkeinError::Semantic(
@@ -4524,6 +4588,22 @@ fn plan_return_value_expression_with_columns(
                 variable: variable.clone(),
                 property: property.clone(),
                 empty: bind_value(empty, parameters)?,
+                default: bind_value(default, parameters)?,
+            })
+        }
+        ReturnValueExpression::DefaultIfNull {
+            variable,
+            property,
+            default,
+        } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in expression"
+                )));
+            }
+            Ok(ProjectionExpression::DefaultIfNull {
+                variable: variable.clone(),
+                property: property.clone(),
                 default: bind_value(default, parameters)?,
             })
         }

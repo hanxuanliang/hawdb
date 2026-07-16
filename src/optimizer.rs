@@ -4540,6 +4540,19 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             write_value(output, default);
             output.push(')');
         }
+        ProjectionExpression::DefaultIfNull {
+            variable,
+            property,
+            default,
+        } => {
+            output.push_str("default_if_null(");
+            write_identifier(output, variable);
+            output.push('.');
+            write_identifier(output, property);
+            output.push(',');
+            write_value(output, default);
+            output.push(')');
+        }
         ProjectionExpression::CasePropertyNotNullOrEq {
             variable,
             property,
@@ -4587,6 +4600,13 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             write_identifier(output, property);
             output.push(',');
             write_value(output, empty);
+            output.push(',');
+            write_value(output, default);
+            output.push(')');
+        }
+        ProjectionExpression::ColumnValueDefaultIfNull { column, default } => {
+            output.push_str("column_value_default_if_null(");
+            write_identifier(output, column);
             output.push(',');
             write_value(output, default);
             output.push(')');

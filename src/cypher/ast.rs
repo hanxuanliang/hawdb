@@ -592,6 +592,11 @@ pub enum ReturnValueExpression {
         empty: ValueExpression,
         default: ValueExpression,
     },
+    DefaultIfNull {
+        variable: String,
+        property: String,
+        default: ValueExpression,
+    },
     CasePropertyNotNullOrEq {
         variable: String,
         property: String,
@@ -614,6 +619,7 @@ pub enum ReturnExpression {
     },
     Id(String),
     RelationshipType(String),
+    Value(ValueExpression),
     Coalesce(Vec<ReturnValueExpression>),
     Left {
         expression: Box<ReturnValueExpression>,
@@ -629,6 +635,11 @@ pub enum ReturnExpression {
         variable: String,
         property: String,
         empty: ValueExpression,
+        default: ValueExpression,
+    },
+    DefaultIfNull {
+        variable: String,
+        property: String,
         default: ValueExpression,
     },
     CasePropertyNotNullOrEq {

@@ -860,6 +860,15 @@ impl Parser<'_> {
                 empty,
                 default,
             },
+            ReturnValueExpression::DefaultIfNull {
+                variable,
+                property,
+                default,
+            } => ReturnExpression::DefaultIfNull {
+                variable,
+                property,
+                default,
+            },
             ReturnValueExpression::CasePropertyNotNullOrEq {
                 variable,
                 property,
@@ -876,9 +885,7 @@ impl Parser<'_> {
             ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
                 ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, terms }
             }
-            ReturnValueExpression::Value(_) => {
-                return Err(self.error("literal return expressions require an aliasing function"));
-            }
+            ReturnValueExpression::Value(value) => ReturnExpression::Value(value),
         })
     }
 
@@ -1014,7 +1021,23 @@ impl Parser<'_> {
         self.expect_keyword("IS")?;
         self.expect_keyword("NOT")?;
         self.expect_keyword("NULL")?;
-        self.expect_keyword("AND")?;
+        if !self.consume_keyword("AND") {
+            self.expect_keyword("THEN")?;
+            let then_variable = self.parse_ident()?;
+            self.expect_char('.')?;
+            let then_property = self.parse_ident()?;
+            if then_variable != variable || then_property != property {
+                return Err(self.error("CASE sort expression THEN must return the same property"));
+            }
+            self.expect_keyword("ELSE")?;
+            let default = self.parse_value()?;
+            self.expect_keyword("END")?;
+            return Ok(ReturnValueExpression::DefaultIfNull {
+                variable,
+                property,
+                default,
+            });
+        }
         let neq_variable = self.parse_ident()?;
         self.expect_char('.')?;
         let neq_property = self.parse_ident()?;

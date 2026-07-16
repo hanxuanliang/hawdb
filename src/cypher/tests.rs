@@ -1423,6 +1423,42 @@ fn parses_optional_match_return_collect_distinct_property() {
 }
 
 #[test]
+fn parses_literal_return_projection_alias() {
+    let statement = parse("MATCH (m:Memory) RETURN m.id, 0 AS mention_breadth").unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    assert_eq!(query.returns.len(), 2);
+    assert!(matches!(
+        query.returns[1].expression,
+        ReturnExpression::Value(_)
+    ));
+    assert_eq!(query.returns[1].alias.as_deref(), Some("mention_breadth"));
+}
+
+#[test]
+fn parses_case_property_default_if_null_order_expression() {
+    let statement = parse(
+        "MATCH (m:Memory) RETURN m.id ORDER BY CASE WHEN m.importance IS NOT NULL THEN m.importance ELSE 0.5 END DESC",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let OrderExpression::Value(ReturnValueExpression::DefaultIfNull {
+        variable,
+        property,
+        default,
+    }) = &query.order_by[0].expression
+    else {
+        panic!("expected default-if-null order expression");
+    };
+    assert_eq!(variable, "m");
+    assert_eq!(property, "importance");
+    assert_eq!(default, &ValueExpression::Literal(Value::Float(0.5)));
+}
+
+#[test]
 fn parses_with_distinct_property_alias_count() {
     let statement = parse(
         "MATCH (c:Memory)-[:CRYSTALLIZED_FROM]->(s:Memory) WITH DISTINCT c.id AS a, s.id AS b RETURN count(*)",

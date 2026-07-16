@@ -2048,6 +2048,25 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 Ok(value)
             }
         }
+        ProjectionExpression::DefaultIfNull {
+            variable,
+            property,
+            default,
+        } => {
+            if !binding_has_variable(binding, variable) {
+                return Err(SkeinError::Execution(format!(
+                    "missing variable '{variable}' during projection"
+                )));
+            }
+            let value = binding_property(binding, variable, property)
+                .cloned()
+                .unwrap_or(Value::Null);
+            if value == Value::Null {
+                Ok(default.clone())
+            } else {
+                Ok(value)
+            }
+        }
         ProjectionExpression::CasePropertyNotNullOrEq {
             variable,
             property,
@@ -2101,6 +2120,16 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 Ok(default.clone())
             } else {
                 Ok(value)
+            }
+        }
+        ProjectionExpression::ColumnValueDefaultIfNull { column, default } => {
+            let value = binding.values.get(column).ok_or_else(|| {
+                SkeinError::Execution(format!("missing column '{column}' during projection"))
+            })?;
+            if value == &Value::Null {
+                Ok(default.clone())
+            } else {
+                Ok(value.clone())
             }
         }
         ProjectionExpression::ColumnValueCasePropertyNotNullOrEq {

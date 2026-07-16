@@ -8376,6 +8376,169 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "wiki export community mention memory ranking read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.community_id IN $cids RETURN e.community_id, m.id, m.title, m.content, m.importance, m.created_at, m.is_crystal, COUNT(DISTINCT e.id) AS mention_breadth, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state ORDER BY e.community_id ASC, mention_breadth DESC, CASE WHEN m.importance IS NOT NULL THEN m.importance ELSE 0.5 END DESC, m.created_at DESC",
+                        BTreeMap::from([(
+                            "cids".to_string(),
+                            Value::List(vec![Value::Int(9721), Value::Int(9722)]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("e.community_id", Value::Int(9721)),
+                            ("m.id", Value::String("wiki-top-mention-m1".to_string())),
+                            ("m.title", Value::String("Mention One".to_string())),
+                            ("m.content", Value::String("mention one body".to_string())),
+                            ("m.importance", Value::Float(0.4)),
+                            ("m.created_at", Value::Int(1100)),
+                            ("m.is_crystal", Value::Bool(false)),
+                            ("mention_breadth", Value::Int(2)),
+                            ("m.metadata", Value::String("{\"kind\":\"mention\"}".to_string())),
+                            ("coalesce", Value::Bool(true)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("e.community_id", Value::Int(9721)),
+                            ("m.id", Value::String("wiki-top-mention-m2".to_string())),
+                            ("m.title", Value::String("Mention Two".to_string())),
+                            ("m.content", Value::String("mention two body".to_string())),
+                            ("m.importance", Value::Float(0.9)),
+                            ("m.created_at", Value::Int(1200)),
+                            ("m.is_crystal", Value::Bool(false)),
+                            ("mention_breadth", Value::Int(1)),
+                            ("m.metadata", Value::String("{\"kind\":\"mention\"}".to_string())),
+                            ("coalesce", Value::Bool(false)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("e.community_id", Value::Int(9722)),
+                            ("m.id", Value::String("wiki-top-mention-m3".to_string())),
+                            ("m.title", Value::String("Mention Three".to_string())),
+                            ("m.content", Value::String("mention three body".to_string())),
+                            ("m.importance", Value::Null),
+                            ("m.created_at", Value::Int(1300)),
+                            ("m.is_crystal", Value::Bool(false)),
+                            ("mention_breadth", Value::Int(1)),
+                            ("m.metadata", Value::String("{\"kind\":\"mention\"}".to_string())),
+                            ("coalesce", Value::Bool(true)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-top-mention-e1', community_id: 9721})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-top-mention-e2', community_id: 9721})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-top-mention-e3', community_id: 9722})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-top-mention-m1', title: 'Mention One', content: 'mention one body', importance: 0.4, created_at: 1100, is_crystal: false, metadata: '{\"kind\":\"mention\"}', is_latest: true, lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-top-mention-m2', title: 'Mention Two', content: 'mention two body', importance: 0.9, created_at: 1200, is_crystal: false, metadata: '{\"kind\":\"mention\"}', is_latest: false, lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-top-mention-m3', title: 'Mention Three', content: 'mention three body', created_at: 1300, is_crystal: false, metadata: '{\"kind\":\"mention\"}', lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-top-mention-m1'}), (e:Entity {id: 'wiki-top-mention-e1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-top-mention-m1'}), (e:Entity {id: 'wiki-top-mention-e2'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-top-mention-m1'}), (e:Entity {id: 'wiki-top-mention-e2'}) CREATE (m)-[:MENTIONS {source: 'duplicate'}]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-top-mention-m2'}), (e:Entity {id: 'wiki-top-mention-e1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-top-mention-m3'}), (e:Entity {id: 'wiki-top-mention-e3'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['wiki-top-mention-e1', 'wiki-top-mention-e2', 'wiki-top-mention-e3', 'wiki-top-mention-m1', 'wiki-top-mention-m2', 'wiki-top-mention-m3'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(6),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "wiki export community direct memory ranking read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.community_id IN $cids AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.community_id, m.id, m.title, m.content, m.importance, m.created_at, m.is_crystal, 0 AS mention_breadth, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state ORDER BY m.community_id ASC, CASE WHEN m.importance IS NOT NULL THEN m.importance ELSE 0.5 END DESC, m.created_at DESC",
+                        BTreeMap::from([(
+                            "cids".to_string(),
+                            Value::List(vec![Value::Int(9731), Value::Int(9732)]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.community_id", Value::Int(9731)),
+                            ("m.id", Value::String("wiki-top-direct-m2".to_string())),
+                            ("m.title", Value::String("Direct Two".to_string())),
+                            ("m.content", Value::String("direct two body".to_string())),
+                            ("m.importance", Value::Float(0.9)),
+                            ("m.created_at", Value::Int(2200)),
+                            ("m.is_crystal", Value::Bool(false)),
+                            ("mention_breadth", Value::Int(0)),
+                            ("m.metadata", Value::String("{\"kind\":\"direct\"}".to_string())),
+                            ("coalesce", Value::Bool(false)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("m.community_id", Value::Int(9731)),
+                            ("m.id", Value::String("wiki-top-direct-m1".to_string())),
+                            ("m.title", Value::String("Direct One".to_string())),
+                            ("m.content", Value::String("direct one body".to_string())),
+                            ("m.importance", Value::Float(0.2)),
+                            ("m.created_at", Value::Int(2100)),
+                            ("m.is_crystal", Value::Bool(false)),
+                            ("mention_breadth", Value::Int(0)),
+                            ("m.metadata", Value::String("{\"kind\":\"direct\"}".to_string())),
+                            ("coalesce", Value::Bool(true)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("m.community_id", Value::Int(9732)),
+                            ("m.id", Value::String("wiki-top-direct-m3".to_string())),
+                            ("m.title", Value::String("Direct Three".to_string())),
+                            ("m.content", Value::String("direct three body".to_string())),
+                            ("m.importance", Value::Null),
+                            ("m.created_at", Value::Int(2300)),
+                            ("m.is_crystal", Value::Null),
+                            ("mention_breadth", Value::Int(0)),
+                            ("m.metadata", Value::String("{\"kind\":\"direct\"}".to_string())),
+                            ("coalesce", Value::Bool(true)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-top-direct-m1', community_id: 9731, title: 'Direct One', content: 'direct one body', importance: 0.2, created_at: 2100, is_crystal: false, metadata: '{\"kind\":\"direct\"}', is_latest: true, lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-top-direct-m2', community_id: 9731, title: 'Direct Two', content: 'direct two body', importance: 0.9, created_at: 2200, is_crystal: false, metadata: '{\"kind\":\"direct\"}', is_latest: false, lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-top-direct-m3', community_id: 9732, title: 'Direct Three', content: 'direct three body', created_at: 2300, metadata: '{\"kind\":\"direct\"}', lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-top-direct-crystal', community_id: 9731, title: 'Direct Crystal Skip', is_crystal: true, created_at: 2400})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['wiki-top-direct-m1', 'wiki-top-direct-m2', 'wiki-top-direct-m3', 'wiki-top-direct-crystal'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp graph all shortest path read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH p = (a)-[e* ALL SHORTEST 1..3]-(b) WHERE a.id = $from_id AND b.id = $to_id RETURN properties(nodes(p), 'id') AS node_ids, properties(nodes(p), 'name') AS names, length(p) AS hops",
@@ -10048,6 +10211,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 AND c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN COUNT(c)",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki export community mention memory ranking read",
+                "wiki_export_read",
+                "nmem-server::wiki_export::list_top_memories_by_community.mention_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.community_id IN $cids RETURN e.community_id, m.id, m.title, m.content, m.importance, m.created_at, m.is_crystal, COUNT(DISTINCT e.id) AS mention_breadth, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state ORDER BY e.community_id ASC, mention_breadth DESC, CASE WHEN m.importance IS NOT NULL THEN m.importance ELSE 0.5 END DESC, m.created_at DESC",
+            ),
+            CompatibilityQueryCallSite::new(
+                "wiki export community direct memory ranking read",
+                "wiki_export_read",
+                "nmem-server::wiki_export::list_top_memories_by_community.direct_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.community_id IN $cids AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.community_id, m.id, m.title, m.content, m.importance, m.created_at, m.is_crystal, 0 AS mention_breadth, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state ORDER BY m.community_id ASC, CASE WHEN m.importance IS NOT NULL THEN m.importance ELSE 0.5 END DESC, m.created_at DESC",
+            ),
+            CompatibilityQueryCallSite::new(
                 "okf export community list read",
                 "okf_export_read",
                 "nmem-server::okf_export::list_communities",
@@ -11391,7 +11570,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 250);
+        assert_eq!(report.checks.len(), 252);
     }
 
     #[test]
@@ -11407,13 +11586,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 250);
-        assert_eq!(coverage.covered_checks, 250);
+        assert_eq!(coverage.required_checks, 252);
+        assert_eq!(coverage.covered_checks, 252);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 250);
+        assert_eq!(coverage_json["covered_checks"], 252);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -11443,10 +11622,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 250);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 252);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 250);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 252);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -11640,15 +11819,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 250);
-        assert_eq!(report.shadow_checks.len(), 250);
+        assert_eq!(report.primary_checks.len(), 252);
+        assert_eq!(report.shadow_checks.len(), 252);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            250
+            252
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -11657,7 +11836,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 250);
+        assert_eq!(cutover.matched_checks, 252);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
