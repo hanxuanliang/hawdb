@@ -8301,6 +8301,81 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "okf export memory rows with labels read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE (m.is_crystal IS NULL OR m.is_crystal = false) OPTIONAL MATCH (m)-[:HAS_LABEL]->(l:Label) RETURN m.id, m.title, m.content, m.unit_type, m.importance, m.confidence, m.created_at, m.source, m.metadata, m.is_latest, m.lifecycle_state, COLLECT(DISTINCT l.name) AS labels ORDER BY m.created_at DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(2))]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("okf-memory-row-two".to_string())),
+                            ("m.title", Value::String("Memory Row Two".to_string())),
+                            ("m.content", Value::String("body two".to_string())),
+                            ("m.unit_type", Value::String("fact".to_string())),
+                            ("m.importance", Value::Float(0.6)),
+                            ("m.confidence", Value::Float(0.7)),
+                            ("m.created_at", Value::Int(1_900_000_000_000_000_000)),
+                            ("m.source", Value::String("source two".to_string())),
+                            ("m.metadata", Value::String("{\"rank\":2}".to_string())),
+                            ("m.is_latest", Value::Bool(false)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                            ("labels", Value::List(Vec::new())),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("okf-memory-row-one".to_string())),
+                            ("m.title", Value::String("Memory Row One".to_string())),
+                            ("m.content", Value::String("body one".to_string())),
+                            ("m.unit_type", Value::String("note".to_string())),
+                            ("m.importance", Value::Float(0.9)),
+                            ("m.confidence", Value::Float(0.8)),
+                            ("m.created_at", Value::Int(1_800_000_000_000_000_000)),
+                            ("m.source", Value::String("source one".to_string())),
+                            ("m.metadata", Value::String("{\"rank\":1}".to_string())),
+                            ("m.is_latest", Value::Bool(true)),
+                            ("m.lifecycle_state", Value::String("active".to_string())),
+                            (
+                                "labels",
+                                Value::List(vec![
+                                    Value::String("alpha".to_string()),
+                                    Value::String("beta".to_string()),
+                                ]),
+                            ),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'okf-memory-row-one', title: 'Memory Row One', content: 'body one', unit_type: 'note', importance: 0.9, confidence: 0.8, created_at: 1800000000000000000, source: 'source one', metadata: '{\"rank\":1}', is_latest: true, lifecycle_state: 'active', is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'okf-memory-row-two', title: 'Memory Row Two', content: 'body two', unit_type: 'fact', importance: 0.6, confidence: 0.7, created_at: 1900000000000000000, source: 'source two', metadata: '{\"rank\":2}', is_latest: false, lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'okf-memory-row-crystal', title: 'Crystal Skip', is_crystal: true, created_at: 3000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'okf-memory-row-label-a', name: 'alpha'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'okf-memory-row-label-b', name: 'beta'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'okf-memory-row-one'}), (l:Label {id: 'okf-memory-row-label-a'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'okf-memory-row-one'}), (l:Label {id: 'okf-memory-row-label-b'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'okf-memory-row-one'}), (l:Label {id: 'okf-memory-row-label-b'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['okf-memory-row-one', 'okf-memory-row-two', 'okf-memory-row-crystal', 'okf-memory-row-label-a', 'okf-memory-row-label-b'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(5),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp graph all shortest path read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH p = (a)-[e* ALL SHORTEST 1..3]-(b) WHERE a.id = $from_id AND b.id = $to_id RETURN properties(nodes(p), 'id') AS node_ids, properties(nodes(p), 'name') AS names, length(p) AS hops",
@@ -10013,6 +10088,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity {id: $id})-[:RELATES_TO]-(other:Entity) WHERE other.id <> $id RETURN DISTINCT other.id, other.name, other.entity_type LIMIT 30",
             ),
             CompatibilityQueryCallSite::new(
+                "okf export memory rows with labels read",
+                "okf_export_read",
+                "nmem-server::okf_export::fetch_memory_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE (m.is_crystal IS NULL OR m.is_crystal = false) OPTIONAL MATCH (m)-[:HAS_LABEL]->(l:Label) RETURN m.id, m.title, m.content, m.unit_type, m.importance, m.confidence, m.created_at, m.source, m.metadata, m.is_latest, m.lifecycle_state, COLLECT(DISTINCT l.name) AS labels ORDER BY m.created_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "analyzable corpus max updated fingerprint",
                 "scheduler_fingerprint_read",
                 "nmem-server::scheduler_service::analyzable_corpus_fingerprint",
@@ -11308,7 +11391,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 249);
+        assert_eq!(report.checks.len(), 250);
     }
 
     #[test]
@@ -11324,13 +11407,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 249);
-        assert_eq!(coverage.covered_checks, 249);
+        assert_eq!(coverage.required_checks, 250);
+        assert_eq!(coverage.covered_checks, 250);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 249);
+        assert_eq!(coverage_json["covered_checks"], 250);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -11360,10 +11443,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 249);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 250);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 249);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 250);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -11557,15 +11640,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 249);
-        assert_eq!(report.shadow_checks.len(), 249);
+        assert_eq!(report.primary_checks.len(), 250);
+        assert_eq!(report.shadow_checks.len(), 250);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            249
+            250
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -11574,7 +11657,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 249);
+        assert_eq!(cutover.matched_checks, 250);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

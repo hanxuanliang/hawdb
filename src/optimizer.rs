@@ -281,6 +281,7 @@ pub enum PhysicalPlan {
         target_label: String,
         min_hops: usize,
         max_hops: usize,
+        optional: bool,
         input: Box<PhysicalPlan>,
     },
     OptionalDegreeExec {
@@ -683,6 +684,7 @@ impl PhysicalPlan {
                 min_hops,
                 max_hops,
                 rel_properties,
+                optional,
                 input,
             } => {
                 let arrow = match direction {
@@ -695,7 +697,7 @@ impl PhysicalPlan {
                     .map(|variable| format!(" rel={variable}:{rel_type}"))
                     .unwrap_or_else(|| format!(" rel_type={rel_type}"));
                 format!(
-                    "{pad}AdjacencyExpandExec source={source_variable}:{source_label}{rel} direction={arrow} properties={rel_properties:?} hops={min_hops}..{max_hops} target={target_variable}:{target_label}\n{}",
+                    "{pad}AdjacencyExpandExec source={source_variable}:{source_label}{rel} direction={arrow} properties={rel_properties:?} hops={min_hops}..{max_hops} optional={optional} target={target_variable}:{target_label}\n{}",
                     input.explain(indent + 2)
                 )
             }
@@ -1494,6 +1496,7 @@ impl PhysicalPlan {
                 target_label,
                 min_hops,
                 max_hops,
+                optional,
                 input,
             } => {
                 output.push_str("AdjacencyExpandExec(");
@@ -1525,6 +1528,8 @@ impl PhysicalPlan {
                 write_identifier(output, target_variable);
                 output.push(':');
                 write_identifier(output, target_label);
+                output.push_str(",optional=");
+                output.push_str(if *optional { "true" } else { "false" });
                 output.push_str(",input=");
                 input.write_fingerprint(output);
                 output.push(')');
@@ -2570,6 +2575,7 @@ impl GroupExpr {
                 target_label,
                 min_hops,
                 max_hops,
+                optional,
                 ..
             } => {
                 push_expand_estimate_decision(
@@ -2592,6 +2598,7 @@ impl GroupExpr {
                     target_label: target_label.clone(),
                     min_hops: *min_hops,
                     max_hops: *max_hops,
+                    optional: *optional,
                     input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
                 }
             }
@@ -3145,6 +3152,7 @@ fn logical_to_physical_direct(
             target_label,
             min_hops,
             max_hops,
+            optional,
             input,
         } => {
             push_expand_estimate_decision(
@@ -3167,6 +3175,7 @@ fn logical_to_physical_direct(
                 target_label: target_label.clone(),
                 min_hops: *min_hops,
                 max_hops: *max_hops,
+                optional: *optional,
                 input: Box::new(logical_to_physical_direct(input, catalog, decisions)),
             }
         }
@@ -4582,6 +4591,22 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             write_value(output, default);
             output.push(')');
         }
+        ProjectionExpression::ColumnValueCasePropertyNotNullOrEq {
+            column,
+            empty,
+            non_empty,
+            null_or_empty,
+        } => {
+            output.push_str("column_value_case_property_not_null_or_eq(");
+            write_identifier(output, column);
+            output.push(',');
+            write_value(output, empty);
+            output.push(',');
+            write_value(output, non_empty);
+            output.push(',');
+            write_value(output, null_or_empty);
+            output.push(')');
+        }
         ProjectionExpression::Column(name) => {
             output.push_str("column(");
             write_identifier(output, name);
@@ -4758,6 +4783,7 @@ mod tests {
                 target_label: "Entity".to_string(),
                 min_hops: 1,
                 max_hops: 3,
+                optional: false,
                 input: Box::new(LogicalPlan::NodeScan {
                     variable: "m".to_string(),
                     label: "Memory".to_string(),
@@ -4826,6 +4852,7 @@ mod tests {
                 target_label: "Entity".to_string(),
                 min_hops: 1,
                 max_hops: 1,
+                optional: false,
                 input: Box::new(LogicalPlan::Filter {
                     predicate: Predicate::PropertyEq {
                         variable: "m".to_string(),

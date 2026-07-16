@@ -259,6 +259,7 @@ pub enum LogicalPlan {
         target_label: String,
         min_hops: usize,
         max_hops: usize,
+        optional: bool,
         input: Box<LogicalPlan>,
     },
     OptionalDegree {
@@ -560,6 +561,12 @@ pub enum ProjectionExpression {
         property: String,
         empty: Value,
         default: Value,
+    },
+    ColumnValueCasePropertyNotNullOrEq {
+        column: String,
+        empty: Value,
+        non_empty: Value,
+        null_or_empty: Value,
     },
     Column(String),
     ColumnProperty {
@@ -1347,9 +1354,10 @@ pub fn plan_with_params(
                 if query.optional_with.is_none()
                     && !returns_are_count_only(&query.returns)
                     && optional_direct_count_alias(query, optional)?.is_none()
+                    && optional_direct_collect_alias(query, optional)?.is_none()
                 {
                     return Err(SkeinError::Semantic(
-                        "OPTIONAL MATCH is currently supported only for COUNT returns or source projections plus one COUNT".to_string(),
+                        "OPTIONAL MATCH is currently supported only for COUNT returns, source projections plus one COUNT, or source projections plus one COLLECT".to_string(),
                     ));
                 }
                 if !optional.expand.properties.is_empty()
@@ -1389,6 +1397,7 @@ pub fn plan_with_params(
                             ReturnExpression::CountAll
                                 | ReturnExpression::CountVariable { .. }
                                 | ReturnExpression::CountProperty { .. }
+                                | ReturnExpression::CollectProperty { .. }
                                 | ReturnExpression::MinProperty { .. }
                                 | ReturnExpression::MaxProperty { .. }
                                 | ReturnExpression::AvgProperty { .. }
@@ -1431,6 +1440,7 @@ pub fn plan_with_params(
                     target_label: expand.target_label.clone(),
                     min_hops: expand.min_hops,
                     max_hops: expand.max_hops,
+                    optional: false,
                     input: Box::new(input),
                 };
             }
@@ -1446,6 +1456,7 @@ pub fn plan_with_params(
                     target_label: post_expand.expand.target_label.clone(),
                     min_hops: post_expand.expand.min_hops,
                     max_hops: post_expand.expand.max_hops,
+                    optional: false,
                     input: Box::new(input),
                 };
             }
@@ -1596,6 +1607,7 @@ pub fn plan_with_params(
                     target_label: optional.expand.target_label.clone(),
                     min_hops: 1,
                     max_hops: 1,
+                    optional: optional_direct_collect_alias(query, optional)?.is_some(),
                     input: Box::new(input),
                 };
                 if let Some(predicate) = combine_predicates(plan_node_pattern_predicates(
@@ -2089,6 +2101,7 @@ fn return_expression_is_scoped(
         | ReturnExpression::CountAll
         | ReturnExpression::CountVariable { .. }
         | ReturnExpression::CountProperty { .. }
+        | ReturnExpression::CollectProperty { .. }
         | ReturnExpression::MinProperty { .. }
         | ReturnExpression::MaxProperty { .. }
         | ReturnExpression::AvgProperty { .. } => false,
@@ -2279,12 +2292,94 @@ fn optional_direct_count_alias(
             }
             ReturnExpression::CountAll
             | ReturnExpression::CountProperty { .. }
+            | ReturnExpression::CollectProperty { .. }
             | ReturnExpression::MinProperty { .. }
             | ReturnExpression::MaxProperty { .. }
             | ReturnExpression::AvgProperty { .. } => return Ok(None),
         }
     }
     Ok(if has_projection { count_alias } else { None })
+}
+
+fn optional_direct_collect_alias(
+    query: &MatchReturn,
+    optional: &crate::cypher::OptionalRelationshipExpand,
+) -> Result<Option<String>> {
+    let mut collect_alias = None;
+    let mut has_projection = false;
+    for item in &query.returns {
+        match &item.expression {
+            ReturnExpression::CollectProperty {
+                variable,
+                property,
+                distinct,
+            } => {
+                if collect_alias.is_some() || variable != &optional.expand.target_variable {
+                    return Ok(None);
+                }
+                collect_alias = Some(item.alias.clone().unwrap_or_else(|| {
+                    if *distinct {
+                        format!("collect(DISTINCT {variable}.{property})")
+                    } else {
+                        format!("collect({variable}.{property})")
+                    }
+                }));
+            }
+            ReturnExpression::Variable(variable) => {
+                if variable != &optional.source_variable {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
+            ReturnExpression::Property { variable, .. }
+            | ReturnExpression::Id(variable)
+            | ReturnExpression::RelationshipType(variable) => {
+                if variable != &optional.source_variable {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
+            ReturnExpression::Coalesce(expressions) => {
+                if !return_value_expressions_are_source_only(expressions, &optional.source_variable)
+                {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
+            ReturnExpression::Left { expression, .. } | ReturnExpression::Lower(expression) => {
+                if !return_value_expression_is_source_only(expression, &optional.source_variable) {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
+            ReturnExpression::DatePart { variable, .. } => {
+                if variable != &optional.source_variable {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
+            ReturnExpression::DefaultIfNullOrEq { variable, .. } => {
+                if variable != &optional.source_variable {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
+            ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+            | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
+                if variable != &optional.source_variable {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
+            ReturnExpression::CountAll
+            | ReturnExpression::CountVariable { .. }
+            | ReturnExpression::CountProperty { .. }
+            | ReturnExpression::MinProperty { .. }
+            | ReturnExpression::MaxProperty { .. }
+            | ReturnExpression::AvgProperty { .. } => return Ok(None),
+        }
+    }
+    Ok(if has_projection { collect_alias } else { None })
 }
 
 fn plan_optional_direct_count_return(
@@ -3577,6 +3672,16 @@ fn plan_sort_items(
         .map(|item| {
             let key = match &item.expression {
                 OrderExpression::Property { variable, property } => {
+                    let projected_property = format!("{variable}.{property}");
+                    if projection_names.contains(&projected_property) {
+                        return Ok(SortItem {
+                            key: SortKey::Column(projected_property),
+                            direction: match item.direction {
+                                CypherOrderDirection::Asc => SortDirection::Asc,
+                                CypherOrderDirection::Desc => SortDirection::Desc,
+                            },
+                        });
+                    }
                     if projection_names.contains(variable) {
                         return Ok(SortItem {
                             key: SortKey::Expression(ProjectionExpression::ColumnProperty {
@@ -3609,14 +3714,9 @@ fn plan_sort_items(
                         variable: variable.clone(),
                     }
                 }
-                OrderExpression::Value(expression) => {
-                    SortKey::Expression(plan_return_value_expression_with_columns(
-                        scope,
-                        projection_names,
-                        expression,
-                        parameters,
-                    )?)
-                }
+                OrderExpression::Value(expression) => SortKey::Expression(
+                    plan_order_value_expression(scope, projection_names, expression, parameters)?,
+                ),
                 OrderExpression::Column(name) => {
                     if !projection_names.contains(name) {
                         return Err(SkeinError::Semantic(format!(
@@ -3633,6 +3733,33 @@ fn plan_sort_items(
             Ok(SortItem { key, direction })
         })
         .collect()
+}
+
+fn plan_order_value_expression(
+    scope: &BTreeSet<String>,
+    projection_names: &BTreeSet<String>,
+    expression: &ReturnValueExpression,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<ProjectionExpression> {
+    if let ReturnValueExpression::CasePropertyNotNullOrEq {
+        variable,
+        property,
+        empty,
+        non_empty,
+        null_or_empty,
+    } = expression
+    {
+        let projected_property = format!("{variable}.{property}");
+        if projection_names.contains(&projected_property) {
+            return Ok(ProjectionExpression::ColumnValueCasePropertyNotNullOrEq {
+                column: projected_property,
+                empty: bind_value(empty, parameters)?,
+                non_empty: bind_value(non_empty, parameters)?,
+                null_or_empty: bind_value(null_or_empty, parameters)?,
+            });
+        }
+    }
+    plan_return_value_expression_with_columns(scope, projection_names, expression, parameters)
 }
 
 fn bind_pagination_value(
@@ -3733,6 +3860,7 @@ fn plan_return_items(
             ReturnExpression::CountAll
                 | ReturnExpression::CountVariable { .. }
                 | ReturnExpression::CountProperty { .. }
+                | ReturnExpression::CollectProperty { .. }
                 | ReturnExpression::MinProperty { .. }
                 | ReturnExpression::MaxProperty { .. }
                 | ReturnExpression::AvgProperty { .. }
@@ -3759,6 +3887,7 @@ fn plan_return_items(
                 ReturnExpression::CountAll
                 | ReturnExpression::CountVariable { .. }
                 | ReturnExpression::CountProperty { .. }
+                | ReturnExpression::CollectProperty { .. }
                 | ReturnExpression::MinProperty { .. }
                 | ReturnExpression::MaxProperty { .. }
                 | ReturnExpression::AvgProperty { .. } => {
@@ -4005,6 +4134,7 @@ fn plan_projection_with_columns(
         ReturnExpression::CountAll
         | ReturnExpression::CountVariable { .. }
         | ReturnExpression::CountProperty { .. }
+        | ReturnExpression::CollectProperty { .. }
         | ReturnExpression::MinProperty { .. }
         | ReturnExpression::MaxProperty { .. }
         | ReturnExpression::AvgProperty { .. } => {
@@ -4159,6 +4289,25 @@ fn plan_aggregation(scope: &BTreeSet<String>, item: &ReturnItem) -> Result<Aggre
             }
             (
                 AggregateFunction::Count,
+                AggregateTarget::Property {
+                    variable: variable.clone(),
+                    property: property.clone(),
+                },
+                *distinct,
+            )
+        }
+        ReturnExpression::CollectProperty {
+            variable,
+            property,
+            distinct,
+        } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in return item"
+                )));
+            }
+            (
+                AggregateFunction::Collect,
                 AggregateTarget::Property {
                     variable: variable.clone(),
                     property: property.clone(),

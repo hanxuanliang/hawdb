@@ -174,6 +174,7 @@ fn range_expand_plan() -> LogicalPlan {
             target_label: "Entity".to_string(),
             min_hops: 2,
             max_hops: 2,
+            optional: false,
             input: Box::new(LogicalPlan::Filter {
                 predicate: Predicate::And(vec![
                     Predicate::PropertyCompare {

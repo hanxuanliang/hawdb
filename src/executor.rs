@@ -1663,6 +1663,7 @@ fn execute_bindings(
             target_label,
             min_hops,
             max_hops,
+            optional,
             input,
         } => {
             let input = execute_bindings(input, catalog, store)?;
@@ -1682,6 +1683,7 @@ fn execute_bindings(
                         "missing variable '{source_variable}' during expand"
                     ))
                 })?;
+                let output_len_before = output.len();
                 if rel_variable.is_some()
                     || !rel_properties.is_empty()
                     || *direction != RelationshipDirection::Outgoing
@@ -1723,6 +1725,15 @@ fn execute_bindings(
                             relationships: binding.relationships.clone(),
                         });
                     }
+                }
+                if *optional && output.len() == output_len_before {
+                    let mut nodes = binding.nodes.clone();
+                    nodes.insert(target_variable.clone(), null_lookup_node());
+                    output.push(Binding {
+                        values: binding.values,
+                        nodes,
+                        relationships: binding.relationships,
+                    });
                 }
             }
             Ok(output)
@@ -2090,6 +2101,21 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 Ok(default.clone())
             } else {
                 Ok(value)
+            }
+        }
+        ProjectionExpression::ColumnValueCasePropertyNotNullOrEq {
+            column,
+            empty,
+            non_empty,
+            null_or_empty,
+        } => {
+            let value = binding.values.get(column).ok_or_else(|| {
+                SkeinError::Execution(format!("missing column '{column}' during projection"))
+            })?;
+            if value == &Value::Null || value == empty {
+                Ok(null_or_empty.clone())
+            } else {
+                Ok(non_empty.clone())
             }
         }
         ProjectionExpression::Column(name) => binding.values.get(name).cloned().ok_or_else(|| {

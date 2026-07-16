@@ -591,7 +591,7 @@ EVOLVES/crystal synthesis count reads,
 wiki export summary entity/crystal/community count reads,
 OKF export community list, crystal list, and crystal-source entity community
 reads, shared OKF/wiki entity mention detail reads, and shared OKF/wiki related
-entity reads,
+entity reads, plus OKF memory row exports with row-preserving label collection,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label

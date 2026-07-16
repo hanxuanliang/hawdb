@@ -1396,6 +1396,33 @@ fn parses_with_collect_distinct_property() {
 }
 
 #[test]
+fn parses_optional_match_return_collect_distinct_property() {
+    let statement = parse(
+        "MATCH (m:Memory) OPTIONAL MATCH (m)-[:HAS_LABEL]->(l:Label) RETURN m.id, COLLECT(DISTINCT l.name) AS labels",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let optional = query.optional_expand.expect("optional expand");
+    assert_eq!(optional.source_variable, "m");
+    assert_eq!(optional.expand.target_variable, "l");
+    assert_eq!(query.returns.len(), 2);
+    let ReturnExpression::CollectProperty {
+        variable,
+        property,
+        distinct,
+    } = &query.returns[1].expression
+    else {
+        panic!("expected collect return");
+    };
+    assert_eq!(variable, "l");
+    assert_eq!(property, "name");
+    assert!(*distinct);
+    assert_eq!(query.returns[1].alias.as_deref(), Some("labels"));
+}
+
+#[test]
 fn parses_with_distinct_property_alias_count() {
     let statement = parse(
         "MATCH (c:Memory)-[:CRYSTALLIZED_FROM]->(s:Memory) WITH DISTINCT c.id AS a, s.id AS b RETURN count(*)",

@@ -617,6 +617,18 @@ impl Parser<'_> {
                 let property = self.parse_ident()?;
                 self.expect_char(')')?;
                 ReturnExpression::AvgProperty { variable, property }
+            } else if self.consume_keyword("COLLECT") {
+                self.expect_char('(')?;
+                let distinct = self.consume_keyword("DISTINCT");
+                let variable = self.parse_ident()?;
+                self.expect_char('.')?;
+                let property = self.parse_ident()?;
+                self.expect_char(')')?;
+                ReturnExpression::CollectProperty {
+                    variable,
+                    property,
+                    distinct,
+                }
             } else {
                 self.parse_return_projection_expression()?
             };
