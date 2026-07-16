@@ -9252,6 +9252,216 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest skills public detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.id, s.title, s.name, s.metadata",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-public-detail".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-public-detail', title: 'Public Detail', name: 'public-detail', metadata: '{}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-public-detail'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills stale memory ids read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids AND m.is_latest = false RETURN m.id",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("rest-skill-stale-memory".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-skill-stale-memory', is_latest: false})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-skill-stale-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills evolves latest read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (old:Memory)-[:EVOLVES]->(new:Memory) WHERE old.id IN $ids RETURN DISTINCT new.id, new.is_latest",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("rest-skill-evolves-old".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-skill-evolves-old', is_latest: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-skill-evolves-new', is_latest: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (old:Memory {id: 'rest-skill-evolves-old'}), (new:Memory {id: 'rest-skill-evolves-new'}) CREATE (old)-[:EVOLVES]->(new)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['rest-skill-evolves-old', 'rest-skill-evolves-new'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills id read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.id",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-id-read".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-id-read'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-id-read'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills id version read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.id, s.version",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-id-version".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-id-version', version: 7})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-id-version'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills source memory title content read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id})-[:SYNTHESIZED_FROM]->(m:Memory) RETURN m.title, m.content ORDER BY m.created_at LIMIT 8",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-source-detail".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-source-detail'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-skill-source-memory', title: 'Source Title', content: 'source content', created_at: 1})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (s:Skill {id: 'rest-skill-source-detail'}), (m:Memory {id: 'rest-skill-source-memory'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-skill-source-detail', 'rest-skill-source-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.metadata",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-metadata".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-metadata', metadata: '{\"source\":\"rest\"}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-metadata'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills version read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.version",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-version".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-version', version: 9})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-version'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest skills title read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s.title",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-skill-title".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-skill-title', title: 'Skill Title'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-skill-title'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "skill builder list read",
                     CypherFixtureStatement::new(
                         "MATCH (s:Skill) RETURN s ORDER BY s.updated_at DESC LIMIT 60",
@@ -20066,6 +20276,64 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (sk:Skill) WHERE sk.stage IN $stages RETURN sk.id, sk.title, sk.name, sk.description, sk.stage, sk.evidence_count LIMIT 50",
             ),
             CompatibilityQueryCallSite::new(
+                "rest skills public detail read",
+                "skill_read",
+                "nmem-server::rest_skills::public_detail",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.id, s.title, s.name, s.metadata"),
+            CompatibilityQueryCallSite::new(
+                "rest skills stale memory ids read",
+                "skill_read",
+                "nmem-server::rest_skills::stale_memory_ids",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id IN $ids AND m.is_latest = false RETURN m.id"),
+            CompatibilityQueryCallSite::new(
+                "rest skills evolves latest read",
+                "skill_read",
+                "nmem-server::rest_skills::evolves_latest",
+            )
+            .with_cypher(
+                "MATCH (old:Memory)-[:EVOLVES]->(new:Memory) WHERE old.id IN $ids RETURN DISTINCT new.id, new.is_latest",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills id read",
+                "skill_read",
+                "nmem-server::rest_skills::id_exists",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.id"),
+            CompatibilityQueryCallSite::new(
+                "rest skills id version read",
+                "skill_read",
+                "nmem-server::rest_skills::id_version",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.id, s.version"),
+            CompatibilityQueryCallSite::new(
+                "rest skills source memory title content read",
+                "skill_read",
+                "nmem-server::rest_skills::source_memory_title_content",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id})-[:SYNTHESIZED_FROM]->(m:Memory) RETURN m.title, m.content ORDER BY m.created_at LIMIT 8",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest skills metadata read",
+                "skill_read",
+                "nmem-server::rest_skills::metadata; nmem-server::rest_skills_write::metadata",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.metadata"),
+            CompatibilityQueryCallSite::new(
+                "rest skills version read",
+                "skill_read",
+                "nmem-server::rest_skills::version",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.version"),
+            CompatibilityQueryCallSite::new(
+                "rest skills title read",
+                "skill_read",
+                "nmem-server::rest_skills::title",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s.title"),
+            CompatibilityQueryCallSite::new(
                 "skill builder list read",
                 "skill_read",
                 "nmem-server::skill_builder::list_skills",
@@ -23255,7 +23523,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 551);
+        assert_eq!(report.checks.len(), 560);
     }
 
     #[test]
@@ -23271,13 +23539,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 551);
-        assert_eq!(coverage.covered_checks, 551);
+        assert_eq!(coverage.required_checks, 560);
+        assert_eq!(coverage.covered_checks, 560);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 551);
+        assert_eq!(coverage_json["covered_checks"], 560);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -23307,10 +23575,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 551);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 560);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 551);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 560);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -23535,15 +23803,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 551);
-        assert_eq!(report.shadow_checks.len(), 551);
+        assert_eq!(report.primary_checks.len(), 560);
+        assert_eq!(report.shadow_checks.len(), 560);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            551
+            560
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -23552,7 +23820,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 551);
+        assert_eq!(cutover.matched_checks, 560);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
