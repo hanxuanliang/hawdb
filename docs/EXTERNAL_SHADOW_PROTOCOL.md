@@ -256,7 +256,7 @@ Skein-side error with the shadow engine name.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--allow-self-shadow] [--shadow-trace <path>] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--allow-self-shadow] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -274,3 +274,8 @@ conversation. Each line contains `sequence`, `event`, and `payload`; `event` is
 the current stderr tail when available. The transcript is intended for
 previous-wrapper parity debugging and should be treated as local diagnostic
 output because Cypher parameters may contain graph data.
+
+Each request waits up to 30000 ms for one stdout response line by default.
+`--shadow-timeout-ms <ms>` overrides that per-request timeout. A timeout kills
+the shadow process and fails the gate with an `execution` error instead of
+letting CI or local cutover runs hang indefinitely.

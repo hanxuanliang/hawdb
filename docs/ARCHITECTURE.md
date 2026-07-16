@@ -338,8 +338,9 @@ and migration gate report helpers; their `decision` fields are lowercase
 `assess_compatibility_migration_gate_bundle`
 packages the four reports into one result, and
 `compatibility_migration_gate_bundle_to_json` preserves the same structure for
-artifact upload. The `nowledge-cypher-migration-gate [--require-ready] <root>
-<shadow-name> <program> [args...]` CLI command scans a Nowledge source tree,
+artifact upload. The `nowledge-cypher-migration-gate [--require-ready]
+[--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]` CLI command
+scans a Nowledge source tree,
 runs the public Nowledge core fixture through `ExternalShadowCommand`, uses
 normalized Cypher coverage so scanner-generated `file:line:hash` names do not
 have to match semantic fixture names, and prints the same migration-gate bundle

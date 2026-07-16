@@ -8,11 +8,13 @@ use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::Duration;
 
 const DEFAULT_FLOAT_ABS_TOLERANCE: f64 = 1.0e-9;
 pub const EXTERNAL_SHADOW_PROTOCOL_VERSION: u64 = 1;
+const DEFAULT_EXTERNAL_SHADOW_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const EXTERNAL_SHADOW_STDERR_TAIL_BYTES: usize = 8192;
 const EXTERNAL_SHADOW_STDOUT_TAIL_BYTES: usize = 2048;
 
@@ -255,10 +257,23 @@ pub struct ExternalShadowCommand {
     name: String,
     child: Child,
     stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
+    stdout: ExternalShadowStdout,
     stderr: ExternalShadowStderr,
     trace: Option<File>,
     next_trace_sequence: u64,
+    request_timeout: Duration,
+}
+
+struct ExternalShadowStdout {
+    receiver: mpsc::Receiver<std::result::Result<String, String>>,
+    join: Option<JoinHandle<()>>,
+}
+
+enum ExternalShadowStdoutRead {
+    Line(String),
+    Closed,
+    Timeout,
+    Error(String),
 }
 
 struct ExternalShadowStderr {
@@ -280,7 +295,13 @@ impl ExternalShadowCommand {
         program: impl AsRef<std::ffi::OsStr>,
         args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
     ) -> Result<Self> {
-        Self::spawn_inner(name, program, args, None::<&Path>)
+        Self::spawn_inner(
+            name,
+            program,
+            args,
+            None::<&Path>,
+            default_external_shadow_request_timeout(),
+        )
     }
 
     pub fn spawn_with_trace_path(
@@ -289,7 +310,38 @@ impl ExternalShadowCommand {
         args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
         trace_path: impl AsRef<Path>,
     ) -> Result<Self> {
-        Self::spawn_inner(name, program, args, Some(trace_path.as_ref()))
+        Self::spawn_inner(
+            name,
+            program,
+            args,
+            Some(trace_path.as_ref()),
+            default_external_shadow_request_timeout(),
+        )
+    }
+
+    pub fn spawn_with_request_timeout(
+        name: impl Into<String>,
+        program: impl AsRef<std::ffi::OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+        request_timeout: Duration,
+    ) -> Result<Self> {
+        Self::spawn_inner(name, program, args, None::<&Path>, request_timeout)
+    }
+
+    pub fn spawn_with_trace_path_and_request_timeout(
+        name: impl Into<String>,
+        program: impl AsRef<std::ffi::OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+        trace_path: impl AsRef<Path>,
+        request_timeout: Duration,
+    ) -> Result<Self> {
+        Self::spawn_inner(
+            name,
+            program,
+            args,
+            Some(trace_path.as_ref()),
+            request_timeout,
+        )
     }
 
     fn spawn_inner(
@@ -297,6 +349,7 @@ impl ExternalShadowCommand {
         program: impl AsRef<std::ffi::OsStr>,
         args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
         trace_path: Option<&Path>,
+        request_timeout: Duration,
     ) -> Result<Self> {
         let mut command = Command::new(program);
         command
@@ -335,10 +388,11 @@ impl ExternalShadowCommand {
             name: name.into(),
             child,
             stdin,
-            stdout: BufReader::new(stdout),
+            stdout: ExternalShadowStdout::start(stdout),
             stderr: ExternalShadowStderr::start(stderr),
             trace,
             next_trace_sequence: 1,
+            request_timeout,
         })
     }
 
@@ -379,20 +433,33 @@ impl ExternalShadowCommand {
             self.request_error(message)
         })?;
 
-        let mut response = String::new();
-        let bytes = self.stdout.read_line(&mut response).map_err(|error| {
-            let message = format!(
-                "failed to read response from shadow engine '{}': {error}",
-                self.name
-            );
-            self.trace_error(trace_sequence, &message);
-            self.request_error(message)
-        })?;
-        if bytes == 0 {
-            let message = format!("shadow engine '{}' closed stdout", self.name);
-            self.trace_error(trace_sequence, &message);
-            return Err(self.request_error(message));
-        }
+        let response = match self.stdout.read_line(self.request_timeout) {
+            ExternalShadowStdoutRead::Line(response) => response,
+            ExternalShadowStdoutRead::Closed => {
+                let message = format!("shadow engine '{}' closed stdout", self.name);
+                self.trace_error(trace_sequence, &message);
+                return Err(self.request_error(message));
+            }
+            ExternalShadowStdoutRead::Timeout => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                let message = format!(
+                    "shadow engine '{}' did not return a response within {} ms",
+                    self.name,
+                    self.request_timeout.as_millis()
+                );
+                self.trace_error(trace_sequence, &message);
+                return Err(self.request_error(message));
+            }
+            ExternalShadowStdoutRead::Error(error) => {
+                let message = format!(
+                    "failed to read response from shadow engine '{}': {error}",
+                    self.name
+                );
+                self.trace_error(trace_sequence, &message);
+                return Err(self.request_error(message));
+            }
+        };
         let raw_response = response.trim_end();
         let response = serde_json::from_str(raw_response).map_err(|error| {
             let raw_tail = external_shadow_stdout_tail(raw_response);
@@ -446,6 +513,51 @@ impl Drop for ExternalShadowCommand {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl ExternalShadowStdout {
+    fn start(stdout: ChildStdout) -> Self {
+        let (sender, receiver) = mpsc::channel();
+        let join = thread::spawn(move || {
+            let mut stdout = BufReader::new(stdout);
+            loop {
+                let mut line = String::new();
+                match stdout.read_line(&mut line) {
+                    Ok(0) => break,
+                    Ok(_) => {
+                        if sender.send(Ok(line)).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        let _ = sender.send(Err(error.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+        Self {
+            receiver,
+            join: Some(join),
+        }
+    }
+
+    fn read_line(&self, timeout: Duration) -> ExternalShadowStdoutRead {
+        match self.receiver.recv_timeout(timeout) {
+            Ok(Ok(line)) => ExternalShadowStdoutRead::Line(line),
+            Ok(Err(error)) => ExternalShadowStdoutRead::Error(error),
+            Err(mpsc::RecvTimeoutError::Timeout) => ExternalShadowStdoutRead::Timeout,
+            Err(mpsc::RecvTimeoutError::Disconnected) => ExternalShadowStdoutRead::Closed,
+        }
+    }
+}
+
+impl Drop for ExternalShadowStdout {
+    fn drop(&mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -1135,6 +1247,10 @@ fn external_shadow_stdout_tail(response: &str) -> &str {
         start += 1;
     }
     &response[start..]
+}
+
+fn default_external_shadow_request_timeout() -> Duration {
+    Duration::from_millis(DEFAULT_EXTERNAL_SHADOW_REQUEST_TIMEOUT_MS)
 }
 
 fn decode_external_session_response(
@@ -26737,7 +26853,7 @@ mod tests {
     use crate::{Database, QueryOutput, Result, Value};
     use std::collections::BTreeMap;
     use std::fs;
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn runs_nowledge_shaped_fixture() {
@@ -27592,6 +27708,49 @@ done
         let trace = fs::read_to_string(&trace_path).unwrap();
         assert!(trace.contains("\"event\":\"error\""));
         assert!(trace.contains("stdout line tail"));
+        let _ = fs::remove_file(trace_path);
+    }
+
+    #[test]
+    fn times_out_external_shadow_without_response() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-timeout",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  :
+done
+"#,
+        );
+        let trace_path = unique_test_path("external-shadow-timeout-trace.jsonl");
+        let mut shadow = ExternalShadowCommand::spawn_with_trace_path_and_request_timeout(
+            "external-shadow-timeout",
+            "sh",
+            [script],
+            &trace_path,
+            Duration::from_millis(20),
+        )
+        .unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-timeout-fixture".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::RowCount(0),
+            ))],
+        };
+
+        let error =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("shadow engine 'external-shadow-timeout' did not return a response within"));
+        drop(shadow);
+        let trace = fs::read_to_string(&trace_path).unwrap();
+        assert!(trace.contains("\"event\":\"error\""));
+        assert!(trace.contains("did not return a response within"));
         let _ = fs::remove_file(trace_path);
     }
 
