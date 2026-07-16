@@ -357,7 +357,16 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
             "op": "execute_session",
             "statements": statements.iter().map(json_from_statement).collect::<Vec<_>>(),
         }))?;
-        decode_external_session_response(&self.name, response)
+        let outputs = decode_external_session_response(&self.name, response)?;
+        if outputs.len() != statements.len() {
+            return Err(SkeinError::Execution(format!(
+                "shadow engine '{}' session returned {} outputs for {} statements",
+                self.name,
+                outputs.len(),
+                statements.len()
+            )));
+        }
+        Ok(outputs)
     }
 
     fn project_graph(
@@ -27020,29 +27029,7 @@ done
         );
         let mut shadow =
             ExternalShadowCommand::spawn("external-shadow-session", "sh", [script]).unwrap();
-        let fixture = CompatibilityFixture {
-            name: "external-shadow-session-fixture".to_string(),
-            setup: Vec::new(),
-            checks: vec![CompatibilityCheck::Cypher(
-                CypherFixtureCheck::expect_rows(
-                    "session set title",
-                    CypherFixtureStatement::new(
-                        "MATCH (m:Memory) WHERE m.id = 1 SET m.title = 'New'",
-                    ),
-                    ExpectedRows::RowCount(1),
-                )
-                .with_setup_query(CypherFixtureStatement::new(
-                    "CREATE (:Memory {id: 1, title: 'Old'})",
-                ))
-                .with_effect_query(
-                    CypherFixtureStatement::new(
-                        "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title",
-                    ),
-                    ExpectedRows::Exact(vec![row([("title", Value::String("New".to_string()))])]),
-                )
-                .with_session_execution(),
-            )],
-        };
+        let fixture = session_effect_fixture("external-shadow-session-fixture");
 
         let report =
             run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
@@ -27052,6 +27039,60 @@ done
             report.shadow_checks[0].status,
             CompatibilityShadowStatus::Matched
         );
+    }
+
+    #[test]
+    fn rejects_external_shadow_session_output_count_mismatch() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-session-count-mismatch",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *execute_session*) echo '{"ok":{"outputs":[{"rows":[]},{"rows":[{"title":"New"}]}]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected execute_session"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-session-count-mismatch", "sh", [script])
+                .unwrap();
+        let fixture = session_effect_fixture("external-shadow-session-count-mismatch-fixture");
+
+        let error =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("session returned 2 outputs for 3 statements"));
+    }
+
+    #[test]
+    fn rejects_external_shadow_session_extra_outputs() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-session-extra-outputs",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *execute_session*) echo '{"ok":{"outputs":[{"rows":[]},{"rows":[{}]},{"rows":[{"title":"New"}]},{"rows":[]}]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected execute_session"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-session-extra-outputs", "sh", [script])
+                .unwrap();
+        let fixture = session_effect_fixture("external-shadow-session-extra-outputs-fixture");
+
+        let error =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("session returned 4 outputs for 3 statements"));
     }
 
     #[test]
@@ -27329,6 +27370,32 @@ done
 
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Blocked);
         assert!(cutover.blockers[0].contains("below required minimum"));
+    }
+
+    fn session_effect_fixture(name: &str) -> CompatibilityFixture {
+        CompatibilityFixture {
+            name: name.to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "session set title",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id = 1 SET m.title = 'New'",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 1, title: 'Old'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title",
+                    ),
+                    ExpectedRows::Exact(vec![row([("title", Value::String("New".to_string()))])]),
+                )
+                .with_session_execution(),
+            )],
+        }
     }
 
     fn write_external_shadow_script(name: &str, content: &str) -> String {
