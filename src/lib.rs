@@ -53,6 +53,7 @@ pub use compat::{
     CompatibilityShadowCheckReport, CompatibilityShadowEngine, CompatibilityShadowReport,
     CompatibilityShadowStatus, CypherFixtureCheck, CypherFixtureStatement, ExpectedErrorClass,
     ExpectedRows, ExternalShadowCommand, ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput,
+    EXTERNAL_SHADOW_PROTOCOL_VERSION,
 };
 pub use cypher::RelationshipDirection;
 pub use error::{Result, SkeinError};

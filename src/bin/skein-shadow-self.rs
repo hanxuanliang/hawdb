@@ -1,4 +1,4 @@
-use skein::{Database, QueryOutput, Result, SkeinError, Value};
+use skein::{Database, QueryOutput, Result, SkeinError, Value, EXTERNAL_SHADOW_PROTOCOL_VERSION};
 use std::collections::BTreeMap;
 use std::io::{self, BufRead, Write};
 
@@ -26,6 +26,9 @@ fn main() -> Result<()> {
 }
 
 fn handle_request(db: &mut Database, request: &serde_json::Value) -> serde_json::Value {
+    if let Err(error) = validate_protocol_version(request) {
+        return error;
+    }
     let op = request.get("op").and_then(serde_json::Value::as_str);
     match op {
         Some("execute") => handle_execute(db, request),
@@ -33,6 +36,24 @@ fn handle_request(db: &mut Database, request: &serde_json::Value) -> serde_json:
         Some("project_graph") => handle_project_graph(db, request),
         Some(other) => json_error("semantic", format!("unknown shadow op '{other}'")),
         None => json_error("semantic", "shadow request missing op"),
+    }
+}
+
+fn validate_protocol_version(
+    request: &serde_json::Value,
+) -> std::result::Result<(), serde_json::Value> {
+    match request
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(EXTERNAL_SHADOW_PROTOCOL_VERSION) => Ok(()),
+        Some(version) => Err(json_error(
+            "execution",
+            format!(
+                "unsupported shadow protocol version {version}; expected {EXTERNAL_SHADOW_PROTOCOL_VERSION}"
+            ),
+        )),
+        None => Err(json_error("execution", "shadow request missing protocol_version")),
     }
 }
 
@@ -263,4 +284,67 @@ fn write_response(stdout: &mut io::Stdout, response: serde_json::Value) -> Resul
     stdout
         .flush()
         .map_err(|error| SkeinError::Execution(format!("failed to flush stdout: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rejects_missing_protocol_version() {
+        let mut db = Database::new();
+        let response = handle_request(
+            &mut db,
+            &serde_json::json!({
+                "op": "execute",
+                "cypher": "RETURN 1 AS value",
+                "parameters": {}
+            }),
+        );
+
+        assert_eq!(response["error"]["class"], "execution");
+        assert_eq!(
+            response["error"]["message"],
+            "shadow request missing protocol_version"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_protocol_version() {
+        let mut db = Database::new();
+        let response = handle_request(
+            &mut db,
+            &serde_json::json!({
+                "protocol_version": 2,
+                "op": "execute",
+                "cypher": "RETURN 1 AS value",
+                "parameters": {}
+            }),
+        );
+
+        assert_eq!(response["error"]["class"], "execution");
+        assert!(response["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("unsupported shadow protocol version 2"));
+    }
+
+    #[test]
+    fn accepts_current_protocol_version() {
+        let mut db = Database::new();
+        let response = handle_request(
+            &mut db,
+            &serde_json::json!({
+                "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                "op": "execute",
+                "cypher": "CREATE (:Memory {id: 1, title: 'Graph foundations'})",
+                "parameters": {}
+            }),
+        );
+
+        assert_eq!(
+            response["ok"]["rows"],
+            serde_json::json!([{ "node_id": 0 }])
+        );
+    }
 }
