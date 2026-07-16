@@ -12284,6 +12284,83 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(2),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph space-scoped overview seed read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.space_id = $space_id OR ($space_id = $default_space_id AND (m.space_id IS NULL OR m.space_id = '')) RETURN m.id ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "space_id".to_string(),
+                                Value::String("rest-graph-space-seed".to_string()),
+                            ),
+                            (
+                                "default_space_id".to_string(),
+                                Value::String("default".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(5)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-graph-space-seed-memory', space_id: 'rest-graph-space-seed', title: 'Rest Graph Space Seed', importance: 0.9})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-graph-space-seed-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph scoped search seed read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.space_id = $space_id AND (contains(LOWER(COALESCE(m.title, '')), LOWER($q)) OR contains(LOWER(COALESCE(m.content, '')), LOWER($q))) RETURN m.id ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "space_id".to_string(),
+                                Value::String("rest-graph-search-space".to_string()),
+                            ),
+                            ("q".to_string(), Value::String("scoped needle".to_string())),
+                            ("limit".to_string(), Value::Int(5)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-graph-scoped-search-memory', space_id: 'rest-graph-search-space', title: 'Scoped Needle Memory', content: 'space scoped search body', importance: 0.8})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-graph-scoped-search-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph global search seed read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE contains(LOWER(COALESCE(m.title, '')), LOWER($q)) OR contains(LOWER(COALESCE(m.content, '')), LOWER($q)) RETURN m.id ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            ("q".to_string(), Value::String("global needle".to_string())),
+                            ("limit".to_string(), Value::Int(5)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-graph-global-search-memory', title: 'Global Needle Memory', content: 'global graph search body', importance: 0.85})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-graph-global-search-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "pagerank mention edge count",
                 CypherFixtureStatement::new(
@@ -18465,6 +18542,30 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (a:Memory)-[r]-(e:Entity) WHERE a.id IN $ids RETURN a.id, e.id, COALESCE(e.name, e.id), e.entity_type, e.description, COALESCE(e.pagerank_score, e.confidence, 0.5), e.community_id, e.confidence, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph space-scoped overview seed read",
+                "graph_overview_read",
+                "nmem-server::rest_graph::graph_overview_handler",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.space_id = $space_id OR ($space_id = $default_space_id AND (m.space_id IS NULL OR m.space_id = '')) RETURN m.id ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph scoped search seed read",
+                "graph_search_read",
+                "nmem-server::rest_graph::graph_search_handler",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.space_id = $space_id AND (contains(LOWER(COALESCE(m.title, '')), LOWER($q)) OR contains(LOWER(COALESCE(m.content, '')), LOWER($q))) RETURN m.id ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph global search seed read",
+                "graph_search_read",
+                "nmem-server::rest_graph::graph_search_handler",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE contains(LOWER(COALESCE(m.title, '')), LOWER($q)) OR contains(LOWER(COALESCE(m.content, '')), LOWER($q)) RETURN m.id ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "node detail neighbor counts",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::query_node_detail",
@@ -21702,7 +21803,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 503);
+        assert_eq!(report.checks.len(), 506);
     }
 
     #[test]
@@ -21718,13 +21819,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 503);
-        assert_eq!(coverage.covered_checks, 503);
+        assert_eq!(coverage.required_checks, 506);
+        assert_eq!(coverage.covered_checks, 506);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 503);
+        assert_eq!(coverage_json["covered_checks"], 506);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -21754,10 +21855,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 503);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 506);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 503);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 506);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -21982,15 +22083,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 503);
-        assert_eq!(report.shadow_checks.len(), 503);
+        assert_eq!(report.primary_checks.len(), 506);
+        assert_eq!(report.shadow_checks.len(), 506);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            503
+            506
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -21999,7 +22100,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 503);
+        assert_eq!(cutover.matched_checks, 506);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

@@ -69,6 +69,19 @@ impl Parser<'_> {
         }
         if self.consume_char('$') {
             let parameter = self.parse_ident()?;
+            self.skip_ws();
+            if self.consume_char('=') {
+                return Ok(PropertyPredicate::ParameterEq {
+                    left: parameter,
+                    right: self.parse_parameter_name()?,
+                });
+            }
+            if self.consume_token("<>") || self.consume_token("!=") {
+                return Ok(PropertyPredicate::ParameterNotEq {
+                    left: parameter,
+                    right: self.parse_parameter_name()?,
+                });
+            }
             self.expect_keyword("IS")?;
             let is_not = self.consume_keyword("NOT");
             self.expect_keyword("NULL")?;
@@ -92,6 +105,14 @@ impl Parser<'_> {
                 property,
                 value,
             });
+        }
+        if variable.eq_ignore_ascii_case("contains") && self.peek_char() == Some('(') {
+            self.expect_char('(')?;
+            let expression = self.parse_return_value_expression()?;
+            self.expect_char(',')?;
+            let value = self.parse_return_value_expression()?;
+            self.expect_char(')')?;
+            return Ok(PropertyPredicate::ExpressionContains { expression, value });
         }
         if matches_ignore_ascii_case(&variable, &["coalesce", "left", "lower", "case"])
             && self.peek_char() == Some('(')
@@ -249,6 +270,12 @@ impl Parser<'_> {
             self.pos = value_start;
         }
         self.parse_value().map(PropertyPredicateRight::Value)
+    }
+
+    fn parse_parameter_name(&mut self) -> Result<String> {
+        self.skip_ws();
+        self.expect_char('$')?;
+        self.parse_ident()
     }
 
     fn looks_like_relationship_exists_predicate(&self) -> bool {

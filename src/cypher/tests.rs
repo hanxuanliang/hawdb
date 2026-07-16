@@ -2287,6 +2287,48 @@ fn parses_parameter_null_predicate() {
 }
 
 #[test]
+fn parses_parameter_equality_predicate() {
+    let statement = parse(
+        "MATCH (m:Memory) WHERE m.space_id = $space_id OR ($space_id = $default_space_id AND (m.space_id IS NULL OR m.space_id = '')) RETURN m.id",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let Some(PropertyPredicate::Or(predicates)) = query.predicate else {
+        panic!("expected OR predicate");
+    };
+    let PropertyPredicate::And(default_space_predicates) = &predicates[1] else {
+        panic!("expected default-space conjunction");
+    };
+    assert_eq!(
+        default_space_predicates[0],
+        PropertyPredicate::ParameterEq {
+            left: "space_id".to_string(),
+            right: "default_space_id".to_string(),
+        }
+    );
+}
+
+#[test]
+fn parses_contains_function_predicate() {
+    let statement = parse(
+        "MATCH (m:Memory) WHERE contains(LOWER(COALESCE(m.title, '')), LOWER($q)) RETURN m.id",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    assert!(matches!(
+        query.predicate,
+        Some(PropertyPredicate::ExpressionContains {
+            expression: ReturnValueExpression::Lower(_),
+            value: ReturnValueExpression::Lower(_),
+        })
+    ));
+}
+
+#[test]
 fn parses_parenthesized_case_expression_predicate() {
     let statement = parse(
         "MATCH (t:Thread) WHERE (CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END) = $space_id RETURN COUNT(t)",

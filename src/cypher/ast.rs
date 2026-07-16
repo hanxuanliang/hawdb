@@ -573,6 +573,14 @@ pub enum PropertyPredicate {
     ParameterIsNotNull {
         parameter: String,
     },
+    ParameterEq {
+        left: String,
+        right: String,
+    },
+    ParameterNotEq {
+        left: String,
+        right: String,
+    },
     In {
         variable: String,
         property: String,

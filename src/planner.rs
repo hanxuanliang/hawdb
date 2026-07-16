@@ -4032,6 +4032,14 @@ fn plan_predicate(
         PropertyPredicate::ParameterIsNotNull { parameter } => Ok(Predicate::ConstantBool(
             bind_value(&ValueExpression::Parameter(parameter.clone()), parameters)? != Value::Null,
         )),
+        PropertyPredicate::ParameterEq { left, right } => Ok(Predicate::ConstantBool(
+            bind_value(&ValueExpression::Parameter(left.clone()), parameters)?
+                == bind_value(&ValueExpression::Parameter(right.clone()), parameters)?,
+        )),
+        PropertyPredicate::ParameterNotEq { left, right } => Ok(Predicate::ConstantBool(
+            bind_value(&ValueExpression::Parameter(left.clone()), parameters)?
+                != bind_value(&ValueExpression::Parameter(right.clone()), parameters)?,
+        )),
         PropertyPredicate::In {
             variable,
             property,
@@ -4328,6 +4336,8 @@ fn predicate_variable(predicate: &PropertyPredicate) -> Option<&str> {
         | PropertyPredicate::ExpressionContains { .. }
         | PropertyPredicate::ParameterIsNull { .. }
         | PropertyPredicate::ParameterIsNotNull { .. }
+        | PropertyPredicate::ParameterEq { .. }
+        | PropertyPredicate::ParameterNotEq { .. }
         | PropertyPredicate::BoundRelationshipExists { .. } => None,
     }
 }
