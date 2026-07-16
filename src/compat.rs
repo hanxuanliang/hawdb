@@ -4449,6 +4449,37 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory label names by id read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE m.id = $id RETURN l.name",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("memory-label-by-id-memory-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "l.name",
+                        Value::String("replacement".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'memory-label-by-id-memory-1', title: 'Replacement memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'memory-label-by-id-label-1', name: 'replacement'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'memory-label-by-id-memory-1'}), (l:Label {id: 'memory-label-by-id-label-1'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['memory-label-by-id-memory-1', 'memory-label-by-id-label-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory label bulk name read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE m.id IN $ids RETURN m.id, l.name",
@@ -12411,6 +12442,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory {id: $memory_id})-[:HAS_LABEL]->(l:Label) RETURN l.name LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "memory label names by id read",
+                "label_read",
+                "nmem-graph::repo::add_evolves_edge::label_names_for_replaced_memory",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE m.id = $id RETURN l.name",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory label bulk name read",
                 "label_read",
                 "nmem-server::memory_repo::bulk_label_names_for_memories",
@@ -15766,7 +15805,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 349);
+        assert_eq!(report.checks.len(), 350);
     }
 
     #[test]
@@ -15782,13 +15821,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 349);
-        assert_eq!(coverage.covered_checks, 349);
+        assert_eq!(coverage.required_checks, 350);
+        assert_eq!(coverage.covered_checks, 350);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 349);
+        assert_eq!(coverage_json["covered_checks"], 350);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15818,10 +15857,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 349);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 350);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 349);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 350);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16046,15 +16085,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 349);
-        assert_eq!(report.shadow_checks.len(), 349);
+        assert_eq!(report.primary_checks.len(), 350);
+        assert_eq!(report.shadow_checks.len(), 350);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            349
+            350
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16063,7 +16102,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 349);
+        assert_eq!(cutover.matched_checks, 350);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
