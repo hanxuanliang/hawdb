@@ -32,10 +32,11 @@ pub use api::{
     CanonicalSnapshotRelationship, CanonicalStableIdMapping, Database, DatabaseConfig,
     DatabaseReadTransaction, DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport,
     DerivedArtifactJobStatus, GraphLightningBootstrapExport, GraphLightningBootstrapManifest,
-    KnowledgeGraphContextPath, KnowledgeGraphPathDirection, KnowledgeRetrievalOutput,
-    KnowledgeRetrievalRequest, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
-    NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    GraphLightningGraphStream, KnowledgeGraphContextPath, KnowledgeGraphPathDirection,
+    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, NowledgeGraphAdapter,
+    NowledgeGraphExplainOutput, NowledgeGraphStatement, NowledgeGraphTransactionOutput,
+    QueryOutput, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,

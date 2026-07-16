@@ -104,10 +104,13 @@ reopen. The default `export_canonical_graph_snapshot` remains read-only and does
 not create persistent export metadata.
 `Database::prepare_graph_lightning_bootstrap_export` wraps the same persisted
 stable-ID snapshot in a Graph Lightning bootstrap manifest. The manifest records
-protocol version, graph commit epoch, logical checksum, schema checksum,
-node/relationship counts, label/type counts, property counts, and the canonical
-snapshot validation result. It is the local v1 gate before a GraphStream encoder
-or row-staging adapter consumes the snapshot.
+protocol version, graph commit epoch, logical checksum, GraphStream checksum and
+byte length, schema checksum, node/relationship counts, label/type counts,
+property counts, and the canonical snapshot validation result. It is the local
+v1 gate before a GraphStream encoder or row-staging adapter consumes the
+snapshot. The paired GraphStream is deterministic canonical text sorted by
+labels, relationship type, stable IDs, and endpoints; it does not copy local
+pages, WAL entries, checkpoint bytes, or adjacency pointers.
 The CLI command `skein validate-canonical-snapshot [--require-valid]
 [--require-import-ready] <database-path>` opens the database read-only, exports
 the current canonical snapshot, and prints the validation report as JSON.
@@ -120,6 +123,10 @@ The CLI command `skein graph-lightning-bootstrap-manifest [--require-ready]
 `stable_ids.skein`, and prints the bootstrap manifest as JSON. `--require-ready`
 returns a non-zero status if the manifest's embedded validation is not
 import-ready.
+The CLI command `skein graph-lightning-graph-stream [--require-ready]
+<database-path>` uses the same bootstrap export path and prints the deterministic
+GraphStream text. The final `checksum` line covers the stream body and matches
+the manifest's `graph_stream_checksum`.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a

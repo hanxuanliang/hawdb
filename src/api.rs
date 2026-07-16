@@ -102,10 +102,16 @@ impl CanonicalGraphSnapshotExport {
 
     pub fn graph_lightning_bootstrap_manifest(&self) -> GraphLightningBootstrapManifest {
         let validation = self.validate();
+        let graph_stream_body = encode_graph_lightning_graph_stream_body(self);
+        let graph_stream_checksum = checksum_bytes(graph_stream_body.as_bytes());
+        let graph_stream_byte_len =
+            graph_stream_body.len() + format!("checksum\t{graph_stream_checksum}\n").len();
         GraphLightningBootstrapManifest {
             protocol_version: GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
             graph_commit_epoch: self.graph_commit_epoch,
             logical_checksum: self.logical_checksum,
+            graph_stream_checksum,
+            graph_stream_byte_len,
             schema_checksum: canonical_graph_snapshot_schema_checksum(
                 &self.nodes,
                 &self.relationships,
@@ -131,6 +137,22 @@ impl CanonicalGraphSnapshotExport {
                 .map(|relationship| relationship.properties.len())
                 .sum(),
             validation,
+        }
+    }
+
+    pub fn graph_lightning_graph_stream(&self) -> GraphLightningGraphStream {
+        let body = encode_graph_lightning_graph_stream_body(self);
+        let stream_checksum = checksum_bytes(body.as_bytes());
+        let encoded = format!("{body}checksum\t{stream_checksum}\n");
+        GraphLightningGraphStream {
+            format_version: GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+            graph_commit_epoch: self.graph_commit_epoch,
+            logical_checksum: self.logical_checksum,
+            stream_checksum,
+            byte_len: encoded.len(),
+            node_count: self.nodes.len(),
+            relationship_count: self.relationships.len(),
+            encoded,
         }
     }
 
@@ -195,11 +217,13 @@ impl CanonicalGraphSnapshotExport {
 }
 
 pub const GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION: u64 = 1;
+pub const GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraphLightningBootstrapExport {
     pub snapshot: CanonicalGraphSnapshotExport,
     pub manifest: GraphLightningBootstrapManifest,
+    pub graph_stream: GraphLightningGraphStream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +231,8 @@ pub struct GraphLightningBootstrapManifest {
     pub protocol_version: u64,
     pub graph_commit_epoch: u64,
     pub logical_checksum: u64,
+    pub graph_stream_checksum: u64,
+    pub graph_stream_byte_len: usize,
     pub schema_checksum: u64,
     pub node_count: usize,
     pub relationship_count: usize,
@@ -215,6 +241,18 @@ pub struct GraphLightningBootstrapManifest {
     pub node_property_count: usize,
     pub relationship_property_count: usize,
     pub validation: CanonicalGraphSnapshotValidation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningGraphStream {
+    pub format_version: u64,
+    pub graph_commit_epoch: u64,
+    pub logical_checksum: u64,
+    pub stream_checksum: u64,
+    pub byte_len: usize,
+    pub node_count: usize,
+    pub relationship_count: usize,
+    pub encoded: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -800,7 +838,12 @@ impl Database {
     ) -> Result<GraphLightningBootstrapExport> {
         let snapshot = self.export_canonical_graph_snapshot_with_persisted_stable_ids()?;
         let manifest = snapshot.graph_lightning_bootstrap_manifest();
-        Ok(GraphLightningBootstrapExport { snapshot, manifest })
+        let graph_stream = snapshot.graph_lightning_graph_stream();
+        Ok(GraphLightningBootstrapExport {
+            snapshot,
+            manifest,
+            graph_stream,
+        })
     }
 
     pub fn storage_version(&self) -> &'static str {
@@ -2278,6 +2321,80 @@ fn canonical_graph_snapshot_schema_checksum(
         append_canonical_string(&mut body, "relationship_property", &property);
     }
     checksum_bytes(body.as_bytes())
+}
+
+fn encode_graph_lightning_graph_stream_body(snapshot: &CanonicalGraphSnapshotExport) -> String {
+    let node_stable_keys = snapshot
+        .nodes
+        .iter()
+        .map(|node| (node.node_id, canonical_stable_key(node.stable_id.as_ref())))
+        .collect::<BTreeMap<_, _>>();
+    let mut nodes = snapshot.nodes.iter().collect::<Vec<_>>();
+    nodes.sort_by_key(|node| {
+        (
+            node.labels.clone(),
+            canonical_stable_key(node.stable_id.as_ref()),
+            node.node_id,
+        )
+    });
+    let mut relationships = snapshot.relationships.iter().collect::<Vec<_>>();
+    relationships.sort_by_key(|relationship| {
+        (
+            relationship.rel_type.clone(),
+            node_stable_keys
+                .get(&relationship.source_node_id)
+                .cloned()
+                .unwrap_or_default(),
+            node_stable_keys
+                .get(&relationship.target_node_id)
+                .cloned()
+                .unwrap_or_default(),
+            canonical_stable_key(relationship.stable_id.as_ref()),
+            relationship.relationship_id,
+        )
+    });
+
+    let mut body = String::new();
+    body.push_str("SKEIN_GRAPH_LIGHTNING_GRAPH_STREAM_V1\n");
+    body.push_str(&format!(
+        "format_version\t{}\n",
+        GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION
+    ));
+    body.push_str(&format!(
+        "graph_commit_epoch\t{}\n",
+        snapshot.graph_commit_epoch
+    ));
+    body.push_str(&format!(
+        "logical_checksum\t{}\n",
+        snapshot.logical_checksum
+    ));
+    body.push_str(&format!("node_count\t{}\n", nodes.len()));
+    for node in nodes {
+        body.push_str(&format!("node\t{}\n", node.node_id));
+        append_optional_canonical_value(&mut body, "stable_id", node.stable_id.as_ref());
+        body.push_str(&format!("label_count\t{}\n", node.labels.len()));
+        for label in &node.labels {
+            append_canonical_string(&mut body, "label", label);
+        }
+        append_canonical_properties(&mut body, &node.properties);
+    }
+    body.push_str(&format!("relationship_count\t{}\n", relationships.len()));
+    for relationship in relationships {
+        body.push_str(&format!(
+            "relationship\t{}\t{}\t{}\n",
+            relationship.relationship_id, relationship.source_node_id, relationship.target_node_id
+        ));
+        append_optional_canonical_value(&mut body, "stable_id", relationship.stable_id.as_ref());
+        append_canonical_string(&mut body, "relationship_type", &relationship.rel_type);
+        append_canonical_properties(&mut body, &relationship.properties);
+    }
+    body
+}
+
+fn canonical_stable_key(value: Option<&Value>) -> String {
+    let mut key = String::new();
+    append_optional_canonical_value(&mut key, "stable_id", value);
+    key
 }
 
 fn append_canonical_properties(body: &mut String, properties: &BTreeMap<String, Value>) {
@@ -6734,6 +6851,11 @@ mod tests {
             );
             assert_eq!(manifest.graph_commit_epoch, 1);
             assert_eq!(manifest.logical_checksum, export.snapshot.logical_checksum);
+            assert_eq!(
+                manifest.graph_stream_checksum,
+                export.graph_stream.stream_checksum
+            );
+            assert_eq!(manifest.graph_stream_byte_len, export.graph_stream.byte_len);
             assert_eq!(manifest.node_count, 2);
             assert_eq!(manifest.relationship_count, 1);
             assert_eq!(manifest.label_count, 2);
@@ -6743,6 +6865,11 @@ mod tests {
             assert!(manifest.validation.is_import_ready);
             assert!(manifest.validation.stable_identity_ready);
             assert!(export.snapshot.relationships[0].stable_id.is_some());
+            assert!(export
+                .graph_stream
+                .encoded
+                .starts_with("SKEIN_GRAPH_LIGHTNING_GRAPH_STREAM_V1\n"));
+            assert!(export.graph_stream.encoded.contains("\nchecksum\t"));
         }
 
         {

@@ -218,6 +218,33 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "graph-lightning-graph-stream" {
+            let mut require_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_graph_stream_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(graph_lightning_graph_stream_usage()));
+            }
+            let mut db = Database::open(path)?;
+            let export = db.prepare_graph_lightning_bootstrap_export()?;
+            if require_ready && !export.manifest.validation.is_import_ready {
+                return Err(SkeinError::Execution(
+                    "graph lightning graph stream is not import ready".to_string(),
+                ));
+            }
+            print!("{}", export.graph_stream.encoded);
+            return Ok(());
+        }
         return Err(SkeinError::Semantic(format!("unknown command '{command}'")));
     }
 
@@ -254,6 +281,10 @@ fn validate_canonical_snapshot_usage() -> String {
 
 fn graph_lightning_bootstrap_manifest_usage() -> String {
     "graph-lightning-bootstrap-manifest requires [--require-ready] <database-path>".to_string()
+}
+
+fn graph_lightning_graph_stream_usage() -> String {
+    "graph-lightning-graph-stream requires [--require-ready] <database-path>".to_string()
 }
 
 fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
@@ -351,6 +382,8 @@ fn graph_lightning_bootstrap_manifest_json(
         "protocol_version": manifest.protocol_version,
         "graph_commit_epoch": manifest.graph_commit_epoch,
         "logical_checksum": manifest.logical_checksum,
+        "graph_stream_checksum": manifest.graph_stream_checksum,
+        "graph_stream_byte_len": manifest.graph_stream_byte_len,
         "schema_checksum": manifest.schema_checksum,
         "node_count": manifest.node_count,
         "relationship_count": manifest.relationship_count,
@@ -424,8 +457,9 @@ mod tests {
     use super::{
         add_shadow_ready_report, add_shadow_trace_report, canonical_snapshot_validation_json,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
-        is_self_shadow_command, parse_shadow_timeout_ms, should_run_shadow_ready,
-        stable_identity_audit_json, validate_canonical_snapshot_usage, value_json,
+        graph_lightning_graph_stream_usage, is_self_shadow_command, parse_shadow_timeout_ms,
+        should_run_shadow_ready, stable_identity_audit_json, validate_canonical_snapshot_usage,
+        value_json,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -627,6 +661,8 @@ mod tests {
             protocol_version: 1,
             graph_commit_epoch: 5,
             logical_checksum: 99,
+            graph_stream_checksum: 101,
+            graph_stream_byte_len: 4096,
             schema_checksum: 77,
             node_count: 3,
             relationship_count: 2,
@@ -643,6 +679,8 @@ mod tests {
         assert_eq!(json["protocol_version"], 1);
         assert_eq!(json["graph_commit_epoch"], 5);
         assert_eq!(json["logical_checksum"], 99);
+        assert_eq!(json["graph_stream_checksum"], 101);
+        assert_eq!(json["graph_stream_byte_len"], 4096);
         assert_eq!(json["schema_checksum"], 77);
         assert_eq!(json["node_count"], 3);
         assert_eq!(json["relationship_count"], 2);
@@ -703,5 +741,11 @@ mod tests {
     fn validates_graph_lightning_bootstrap_manifest_usage_text() {
         assert!(graph_lightning_bootstrap_manifest_usage().contains("<database-path>"));
         assert!(graph_lightning_bootstrap_manifest_usage().contains("--require-ready"));
+    }
+
+    #[test]
+    fn validates_graph_lightning_graph_stream_usage_text() {
+        assert!(graph_lightning_graph_stream_usage().contains("<database-path>"));
+        assert!(graph_lightning_graph_stream_usage().contains("--require-ready"));
     }
 }
