@@ -152,6 +152,10 @@ READY staging catalog and atomically writes
 `graph_lightning_published_manifest.json`. Repeating the command for the same
 manifest is idempotent; attempting to publish a different manifest over an
 existing pointer fails instead of overwriting the published graph pointer.
+`skein graph-lightning-verify-published <staging-dir> <publish-dir>` verifies
+that the published pointer still references the staged catalog by byte length
+and checksum, and that the referenced staging catalog still passes the
+source-independent verifier.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
