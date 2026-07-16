@@ -33,6 +33,10 @@ needs. The source product boundary is:
 | Read concurrency | shared readers, exclusive writes/control | Partial: snapshot readers do not observe later commits, survive checkpoints, publish oldest active reader plus safe reclamation epochs to the manifest, and expose the same boundary through `Database::storage_reclamation_watermark`; page-level MVCC and physical reclamation remain |
 | Projected graph | `PROJECT_GRAPH`, page_rank, louvain | Partial: immutable in-memory CSR/CSC projection over store snapshots with node-label and relationship-type filtering, WAL/checkpoint-persisted projection definitions, checkpoint-generated CSR/CSC projection artifacts with format version, projection epoch, public reusable/stale status, recovery-time filtering of artifacts whose commit epoch or definition no longer matches the replayed graph state, epoch/definition-checked execution reuse, checkpoint-independent background artifact rebuild, report-oriented `Database::rebuild_derived_artifacts` for projected graph artifacts, embedded derived-artifact job queue with pending/running/succeeded/failed status, Kuzu-style `CALL project_graph`, `CALL page_rank`, and `CALL louvain` Cypher procedure entry points, reverse traversal, PageRank scoring with parity tolerances, deterministic Louvain-compatible community assignment, hierarchical Louvain levels via `maxLevels`, production-shaped compatibility fixtures, and cutover gating |
 
+Note: the current compatibility fixture also covers Nowledge-used entity reuse
+exact, case-insensitive, alias-containment, same-type bounded scan reads, and
+entity temporal metadata create/update writes.
+
 ## LanceDB Replacement Surface
 
 | Capability | Nowledge need | Skein status |

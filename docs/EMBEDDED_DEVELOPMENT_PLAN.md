@@ -157,7 +157,9 @@ queries keep their WAL/commit semantics and are not failed after durable
 execution.
 `nowledge_memory_core_fixture` and `nowledge_memory_core_inventory` expose the
 current Nowledge core compatibility contract as public migration inputs,
-including the Nowledge-used incoming one-hop relationship read pattern
+including Nowledge-used entity reuse exact, case-insensitive, alias-containment,
+same-type bounded scan reads, entity temporal metadata create/update writes, and
+the incoming one-hop relationship read pattern
 `MATCH (e:Entity)<-[:MENTIONS]-(m:Memory)`.
 `CompatibilityQueryCallSite` and `build_compatibility_query_inventory` provide a
 stable production call-site inventory builder with source metadata and duplicate
@@ -570,7 +572,8 @@ report projected graph checks as primary-only. `ExternalShadowCommand` provides
 a JSON-lines process adapter for this interface, so a Ladybug/Kuzu wrapper can
 be attached as a subprocess without linking Kuzu or Python into Skein.
 The current fixture covers indexed parameter lookup, null predicates, list
-predicates with pagination, entity alias list lookup, current timestamp writes,
+predicates with pagination, entity alias list lookup, entity reuse lookup reads,
+entity temporal metadata create/update writes, current timestamp writes,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label

@@ -1293,6 +1293,313 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ),
                 ExpectedRows::Exact(vec![compatibility_row([("id", Value::Int(10))])]),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity reusable exact lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {name: $name, entity_type: $entity_type}) RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "name".to_string(),
+                                Value::String("Reusable Exact".to_string()),
+                            ),
+                            (
+                                "entity_type".to_string(),
+                                Value::String("concept".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "e.id",
+                            Value::String("entity-reusable-exact-1".to_string()),
+                        ),
+                        ("e.name", Value::String("Reusable Exact".to_string())),
+                        (
+                            "e.aliases",
+                            Value::List(vec![Value::String("Exact Alias".to_string())]),
+                        ),
+                        (
+                            "e.entity_created",
+                            Value::String("2024-01-01".to_string()),
+                        ),
+                        ("e.entity_ended", Value::Null),
+                        (
+                            "e.temporal_precision",
+                            Value::String("day".to_string()),
+                        ),
+                        ("e.temporal_confidence", Value::Float(0.75)),
+                        (
+                            "e.temporal_context",
+                            Value::String("exact context".to_string()),
+                        ),
+                        (
+                            "e.description",
+                            Value::String("Exact reusable entity".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-reusable-exact-1', name: 'Reusable Exact', entity_type: 'concept', aliases: ['Exact Alias'], entity_created: '2024-01-01', entity_ended: NULL, temporal_precision: 'day', temporal_confidence: 0.75, temporal_context: 'exact context', description: 'Exact reusable entity', updated_at: 10})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'entity-reusable-exact-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity reusable lowercase lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.entity_type = $entity_type AND LOWER(e.name) = LOWER($name) RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "name".to_string(),
+                                Value::String("reusable case".to_string()),
+                            ),
+                            (
+                                "entity_type".to_string(),
+                                Value::String("concept".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "e.id",
+                            Value::String("entity-reusable-lowercase-1".to_string()),
+                        ),
+                        ("e.name", Value::String("Reusable Case".to_string())),
+                        ("e.aliases", Value::List(vec![])),
+                        (
+                            "e.entity_created",
+                            Value::String("2023-01-01".to_string()),
+                        ),
+                        ("e.entity_ended", Value::Null),
+                        (
+                            "e.temporal_precision",
+                            Value::String("year".to_string()),
+                        ),
+                        ("e.temporal_confidence", Value::Float(0.5)),
+                        ("e.temporal_context", Value::Null),
+                        (
+                            "e.description",
+                            Value::String("Case reusable entity".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-reusable-lowercase-1', name: 'Reusable Case', entity_type: 'concept', aliases: [], entity_created: '2023-01-01', entity_ended: NULL, temporal_precision: 'year', temporal_confidence: 0.5, temporal_context: NULL, description: 'Case reusable entity', updated_at: 20})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'entity-reusable-lowercase-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity reusable alias lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.entity_type = $entity_type AND list_contains(e.aliases, $name) RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "name".to_string(),
+                                Value::String("Reusable Alias".to_string()),
+                            ),
+                            (
+                                "entity_type".to_string(),
+                                Value::String("concept".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "e.id",
+                            Value::String("entity-reusable-alias-1".to_string()),
+                        ),
+                        ("e.name", Value::String("Reusable Alias Owner".to_string())),
+                        (
+                            "e.aliases",
+                            Value::List(vec![Value::String("Reusable Alias".to_string())]),
+                        ),
+                        ("e.entity_created", Value::Null),
+                        ("e.entity_ended", Value::Null),
+                        ("e.temporal_precision", Value::Null),
+                        ("e.temporal_confidence", Value::Null),
+                        ("e.temporal_context", Value::Null),
+                        (
+                            "e.description",
+                            Value::String("Alias reusable entity".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-reusable-alias-1', name: 'Reusable Alias Owner', entity_type: 'concept', aliases: ['Reusable Alias'], entity_created: NULL, entity_ended: NULL, temporal_precision: NULL, temporal_confidence: NULL, temporal_context: NULL, description: 'Alias reusable entity', updated_at: 30})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'entity-reusable-alias-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity reusable same-type bounded scan",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.entity_type = $entity_type RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description ORDER BY e.updated_at DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "entity_type".to_string(),
+                                Value::String("scan-concept".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "e.id",
+                            Value::String("entity-reusable-scan-new".to_string()),
+                        ),
+                        ("e.name", Value::String("Reusable Scan New".to_string())),
+                        (
+                            "e.aliases",
+                            Value::List(vec![Value::String("Scan New".to_string())]),
+                        ),
+                        (
+                            "e.entity_created",
+                            Value::String("2024-02-01".to_string()),
+                        ),
+                        ("e.entity_ended", Value::Null),
+                        (
+                            "e.temporal_precision",
+                            Value::String("day".to_string()),
+                        ),
+                        ("e.temporal_confidence", Value::Float(0.9)),
+                        (
+                            "e.temporal_context",
+                            Value::String("scan context".to_string()),
+                        ),
+                        (
+                            "e.description",
+                            Value::String("New scan reusable entity".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-reusable-scan-old', name: 'Reusable Scan Old', entity_type: 'scan-concept', aliases: ['Scan Old'], entity_created: '2024-01-01', entity_ended: NULL, temporal_precision: 'day', temporal_confidence: 0.6, temporal_context: 'old scan context', description: 'Old scan reusable entity', updated_at: 10})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-reusable-scan-new', name: 'Reusable Scan New', entity_type: 'scan-concept', aliases: ['Scan New'], entity_created: '2024-02-01', entity_ended: NULL, temporal_precision: 'day', temporal_confidence: 0.9, temporal_context: 'scan context', description: 'New scan reusable entity', updated_at: 20})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.entity_type = 'scan-concept' DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity temporal metadata update write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $id}) SET e.aliases = $aliases, e.entity_created = $entity_created, e.entity_ended = $entity_ended, e.temporal_precision = $temporal_precision, e.temporal_confidence = $temporal_confidence, e.temporal_context = $temporal_context, e.updated_at = $updated_at",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("entity-temporal-update-1".to_string()),
+                            ),
+                            (
+                                "aliases".to_string(),
+                                Value::List(vec![Value::String("Updated Alias".to_string())]),
+                            ),
+                            (
+                                "entity_created".to_string(),
+                                Value::String("2024-03-01".to_string()),
+                            ),
+                            ("entity_ended".to_string(), Value::Null),
+                            (
+                                "temporal_precision".to_string(),
+                                Value::String("day".to_string()),
+                            ),
+                            ("temporal_confidence".to_string(), Value::Float(0.8)),
+                            (
+                                "temporal_context".to_string(),
+                                Value::String("updated context".to_string()),
+                            ),
+                            ("updated_at".to_string(), Value::Int(40)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-temporal-update-1', name: 'Temporal Update', entity_type: 'concept', aliases: ['Old Alias'], entity_created: NULL, entity_ended: NULL, temporal_precision: NULL, temporal_confidence: NULL, temporal_context: NULL, updated_at: 1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'entity-temporal-update-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity temporal create write",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (e:Entity { id: $id, name: $name, entity_type: $entity_type, description: $description, aliases: $aliases, confidence: $confidence, entity_created: $entity_created, entity_ended: $entity_ended, temporal_precision: $temporal_precision, temporal_confidence: $temporal_confidence, temporal_context: $temporal_context, created_at: $created_at, updated_at: $updated_at, metadata: $metadata })",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("entity-temporal-create-1".to_string()),
+                            ),
+                            (
+                                "name".to_string(),
+                                Value::String("Temporal Create".to_string()),
+                            ),
+                            (
+                                "entity_type".to_string(),
+                                Value::String("concept".to_string()),
+                            ),
+                            (
+                                "description".to_string(),
+                                Value::String("Created temporal entity".to_string()),
+                            ),
+                            (
+                                "aliases".to_string(),
+                                Value::List(vec![Value::String("Created Alias".to_string())]),
+                            ),
+                            ("confidence".to_string(), Value::Float(0.95)),
+                            (
+                                "entity_created".to_string(),
+                                Value::String("2024-04-01".to_string()),
+                            ),
+                            ("entity_ended".to_string(), Value::Null),
+                            (
+                                "temporal_precision".to_string(),
+                                Value::String("day".to_string()),
+                            ),
+                            ("temporal_confidence".to_string(), Value::Float(0.85)),
+                            (
+                                "temporal_context".to_string(),
+                                Value::String("created context".to_string()),
+                            ),
+                            ("created_at".to_string(), Value::Int(50)),
+                            ("updated_at".to_string(), Value::Int(50)),
+                            ("metadata".to_string(), Value::String("{}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'entity-temporal-create-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "current timestamp write",
                 CypherFixtureStatement::new(
@@ -7503,6 +7810,54 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE e.entity_type = $entity_type AND list_contains(e.aliases, $name)",
             ),
             CompatibilityQueryCallSite::new(
+                "entity reusable exact lookup",
+                "entity_write_lookup",
+                "nmem-graph::entity_write::find_reusable_entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity {name: $name, entity_type: $entity_type}) RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "entity reusable lowercase lookup",
+                "entity_write_lookup",
+                "nmem-graph::entity_write::find_reusable_entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.entity_type = $entity_type AND LOWER(e.name) = LOWER($name) RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "entity reusable alias lookup",
+                "entity_write_lookup",
+                "nmem-graph::entity_write::find_reusable_entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.entity_type = $entity_type AND list_contains(e.aliases, $name) RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "entity reusable same-type bounded scan",
+                "entity_write_lookup",
+                "nmem-graph::entity_write::find_reusable_entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.entity_type = $entity_type RETURN e.id, e.name, e.aliases, e.entity_created, e.entity_ended, e.temporal_precision, e.temporal_confidence, e.temporal_context, e.description ORDER BY e.updated_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "entity temporal metadata update write",
+                "entity_write",
+                "nmem-graph::entity_write::store_entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity {id: $id}) SET e.aliases = $aliases, e.entity_created = $entity_created, e.entity_ended = $entity_ended, e.temporal_precision = $temporal_precision, e.temporal_confidence = $temporal_confidence, e.temporal_context = $temporal_context, e.updated_at = $updated_at",
+            ),
+            CompatibilityQueryCallSite::new(
+                "entity temporal create write",
+                "entity_write",
+                "nmem-graph::entity_write::store_entity",
+            )
+            .with_cypher(
+                "CREATE (e:Entity { id: $id, name: $name, entity_type: $entity_type, description: $description, aliases: $aliases, confidence: $confidence, entity_created: $entity_created, entity_ended: $entity_ended, temporal_precision: $temporal_precision, temporal_confidence: $temporal_confidence, temporal_context: $temporal_context, created_at: $created_at, updated_at: $updated_at, metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
                 "current timestamp write",
                 "augmentation_write",
                 "nmem-graph::augmentation::create_job",
@@ -9058,7 +9413,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 190);
+        assert_eq!(report.checks.len(), 196);
     }
 
     #[test]
@@ -9074,13 +9429,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 190);
-        assert_eq!(coverage.covered_checks, 190);
+        assert_eq!(coverage.required_checks, 196);
+        assert_eq!(coverage.covered_checks, 196);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 190);
+        assert_eq!(coverage_json["covered_checks"], 196);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -9110,10 +9465,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 190);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 196);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 190);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 196);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -9307,15 +9662,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 190);
-        assert_eq!(report.shadow_checks.len(), 190);
+        assert_eq!(report.primary_checks.len(), 196);
+        assert_eq!(report.shadow_checks.len(), 196);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            190
+            196
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -9324,7 +9679,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 190);
+        assert_eq!(cutover.matched_checks, 196);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
