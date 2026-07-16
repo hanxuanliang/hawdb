@@ -182,7 +182,7 @@ impl Parser<'_> {
                 },
             ));
         }
-        if self.consume_keyword("MATCH") {
+        if self.consume_char(',') || self.consume_keyword("MATCH") {
             let (matched_target_variable, matched_target_label, matched_target_properties) =
                 self.parse_match_node_pattern()?;
             let post_match_expand = self.parse_post_match_relationship_expand(
@@ -239,6 +239,12 @@ impl Parser<'_> {
                     limit,
                 })));
             }
+            if self.consume_keyword("WHERE") {
+                predicate = Some(combine_match_predicates(
+                    predicate,
+                    self.parse_property_predicate()?,
+                ));
+            }
             self.expect_keyword("MERGE")?;
             let Some(expand) = expand else {
                 return Err(self.error("MATCH MERGE requires a bound relationship pattern"));
@@ -260,6 +266,7 @@ impl Parser<'_> {
                     matched_target_variable,
                     matched_target_label,
                     matched_target_properties,
+                    predicate,
                     merge_source_variable: merge_pattern.source_variable,
                     rel_variable: merge_pattern.rel_variable,
                     rel_type: merge_pattern.rel_type,

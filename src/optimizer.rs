@@ -139,6 +139,19 @@ pub enum PhysicalPlan {
         new_rel_match_properties: BTreeMap<String, Value>,
         on_create_properties: BTreeMap<String, Value>,
     },
+    MergeRelationshipFromMatchedTarget {
+        old_source_label: String,
+        old_source_properties: BTreeMap<String, Value>,
+        old_rel_type: String,
+        old_rel_properties: BTreeMap<String, Value>,
+        old_target_label: String,
+        old_target_properties: BTreeMap<String, Value>,
+        new_source_label: String,
+        new_source_properties: BTreeMap<String, Value>,
+        new_rel_type: String,
+        new_rel_match_properties: BTreeMap<String, Value>,
+        on_create_properties: BTreeMap<String, Value>,
+    },
     CreateMatchedRelationship {
         source_label: String,
         source_properties: BTreeMap<String, Value>,
@@ -481,6 +494,18 @@ impl PhysicalPlan {
             } => {
                 format!(
                     "{pad}MergeRelationshipToMatchedTarget source_label={source_label} old_rel_type={old_rel_type} old_target={old_target_label} new_rel_type={new_rel_type} new_target={new_target_label}"
+                )
+            }
+            PhysicalPlan::MergeRelationshipFromMatchedTarget {
+                old_source_label,
+                old_rel_type,
+                old_target_label,
+                new_source_label,
+                new_rel_type,
+                ..
+            } => {
+                format!(
+                    "{pad}MergeRelationshipFromMatchedTarget old_source={old_source_label} old_rel_type={old_rel_type} old_target={old_target_label} new_rel_type={new_rel_type} new_source={new_source_label}"
                 )
             }
             PhysicalPlan::CreateMatchedRelationship {
@@ -1114,6 +1139,43 @@ impl PhysicalPlan {
                 write_identifier(output, new_target_label);
                 output.push(',');
                 write_properties(output, new_target_properties);
+                output.push_str("),new_rel=[");
+                write_identifier(output, new_rel_type);
+                output.push(',');
+                write_properties(output, new_rel_match_properties);
+                output.push(',');
+                write_properties(output, on_create_properties);
+                output.push(']');
+            }
+            PhysicalPlan::MergeRelationshipFromMatchedTarget {
+                old_source_label,
+                old_source_properties,
+                old_rel_type,
+                old_rel_properties,
+                old_target_label,
+                old_target_properties,
+                new_source_label,
+                new_source_properties,
+                new_rel_type,
+                new_rel_match_properties,
+                on_create_properties,
+            } => {
+                output.push_str("MergeRelationshipFromMatchedTarget(old_source=");
+                write_identifier(output, old_source_label);
+                output.push(',');
+                write_properties(output, old_source_properties);
+                output.push_str(")-[");
+                write_identifier(output, old_rel_type);
+                output.push(',');
+                write_properties(output, old_rel_properties);
+                output.push_str("]->(");
+                write_identifier(output, old_target_label);
+                output.push(',');
+                write_properties(output, old_target_properties);
+                output.push_str("),new_source=(");
+                write_identifier(output, new_source_label);
+                output.push(',');
+                write_properties(output, new_source_properties);
                 output.push_str("),new_rel=[");
                 write_identifier(output, new_rel_type);
                 output.push(',');
@@ -2126,6 +2188,7 @@ impl GroupExpr {
             | LogicalPlan::MergeMatchedRelationship { .. }
             | LogicalPlan::MergeRelationshipFromMatchedRelationship { .. }
             | LogicalPlan::MergeRelationshipToMatchedTarget { .. }
+            | LogicalPlan::MergeRelationshipFromMatchedTarget { .. }
             | LogicalPlan::CreateMatchedRelationship { .. }
             | LogicalPlan::SetNodeProperty { .. }
             | LogicalPlan::SetNodeProperties { .. }
@@ -2370,6 +2433,31 @@ impl GroupExpr {
                 old_target_properties: old_target_properties.clone(),
                 new_target_label: new_target_label.clone(),
                 new_target_properties: new_target_properties.clone(),
+                new_rel_type: new_rel_type.clone(),
+                new_rel_match_properties: new_rel_match_properties.clone(),
+                on_create_properties: on_create_properties.clone(),
+            },
+            LogicalPlan::MergeRelationshipFromMatchedTarget {
+                old_source_label,
+                old_source_properties,
+                old_rel_type,
+                old_rel_properties,
+                old_target_label,
+                old_target_properties,
+                new_source_label,
+                new_source_properties,
+                new_rel_type,
+                new_rel_match_properties,
+                on_create_properties,
+            } => PhysicalPlan::MergeRelationshipFromMatchedTarget {
+                old_source_label: old_source_label.clone(),
+                old_source_properties: old_source_properties.clone(),
+                old_rel_type: old_rel_type.clone(),
+                old_rel_properties: old_rel_properties.clone(),
+                old_target_label: old_target_label.clone(),
+                old_target_properties: old_target_properties.clone(),
+                new_source_label: new_source_label.clone(),
+                new_source_properties: new_source_properties.clone(),
                 new_rel_type: new_rel_type.clone(),
                 new_rel_match_properties: new_rel_match_properties.clone(),
                 on_create_properties: on_create_properties.clone(),
@@ -2725,6 +2813,7 @@ fn logical_group_count(logical: &LogicalPlan) -> usize {
         | LogicalPlan::MergeMatchedRelationship { .. }
         | LogicalPlan::MergeRelationshipFromMatchedRelationship { .. }
         | LogicalPlan::MergeRelationshipToMatchedTarget { .. }
+        | LogicalPlan::MergeRelationshipFromMatchedTarget { .. }
         | LogicalPlan::CreateMatchedRelationship { .. }
         | LogicalPlan::SetNodeProperty { .. }
         | LogicalPlan::SetNodeProperties { .. }
@@ -2947,6 +3036,31 @@ fn logical_to_physical_direct(
             old_target_properties: old_target_properties.clone(),
             new_target_label: new_target_label.clone(),
             new_target_properties: new_target_properties.clone(),
+            new_rel_type: new_rel_type.clone(),
+            new_rel_match_properties: new_rel_match_properties.clone(),
+            on_create_properties: on_create_properties.clone(),
+        },
+        LogicalPlan::MergeRelationshipFromMatchedTarget {
+            old_source_label,
+            old_source_properties,
+            old_rel_type,
+            old_rel_properties,
+            old_target_label,
+            old_target_properties,
+            new_source_label,
+            new_source_properties,
+            new_rel_type,
+            new_rel_match_properties,
+            on_create_properties,
+        } => PhysicalPlan::MergeRelationshipFromMatchedTarget {
+            old_source_label: old_source_label.clone(),
+            old_source_properties: old_source_properties.clone(),
+            old_rel_type: old_rel_type.clone(),
+            old_rel_properties: old_rel_properties.clone(),
+            old_target_label: old_target_label.clone(),
+            old_target_properties: old_target_properties.clone(),
+            new_source_label: new_source_label.clone(),
+            new_source_properties: new_source_properties.clone(),
             new_rel_type: new_rel_type.clone(),
             new_rel_match_properties: new_rel_match_properties.clone(),
             on_create_properties: on_create_properties.clone(),
@@ -3530,6 +3644,7 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
         | PhysicalPlan::MergeMatchedRelationship { .. }
         | PhysicalPlan::MergeRelationshipFromMatchedRelationship { .. }
         | PhysicalPlan::MergeRelationshipToMatchedTarget { .. }
+        | PhysicalPlan::MergeRelationshipFromMatchedTarget { .. }
         | PhysicalPlan::CreateMatchedRelationship { .. }
         | PhysicalPlan::SetNodeProperty { .. }
         | PhysicalPlan::SetNodeProperties { .. }

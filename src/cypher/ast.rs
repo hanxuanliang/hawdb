@@ -386,6 +386,7 @@ pub struct MatchExpandMatchMergeRelationship {
     pub matched_target_variable: String,
     pub matched_target_label: String,
     pub matched_target_properties: BTreeMap<String, ValueExpression>,
+    pub predicate: Option<PropertyPredicate>,
     pub merge_source_variable: String,
     pub rel_variable: Option<String>,
     pub rel_type: String,

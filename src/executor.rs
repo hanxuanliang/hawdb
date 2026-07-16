@@ -12,11 +12,11 @@ use crate::planner::{
 use crate::schema::{Catalog, PropertyType, TableKind};
 use crate::store::{
     ConnectedNodesCreate, GraphMutation, GraphStore, MatchedRelationshipCopyMerge,
-    MatchedRelationshipCreate, MatchedRelationshipMerge, MatchedRelationshipRetargetMerge, NodeId,
-    NodeRecord, NodeSetAssignment, NodeSetValue, ProjectedGraphDefinition, PropertyFilter,
-    RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
-    RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
-    RelationshipTargetNodeDelete,
+    MatchedRelationshipCreate, MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
+    MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue,
+    ProjectedGraphDefinition, PropertyFilter, RelRecord, RelationshipDeleteRequest,
+    RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate, RelationshipPropertyUpdate,
+    RelationshipSetAssignment, RelationshipTargetNodeDelete,
 };
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -252,6 +252,33 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
                 old_target_filter: property_filter_from_properties(old_target_properties),
                 new_target_label: new_target_label.clone(),
                 new_target_filter: property_filter_from_properties(new_target_properties),
+                new_rel_type: new_rel_type.clone(),
+                new_rel_match_properties: new_rel_match_properties.clone(),
+                on_create_properties: on_create_properties.clone(),
+            },
+        ))),
+        PhysicalPlan::MergeRelationshipFromMatchedTarget {
+            old_source_label,
+            old_source_properties,
+            old_rel_type,
+            old_rel_properties,
+            old_target_label,
+            old_target_properties,
+            new_source_label,
+            new_source_properties,
+            new_rel_type,
+            new_rel_match_properties,
+            on_create_properties,
+        } => Ok(Some(GraphMutation::MergeRelationshipsFromMatchedTarget(
+            MatchedRelationshipSourceRetargetMerge {
+                old_source_label: old_source_label.clone(),
+                old_source_filter: property_filter_from_properties(old_source_properties),
+                old_rel_type: old_rel_type.clone(),
+                old_rel_filter: old_rel_properties.clone(),
+                old_target_label: old_target_label.clone(),
+                old_target_filter: property_filter_from_properties(old_target_properties),
+                new_source_label: new_source_label.clone(),
+                new_source_filter: property_filter_from_properties(new_source_properties),
                 new_rel_type: new_rel_type.clone(),
                 new_rel_match_properties: new_rel_match_properties.clone(),
                 on_create_properties: on_create_properties.clone(),
@@ -1124,6 +1151,49 @@ fn execute_bindings(
                     old_target_filter: property_filter_from_properties(old_target_properties),
                     new_target_label: new_target_label.clone(),
                     new_target_filter: property_filter_from_properties(new_target_properties),
+                    new_rel_type: new_rel_type.clone(),
+                    new_rel_match_properties: new_rel_match_properties.clone(),
+                    on_create_properties: on_create_properties.clone(),
+                },
+            )?;
+            Ok(rows
+                .into_iter()
+                .map(|(source, rel, target, created)| Binding {
+                    values: BTreeMap::from([
+                        ("source_node_id".to_string(), Value::Int(source.0 as i64)),
+                        ("target_node_id".to_string(), Value::Int(target.0 as i64)),
+                        ("rel_id".to_string(), Value::Int(rel.0 as i64)),
+                        ("created".to_string(), Value::Bool(created)),
+                    ]),
+                    nodes: BTreeMap::new(),
+                    relationships: BTreeMap::new(),
+                })
+                .collect())
+        }
+        PhysicalPlan::MergeRelationshipFromMatchedTarget {
+            old_source_label,
+            old_source_properties,
+            old_rel_type,
+            old_rel_properties,
+            old_target_label,
+            old_target_properties,
+            new_source_label,
+            new_source_properties,
+            new_rel_type,
+            new_rel_match_properties,
+            on_create_properties,
+        } => {
+            let rows = store.merge_relationships_from_matched_target(
+                catalog,
+                MatchedRelationshipSourceRetargetMerge {
+                    old_source_label: old_source_label.clone(),
+                    old_source_filter: property_filter_from_properties(old_source_properties),
+                    old_rel_type: old_rel_type.clone(),
+                    old_rel_filter: old_rel_properties.clone(),
+                    old_target_label: old_target_label.clone(),
+                    old_target_filter: property_filter_from_properties(old_target_properties),
+                    new_source_label: new_source_label.clone(),
+                    new_source_filter: property_filter_from_properties(new_source_properties),
                     new_rel_type: new_rel_type.clone(),
                     new_rel_match_properties: new_rel_match_properties.clone(),
                     on_create_properties: on_create_properties.clone(),

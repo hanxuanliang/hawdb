@@ -2519,3 +2519,21 @@ fn parses_match_expand_match_merge_relationship() {
     assert_eq!(query.rel_type, "HAS_LABEL");
     assert_eq!(query.on_create_sets.len(), 2);
 }
+
+#[test]
+fn parses_match_expand_comma_match_merge_relationship_with_predicate() {
+    let statement = parse(
+        "MATCH (older:Memory {id: $older_id})-[:HAS_LABEL]->(label:Label), (newer:Memory {id: $newer_id}) WHERE older.space_id = $space_id AND newer.space_id = $space_id MERGE (newer)-[edge:HAS_LABEL]->(label) ON CREATE SET edge.assigned_by = 'system', edge.created_at = $created_at, edge.properties = '{}'",
+    )
+    .unwrap();
+    let Statement::MatchExpandMatchMergeRelationship(query) = statement else {
+        panic!("expected match expand comma merge relationship");
+    };
+    assert_eq!(query.source_variable, "older");
+    assert_eq!(query.expand.target_variable, "label");
+    assert_eq!(query.matched_target_variable, "newer");
+    assert_eq!(query.rel_variable.as_deref(), Some("edge"));
+    assert_eq!(query.rel_type, "HAS_LABEL");
+    assert!(query.predicate.is_some());
+    assert_eq!(query.on_create_sets.len(), 3);
+}

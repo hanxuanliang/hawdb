@@ -143,6 +143,21 @@ pub struct MatchedRelationshipRetargetMerge {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchedRelationshipSourceRetargetMerge {
+    pub old_source_label: String,
+    pub old_source_filter: Option<PropertyFilter>,
+    pub old_rel_type: String,
+    pub old_rel_filter: BTreeMap<String, Value>,
+    pub old_target_label: String,
+    pub old_target_filter: Option<PropertyFilter>,
+    pub new_source_label: String,
+    pub new_source_filter: Option<PropertyFilter>,
+    pub new_rel_type: String,
+    pub new_rel_match_properties: BTreeMap<String, Value>,
+    pub on_create_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RelationshipPropertyUpdate {
     pub source_label: String,
     pub filter: Option<PropertyFilter>,
@@ -322,6 +337,7 @@ pub enum GraphMutation {
     MergeRelationshipsBetweenMatches(MatchedRelationshipMerge),
     MergeRelationshipsFromMatchedRelationships(MatchedRelationshipCopyMerge),
     MergeRelationshipsToMatchedTarget(MatchedRelationshipRetargetMerge),
+    MergeRelationshipsFromMatchedTarget(MatchedRelationshipSourceRetargetMerge),
     CreateConnectedNodes(ConnectedNodesCreate),
 }
 
@@ -1551,6 +1567,110 @@ impl GraphStore {
                 Some(new_target_label_id),
                 request.new_target_filter.as_ref(),
             )
+            .collect::<Vec<_>>();
+        let mut next_rel_id = self.next_rel_id;
+        let mut rows = Vec::new();
+        let mut ops = Vec::new();
+        for source in source_ids {
+            for target in &target_ids {
+                if let Some(rel) = self.find_relationship_by_property_subset(
+                    source,
+                    *target,
+                    new_rel_type_id,
+                    &request.new_rel_match_properties,
+                ) {
+                    rows.push((source, rel, *target, false));
+                    continue;
+                }
+                let rel = RelId(next_rel_id);
+                next_rel_id += 1;
+                let mut properties = request.new_rel_match_properties.clone();
+                properties.extend(request.on_create_properties.clone());
+                ops.push(WalOp::CreateRelationship {
+                    id: rel,
+                    source,
+                    target: *target,
+                    rel_type: request.new_rel_type.clone(),
+                    properties,
+                });
+                rows.push((source, rel, *target, true));
+            }
+        }
+        if !ops.is_empty() {
+            self.validate_constraints_for_ops(catalog, &ops)?;
+            if let Some(durable) = &mut self.durable {
+                durable.append_batch(ops.clone())?;
+            }
+            for op in ops {
+                self.apply_wal_op(catalog, op);
+            }
+            self.commit_epoch += 1;
+        }
+        Ok(rows)
+    }
+
+    pub fn merge_relationships_from_matched_target(
+        &mut self,
+        catalog: &mut Catalog,
+        request: MatchedRelationshipSourceRetargetMerge,
+    ) -> Result<Vec<(NodeId, RelId, NodeId, bool)>> {
+        let old_source_label_id = optional_label_id(catalog, &request.old_source_label);
+        if !request.old_source_label.is_empty() && old_source_label_id.is_none() {
+            return Ok(Vec::new());
+        }
+        let Some(old_target_label_id) = catalog.label_id(&request.old_target_label) else {
+            return Ok(Vec::new());
+        };
+        let new_source_label_id = optional_label_id(catalog, &request.new_source_label);
+        if !request.new_source_label.is_empty() && new_source_label_id.is_none() {
+            return Ok(Vec::new());
+        }
+        let Some(old_rel_type_id) = catalog.rel_type_id(&request.old_rel_type) else {
+            return Ok(Vec::new());
+        };
+        let new_rel_type_id = catalog.get_or_create_rel_type(&request.new_rel_type);
+        let target_ids = self
+            .scan_relationships(Some(old_rel_type_id))
+            .filter(|relationship| {
+                properties_contain_all(&relationship.properties, &request.old_rel_filter)
+                    && self
+                        .nodes
+                        .get(&relationship.source)
+                        .map(|node| {
+                            old_source_label_id
+                                .map(|label_id| node.labels.contains(&label_id))
+                                .unwrap_or(true)
+                                && request
+                                    .old_source_filter
+                                    .as_ref()
+                                    .map(|filter| {
+                                        property_filter_matches(filter, node.id.0, &node.properties)
+                                    })
+                                    .unwrap_or(true)
+                        })
+                        .unwrap_or(false)
+                    && self
+                        .nodes
+                        .get(&relationship.target)
+                        .map(|node| {
+                            node.labels.contains(&old_target_label_id)
+                                && request
+                                    .old_target_filter
+                                    .as_ref()
+                                    .map(|filter| {
+                                        property_filter_matches(filter, node.id.0, &node.properties)
+                                    })
+                                    .unwrap_or(true)
+                        })
+                        .unwrap_or(false)
+            })
+            .map(|relationship| relationship.target)
+            .collect::<BTreeSet<_>>();
+        if target_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let source_ids = self
+            .matching_node_ids(new_source_label_id, request.new_source_filter.as_ref())
             .collect::<Vec<_>>();
         let mut next_rel_id = self.next_rel_id;
         let mut rows = Vec::new();
@@ -3149,6 +3269,142 @@ impl GraphStore {
                             Some(new_target_label_id),
                             request.new_target_filter.as_ref(),
                         )
+                        .collect::<Vec<_>>();
+                    for source in source_ids {
+                        for target in &target_ids {
+                            let current = self.find_relationship_by_property_subset(
+                                source,
+                                *target,
+                                new_rel_type_id,
+                                &request.new_rel_match_properties,
+                            );
+                            let pending = pending_relationships
+                                .iter()
+                                .find(
+                                    |(
+                                        _,
+                                        pending_source,
+                                        pending_target,
+                                        pending_type,
+                                        properties,
+                                    )| {
+                                        *pending_source == source
+                                            && *pending_target == *target
+                                            && *pending_type == new_rel_type_id
+                                            && properties_contain_all(
+                                                properties,
+                                                &request.new_rel_match_properties,
+                                            )
+                                    },
+                                )
+                                .map(|(id, _, _, _, _)| *id);
+                            if let Some(relationship) = current.or(pending) {
+                                rows.push(BTreeMap::from([
+                                    ("source_node_id".to_string(), Value::Int(source.0 as i64)),
+                                    ("target_node_id".to_string(), Value::Int(target.0 as i64)),
+                                    ("rel_id".to_string(), Value::Int(relationship.0 as i64)),
+                                    ("created".to_string(), Value::Bool(false)),
+                                ]));
+                                continue;
+                            }
+                            let relationship = RelId(next_rel_id);
+                            next_rel_id += 1;
+                            let mut properties = request.new_rel_match_properties.clone();
+                            properties.extend(request.on_create_properties.clone());
+                            ops.push(WalOp::CreateRelationship {
+                                id: relationship,
+                                source,
+                                target: *target,
+                                rel_type: request.new_rel_type.clone(),
+                                properties: properties.clone(),
+                            });
+                            pending_relationships.push((
+                                relationship,
+                                source,
+                                *target,
+                                new_rel_type_id,
+                                properties,
+                            ));
+                            rows.push(BTreeMap::from([
+                                ("source_node_id".to_string(), Value::Int(source.0 as i64)),
+                                ("target_node_id".to_string(), Value::Int(target.0 as i64)),
+                                ("rel_id".to_string(), Value::Int(relationship.0 as i64)),
+                                ("created".to_string(), Value::Bool(true)),
+                            ]));
+                        }
+                    }
+                }
+                GraphMutation::MergeRelationshipsFromMatchedTarget(request) => {
+                    let old_source_label_id =
+                        optional_label_id(&working_catalog, &request.old_source_label);
+                    if !request.old_source_label.is_empty() && old_source_label_id.is_none() {
+                        continue;
+                    }
+                    let Some(old_target_label_id) =
+                        working_catalog.label_id(&request.old_target_label)
+                    else {
+                        continue;
+                    };
+                    let new_source_label_id =
+                        optional_label_id(&working_catalog, &request.new_source_label);
+                    if !request.new_source_label.is_empty() && new_source_label_id.is_none() {
+                        continue;
+                    }
+                    let Some(old_rel_type_id) = working_catalog.rel_type_id(&request.old_rel_type)
+                    else {
+                        continue;
+                    };
+                    let new_rel_type_id =
+                        working_catalog.get_or_create_rel_type(&request.new_rel_type);
+                    let target_ids = self
+                        .scan_relationships(Some(old_rel_type_id))
+                        .filter(|relationship| {
+                            properties_contain_all(
+                                &relationship.properties,
+                                &request.old_rel_filter,
+                            ) && self
+                                .nodes
+                                .get(&relationship.source)
+                                .map(|node| {
+                                    old_source_label_id
+                                        .map(|label_id| node.labels.contains(&label_id))
+                                        .unwrap_or(true)
+                                        && request
+                                            .old_source_filter
+                                            .as_ref()
+                                            .map(|filter| {
+                                                property_filter_matches(
+                                                    filter,
+                                                    node.id.0,
+                                                    &node.properties,
+                                                )
+                                            })
+                                            .unwrap_or(true)
+                                })
+                                .unwrap_or(false)
+                                && self
+                                    .nodes
+                                    .get(&relationship.target)
+                                    .map(|node| {
+                                        node.labels.contains(&old_target_label_id)
+                                            && request
+                                                .old_target_filter
+                                                .as_ref()
+                                                .map(|filter| {
+                                                    property_filter_matches(
+                                                        filter,
+                                                        node.id.0,
+                                                        &node.properties,
+                                                    )
+                                                })
+                                                .unwrap_or(true)
+                                    })
+                                    .unwrap_or(false)
+                        })
+                        .map(|relationship| relationship.target)
+                        .collect::<BTreeSet<_>>();
+                    let source_ids = self
+                        .matching_node_ids(new_source_label_id, request.new_source_filter.as_ref())
                         .collect::<Vec<_>>();
                     for source in source_ids {
                         for target in &target_ids {

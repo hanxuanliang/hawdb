@@ -11576,6 +11576,50 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory label transfer retarget relationship",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (older:Memory {id: $older_id})-[:HAS_LABEL]->(label:Label), (newer:Memory {id: $newer_id}) WHERE older.space_id = $space_id AND newer.space_id = $space_id MERGE (newer)-[edge:HAS_LABEL]->(label) ON CREATE SET edge.assigned_by = 'system', edge.created_at = $created_at, edge.properties = '{}'",
+                        BTreeMap::from([
+                            (
+                                "older_id".to_string(),
+                                Value::String("label-transfer-older".to_string()),
+                            ),
+                            (
+                                "newer_id".to_string(),
+                                Value::String("label-transfer-newer".to_string()),
+                            ),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("created_at".to_string(), Value::Int(7100)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-transfer-older', space_id: 'default'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'label-transfer-newer', space_id: 'default'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-transfer-label', name: 'Transferred'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'label-transfer-older'}), (l:Label {id: 'label-transfer-label'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'label-transfer-newer'})-[r:HAS_LABEL]->(l:Label {id: 'label-transfer-label'}) RETURN count(r) AS total, min(r.assigned_by) AS assigned_by, min(r.created_at) AS created_at, min(r.properties) AS properties",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("total", Value::Int(1)),
+                        ("assigned_by", Value::String("system".to_string())),
+                        ("created_at", Value::Int(7100)),
+                        ("properties", Value::String("{}".to_string())),
+                    ])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp graph all shortest path read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH p = (a)-[e* ALL SHORTEST 1..3]-(b) WHERE a.id = $from_id AND b.id = $to_id RETURN properties(nodes(p), 'id') AS node_ids, properties(nodes(p), 'name') AS names, length(p) AS hops",
@@ -14068,6 +14112,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (older:Memory {id: $older_id}) WHERE older.space_id = $space_id SET older.is_latest = false",
             ),
             CompatibilityQueryCallSite::new(
+                "memory label transfer retarget relationship",
+                "memory_evolution_write",
+                "nmem-graph::repo::add_evolves_edge::copy_replaced_memory_labels",
+            )
+            .with_cypher(
+                "MATCH (older:Memory {id: $older_id})-[:HAS_LABEL]->(label:Label), (newer:Memory {id: $newer_id}) WHERE older.space_id = $space_id AND newer.space_id = $space_id MERGE (newer)-[edge:HAS_LABEL]->(label) ON CREATE SET edge.assigned_by = 'system', edge.created_at = $created_at, edge.properties = '{}'",
+            ),
+            CompatibilityQueryCallSite::new(
                 "distinct relationship aggregation",
                 "aggregation_read",
                 "nowledge-memory-core::distinct-summary",
@@ -15441,7 +15493,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 342);
+        assert_eq!(report.checks.len(), 343);
     }
 
     #[test]
@@ -15457,13 +15509,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 342);
-        assert_eq!(coverage.covered_checks, 342);
+        assert_eq!(coverage.required_checks, 343);
+        assert_eq!(coverage.covered_checks, 343);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 342);
+        assert_eq!(coverage_json["covered_checks"], 343);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15493,10 +15545,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 342);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 343);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 342);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 343);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -15721,15 +15773,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 342);
-        assert_eq!(report.shadow_checks.len(), 342);
+        assert_eq!(report.primary_checks.len(), 343);
+        assert_eq!(report.shadow_checks.len(), 343);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            342
+            343
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -15738,7 +15790,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 342);
+        assert_eq!(cutover.matched_checks, 343);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

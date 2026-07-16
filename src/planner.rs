@@ -142,6 +142,19 @@ pub enum LogicalPlan {
         new_rel_match_properties: BTreeMap<String, Value>,
         on_create_properties: BTreeMap<String, Value>,
     },
+    MergeRelationshipFromMatchedTarget {
+        old_source_label: String,
+        old_source_properties: BTreeMap<String, Value>,
+        old_rel_type: String,
+        old_rel_properties: BTreeMap<String, Value>,
+        old_target_label: String,
+        old_target_properties: BTreeMap<String, Value>,
+        new_source_label: String,
+        new_source_properties: BTreeMap<String, Value>,
+        new_rel_type: String,
+        new_rel_match_properties: BTreeMap<String, Value>,
+        on_create_properties: BTreeMap<String, Value>,
+    },
     SetNodeProperty {
         variable: String,
         label: String,
@@ -912,42 +925,67 @@ pub fn plan_with_params(
                         .to_string(),
                 ));
             }
-            if merge.merge_source_variable != merge.source_variable {
-                return Err(SkeinError::Semantic(format!(
-                    "relationship retarget MERGE source variable '{}' does not match bound variable '{}'",
-                    merge.merge_source_variable, merge.source_variable
-                )));
-            }
-            if merge.merge_target_variable != merge.matched_target_variable {
-                return Err(SkeinError::Semantic(format!(
-                    "relationship retarget MERGE target variable '{}' does not match bound variable '{}'",
-                    merge.merge_target_variable, merge.matched_target_variable
-                )));
-            }
+            let (source_properties, new_target_properties) =
+                bind_two_node_relationship_create_filters(
+                    &merge.source_variable,
+                    &merge.source_properties,
+                    &merge.matched_target_variable,
+                    &merge.matched_target_properties,
+                    merge.predicate.as_ref(),
+                    parameters,
+                )?;
             let on_create_properties = bind_relationship_on_create_set_properties(
                 merge.rel_variable.as_deref(),
                 &merge.on_create_sets,
                 parameters,
             )?;
-            Ok(LogicalPlan::MergeRelationshipToMatchedTarget {
-                source_label: merge.source_label.clone(),
-                source_properties: bind_properties(&merge.source_properties, parameters)?,
-                old_rel_type: merge.expand.rel_type.clone(),
-                old_rel_properties: bind_properties(&merge.expand.properties, parameters)?,
-                old_target_label: merge.expand.target_label.clone(),
-                old_target_properties: bind_properties(
-                    &merge.expand.target_properties,
-                    parameters,
-                )?,
-                new_target_label: merge.matched_target_label.clone(),
-                new_target_properties: bind_properties(
-                    &merge.matched_target_properties,
-                    parameters,
-                )?,
-                new_rel_type: merge.rel_type.clone(),
-                new_rel_match_properties: bind_properties(&merge.rel_properties, parameters)?,
-                on_create_properties,
-            })
+            let old_rel_properties = bind_properties(&merge.expand.properties, parameters)?;
+            let old_target_properties =
+                bind_properties(&merge.expand.target_properties, parameters)?;
+            let new_rel_match_properties = bind_properties(&merge.rel_properties, parameters)?;
+            if merge.merge_source_variable == merge.source_variable
+                && merge.merge_target_variable == merge.matched_target_variable
+            {
+                return Ok(LogicalPlan::MergeRelationshipToMatchedTarget {
+                    source_label: merge.source_label.clone(),
+                    source_properties,
+                    old_rel_type: merge.expand.rel_type.clone(),
+                    old_rel_properties,
+                    old_target_label: merge.expand.target_label.clone(),
+                    old_target_properties,
+                    new_target_label: merge.matched_target_label.clone(),
+                    new_target_properties,
+                    new_rel_type: merge.rel_type.clone(),
+                    new_rel_match_properties,
+                    on_create_properties,
+                });
+            }
+            if merge.merge_source_variable == merge.matched_target_variable
+                && merge.merge_target_variable == merge.expand.target_variable
+            {
+                return Ok(LogicalPlan::MergeRelationshipFromMatchedTarget {
+                    old_source_label: merge.source_label.clone(),
+                    old_source_properties: source_properties,
+                    old_rel_type: merge.expand.rel_type.clone(),
+                    old_rel_properties,
+                    old_target_label: merge.expand.target_label.clone(),
+                    old_target_properties,
+                    new_source_label: merge.matched_target_label.clone(),
+                    new_source_properties: new_target_properties,
+                    new_rel_type: merge.rel_type.clone(),
+                    new_rel_match_properties,
+                    on_create_properties,
+                });
+            }
+            Err(SkeinError::Semantic(format!(
+                "relationship retarget MERGE variables '{}'-'{}' do not match supported bound pairs '{}'-'{}' or '{}'-'{}'",
+                merge.merge_source_variable,
+                merge.merge_target_variable,
+                merge.source_variable,
+                merge.matched_target_variable,
+                merge.matched_target_variable,
+                merge.expand.target_variable
+            )))
         }
         Statement::MatchSet(update) => {
             if update.sets.is_empty() {
