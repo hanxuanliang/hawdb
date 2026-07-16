@@ -133,6 +133,11 @@ the local bootstrap artifacts before upload. The report covers GraphStream
 format version, body checksum, manifest checksum and byte-length agreement,
 declared count agreement, duplicate node/relationship IDs, and relationship
 endpoint integrity.
+`skein graph-lightning-bootstrap-bundle [--require-ready] <database-path>`
+prints one machine-readable bootstrap evidence bundle containing the manifest,
+the GraphStream validation report, and a ready/blocked export gate decision. Use
+this as the CI or upload preflight entry point when the caller needs one JSON
+artifact instead of separate manifest and verifier commands.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a

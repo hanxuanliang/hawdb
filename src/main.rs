@@ -218,6 +218,42 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "graph-lightning-bootstrap-bundle" {
+            let mut require_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_bootstrap_bundle_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(
+                    graph_lightning_bootstrap_bundle_usage(),
+                ));
+            }
+            let mut db = Database::open(path)?;
+            let export = db.prepare_graph_lightning_bootstrap_export()?;
+            let rendered = graph_lightning_bootstrap_bundle_json(&export);
+            println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            if require_ready
+                && rendered
+                    .get("export_gate")
+                    .and_then(|gate| gate.get("decision"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("ready")
+            {
+                return Err(SkeinError::Execution(
+                    "graph lightning bootstrap bundle is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
         if command == "graph-lightning-graph-stream" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
@@ -312,6 +348,10 @@ fn validate_canonical_snapshot_usage() -> String {
 
 fn graph_lightning_bootstrap_manifest_usage() -> String {
     "graph-lightning-bootstrap-manifest requires [--require-ready] <database-path>".to_string()
+}
+
+fn graph_lightning_bootstrap_bundle_usage() -> String {
+    "graph-lightning-bootstrap-bundle requires [--require-ready] <database-path>".to_string()
 }
 
 fn graph_lightning_graph_stream_usage() -> String {
@@ -442,6 +482,35 @@ fn graph_lightning_bootstrap_manifest_json(
     })
 }
 
+fn graph_lightning_bootstrap_bundle_json(
+    export: &skein::GraphLightningBootstrapExport,
+) -> serde_json::Value {
+    let graph_stream_validation = export
+        .graph_stream
+        .validate_against_manifest(&export.manifest);
+    let mut blockers = Vec::new();
+    if !export.manifest.validation.is_import_ready {
+        blockers.push("manifest validation is not import ready");
+    }
+    if !graph_stream_validation.is_valid {
+        blockers.push("graph stream validation failed");
+    }
+    let decision = if blockers.is_empty() {
+        "ready"
+    } else {
+        "blocked"
+    };
+    serde_json::json!({
+        "protocol": "graph-lightning-bootstrap-bundle",
+        "manifest": graph_lightning_bootstrap_manifest_json(&export.manifest),
+        "graph_stream_validation": graph_lightning_graph_stream_validation_json(&graph_stream_validation),
+        "export_gate": {
+            "decision": decision,
+            "blockers": blockers,
+        },
+    })
+}
+
 fn graph_lightning_graph_stream_validation_json(
     validation: &skein::GraphLightningGraphStreamValidation,
 ) -> serde_json::Value {
@@ -516,6 +585,7 @@ fn value_json(value: &Value) -> serde_json::Value {
 mod tests {
     use super::{
         add_shadow_ready_report, add_shadow_trace_report, canonical_snapshot_validation_json,
+        graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
         graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
         graph_lightning_verify_export_usage, is_self_shadow_command, parse_shadow_timeout_ms,
@@ -524,8 +594,8 @@ mod tests {
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
-        CanonicalSnapshotIdentityAudit, ExternalShadowReady, GraphLightningBootstrapManifest,
-        GraphLightningGraphStreamValidation, Value,
+        CanonicalSnapshotIdentityAudit, Database, ExternalShadowReady,
+        GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, Value,
     };
     use std::time::Duration;
 
@@ -792,6 +862,28 @@ mod tests {
     }
 
     #[test]
+    fn renders_graph_lightning_bootstrap_bundle_json() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+
+        let json = graph_lightning_bootstrap_bundle_json(&export);
+
+        assert_eq!(json["protocol"], "graph-lightning-bootstrap-bundle");
+        assert_eq!(json["manifest"]["protocol"], "graph-lightning-bootstrap");
+        assert_eq!(json["manifest"]["validation"]["is_import_ready"], true);
+        assert_eq!(json["graph_stream_validation"]["is_valid"], true);
+        assert_eq!(json["export_gate"]["decision"], "ready");
+        assert!(json["export_gate"]["blockers"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn renders_stable_identity_audit_values() {
         let audit = CanonicalSnapshotIdentityAudit {
             requires_stable_id_mapping: true,
@@ -845,6 +937,12 @@ mod tests {
     fn validates_graph_lightning_bootstrap_manifest_usage_text() {
         assert!(graph_lightning_bootstrap_manifest_usage().contains("<database-path>"));
         assert!(graph_lightning_bootstrap_manifest_usage().contains("--require-ready"));
+    }
+
+    #[test]
+    fn validates_graph_lightning_bootstrap_bundle_usage_text() {
+        assert!(graph_lightning_bootstrap_bundle_usage().contains("<database-path>"));
+        assert!(graph_lightning_bootstrap_bundle_usage().contains("--require-ready"));
     }
 
     #[test]
