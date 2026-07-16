@@ -9788,6 +9788,59 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest list skill node detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id}) RETURN s",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-list-skill-detail-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-list-skill-detail-1', name: 'rest-list-skill', title: 'REST List Skill', stage: 'active', version: 1, metadata: '{}', updated_at: 110})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-list-skill-detail-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest list skill evidence detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id})-[:SYNTHESIZED_FROM]->(m:Memory) RETURN m.id, m.title, m.content, m.created_at ORDER BY m.created_at DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("rest-list-skill-evidence-1".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(12)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-list-skill-evidence-1', stage: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-list-skill-evidence-memory-1', title: 'Evidence memory', content: 'evidence content', created_at: 111})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (s:Skill {id: 'rest-list-skill-evidence-1'}), (m:Memory {id: 'rest-list-skill-evidence-memory-1'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-list-skill-evidence-1', 'rest-list-skill-evidence-memory-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "skill metadata read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (sk:Skill {id: $id}) RETURN sk.stage, sk.metadata",
@@ -14266,6 +14319,28 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (n) WHERE n.id IN ['coalesced-community-memory-1', 'coalesced-community-memory-2', 'coalesced-community-entity-1', 'coalesced-community-entity-2'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest list community summary ranked read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' RETURN c.id, c.community_id, c.name, c.description, c.ai_summary, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(10))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'rest-list-community-summary-1', community_id: 9901, name: 'REST List Community', description: 'community description', ai_summary: 'community summary', member_count: 41})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'rest-list-community-empty-1', community_id: 9902, name: 'Empty Summary Community', ai_summary: '', member_count: 99})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.id IN ['rest-list-community-summary-1', 'rest-list-community-empty-1'] DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(2),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -20438,6 +20513,28 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread {id: $thread_uuid})-[:COMPACTS_TO]->(m:Memory)-[:MENTIONS]->(e:Entity) RETURN DISTINCT e.name ORDER BY e.name LIMIT 20",
             ),
             CompatibilityQueryCallSite::new(
+                "rest list community summary ranked read",
+                "rest_list_read",
+                "nmem-server::rest_lists::list_communities_handler",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' RETURN c.id, c.community_id, c.name, c.description, c.ai_summary, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest list skill node detail read",
+                "rest_list_read",
+                "nmem-server::rest_lists::get_skill_handler.skill",
+            )
+            .with_cypher("MATCH (s:Skill {id: $id}) RETURN s"),
+            CompatibilityQueryCallSite::new(
+                "rest list skill evidence detail read",
+                "rest_list_read",
+                "nmem-server::rest_lists::get_skill_handler.evidence",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id})-[:SYNTHESIZED_FROM]->(m:Memory) RETURN m.id, m.title, m.content, m.created_at ORDER BY m.created_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest list label row aliased usage read",
                 "rest_list_read",
                 "nmem-server::rest_lists::get_label_handler",
@@ -22453,7 +22550,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 527);
+        assert_eq!(report.checks.len(), 530);
     }
 
     #[test]
@@ -22469,13 +22566,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 527);
-        assert_eq!(coverage.covered_checks, 527);
+        assert_eq!(coverage.required_checks, 530);
+        assert_eq!(coverage.covered_checks, 530);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 527);
+        assert_eq!(coverage_json["covered_checks"], 530);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -22505,10 +22602,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 527);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 530);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 527);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 530);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -22733,15 +22830,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 527);
-        assert_eq!(report.shadow_checks.len(), 527);
+        assert_eq!(report.primary_checks.len(), 530);
+        assert_eq!(report.shadow_checks.len(), 530);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            527
+            530
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -22750,7 +22847,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 527);
+        assert_eq!(cutover.matched_checks, 530);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
