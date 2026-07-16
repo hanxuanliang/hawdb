@@ -4814,6 +4814,56 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest memory label metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id})-[:HAS_LABEL]->(l:Label) RETURN l.id, l.name, l.color, l.description ORDER BY l.name",
+                        BTreeMap::from([(
+                            "memory_id".to_string(),
+                            Value::String("rest-label-memory-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("l.id", Value::String("rest-label-alpha".to_string())),
+                            ("l.name", Value::String("alpha".to_string())),
+                            ("l.color", Value::String("#112233".to_string())),
+                            (
+                                "l.description",
+                                Value::String("alpha label".to_string()),
+                            ),
+                        ]),
+                        compatibility_row([
+                            ("l.id", Value::String("rest-label-beta".to_string())),
+                            ("l.name", Value::String("beta".to_string())),
+                            ("l.color", Value::String("#445566".to_string())),
+                            ("l.description", Value::String("beta label".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-label-memory-1', title: 'REST labeled memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'rest-label-beta', name: 'beta', color: '#445566', description: 'beta label'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'rest-label-alpha', name: 'alpha', color: '#112233', description: 'alpha label'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-label-memory-1'}), (l:Label {id: 'rest-label-beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-label-memory-1'}), (l:Label {id: 'rest-label-alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-label-memory-1', 'rest-label-alpha', 'rest-label-beta'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory label names by id read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE m.id = $id RETURN l.name",
@@ -6450,6 +6500,36 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest thread source lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.thread_id = $sid OR t.id = $sid RETURN t.thread_id, t.title, t.source, t.created_at LIMIT 1",
+                        BTreeMap::from([(
+                            "sid".to_string(),
+                            Value::String("rest-thread-logical-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "t.thread_id",
+                            Value::String("rest-thread-logical-1".to_string()),
+                        ),
+                        ("t.title", Value::String("REST Thread".to_string())),
+                        ("t.source", Value::String("codex".to_string())),
+                        ("t.created_at", Value::Int(1_700_000_060)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-thread-node-1', thread_id: 'rest-thread-logical-1', title: 'REST Thread', source: 'codex', created_at: 1700000060})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-thread-node-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "thread identity bulk normalized-space move write",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (ti:ThreadIdentity) WHERE ti.thread_id IN $ids AND CASE WHEN ti.space_id IS NULL OR ti.space_id = '' THEN 'default' ELSE ti.space_id END = $source_space_id SET ti.space_id = $target_space_id, ti.updated_at = $updated_at",
@@ -6769,6 +6849,38 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (n) WHERE n.id IN ['memory-entity-list-memory-1', 'memory-entity-list-entity-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest memory related entity metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id})-[:MENTIONS]->(e:Entity) RETURN e.name, e.entity_type, e.confidence",
+                        BTreeMap::from([(
+                            "memory_id".to_string(),
+                            Value::String("rest-entity-memory-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("e.name", Value::String("Nowledge".to_string())),
+                        ("e.entity_type", Value::String("system".to_string())),
+                        ("e.confidence", Value::Float(0.82)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-entity-memory-1', title: 'REST entity memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-entity-node-1', name: 'Nowledge', entity_type: 'system', confidence: 0.82})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-entity-memory-1'}), (e:Entity {id: 'rest-entity-node-1'}) CREATE (m)-[:MENTIONS {confidence: 0.31}]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-entity-memory-1', 'rest-entity-node-1'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(2),
                 ),
@@ -15391,6 +15503,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory {id: $memory_id})-[:HAS_LABEL]->(l:Label) RETURN l.name LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "rest memory label metadata read",
+                "label_read",
+                "nmem-server::rest::export_memory.labels",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id})-[:HAS_LABEL]->(l:Label) RETURN l.id, l.name, l.color, l.description ORDER BY l.name",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory label names by id read",
                 "label_read",
                 "nmem-graph::repo::add_evolves_edge::label_names_for_replaced_memory",
@@ -15765,6 +15885,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (ti:ThreadIdentity) WHERE CASE WHEN ti.space_id IS NULL OR ti.space_id = '' THEN 'default' ELSE ti.space_id END = $space_id RETURN ti.thread_id",
             ),
             CompatibilityQueryCallSite::new(
+                "rest thread source lookup read",
+                "thread_read",
+                "nmem-server::rest::export_memory.source_thread",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.thread_id = $sid OR t.id = $sid RETURN t.thread_id, t.title, t.source, t.created_at LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
                 "thread identity resolve read",
                 "thread_read",
                 "nmem-graph::repo::resolve_thread_identity",
@@ -15847,6 +15975,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (m:Memory {id: $memory_id})-[:MENTIONS]->(e:Entity) RETURN e.name LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest memory related entity metadata read",
+                "entity_read",
+                "nmem-server::rest::export_memory.related_entities",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id})-[:MENTIONS]->(e:Entity) RETURN e.name, e.entity_type, e.confidence",
             ),
             CompatibilityQueryCallSite::new(
                 "memory entity endpoint bulk read",
@@ -19372,7 +19508,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 437);
+        assert_eq!(report.checks.len(), 440);
     }
 
     #[test]
@@ -19388,13 +19524,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 437);
-        assert_eq!(coverage.covered_checks, 437);
+        assert_eq!(coverage.required_checks, 440);
+        assert_eq!(coverage.covered_checks, 440);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 437);
+        assert_eq!(coverage_json["covered_checks"], 440);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -19424,10 +19560,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 437);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 440);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 437);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 440);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -19652,15 +19788,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 437);
-        assert_eq!(report.shadow_checks.len(), 437);
+        assert_eq!(report.primary_checks.len(), 440);
+        assert_eq!(report.shadow_checks.len(), 440);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            437
+            440
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -19669,7 +19805,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 437);
+        assert_eq!(cutover.matched_checks, 440);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
