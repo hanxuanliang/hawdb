@@ -1301,6 +1301,130 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ]),
             )),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "community entity topic candidate read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (e:Entity) WHERE e.id IN $entity_ids RETURN e.name, e.entity_type, e.confidence ORDER BY e.confidence DESC, e.name ASC LIMIT 30",
+                    BTreeMap::from([(
+                        "entity_ids".to_string(),
+                        Value::List(vec![Value::Int(10), Value::Int(11)]),
+                    )]),
+                ),
+                ExpectedRows::Exact(vec![
+                    compatibility_row([
+                        ("e.name", Value::String("Cypher".to_string())),
+                        ("e.entity_type", Value::Null),
+                        ("e.confidence", Value::Null),
+                    ]),
+                    compatibility_row([
+                        ("e.name", Value::String("Rust".to_string())),
+                        ("e.entity_type", Value::Null),
+                        ("e.confidence", Value::Null),
+                    ]),
+                ]),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community entity relation edge detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE e1.id IN $entity_ids AND e2.id IN $entity_ids RETURN e1.name, e2.name, r.relation_type, r.strength, r.context, r.confidence ORDER BY r.strength DESC, r.confidence DESC LIMIT 20",
+                        BTreeMap::from([(
+                            "entity_ids".to_string(),
+                            Value::List(vec![
+                                Value::String("community-edge-a".to_string()),
+                                Value::String("community-edge-b".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("e1.name", Value::String("Community Edge A".to_string())),
+                        ("e2.name", Value::String("Community Edge B".to_string())),
+                        ("r.relation_type", Value::String("related".to_string())),
+                        ("r.strength", Value::Float(0.8)),
+                        ("r.context", Value::String("shared context".to_string())),
+                        ("r.confidence", Value::Float(0.7)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'community-edge-a', name: 'Community Edge A'})-[:RELATES_TO {relation_type: 'related', strength: 0.8, context: 'shared context', confidence: 0.7}]->(:Entity {id: 'community-edge-b', name: 'Community Edge B'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['community-edge-a', 'community-edge-b'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community topic signal reset write",
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) SET e.topic_graph_eligible = false, e.topic_signal_score = 0.0, e.topic_signal_updated_at = CURRENT_TIMESTAMP()",
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) SET e.topic_graph_eligible = NULL, e.topic_signal_score = NULL, e.topic_signal_updated_at = NULL",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "community topic signal enable write",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (e:Entity {id: $entity_id}) SET e.topic_graph_eligible = true, e.topic_signal_score = $score, e.topic_signal_updated_at = CURRENT_TIMESTAMP()",
+                    BTreeMap::from([
+                        ("entity_id".to_string(), Value::Int(10)),
+                        ("score".to_string(), Value::Float(0.75)),
+                    ]),
+                ),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community topic eligible entity read",
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.topic_graph_eligible = true RETURN e.id",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([("e.id", Value::Int(10))])]),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 10}) SET e.topic_graph_eligible = NULL, e.topic_signal_score = NULL, e.topic_signal_updated_at = NULL",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community node assignment write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (n) WHERE n.id = $node_id SET n.community_id = $community_id",
+                        BTreeMap::from([
+                            ("node_id".to_string(), Value::Int(10)),
+                            ("community_id".to_string(), Value::Int(42)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id = 10 SET n.community_id = NULL",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "community entity assignment reset write",
+                CypherFixtureStatement::new("MATCH (e:Entity) SET e.community_id = NULL"),
+                ExpectedRows::RowCount(2),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "community memory assignment reset write",
+                CypherFixtureStatement::new("MATCH (m:Memory) SET m.community_id = NULL"),
+                ExpectedRows::RowCount(3),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "whole node projection",
                 CypherFixtureStatement::with_parameters(
                     "MATCH (m:Memory {id: $memory_id}) RETURN m",
@@ -10048,6 +10172,54 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.id IN $entity_ids RETURN m.title, m.content, m.importance, COUNT(e) AS hits, m.metadata, COALESCE(m.is_latest, true) ORDER BY hits DESC, m.importance DESC, m.title ASC LIMIT 8"),
             CompatibilityQueryCallSite::new(
+                "community entity topic candidate read",
+                "community_read",
+                "nmem-graph::community::load_topic_candidate_entities",
+            )
+            .with_cypher("MATCH (e:Entity) WHERE e.id IN $entity_ids RETURN e.name, e.entity_type, e.confidence ORDER BY e.confidence DESC, e.name ASC LIMIT 30"),
+            CompatibilityQueryCallSite::new(
+                "community entity relation edge detail read",
+                "community_read",
+                "nmem-graph::community::load_relation_edge_details",
+            )
+            .with_cypher("MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE e1.id IN $entity_ids AND e2.id IN $entity_ids RETURN e1.name, e2.name, r.relation_type, r.strength, r.context, r.confidence ORDER BY r.strength DESC, r.confidence DESC LIMIT 20"),
+            CompatibilityQueryCallSite::new(
+                "community topic signal reset write",
+                "community_write",
+                "nmem-graph::community::reset_topic_signals",
+            )
+            .with_cypher("MATCH (e:Entity) SET e.topic_graph_eligible = false, e.topic_signal_score = 0.0, e.topic_signal_updated_at = CURRENT_TIMESTAMP()"),
+            CompatibilityQueryCallSite::new(
+                "community topic signal enable write",
+                "community_write",
+                "nmem-graph::community::enable_topic_signal",
+            )
+            .with_cypher("MATCH (e:Entity {id: $entity_id}) SET e.topic_graph_eligible = true, e.topic_signal_score = $score, e.topic_signal_updated_at = CURRENT_TIMESTAMP()"),
+            CompatibilityQueryCallSite::new(
+                "community topic eligible entity read",
+                "community_read",
+                "nmem-graph::community::load_topic_eligible_entities",
+            )
+            .with_cypher("MATCH (e:Entity) WHERE e.topic_graph_eligible = true RETURN e.id"),
+            CompatibilityQueryCallSite::new(
+                "community node assignment write",
+                "community_write",
+                "nmem-graph::community::assign_node_community",
+            )
+            .with_cypher("MATCH (n) WHERE n.id = $node_id SET n.community_id = $community_id"),
+            CompatibilityQueryCallSite::new(
+                "community entity assignment reset write",
+                "community_write",
+                "nmem-graph::community::reset_entity_communities",
+            )
+            .with_cypher("MATCH (e:Entity) SET e.community_id = NULL"),
+            CompatibilityQueryCallSite::new(
+                "community memory assignment reset write",
+                "community_write",
+                "nmem-graph::community::reset_memory_communities",
+            )
+            .with_cypher("MATCH (m:Memory) SET m.community_id = NULL"),
+            CompatibilityQueryCallSite::new(
                 "whole node projection",
                 "record_projection_read",
                 "nmem-graph::repo::get_by_id",
@@ -13395,7 +13567,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 283);
+        assert_eq!(report.checks.len(), 291);
     }
 
     #[test]
@@ -13411,13 +13583,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 283);
-        assert_eq!(coverage.covered_checks, 283);
+        assert_eq!(coverage.required_checks, 291);
+        assert_eq!(coverage.covered_checks, 291);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 283);
+        assert_eq!(coverage_json["covered_checks"], 291);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -13447,10 +13619,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 283);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 291);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 283);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 291);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -13675,15 +13847,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 283);
-        assert_eq!(report.shadow_checks.len(), 283);
+        assert_eq!(report.primary_checks.len(), 291);
+        assert_eq!(report.shadow_checks.len(), 291);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            283
+            291
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -13692,7 +13864,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 283);
+        assert_eq!(cutover.matched_checks, 291);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
