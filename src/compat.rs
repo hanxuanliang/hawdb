@@ -7641,6 +7641,202 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "mcp skill prefix lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill) WHERE s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.version, s.use_count, s.metadata, s.name, s.title, s.bundle_path ORDER BY s.updated_at DESC LIMIT 1",
+                        BTreeMap::from([(
+                            "key".to_string(),
+                            Value::String("mcp-skill-prefix".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("s.id", Value::String("mcp-skill-prefix-newer".to_string())),
+                        ("s.version", Value::Int(3)),
+                        ("s.use_count", Value::Int(7)),
+                        ("s.metadata", Value::String("{\"rank\":2}".to_string())),
+                        ("s.name", Value::String("mcp-prefix-newer".to_string())),
+                        ("s.title", Value::String("MCP Prefix Newer".to_string())),
+                        (
+                            "s.bundle_path",
+                            Value::String("/tmp/mcp-prefix-newer".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-prefix-older', version: 2, use_count: 4, metadata: '{\"rank\":1}', name: 'mcp-prefix-older', title: 'MCP Prefix Older', bundle_path: '/tmp/mcp-prefix-older', updated_at: 10})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-prefix-newer', version: 3, use_count: 7, metadata: '{\"rank\":2}', name: 'mcp-prefix-newer', title: 'MCP Prefix Newer', bundle_path: '/tmp/mcp-prefix-newer', updated_at: 20})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill) WHERE s.id IN ['mcp-skill-prefix-older', 'mcp-skill-prefix-newer'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp skill exact lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $key}) RETURN s.id, s.version, s.use_count, s.metadata, s.name, s.title, s.bundle_path",
+                        BTreeMap::from([(
+                            "key".to_string(),
+                            Value::String("mcp-skill-exact".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("s.id", Value::String("mcp-skill-exact".to_string())),
+                        ("s.version", Value::Int(5)),
+                        ("s.use_count", Value::Int(11)),
+                        ("s.metadata", Value::String("{\"kind\":\"exact\"}".to_string())),
+                        ("s.name", Value::String("mcp-exact".to_string())),
+                        ("s.title", Value::String("MCP Exact Skill".to_string())),
+                        (
+                            "s.bundle_path",
+                            Value::String("/tmp/mcp-exact".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-exact', version: 5, use_count: 11, metadata: '{\"kind\":\"exact\"}', name: 'mcp-exact', title: 'MCP Exact Skill', bundle_path: '/tmp/mcp-exact', updated_at: 30})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'mcp-skill-exact'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp skill catalog read",
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill) WHERE s.stage IN ['active','draft','stale','candidate','promotable','rejected'] RETURN s.id, s.stage, s.name, s.title, s.description, s.triggers, s.content_hash, s.metadata, s.space_id ORDER BY s.updated_at DESC LIMIT 1500",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("s.id", Value::String("mcp-skill-catalog-active".to_string())),
+                            ("s.stage", Value::String("active".to_string())),
+                            ("s.name", Value::String("catalog-active".to_string())),
+                            ("s.title", Value::String("Catalog Active".to_string())),
+                            (
+                                "s.description",
+                                Value::String("active catalog skill".to_string()),
+                            ),
+                            ("s.triggers", Value::String("[\"catalog\"]".to_string())),
+                            ("s.content_hash", Value::String("hash-active".to_string())),
+                            ("s.metadata", Value::String("{\"stage\":\"active\"}".to_string())),
+                            ("s.space_id", Value::String("default".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("s.id", Value::String("mcp-skill-catalog-draft".to_string())),
+                            ("s.stage", Value::String("draft".to_string())),
+                            ("s.name", Value::String("catalog-draft".to_string())),
+                            ("s.title", Value::String("Catalog Draft".to_string())),
+                            (
+                                "s.description",
+                                Value::String("draft catalog skill".to_string()),
+                            ),
+                            ("s.triggers", Value::String("[\"draft\"]".to_string())),
+                            ("s.content_hash", Value::String("hash-draft".to_string())),
+                            ("s.metadata", Value::String("{\"stage\":\"draft\"}".to_string())),
+                            ("s.space_id", Value::String("default".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-catalog-active', stage: 'active', name: 'catalog-active', title: 'Catalog Active', description: 'active catalog skill', triggers: '[\"catalog\"]', content_hash: 'hash-active', metadata: '{\"stage\":\"active\"}', space_id: 'default', updated_at: 20})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-catalog-draft', stage: 'draft', name: 'catalog-draft', title: 'Catalog Draft', description: 'draft catalog skill', triggers: '[\"draft\"]', content_hash: 'hash-draft', metadata: '{\"stage\":\"draft\"}', space_id: 'default', updated_at: 10})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-catalog-archived', stage: 'archived', name: 'catalog-archived', title: 'Catalog Archived', updated_at: 30})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill) WHERE s.id IN ['mcp-skill-catalog-active', 'mcp-skill-catalog-draft', 'mcp-skill-catalog-archived'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp active skill list read",
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill) WHERE s.stage = 'active' RETURN s.id, s.title, s.name, s.description, s.triggers, s.stage ORDER BY s.updated_at DESC LIMIT 200",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("s.id", Value::String("mcp-skill-active-newer".to_string())),
+                        ("s.title", Value::String("MCP Active Newer".to_string())),
+                        ("s.name", Value::String("mcp-active-newer".to_string())),
+                        (
+                            "s.description",
+                            Value::String("newer active skill".to_string()),
+                        ),
+                        ("s.triggers", Value::String("[\"newer\"]".to_string())),
+                        ("s.stage", Value::String("active".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-active-newer', title: 'MCP Active Newer', name: 'mcp-active-newer', description: 'newer active skill', triggers: '[\"newer\"]', stage: 'active', updated_at: 20})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'mcp-skill-active-draft', title: 'MCP Active Draft', name: 'mcp-active-draft', description: 'draft skill', triggers: '[\"draft\"]', stage: 'draft', updated_at: 30})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill) WHERE s.id IN ['mcp-skill-active-newer', 'mcp-skill-active-draft'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp memory prefix ownership read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id STARTS WITH $p RETURN m.id, m.space_id LIMIT 2",
+                        BTreeMap::from([(
+                            "p".to_string(),
+                            Value::String("mcp-prefix-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            (
+                                "m.id",
+                                Value::String("mcp-prefix-memory-1".to_string()),
+                            ),
+                            ("m.space_id", Value::String("default".to_string())),
+                        ]),
+                        compatibility_row([
+                            (
+                                "m.id",
+                                Value::String("mcp-prefix-memory-2".to_string()),
+                            ),
+                            ("m.space_id", Value::String("research".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-prefix-memory-1', space_id: 'default'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-prefix-memory-2', space_id: 'research'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'other-prefix-memory', space_id: 'default'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['mcp-prefix-memory-1', 'mcp-prefix-memory-2', 'other-prefix-memory'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "skill stage projection list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (s:Skill) WHERE s.stage = $stage RETURN s.id, s.title, s.name, s.version, s.success_rate, s.metadata, s.description, s.triggers ORDER BY s.updated_at DESC LIMIT $limit",
@@ -15113,6 +15309,46 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Skill) WHERE s.stage = 'active' RETURN s ORDER BY s.updated_at DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "mcp skill prefix lookup read",
+                "mcp_read",
+                "nmem-server::mcp_server::resolve_skill.prefix",
+            )
+            .with_cypher(
+                "MATCH (s:Skill) WHERE s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.version, s.use_count, s.metadata, s.name, s.title, s.bundle_path ORDER BY s.updated_at DESC LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp skill exact lookup read",
+                "mcp_read",
+                "nmem-server::mcp_server::resolve_skill.exact",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $key}) RETURN s.id, s.version, s.use_count, s.metadata, s.name, s.title, s.bundle_path",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp skill catalog read",
+                "mcp_read",
+                "nmem-server::mcp_server::list_skills.catalog",
+            )
+            .with_cypher(
+                "MATCH (s:Skill) WHERE s.stage IN ['active','draft','stale','candidate','promotable','rejected'] RETURN s.id, s.stage, s.name, s.title, s.description, s.triggers, s.content_hash, s.metadata, s.space_id ORDER BY s.updated_at DESC LIMIT 1500",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp active skill list read",
+                "mcp_read",
+                "nmem-server::mcp_server::list_active_skills",
+            )
+            .with_cypher(
+                "MATCH (s:Skill) WHERE s.stage = 'active' RETURN s.id, s.title, s.name, s.description, s.triggers, s.stage ORDER BY s.updated_at DESC LIMIT 200",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp memory prefix ownership read",
+                "mcp_read",
+                "nmem-server::mcp_server::skill_memory_prefix_ownership",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id STARTS WITH $p RETURN m.id, m.space_id LIMIT 2",
+            ),
+            CompatibilityQueryCallSite::new(
                 "skill stage projection list read",
                 "skill_read",
                 "nmem-server::rest_skills::stage_projection_list",
@@ -17994,7 +18230,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 403);
+        assert_eq!(report.checks.len(), 408);
     }
 
     #[test]
@@ -18010,13 +18246,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 403);
-        assert_eq!(coverage.covered_checks, 403);
+        assert_eq!(coverage.required_checks, 408);
+        assert_eq!(coverage.covered_checks, 408);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 403);
+        assert_eq!(coverage_json["covered_checks"], 408);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -18046,10 +18282,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 403);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 408);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 403);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 408);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -18274,15 +18510,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 403);
-        assert_eq!(report.shadow_checks.len(), 403);
+        assert_eq!(report.primary_checks.len(), 408);
+        assert_eq!(report.shadow_checks.len(), 408);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            403
+            408
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -18291,7 +18527,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 403);
+        assert_eq!(cutover.matched_checks, 408);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
