@@ -8215,6 +8215,92 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "export entity mention detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity {id: $id}) RETURN m.id, m.title, m.content, m.is_crystal, COALESCE(m.crystal_title, m.title) AS display_title, m.importance ORDER BY m.is_crystal DESC, m.importance DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("export-detail-entity".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("export-detail-crystal".to_string())),
+                            ("m.title", Value::String("Crystal Fallback".to_string())),
+                            ("m.content", Value::String("crystal body".to_string())),
+                            ("m.is_crystal", Value::Bool(true)),
+                            ("display_title", Value::String("Crystal Display".to_string())),
+                            ("m.importance", Value::Float(20.0)),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("export-detail-memory".to_string())),
+                            ("m.title", Value::String("Memory Title".to_string())),
+                            ("m.content", Value::String("memory body".to_string())),
+                            ("m.is_crystal", Value::Bool(false)),
+                            ("display_title", Value::String("Memory Title".to_string())),
+                            ("m.importance", Value::Float(10.0)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'export-detail-entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'export-detail-crystal', title: 'Crystal Fallback', crystal_title: 'Crystal Display', content: 'crystal body', is_crystal: true, importance: 20.0})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'export-detail-memory', title: 'Memory Title', content: 'memory body', is_crystal: false, importance: 10.0})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'export-detail-crystal'}), (e:Entity {id: 'export-detail-entity'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'export-detail-memory'}), (e:Entity {id: 'export-detail-entity'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['export-detail-entity', 'export-detail-crystal', 'export-detail-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "export related entity read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $id})-[:RELATES_TO]-(other:Entity) WHERE other.id <> $id RETURN DISTINCT other.id, other.name, other.entity_type LIMIT 30",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("export-related-entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("other.id", Value::String("export-related-peer".to_string())),
+                        ("other.name", Value::String("Related Peer".to_string())),
+                        ("other.entity_type", Value::String("concept".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'export-related-entity', name: 'Export Entity', entity_type: 'topic'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'export-related-peer', name: 'Related Peer', entity_type: 'concept'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (e:Entity {id: 'export-related-entity'}), (other:Entity {id: 'export-related-peer'}) CREATE (e)-[:RELATES_TO]->(other)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['export-related-entity', 'export-related-peer'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp graph all shortest path read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH p = (a)-[e* ALL SHORTEST 1..3]-(b) WHERE a.id = $from_id AND b.id = $to_id RETURN properties(nodes(p), 'id') AS node_ids, properties(nodes(p), 'name') AS names, length(p) AS hops",
@@ -9911,6 +9997,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id IS NOT NULL RETURN m.id, e.community_id",
             ),
             CompatibilityQueryCallSite::new(
+                "export entity mention detail read",
+                "export_entity_read",
+                "nmem-server::okf_export::entity_mentions_and_related; nmem-server::wiki_export::entity_mentions_and_related_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:MENTIONS]->(e:Entity {id: $id}) RETURN m.id, m.title, m.content, m.is_crystal, COALESCE(m.crystal_title, m.title) AS display_title, m.importance ORDER BY m.is_crystal DESC, m.importance DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "export related entity read",
+                "export_entity_read",
+                "nmem-server::okf_export::entity_mentions_and_related; nmem-server::wiki_export::entity_mentions_and_related_rows",
+            )
+            .with_cypher(
+                "MATCH (e:Entity {id: $id})-[:RELATES_TO]-(other:Entity) WHERE other.id <> $id RETURN DISTINCT other.id, other.name, other.entity_type LIMIT 30",
+            ),
+            CompatibilityQueryCallSite::new(
                 "analyzable corpus max updated fingerprint",
                 "scheduler_fingerprint_read",
                 "nmem-server::scheduler_service::analyzable_corpus_fingerprint",
@@ -11206,7 +11308,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 247);
+        assert_eq!(report.checks.len(), 249);
     }
 
     #[test]
@@ -11222,13 +11324,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 247);
-        assert_eq!(coverage.covered_checks, 247);
+        assert_eq!(coverage.required_checks, 249);
+        assert_eq!(coverage.covered_checks, 249);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 247);
+        assert_eq!(coverage_json["covered_checks"], 249);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -11258,10 +11360,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 247);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 249);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 247);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 249);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -11455,15 +11557,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 247);
-        assert_eq!(report.shadow_checks.len(), 247);
+        assert_eq!(report.primary_checks.len(), 249);
+        assert_eq!(report.shadow_checks.len(), 249);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            247
+            249
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -11472,7 +11574,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 247);
+        assert_eq!(cutover.matched_checks, 249);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
