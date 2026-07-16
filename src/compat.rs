@@ -12633,6 +12633,196 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest search memory bulk projection",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.unit_type, m.metadata, COALESCE(m.importance, 0.5), COALESCE(m.confidence, 0.5), m.event_start, m.created_at, m.temporal_context",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("rest-search-memory-1".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-search-memory-1', unit_type: 'fact', metadata: '{}', importance: 0.7, confidence: 0.8, event_start: 10, created_at: 20, temporal_context: 'timeless'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-search-memory-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest search entity bulk projection",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.id IN $ids RETURN e.id, COALESCE(e.name, e.id), e.entity_type, e.description, COALESCE(e.pagerank_score, e.confidence, 0.5), e.community_id, e.confidence",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("rest-search-entity-1".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-search-entity-1', name: 'Search Entity', entity_type: 'concept', description: 'search entity', pagerank_score: 0.6, community_id: 9101, confidence: 0.7})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'rest-search-entity-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest search entity memory edge projection",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Entity)-[r]-(m:Memory) WHERE a.id IN $ids RETURN a.id, m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "ids".to_string(),
+                                Value::List(vec![Value::String("rest-search-edge-entity".to_string())]),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-search-edge-entity', name: 'Search Edge Entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-search-edge-memory', title: 'Search Edge Memory', content: 'search memory edge content', pagerank_score: 0.6, community_id: 9102, space_id: 'default', created_at: 21, updated_at: 22, source: 'rest_search', event_start: 23, event_end: 24, importance: 0.7})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-search-edge-memory'}), (e:Entity {id: 'rest-search-edge-entity'}) CREATE (m)-[:MENTIONS {confidence: 0.9}]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-search-edge-entity', 'rest-search-edge-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest search entity entity edge projection",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Entity)-[r]-(b:Entity) WHERE a.id IN $ids RETURN a.id, b.id, COALESCE(b.name, b.id), b.entity_type, b.description, COALESCE(b.pagerank_score, b.confidence, 0.5), b.community_id, b.confidence, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "ids".to_string(),
+                                Value::List(vec![Value::String("rest-search-entity-a".to_string())]),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-search-entity-a', name: 'Entity A'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-search-entity-b', name: 'Entity B', entity_type: 'concept', description: 'entity b', confidence: 0.8, community_id: 9103})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'rest-search-entity-a'}), (b:Entity {id: 'rest-search-entity-b'}) CREATE (a)-[:RELATES_TO {strength: 0.8, confidence: 0.7}]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['rest-search-entity-a', 'rest-search-entity-b'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest search source memory edge projection",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[r:SOURCED_FROM]->(s:Source) WHERE s.id IN $ids RETURN s.id, m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "ids".to_string(),
+                                Value::List(vec![Value::String("rest-search-source-1".to_string())]),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-search-source-1', title: 'Search Source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-search-source-memory', title: 'Source Memory', content: 'source memory content', pagerank_score: 0.5, community_id: 9104, space_id: 'default', created_at: 31, updated_at: 32, source: 'rest_search', event_start: 33, event_end: 34, importance: 0.6})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-search-source-memory'}), (s:Source {id: 'rest-search-source-1'}) CREATE (m)-[:SOURCED_FROM]->(s)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-search-source-1', 'rest-search-source-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest search thread bulk projection",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.id IN $ids RETURN t.id, COALESCE(t.title, t.source, 'Thread'), t.source, t.summary, t.message_count, t.project, t.workspace",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("rest-search-thread-1".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-search-thread-1', title: 'Search Thread', source: 'codex', summary: 'thread summary', message_count: 3, project: 'skein', workspace: 'default'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-search-thread-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest search thread compacts memory projection",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread)-[r:COMPACTS_TO]->(m:Memory) WHERE t.id IN $ids RETURN t.id, m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "ids".to_string(),
+                                Value::List(vec![Value::String("rest-search-compact-thread".to_string())]),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-search-compact-thread', title: 'Compact Thread'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-search-compact-memory', title: 'Compact Memory', content: 'compact memory content', pagerank_score: 0.4, community_id: 9105, space_id: 'default', created_at: 41, updated_at: 42, source: 'rest_search', event_start: 43, event_end: 44, importance: 0.5})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'rest-search-compact-thread'}), (m:Memory {id: 'rest-search-compact-memory'}) CREATE (t)-[:COMPACTS_TO]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-search-compact-thread', 'rest-search-compact-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "rest graph node detail memory lookup",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (n:Memory {id: $node_id}) RETURN n",
@@ -19514,6 +19704,62 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Community) WHERE c.community_id = $cid RETURN c.name, c.ai_summary, c.description, c.member_count LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
+                "rest search memory bulk projection",
+                "search_projection",
+                "nmem-server::rest_search::memory_bulk_projection",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.unit_type, m.metadata, COALESCE(m.importance, 0.5), COALESCE(m.confidence, 0.5), m.event_start, m.created_at, m.temporal_context",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest search entity bulk projection",
+                "search_projection",
+                "nmem-server::rest_search::entity_bulk_projection",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.id IN $ids RETURN e.id, COALESCE(e.name, e.id), e.entity_type, e.description, COALESCE(e.pagerank_score, e.confidence, 0.5), e.community_id, e.confidence",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest search entity memory edge projection",
+                "search_projection",
+                "nmem-server::rest_search::entity_memory_edges",
+            )
+            .with_cypher(
+                "MATCH (a:Entity)-[r]-(m:Memory) WHERE a.id IN $ids RETURN a.id, m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest search entity entity edge projection",
+                "search_projection",
+                "nmem-server::rest_search::entity_entity_edges",
+            )
+            .with_cypher(
+                "MATCH (a:Entity)-[r]-(b:Entity) WHERE a.id IN $ids RETURN a.id, b.id, COALESCE(b.name, b.id), b.entity_type, b.description, COALESCE(b.pagerank_score, b.confidence, 0.5), b.community_id, b.confidence, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest search source memory edge projection",
+                "search_projection",
+                "nmem-server::rest_search::source_memory_edges",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[r:SOURCED_FROM]->(s:Source) WHERE s.id IN $ids RETURN s.id, m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest search thread bulk projection",
+                "search_projection",
+                "nmem-server::rest_search::thread_bulk_projection",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.id IN $ids RETURN t.id, COALESCE(t.title, t.source, 'Thread'), t.source, t.summary, t.message_count, t.project, t.workspace",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest search thread compacts memory projection",
+                "search_projection",
+                "nmem-server::rest_search::thread_memory_edges",
+            )
+            .with_cypher(
+                "MATCH (t:Thread)-[r:COMPACTS_TO]->(m:Memory) WHERE t.id IN $ids RETURN t.id, m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest graph node detail memory lookup",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::node_details_payload",
@@ -23009,7 +23255,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 544);
+        assert_eq!(report.checks.len(), 551);
     }
 
     #[test]
@@ -23025,13 +23271,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 544);
-        assert_eq!(coverage.covered_checks, 544);
+        assert_eq!(coverage.required_checks, 551);
+        assert_eq!(coverage.covered_checks, 551);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 544);
+        assert_eq!(coverage_json["covered_checks"], 551);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -23061,10 +23307,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 544);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 551);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 544);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 551);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -23289,15 +23535,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 544);
-        assert_eq!(report.shadow_checks.len(), 544);
+        assert_eq!(report.primary_checks.len(), 551);
+        assert_eq!(report.shadow_checks.len(), 551);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            544
+            551
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -23306,7 +23552,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 544);
+        assert_eq!(cutover.matched_checks, 551);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
