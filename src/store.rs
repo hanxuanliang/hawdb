@@ -612,6 +612,7 @@ impl GraphStore {
         };
         store.load_checkpoint(catalog)?;
         store.replay_wal(catalog, replay_config)?;
+        store.validate_relationship_endpoints()?;
         store.load_projected_graph_artifacts()?;
         Ok(store)
     }
@@ -4478,6 +4479,24 @@ impl GraphStore {
         validate_relationship_property_exists(catalog, &self.relationships, rel_type_id, property)
     }
 
+    fn validate_relationship_endpoints(&self) -> Result<()> {
+        for relationship in self.relationships.values() {
+            if !self.nodes.contains_key(&relationship.source) {
+                return Err(SkeinError::Storage(format!(
+                    "relationship {} references missing source node {}",
+                    relationship.id.0, relationship.source.0
+                )));
+            }
+            if !self.nodes.contains_key(&relationship.target) {
+                return Err(SkeinError::Storage(format!(
+                    "relationship {} references missing target node {}",
+                    relationship.id.0, relationship.target.0
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn delete_node_ops(&self, ids: &[NodeId], detach: bool) -> Result<Vec<WalOp>> {
         let mut relationship_ids = BTreeSet::new();
         for id in ids {
@@ -8250,6 +8269,39 @@ mod tests {
             assert_eq!(rels[0].source, NodeId(0));
             assert_eq!(rels[0].target, NodeId(1));
         }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn rejects_checkpoint_relationship_with_missing_endpoint() {
+        let path = unique_test_dir("rel_checkpoint_missing_endpoint");
+        {
+            let mut catalog = Catalog::default();
+            let mut store = GraphStore::open(&path, &mut catalog).unwrap();
+            let source = store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+                .unwrap();
+            let target = store
+                .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, target, "RELATES_TO", BTreeMap::new())
+                .unwrap();
+            store.checkpoint(&catalog).unwrap();
+        }
+
+        rewrite_checksummed_file(
+            &path.join("checkpoint.skein"),
+            "rel\t0\t0\t1\t0\t",
+            "rel\t0\t0\t99\t0\t",
+            "checkpoint",
+        );
+
+        let mut catalog = Catalog::default();
+        let error = GraphStore::open(&path, &mut catalog).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("relationship 0 references missing target node 99"));
         std::fs::remove_dir_all(path).unwrap();
     }
 

@@ -28,7 +28,9 @@ Recovery:
 7. In the default recovery mode, stop replay at a torn tail or checksum
    mismatch. In strict recovery mode, reject the open instead.
 8. Rebuild in-memory adjacency indexes from relationship records.
-9. Verify projected graph artifacts when present. Corrupt artifacts are
+9. Validate that every recovered relationship references existing source and
+   target nodes before accepting the graph state.
+10. Verify projected graph artifacts when present. Corrupt artifacts are
    discarded because they are rebuildable derived state, not canonical graph
    state.
 
