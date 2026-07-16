@@ -73,13 +73,13 @@ impl Parser<'_> {
             if self.consume_char('=') {
                 return Ok(PropertyPredicate::ParameterEq {
                     left: parameter,
-                    right: self.parse_parameter_name()?,
+                    right: self.parse_value()?,
                 });
             }
             if self.consume_token("<>") || self.consume_token("!=") {
                 return Ok(PropertyPredicate::ParameterNotEq {
                     left: parameter,
-                    right: self.parse_parameter_name()?,
+                    right: self.parse_value()?,
                 });
             }
             self.expect_keyword("IS")?;
@@ -270,12 +270,6 @@ impl Parser<'_> {
             self.pos = value_start;
         }
         self.parse_value().map(PropertyPredicateRight::Value)
-    }
-
-    fn parse_parameter_name(&mut self) -> Result<String> {
-        self.skip_ws();
-        self.expect_char('$')?;
-        self.parse_ident()
     }
 
     fn looks_like_relationship_exists_predicate(&self) -> bool {

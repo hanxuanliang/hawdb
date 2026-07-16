@@ -4034,11 +4034,11 @@ fn plan_predicate(
         )),
         PropertyPredicate::ParameterEq { left, right } => Ok(Predicate::ConstantBool(
             bind_value(&ValueExpression::Parameter(left.clone()), parameters)?
-                == bind_value(&ValueExpression::Parameter(right.clone()), parameters)?,
+                == bind_value(right, parameters)?,
         )),
         PropertyPredicate::ParameterNotEq { left, right } => Ok(Predicate::ConstantBool(
             bind_value(&ValueExpression::Parameter(left.clone()), parameters)?
-                != bind_value(&ValueExpression::Parameter(right.clone()), parameters)?,
+                != bind_value(right, parameters)?,
         )),
         PropertyPredicate::In {
             variable,

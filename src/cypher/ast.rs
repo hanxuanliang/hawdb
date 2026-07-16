@@ -575,11 +575,11 @@ pub enum PropertyPredicate {
     },
     ParameterEq {
         left: String,
-        right: String,
+        right: ValueExpression,
     },
     ParameterNotEq {
         left: String,
-        right: String,
+        right: ValueExpression,
     },
     In {
         variable: String,

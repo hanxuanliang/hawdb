@@ -2305,7 +2305,31 @@ fn parses_parameter_equality_predicate() {
         default_space_predicates[0],
         PropertyPredicate::ParameterEq {
             left: "space_id".to_string(),
-            right: "default_space_id".to_string(),
+            right: ValueExpression::Parameter("default_space_id".to_string()),
+        }
+    );
+}
+
+#[test]
+fn parses_parameter_literal_equality_predicate() {
+    let statement = parse(
+        "MATCH (m:Memory) WHERE m.space_id = $space_id OR ($space_id = 'default' AND (m.space_id IS NULL OR m.space_id = '')) RETURN m.id",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let Some(PropertyPredicate::Or(predicates)) = query.predicate else {
+        panic!("expected OR predicate");
+    };
+    let PropertyPredicate::And(default_space_predicates) = &predicates[1] else {
+        panic!("expected default-space conjunction");
+    };
+    assert_eq!(
+        default_space_predicates[0],
+        PropertyPredicate::ParameterEq {
+            left: "space_id".to_string(),
+            right: ValueExpression::Literal(Value::String("default".to_string())),
         }
     );
 }

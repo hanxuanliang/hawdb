@@ -5393,6 +5393,164 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest list thread legacy message detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid})-[c:CONTAINS]->(m:Message) RETURN m.id, m.content, m.role, COALESCE(c.order_index, m.order_index), m.timestamp, m.token_count, m.created_at, m.updated_at, m.metadata ORDER BY COALESCE(c.order_index, m.order_index)",
+                        BTreeMap::from([(
+                            "thread_uuid".to_string(),
+                            Value::String("rest-list-thread-detail-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-list-thread-detail-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'rest-list-message-detail-1', content: 'message body', role: 'user', order_index: 2, timestamp: 101, token_count: 4, created_at: 102, updated_at: 103, metadata: '{}'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'rest-list-thread-detail-1'}), (m:Message {id: 'rest-list-message-detail-1'}) CREATE (t)-[:CONTAINS {order_index: 1}]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-list-thread-detail-1', 'rest-list-message-detail-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest list thread compacted memory detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid})-[:COMPACTS_TO]->(m:Memory) RETURN m.id, m.content, m.title, m.importance, m.pagerank_score, m.confidence, m.source_range, m.source, m.created_at, m.updated_at, m.metadata, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.last_reindexed_at, m.reindex_needed, COALESCE(m.unit_type, 'fact'), COALESCE(m.is_latest, true), COALESCE(m.version, 1), COALESCE(m.is_crystal, false), m.crystal_title, m.source_unit_count, COALESCE(m.extraction_method, 'manual'), COALESCE(m.access_count, 0), COALESCE(m.appearances, 0), COALESCE(m.clicks, 0), COALESCE(m.decay_score_cached, 0.0), m.event_end, m.event_start, m.last_accessed_at, m.last_clicked_at, m.last_evaluated_at, COALESCE(m.review_status, ''), m.temporal_confidence, m.temporal_context, m.temporal_precision, m.temporal_type, COALESCE(m.total_dwell_time_ms, 0) ORDER BY m.importance DESC, m.created_at DESC LIMIT 10",
+                        BTreeMap::from([(
+                            "thread_uuid".to_string(),
+                            Value::String("rest-list-compact-thread-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-list-compact-thread-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-list-compact-memory-1', content: 'related content', title: 'Related memory', importance: 0.8, pagerank_score: 0.2, confidence: 0.7, source_range: '{}', source: 'thread', created_at: 104, updated_at: 105, metadata: '{}', space_id: '', unit_type: 'fact', is_latest: true, version: 1, is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'rest-list-compact-thread-1'}), (m:Memory {id: 'rest-list-compact-memory-1'}) CREATE (t)-[:COMPACTS_TO]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-list-compact-thread-1', 'rest-list-compact-memory-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest list thread metadata related memory read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE ( m.space_id = $space_id OR ($space_id = 'default' AND (m.space_id IS NULL OR m.space_id = '')) ) AND ( m.metadata CONTAINS $source_id_spaced OR m.metadata CONTAINS $source_id_compact OR m.metadata CONTAINS $source_thread_id_spaced OR m.metadata CONTAINS $source_thread_id_compact ) RETURN m.id, m.content, m.title, m.importance, m.pagerank_score, m.confidence, m.source_range, m.source, m.created_at, m.updated_at, m.metadata, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.last_reindexed_at, m.reindex_needed, COALESCE(m.unit_type, 'fact'), COALESCE(m.is_latest, true), COALESCE(m.version, 1), COALESCE(m.is_crystal, false), m.crystal_title, m.source_unit_count, COALESCE(m.extraction_method, 'manual'), COALESCE(m.access_count, 0), COALESCE(m.appearances, 0), COALESCE(m.clicks, 0), COALESCE(m.decay_score_cached, 0.0), m.event_end, m.event_start, m.last_accessed_at, m.last_clicked_at, m.last_evaluated_at, COALESCE(m.review_status, ''), m.temporal_confidence, m.temporal_context, m.temporal_precision, m.temporal_type, COALESCE(m.total_dwell_time_ms, 0) ORDER BY m.created_at DESC LIMIT 25",
+                        BTreeMap::from([
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            (
+                                "source_id_spaced".to_string(),
+                                Value::String("\"source_id\": \"rest-list-external-thread-1\"".to_string()),
+                            ),
+                            (
+                                "source_id_compact".to_string(),
+                                Value::String("\"source_id\":\"rest-list-external-thread-1\"".to_string()),
+                            ),
+                            (
+                                "source_thread_id_spaced".to_string(),
+                                Value::String("\"source_thread_id\": \"rest-list-external-thread-1\"".to_string()),
+                            ),
+                            (
+                                "source_thread_id_compact".to_string(),
+                                Value::String("\"source_thread_id\":\"rest-list-external-thread-1\"".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-list-metadata-memory-1', content: 'metadata related content', title: 'Metadata related memory', importance: 0.6, pagerank_score: 0.1, confidence: 0.5, source_range: '{}', source: 'thread', created_at: 106, updated_at: 107, metadata: '{\"source_id\": \"rest-list-external-thread-1\"}', space_id: 'default'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-list-metadata-memory-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest list related entity names by memory ids read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE m.id IN $memory_ids RETURN DISTINCT e.name ORDER BY e.name LIMIT 20",
+                        BTreeMap::from([(
+                            "memory_ids".to_string(),
+                            Value::List(vec![
+                                Value::String("rest-list-entity-memory-1".to_string()),
+                                Value::String("missing-memory".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-list-entity-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-list-entity-1', name: 'related entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-list-entity-memory-1'}), (e:Entity {id: 'rest-list-entity-1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-list-entity-memory-1', 'rest-list-entity-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest list related entity names by thread read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid})-[:COMPACTS_TO]->(m:Memory)-[:MENTIONS]->(e:Entity) RETURN DISTINCT e.name ORDER BY e.name LIMIT 20",
+                        BTreeMap::from([(
+                            "thread_uuid".to_string(),
+                            Value::String("rest-list-related-thread-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-list-related-thread-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-list-related-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-list-related-entity-1', name: 'thread related entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'rest-list-related-thread-1'}), (m:Memory {id: 'rest-list-related-memory-1'}) CREATE (t)-[:COMPACTS_TO]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-list-related-memory-1'}), (e:Entity {id: 'rest-list-related-entity-1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-list-related-thread-1', 'rest-list-related-memory-1', 'rest-list-related-entity-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory label name list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory {id: $memory_id})-[:HAS_LABEL]->(l:Label) RETURN l.name LIMIT $limit",
@@ -20189,6 +20347,46 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread) WHERE t.thread_id = $thread_id OR t.id = $thread_id RETURN t.id, t.thread_id, COALESCE(t.message_count, 0), t.metadata LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
+                "rest list thread legacy message detail read",
+                "rest_list_read",
+                "nmem-server::rest_lists::fetch_legacy_kuzu_messages",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {id: $thread_uuid})-[c:CONTAINS]->(m:Message) RETURN m.id, m.content, m.role, COALESCE(c.order_index, m.order_index), m.timestamp, m.token_count, m.created_at, m.updated_at, m.metadata ORDER BY COALESCE(c.order_index, m.order_index)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest list thread compacted memory detail read",
+                "rest_list_read",
+                "nmem-server::rest_lists::fetch_thread_related_memories",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {id: $thread_uuid})-[:COMPACTS_TO]->(m:Memory) RETURN m.id, m.content, m.title, m.importance, m.pagerank_score, m.confidence, m.source_range, m.source, m.created_at, m.updated_at, m.metadata, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.last_reindexed_at, m.reindex_needed, COALESCE(m.unit_type, 'fact'), COALESCE(m.is_latest, true), COALESCE(m.version, 1), COALESCE(m.is_crystal, false), m.crystal_title, m.source_unit_count, COALESCE(m.extraction_method, 'manual'), COALESCE(m.access_count, 0), COALESCE(m.appearances, 0), COALESCE(m.clicks, 0), COALESCE(m.decay_score_cached, 0.0), m.event_end, m.event_start, m.last_accessed_at, m.last_clicked_at, m.last_evaluated_at, COALESCE(m.review_status, ''), m.temporal_confidence, m.temporal_context, m.temporal_precision, m.temporal_type, COALESCE(m.total_dwell_time_ms, 0) ORDER BY m.importance DESC, m.created_at DESC LIMIT 10",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest list thread metadata related memory read",
+                "rest_list_read",
+                "nmem-server::rest_lists::fetch_metadata_related_memories",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE ( m.space_id = $space_id OR ($space_id = 'default' AND (m.space_id IS NULL OR m.space_id = '')) ) AND ( m.metadata CONTAINS $source_id_spaced OR m.metadata CONTAINS $source_id_compact OR m.metadata CONTAINS $source_thread_id_spaced OR m.metadata CONTAINS $source_thread_id_compact ) RETURN m.id, m.content, m.title, m.importance, m.pagerank_score, m.confidence, m.source_range, m.source, m.created_at, m.updated_at, m.metadata, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.last_reindexed_at, m.reindex_needed, COALESCE(m.unit_type, 'fact'), COALESCE(m.is_latest, true), COALESCE(m.version, 1), COALESCE(m.is_crystal, false), m.crystal_title, m.source_unit_count, COALESCE(m.extraction_method, 'manual'), COALESCE(m.access_count, 0), COALESCE(m.appearances, 0), COALESCE(m.clicks, 0), COALESCE(m.decay_score_cached, 0.0), m.event_end, m.event_start, m.last_accessed_at, m.last_clicked_at, m.last_evaluated_at, COALESCE(m.review_status, ''), m.temporal_confidence, m.temporal_context, m.temporal_precision, m.temporal_type, COALESCE(m.total_dwell_time_ms, 0) ORDER BY m.created_at DESC LIMIT 25",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest list related entity names by memory ids read",
+                "rest_list_read",
+                "nmem-server::rest_lists::fetch_thread_entities.memory_ids",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE m.id IN $memory_ids RETURN DISTINCT e.name ORDER BY e.name LIMIT 20",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest list related entity names by thread read",
+                "rest_list_read",
+                "nmem-server::rest_lists::fetch_thread_entities.thread",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {id: $thread_uuid})-[:COMPACTS_TO]->(m:Memory)-[:MENTIONS]->(e:Entity) RETURN DISTINCT e.name ORDER BY e.name LIMIT 20",
+            ),
+            CompatibilityQueryCallSite::new(
                 "label distinct memory count aggregate read",
                 "label_stats_read",
                 "nmem-server::rest_fs::label_distribution",
@@ -22180,7 +22378,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 519);
+        assert_eq!(report.checks.len(), 524);
     }
 
     #[test]
@@ -22196,13 +22394,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 519);
-        assert_eq!(coverage.covered_checks, 519);
+        assert_eq!(coverage.required_checks, 524);
+        assert_eq!(coverage.covered_checks, 524);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 519);
+        assert_eq!(coverage_json["covered_checks"], 524);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -22232,10 +22430,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 519);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 524);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 519);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 524);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -22460,15 +22658,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 519);
-        assert_eq!(report.shadow_checks.len(), 519);
+        assert_eq!(report.primary_checks.len(), 524);
+        assert_eq!(report.shadow_checks.len(), 524);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            519
+            524
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -22477,7 +22675,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 519);
+        assert_eq!(cutover.matched_checks, 524);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
