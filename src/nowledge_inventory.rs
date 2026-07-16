@@ -555,10 +555,32 @@ fn normalize_cypher_literal(value: &str) -> Option<String> {
     if normalized.is_empty() || !looks_like_cypher(&normalized) {
         return None;
     }
+    if looks_like_incomplete_match_fragment(&normalized) {
+        return None;
+    }
     if contains_unresolved_rust_format_placeholder(&normalized) {
         return None;
     }
     Some(normalized)
+}
+
+fn looks_like_incomplete_match_fragment(query: &str) -> bool {
+    let upper = query.to_ascii_uppercase();
+    if !upper.starts_with("MATCH ") {
+        return false;
+    }
+    ![
+        " RETURN ",
+        " WITH ",
+        " SET ",
+        " CREATE ",
+        " MERGE ",
+        " DELETE ",
+        " DETACH DELETE ",
+        " CALL ",
+    ]
+    .iter()
+    .any(|marker| upper.contains(marker))
 }
 
 fn contains_unresolved_rust_format_placeholder(query: &str) -> bool {
@@ -888,6 +910,28 @@ mod tests {
                 "CALL PROJECT_GRAPH('{name}', {'Entity': ''}, {'RELATES_TO': ''})"
             ),
             None
+        );
+    }
+
+    #[test]
+    fn skips_incomplete_match_fragments_used_for_formatting() {
+        assert_eq!(
+            normalize_cypher_literal("MATCH (e:Entity {name: $name, entity_type: $entity_type})"),
+            None
+        );
+        assert_eq!(
+            normalize_cypher_literal(
+                "MATCH (e:Entity) WHERE e.entity_type = $entity_type AND LOWER(e.name) = LOWER($name)"
+            ),
+            None
+        );
+        assert_eq!(
+            normalize_cypher_literal("MATCH (e:Entity {id: $id}) RETURN e.id"),
+            Some("MATCH (e:Entity {id: $id}) RETURN e.id".to_string())
+        );
+        assert_eq!(
+            normalize_cypher_literal("MATCH (e:Entity {id: $id}) SET e.name = $name"),
+            Some("MATCH (e:Entity {id: $id}) SET e.name = $name".to_string())
         );
     }
 
