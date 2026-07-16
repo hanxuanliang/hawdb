@@ -4570,6 +4570,46 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "thread distill compaction link create",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid}), (m:Memory {id: $memory_id}) CREATE (t)-[:COMPACTS_TO {compaction_method: $method, created_at: $created_at, properties: $props}]->(m)",
+                        BTreeMap::from([
+                            (
+                                "thread_uuid".to_string(),
+                                Value::String("thread-distill-link-1".to_string()),
+                            ),
+                            (
+                                "memory_id".to_string(),
+                                Value::String("thread-distill-link-memory-1".to_string()),
+                            ),
+                            (
+                                "method".to_string(),
+                                Value::String("manual_distillation".to_string()),
+                            ),
+                            ("created_at".to_string(), Value::Int(1_700_000_070)),
+                            (
+                                "props".to_string(),
+                                Value::String("{\"mode\":\"manual\"}".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'thread-distill-link-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'thread-distill-link-memory-1'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['thread-distill-link-1', 'thread-distill-link-memory-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory created-at bulk read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.created_at",
@@ -8832,6 +8872,31 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "thread distill identity metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid}) RETURN t.metadata",
+                        BTreeMap::from([(
+                            "thread_uuid".to_string(),
+                            Value::String("thread-distill-metadata-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "t.metadata",
+                        Value::String("{\"agent_id\":\"agent-1\"}".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'thread-distill-metadata-1', metadata: '{\"agent_id\":\"agent-1\"}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'thread-distill-metadata-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "learning memory latest read",
                     CypherFixtureStatement::new(
                         "MATCH (m:Memory) WHERE m.unit_type = 'learning' AND m.is_crystal = false AND m.is_latest = true RETURN m.id, m.title, m.content ORDER BY m.created_at DESC LIMIT 40",
@@ -10229,6 +10294,32 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ),
                 ExpectedRows::Exact(vec![compatibility_row([("count(t)", Value::Int(1))])]),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "thread distill candidate page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.thread_id IS NOT NULL AND (CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END) = $space_id AND ($source IS NULL OR t.source = $source) RETURN t.thread_id ORDER BY COALESCE(t.updated_at, t.import_date, t.created_at) DESC, t.thread_id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "space_id".to_string(),
+                                Value::String("distill-space".to_string()),
+                            ),
+                            ("source".to_string(), Value::String("codex".to_string())),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "t.thread_id",
+                        Value::String("distill-logical-1".to_string()),
+                    )])]),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread) WHERE t.thread_id IN ['distill-logical-1', 'distill-logical-2', 'distill-logical-3'] DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "thread optional message count",
                 CypherFixtureStatement::with_parameters(
@@ -10297,6 +10388,90 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (n) WHERE n.id IN ['thread-ordered-1', 'ordered-msg-1', 'ordered-msg-2'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "thread distill legacy message read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid})-[c:CONTAINS]->(m:Message) RETURN COALESCE(c.order_index, m.order_index), m.role, m.content, m.metadata ORDER BY COALESCE(c.order_index, m.order_index)",
+                        BTreeMap::from([(
+                            "thread_uuid".to_string(),
+                            Value::String("thread-distill-legacy-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("coalesce", Value::Int(0)),
+                            ("m.role", Value::String("assistant".to_string())),
+                            ("m.content", Value::String("second legacy".to_string())),
+                            ("m.metadata", Value::String("{\"keep\":true}".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("coalesce", Value::Int(1)),
+                            ("m.role", Value::String("user".to_string())),
+                            ("m.content", Value::String("first legacy".to_string())),
+                            ("m.metadata", Value::String("{\"kind\":\"question\"}".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'thread-distill-legacy-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'distill-legacy-msg-1', content: 'first legacy', role: 'user', order_index: 100, metadata: '{\"kind\":\"question\"}'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'distill-legacy-msg-2', content: 'second legacy', role: 'assistant', order_index: 0, metadata: '{\"keep\":true}'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'thread-distill-legacy-1'}), (m:Message {id: 'distill-legacy-msg-1'}) CREATE (t)-[:CONTAINS {order_index: 1}]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'thread-distill-legacy-1'}), (m:Message {id: 'distill-legacy-msg-2'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['thread-distill-legacy-1', 'distill-legacy-msg-1', 'distill-legacy-msg-2'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "thread distill total message count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid}) OPTIONAL MATCH (t)-[:CONTAINS]->(m:Message) WITH t, COUNT(m) AS counted RETURN COALESCE(t.message_count, counted)",
+                        BTreeMap::from([(
+                            "thread_uuid".to_string(),
+                            Value::String("thread-distill-count-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "coalesce",
+                        Value::Int(2),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'thread-distill-count-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'distill-count-msg-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'distill-count-msg-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'thread-distill-count-1'}), (m:Message {id: 'distill-count-msg-1'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'thread-distill-count-1'}), (m:Message {id: 'distill-count-msg-2'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['thread-distill-count-1', 'distill-count-msg-1', 'distill-count-msg-2'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(3),
                 ),
@@ -15520,6 +15695,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread {id: $uuid})-[:COMPACTS_TO]->(m:Memory) RETURN m.id, m.title, m.content LIMIT 200",
             ),
             CompatibilityQueryCallSite::new(
+                "thread distill compaction link create",
+                "thread_distill_write",
+                "nmem-server::rest_distill::create_distilled_memory_link",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {id: $thread_uuid}), (m:Memory {id: $memory_id}) CREATE (t)-[:COMPACTS_TO {compaction_method: $method, created_at: $created_at, properties: $props}]->(m)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory created-at bulk read",
                 "memory_timestamp_read",
                 "nmem-server::context_wiring::memory_created_at_bulk",
@@ -16422,6 +16605,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread {id: $thread_uuid})-[c:CONTAINS]->(m:Message) RETURN m.id, m.content, m.role, COALESCE(c.order_index, m.order_index), m.timestamp ORDER BY COALESCE(c.order_index, m.order_index)",
             ),
             CompatibilityQueryCallSite::new(
+                "thread distill legacy message read",
+                "thread_distill_read",
+                "nmem-server::rest_distill::legacy_thread_messages",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {id: $thread_uuid})-[c:CONTAINS]->(m:Message) RETURN COALESCE(c.order_index, m.order_index), m.role, m.content, m.metadata ORDER BY COALESCE(c.order_index, m.order_index)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "thread distill total message count read",
+                "thread_distill_read",
+                "nmem-server::rest_distill::total_message_count",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {id: $thread_uuid}) OPTIONAL MATCH (t)-[:CONTAINS]->(m:Message) WITH t, COUNT(m) AS counted RETURN COALESCE(t.message_count, counted)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "thread message detach delete",
                 "thread_cleanup_write",
                 "nmem-graph::repo::delete_thread_graph",
@@ -16808,6 +17007,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread {id: $thread_uuid}) RETURN t.metadata as metadata",
             ),
             CompatibilityQueryCallSite::new(
+                "thread distill identity metadata read",
+                "thread_distill_read",
+                "nmem-server::rest_distill::thread_identity_attribution",
+            )
+            .with_cypher("MATCH (t:Thread {id: $thread_uuid}) RETURN t.metadata"),
+            CompatibilityQueryCallSite::new(
                 "learning memory latest read",
                 "memory_retrieval_read",
                 "nmem-server::context_wiring::learning_memory_latest",
@@ -17072,6 +17277,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (t:Thread) WHERE t.thread_id IS NOT NULL AND (CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END) = $space_id AND ($source IS NULL OR t.source = $source) RETURN COUNT(t)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "thread distill candidate page read",
+                "thread_distill_read",
+                "nmem-server::rest_distill::select_thread_candidates",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.thread_id IS NOT NULL AND (CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END) = $space_id AND ($source IS NULL OR t.source = $source) RETURN t.thread_id ORDER BY COALESCE(t.updated_at, t.import_date, t.created_at) DESC, t.thread_id ASC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
                 "memory access counter touch",
@@ -19597,7 +19810,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 443);
+        assert_eq!(report.checks.len(), 448);
     }
 
     #[test]
@@ -19613,13 +19826,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 443);
-        assert_eq!(coverage.covered_checks, 443);
+        assert_eq!(coverage.required_checks, 448);
+        assert_eq!(coverage.covered_checks, 448);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 443);
+        assert_eq!(coverage_json["covered_checks"], 448);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -19649,10 +19862,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 443);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 448);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 443);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 448);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -19877,15 +20090,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 443);
-        assert_eq!(report.shadow_checks.len(), 443);
+        assert_eq!(report.primary_checks.len(), 448);
+        assert_eq!(report.shadow_checks.len(), 448);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            443
+            448
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -19894,7 +20107,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 443);
+        assert_eq!(cutover.matched_checks, 448);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
