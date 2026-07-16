@@ -2,9 +2,10 @@ use crate::cypher::RelationshipDirection;
 use crate::planner::{
     AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, GraphAlgorithmKind,
     GraphAlgorithmOptions, LogicalPlan, Predicate, Projection, ProjectionExpression,
-    RelationshipOnCreateValue, RelationshipSetAssignment, SchemaObjectState, SchemaPropertyType,
-    SchemaTableKind, SetAssignment, SetNodePropertiesReturnMode, SetValue, ShortestPathProjection,
-    SortDirection, SortItem, SortKey,
+    RelationshipCountFilter, RelationshipCountLeg, RelationshipOnCreateValue,
+    RelationshipSetAssignment, SchemaObjectState, SchemaPropertyType, SchemaTableKind,
+    SetAssignment, SetNodePropertiesReturnMode, SetValue, ShortestPathProjection, SortDirection,
+    SortItem, SortKey,
 };
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -307,6 +308,23 @@ pub enum PhysicalPlan {
         target_properties: BTreeMap<String, Value>,
         alias: String,
         input: Box<PhysicalPlan>,
+    },
+    OptionalRelationshipCountSumExec {
+        variable: String,
+        label: String,
+        properties: BTreeMap<String, Value>,
+        legs: Vec<RelationshipCountLeg>,
+        output: String,
+    },
+    ThreadRepairStatsExec {
+        label: String,
+        identity_label: String,
+        identity_ref_property: String,
+        thread_id_property: String,
+        message_rel_type: String,
+        message_label: String,
+        memory_rel_type: String,
+        memory_label: String,
     },
     ShortestPathExec {
         source_variable: String,
@@ -746,6 +764,21 @@ impl PhysicalPlan {
                     "{pad}OptionalDegreeExec source={source_variable} rel_type={rel_type} direction={arrow} target={target_label} alias={alias}\n{}",
                     input.explain(indent + 2)
                 )
+            }
+            PhysicalPlan::OptionalRelationshipCountSumExec {
+                variable,
+                label,
+                legs,
+                output,
+                ..
+            } => {
+                format!(
+                    "{pad}OptionalRelationshipCountSumExec source={variable}:{label} legs={} output={output}",
+                    legs.len()
+                )
+            }
+            PhysicalPlan::ThreadRepairStatsExec { label, .. } => {
+                format!("{pad}ThreadRepairStatsExec label={label}")
             }
             PhysicalPlan::ShortestPathExec {
                 source_variable,
@@ -1636,6 +1669,58 @@ impl PhysicalPlan {
                 input.write_fingerprint(output);
                 output.push(')');
             }
+            PhysicalPlan::OptionalRelationshipCountSumExec {
+                variable,
+                label,
+                properties,
+                legs,
+                output: projection,
+            } => {
+                output.push_str("OptionalRelationshipCountSumExec(");
+                write_identifier(output, variable);
+                output.push(':');
+                write_identifier(output, label);
+                output.push(',');
+                write_properties(output, properties);
+                output.push_str(",legs=[");
+                for (index, leg) in legs.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write_relationship_count_leg(output, leg);
+                }
+                output.push_str("],output=");
+                write_identifier(output, projection);
+                output.push(')');
+            }
+            PhysicalPlan::ThreadRepairStatsExec {
+                label,
+                identity_label,
+                identity_ref_property,
+                thread_id_property,
+                message_rel_type,
+                message_label,
+                memory_rel_type,
+                memory_label,
+            } => {
+                output.push_str("ThreadRepairStatsExec(");
+                write_identifier(output, label);
+                output.push_str(",identity=");
+                write_identifier(output, identity_label);
+                output.push('.');
+                write_identifier(output, identity_ref_property);
+                output.push('=');
+                write_identifier(output, thread_id_property);
+                output.push_str(",messages=");
+                write_identifier(output, message_rel_type);
+                output.push(':');
+                write_identifier(output, message_label);
+                output.push_str(",memories=");
+                write_identifier(output, memory_rel_type);
+                output.push(':');
+                write_identifier(output, memory_label);
+                output.push(')');
+            }
             PhysicalPlan::ShortestPathExec {
                 source_variable,
                 source_label,
@@ -2200,6 +2285,8 @@ impl GroupExpr {
             | LogicalPlan::DeleteRelationshipTargetNodes { .. }
             | LogicalPlan::CreateRelationship { .. }
             | LogicalPlan::NodeScan { .. }
+            | LogicalPlan::OptionalRelationshipCountSum { .. }
+            | LogicalPlan::ThreadRepairStats { .. }
             | LogicalPlan::ShortestPath { .. } => Self {
                 logical: logical.clone(),
                 children: Vec::new(),
@@ -2716,6 +2803,38 @@ impl GroupExpr {
                 alias: alias.clone(),
                 input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
             },
+            LogicalPlan::OptionalRelationshipCountSum {
+                variable,
+                label,
+                properties,
+                legs,
+                output,
+            } => PhysicalPlan::OptionalRelationshipCountSumExec {
+                variable: variable.clone(),
+                label: label.clone(),
+                properties: properties.clone(),
+                legs: legs.clone(),
+                output: output.clone(),
+            },
+            LogicalPlan::ThreadRepairStats {
+                label,
+                identity_label,
+                identity_ref_property,
+                thread_id_property,
+                message_rel_type,
+                message_label,
+                memory_rel_type,
+                memory_label,
+            } => PhysicalPlan::ThreadRepairStatsExec {
+                label: label.clone(),
+                identity_label: identity_label.clone(),
+                identity_ref_property: identity_ref_property.clone(),
+                thread_id_property: thread_id_property.clone(),
+                message_rel_type: message_rel_type.clone(),
+                message_label: message_label.clone(),
+                memory_rel_type: memory_rel_type.clone(),
+                memory_label: memory_label.clone(),
+            },
             LogicalPlan::ShortestPath {
                 source_variable,
                 source_label,
@@ -2789,7 +2908,9 @@ fn logical_group_count(logical: &LogicalPlan) -> usize {
         | LogicalPlan::Distinct { input }
         | LogicalPlan::Sort { input, .. }
         | LogicalPlan::Limit { input, .. } => 1 + logical_group_count(input),
-        LogicalPlan::ShortestPath { .. } => 1,
+        LogicalPlan::OptionalRelationshipCountSum { .. }
+        | LogicalPlan::ThreadRepairStats { .. }
+        | LogicalPlan::ShortestPath { .. } => 1,
         LogicalPlan::CreateNodeLabel { .. }
         | LogicalPlan::CreateRelationshipType { .. }
         | LogicalPlan::CreateNodeTable { .. }
@@ -3321,6 +3442,38 @@ fn logical_to_physical_direct(
             alias: alias.clone(),
             input: Box::new(logical_to_physical_direct(input, catalog, decisions)),
         },
+        LogicalPlan::OptionalRelationshipCountSum {
+            variable,
+            label,
+            properties,
+            legs,
+            output,
+        } => PhysicalPlan::OptionalRelationshipCountSumExec {
+            variable: variable.clone(),
+            label: label.clone(),
+            properties: properties.clone(),
+            legs: legs.clone(),
+            output: output.clone(),
+        },
+        LogicalPlan::ThreadRepairStats {
+            label,
+            identity_label,
+            identity_ref_property,
+            thread_id_property,
+            message_rel_type,
+            message_label,
+            memory_rel_type,
+            memory_label,
+        } => PhysicalPlan::ThreadRepairStatsExec {
+            label: label.clone(),
+            identity_label: identity_label.clone(),
+            identity_ref_property: identity_ref_property.clone(),
+            thread_id_property: thread_id_property.clone(),
+            message_rel_type: message_rel_type.clone(),
+            message_label: message_label.clone(),
+            memory_rel_type: memory_rel_type.clone(),
+            memory_label: memory_label.clone(),
+        },
         LogicalPlan::ShortestPath {
             source_variable,
             source_label,
@@ -3571,6 +3724,14 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
                     .saturating_add(input_cost.estimated_rows.saturating_mul(2)),
             }
         }
+        PhysicalPlan::OptionalRelationshipCountSumExec { legs, .. } => PlanCost {
+            estimated_rows: 1,
+            cost: (legs.len() as u64).saturating_mul(8).saturating_add(4),
+        },
+        PhysicalPlan::ThreadRepairStatsExec { .. } => PlanCost {
+            estimated_rows: 1,
+            cost: 32,
+        },
         PhysicalPlan::ShortestPathExec { max_hops, .. } => PlanCost {
             estimated_rows: 1,
             cost: (*max_hops as u64).saturating_mul(8).saturating_add(4),
@@ -4626,6 +4787,31 @@ fn write_set_return_mode(output: &mut String, returns: &SetNodePropertiesReturnM
             output.push(')');
         }
     }
+}
+
+fn write_relationship_count_leg(output: &mut String, leg: &RelationshipCountLeg) {
+    output.push_str("RelationshipCountLeg(");
+    match leg.direction {
+        RelationshipDirection::Incoming => output.push_str("in,"),
+        RelationshipDirection::Outgoing => output.push_str("out,"),
+        RelationshipDirection::Undirected => output.push_str("both,"),
+    }
+    write_identifier(output, &leg.rel_type);
+    output.push_str(",distinct=");
+    output.push_str(if leg.distinct { "true" } else { "false" });
+    if let Some(filter) = &leg.filter {
+        output.push_str(",filter=");
+        match filter {
+            RelationshipCountFilter::PropertyNotEqOrEmpty { property, value } => {
+                output.push_str("not_eq_or_empty(");
+                write_identifier(output, property);
+                output.push(',');
+                write_value(output, value);
+                output.push(')');
+            }
+        }
+    }
+    output.push(')');
 }
 
 fn write_projection(output: &mut String, item: &Projection) {

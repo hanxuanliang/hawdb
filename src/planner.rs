@@ -287,6 +287,23 @@ pub enum LogicalPlan {
         alias: String,
         input: Box<LogicalPlan>,
     },
+    OptionalRelationshipCountSum {
+        variable: String,
+        label: String,
+        properties: BTreeMap<String, Value>,
+        legs: Vec<RelationshipCountLeg>,
+        output: String,
+    },
+    ThreadRepairStats {
+        label: String,
+        identity_label: String,
+        identity_ref_property: String,
+        thread_id_property: String,
+        message_rel_type: String,
+        message_label: String,
+        memory_rel_type: String,
+        memory_label: String,
+    },
     ShortestPath {
         source_variable: String,
         source_label: String,
@@ -537,6 +554,19 @@ pub struct SetAssignment {
 pub struct RelationshipSetAssignment {
     pub property: String,
     pub value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationshipCountLeg {
+    pub rel_type: String,
+    pub direction: RelationshipDirection,
+    pub distinct: bool,
+    pub filter: Option<RelationshipCountFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationshipCountFilter {
+    PropertyNotEqOrEmpty { property: String, value: Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1191,6 +1221,30 @@ pub fn plan_with_params(
                 returns,
             })
         }
+        Statement::MatchOptionalRelationshipCountSum(query) => {
+            if query.legs.is_empty() {
+                return Err(SkeinError::Semantic(
+                    "optional relationship count sum requires at least one count leg".to_string(),
+                ));
+            }
+            Ok(LogicalPlan::OptionalRelationshipCountSum {
+                variable: query.variable.clone(),
+                label: query.label.clone(),
+                properties: bind_properties(&query.properties, parameters)?,
+                legs: bind_relationship_count_legs(&query.legs, parameters)?,
+                output: query.output.clone(),
+            })
+        }
+        Statement::MatchThreadRepairStats(query) => Ok(LogicalPlan::ThreadRepairStats {
+            label: query.label.clone(),
+            identity_label: query.identity_label.clone(),
+            identity_ref_property: query.identity_ref_property.clone(),
+            thread_id_property: query.thread_id_property.clone(),
+            message_rel_type: query.message_rel_type.clone(),
+            message_label: query.message_label.clone(),
+            memory_rel_type: query.memory_rel_type.clone(),
+            memory_label: query.memory_label.clone(),
+        }),
         Statement::MatchDelete(delete) => {
             if let Some(expand) = &delete.expand {
                 if expand.min_hops != 1 || expand.max_hops != 1 {
@@ -3253,6 +3307,41 @@ fn bind_properties(
         .iter()
         .map(|(name, value)| Ok((name.clone(), bind_value(value, parameters)?)))
         .collect()
+}
+
+fn bind_relationship_count_legs(
+    legs: &[crate::cypher::OptionalRelationshipCountLeg],
+    parameters: &BTreeMap<String, Value>,
+) -> Result<Vec<RelationshipCountLeg>> {
+    legs.iter()
+        .map(|leg| {
+            Ok(RelationshipCountLeg {
+                rel_type: leg.rel_type.clone(),
+                direction: leg.direction,
+                distinct: leg.distinct,
+                filter: leg
+                    .filter
+                    .as_ref()
+                    .map(|filter| bind_relationship_count_filter(filter, parameters))
+                    .transpose()?,
+            })
+        })
+        .collect()
+}
+
+fn bind_relationship_count_filter(
+    filter: &crate::cypher::OptionalRelationshipCountFilter,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<RelationshipCountFilter> {
+    match filter {
+        crate::cypher::OptionalRelationshipCountFilter::PropertyNotEqOrEmpty {
+            property,
+            value,
+        } => Ok(RelationshipCountFilter::PropertyNotEqOrEmpty {
+            property: property.clone(),
+            value: bind_value(value, parameters)?,
+        }),
+    }
 }
 
 fn bind_on_create_set_properties(

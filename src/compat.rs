@@ -11010,6 +11010,79 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest thread repair summary read",
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread) OPTIONAL MATCH (ti:ThreadIdentity) WHERE ti.thread_node_id = t.id WITH t, COUNT(ti) AS identity_refs OPTIONAL MATCH (t)-[:CONTAINS]->(msg:Message) WITH t, identity_refs, COUNT(msg) AS legacy_messages OPTIONAL MATCH (t)-[:COMPACTS_TO]->(m:Memory) RETURN t.id, t.thread_id, CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END, COALESCE(t.message_count, 0), identity_refs, legacy_messages, COUNT(m) ORDER BY t.id ASC",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("t.id", Value::String("repair-summary-thread-a".to_string())),
+                            (
+                                "t.thread_id",
+                                Value::String("repair-summary-logical-a".to_string()),
+                            ),
+                            (
+                                "CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END",
+                                Value::String("default".to_string()),
+                            ),
+                            ("COALESCE(t.message_count, 0)", Value::Int(5)),
+                            ("identity_refs", Value::Int(1)),
+                            ("legacy_messages", Value::Int(2)),
+                            ("COUNT(m)", Value::Int(1)),
+                        ]),
+                        compatibility_row([
+                            ("t.id", Value::String("repair-summary-thread-b".to_string())),
+                            (
+                                "t.thread_id",
+                                Value::String("repair-summary-logical-b".to_string()),
+                            ),
+                            (
+                                "CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END",
+                                Value::String("team".to_string()),
+                            ),
+                            ("COALESCE(t.message_count, 0)", Value::Int(0)),
+                            ("identity_refs", Value::Int(0)),
+                            ("legacy_messages", Value::Int(0)),
+                            ("COUNT(m)", Value::Int(0)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'repair-summary-thread-a', thread_id: 'repair-summary-logical-a', space_id: '', message_count: 5})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'repair-summary-thread-b', thread_id: 'repair-summary-logical-b', space_id: 'team'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:ThreadIdentity {id: 'repair-summary-identity-a', thread_node_id: 'repair-summary-thread-a'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'repair-summary-message-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'repair-summary-message-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'repair-summary-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'repair-summary-thread-a'}), (m:Message {id: 'repair-summary-message-1'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'repair-summary-thread-a'}), (m:Message {id: 'repair-summary-message-2'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'repair-summary-thread-a'}), (m:Memory {id: 'repair-summary-memory-1'}) CREATE (t)-[:COMPACTS_TO]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['repair-summary-thread-a', 'repair-summary-thread-b', 'repair-summary-identity-a', 'repair-summary-message-1', 'repair-summary-message-2', 'repair-summary-memory-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(6),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "rest thread repair storage delete",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (t:Thread {id: $storage_id}) DETACH DELETE t",
@@ -11719,6 +11792,74 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (n) WHERE n.id IN ['rest-write-label-count-entity', 'rest-write-label-count-label'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write entity source reference relationship count sum",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $eid}) OPTIONAL MATCH (e)-[r1:RELATES_TO]-() WHERE r1.source_reference <> $mid OR r1.source_reference IS NULL OR r1.source_reference = '' OPTIONAL MATCH ()-[r2:RELATES_TO]->(e) WHERE r2.source_reference <> $mid OR r2.source_reference IS NULL OR r2.source_reference = '' RETURN (count(r1) + count(r2))",
+                        BTreeMap::from([
+                            (
+                                "eid".to_string(),
+                                Value::String("rest-write-count-sum-entity".to_string()),
+                            ),
+                            (
+                                "mid".to_string(),
+                                Value::String("rest-write-count-sum-excluded".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "(count(r1) + count(r2))",
+                        Value::Int(4),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-count-sum-entity'})-[:RELATES_TO {source_reference: 'other-source'}]->(:Entity {id: 'rest-write-count-sum-out'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-count-sum-in-empty'})-[:RELATES_TO {source_reference: ''}]->(:Entity {id: 'rest-write-count-sum-entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-count-sum-in-excluded'})-[:RELATES_TO {source_reference: 'rest-write-count-sum-excluded'}]->(:Entity {id: 'rest-write-count-sum-entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-count-sum-entity'})-[:RELATES_TO]->(:Entity {id: 'rest-write-count-sum-null'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['rest-write-count-sum-entity', 'rest-write-count-sum-out', 'rest-write-count-sum-in-empty', 'rest-write-count-sum-in-excluded', 'rest-write-count-sum-null'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(8),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write entity distinct relationship count sum",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $eid}) OPTIONAL MATCH (e)-[r1]-() OPTIONAL MATCH ()-[r2]->(e) RETURN (count(DISTINCT r1) + count(DISTINCT r2))",
+                        BTreeMap::from([(
+                            "eid".to_string(),
+                            Value::String("rest-write-distinct-count-sum-entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "(count(DISTINCT r1) + count(DISTINCT r2))",
+                        Value::Int(3),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-distinct-count-sum-entity'})-[:RELATES_TO]->(:Entity {id: 'rest-write-distinct-count-sum-out'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-distinct-count-sum-in'})-[:RELATES_TO]->(:Entity {id: 'rest-write-distinct-count-sum-entity'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['rest-write-distinct-count-sum-entity', 'rest-write-distinct-count-sum-out', 'rest-write-distinct-count-sum-in'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(4),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -22875,6 +23016,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (ti:ThreadIdentity) RETURN ti.id, ti.thread_node_id, CASE WHEN ti.space_id IS NULL OR ti.space_id = '' THEN 'default' ELSE ti.space_id END",
             ),
             CompatibilityQueryCallSite::new(
+                "rest thread repair summary read",
+                "thread_repair_read",
+                "nmem-server::rest_thread_repair::thread_repair_summary",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) OPTIONAL MATCH (ti:ThreadIdentity) WHERE ti.thread_node_id = t.id WITH t, COUNT(ti) AS identity_refs OPTIONAL MATCH (t)-[:CONTAINS]->(msg:Message) WITH t, identity_refs, COUNT(msg) AS legacy_messages OPTIONAL MATCH (t)-[:COMPACTS_TO]->(m:Memory) RETURN t.id, t.thread_id, CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END, COALESCE(t.message_count, 0), identity_refs, legacy_messages, COUNT(m) ORDER BY t.id ASC",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest thread repair storage delete",
                 "thread_repair_write",
                 "nmem-server::rest_thread_repair::delete_storage_thread",
@@ -23068,6 +23217,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-server::rest_write::entity_label_count_for_delete",
             )
             .with_cypher("MATCH (e:Entity {id: $eid})-[:HAS_LABEL]-() RETURN count(*)"),
+            CompatibilityQueryCallSite::new(
+                "rest write entity source reference relationship count sum",
+                "rest_write_read",
+                "nmem-server::rest_write::source_reference_relationship_count_for_delete",
+            )
+            .with_cypher(
+                "MATCH (e:Entity {id: $eid}) OPTIONAL MATCH (e)-[r1:RELATES_TO]-() WHERE r1.source_reference <> $mid OR r1.source_reference IS NULL OR r1.source_reference = '' OPTIONAL MATCH ()-[r2:RELATES_TO]->(e) WHERE r2.source_reference <> $mid OR r2.source_reference IS NULL OR r2.source_reference = '' RETURN (count(r1) + count(r2))",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest write entity distinct relationship count sum",
+                "rest_write_read",
+                "nmem-server::rest_write::relationship_count_for_orphan_entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity {id: $eid}) OPTIONAL MATCH (e)-[r1]-() OPTIONAL MATCH ()-[r2]->(e) RETURN (count(DISTINCT r1) + count(DISTINCT r2))",
+            ),
             CompatibilityQueryCallSite::new(
                 "rest write entity delete",
                 "rest_write",
@@ -26214,7 +26379,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 639);
+        assert_eq!(report.checks.len(), 642);
     }
 
     #[test]
@@ -26230,13 +26395,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 639);
-        assert_eq!(coverage.covered_checks, 639);
+        assert_eq!(coverage.required_checks, 642);
+        assert_eq!(coverage.covered_checks, 642);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 639);
+        assert_eq!(coverage_json["covered_checks"], 642);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -26266,10 +26431,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 639);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 642);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 639);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 642);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -26494,15 +26659,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 639);
-        assert_eq!(report.shadow_checks.len(), 639);
+        assert_eq!(report.primary_checks.len(), 642);
+        assert_eq!(report.shadow_checks.len(), 642);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            639
+            642
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -26511,7 +26676,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 639);
+        assert_eq!(cutover.matched_checks, 642);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

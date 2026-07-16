@@ -5,9 +5,9 @@ use crate::optimizer::PhysicalPlan;
 use crate::planner::{
     AggregateFunction, AggregateTarget, Aggregation, CoalesceDifferenceProjectionTerm,
     ComparisonOp, DatePart, GraphAlgorithmKind, Predicate, Projection, ProjectionExpression,
-    RelationshipOnCreateValue, SchemaObjectState, SchemaPropertyType, SchemaTableKind,
-    SetNodePropertiesReturnMode, SetValue, ShortestPathProjection,
-    ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
+    RelationshipCountFilter, RelationshipCountLeg, RelationshipOnCreateValue, SchemaObjectState,
+    SchemaPropertyType, SchemaTableKind, SetNodePropertiesReturnMode, SetValue,
+    ShortestPathProjection, ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
 };
 use crate::schema::{Catalog, PropertyType, TableKind};
 use crate::store::{
@@ -510,6 +510,8 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
         | PhysicalPlan::IndexNodeTextSeek { .. }
         | PhysicalPlan::AdjacencyExpandExec { .. }
         | PhysicalPlan::OptionalDegreeExec { .. }
+        | PhysicalPlan::OptionalRelationshipCountSumExec { .. }
+        | PhysicalPlan::ThreadRepairStatsExec { .. }
         | PhysicalPlan::ShortestPathExec { .. }
         | PhysicalPlan::FilterExec { .. }
         | PhysicalPlan::ProjectExec { .. }
@@ -1911,6 +1913,51 @@ fn execute_bindings(
                 })
                 .collect()
         }
+        PhysicalPlan::OptionalRelationshipCountSumExec {
+            label,
+            properties,
+            legs,
+            output,
+            ..
+        } => {
+            let label_ids = label_ids_for_pattern(catalog, label);
+            let total = store
+                .scan_nodes(None)
+                .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
+                .filter(|node| node_properties_match(node, properties))
+                .map(|node| {
+                    legs.iter()
+                        .map(|leg| relationship_count_sum_leg(catalog, store, node.id, leg))
+                        .sum::<usize>()
+                })
+                .sum::<usize>();
+            Ok(vec![Binding {
+                values: BTreeMap::from([(output.clone(), Value::Int(total as i64))]),
+                nodes: BTreeMap::new(),
+                relationships: BTreeMap::new(),
+            }])
+        }
+        PhysicalPlan::ThreadRepairStatsExec {
+            label,
+            identity_label,
+            identity_ref_property,
+            thread_id_property,
+            message_rel_type,
+            message_label,
+            memory_rel_type,
+            memory_label,
+        } => Ok(thread_repair_stats_rows(
+            catalog,
+            store,
+            label,
+            identity_label,
+            identity_ref_property,
+            thread_id_property,
+            message_rel_type,
+            message_label,
+            memory_rel_type,
+            memory_label,
+        )),
         PhysicalPlan::ShortestPathExec {
             source_label,
             source_id,
@@ -2817,6 +2864,164 @@ fn one_hop_relationships<'a>(
         );
     }
     matches
+}
+
+fn relationship_count_sum_leg(
+    catalog: &Catalog,
+    store: &GraphStore,
+    source: NodeId,
+    leg: &RelationshipCountLeg,
+) -> usize {
+    let rel_type_id = if leg.rel_type.is_empty() {
+        None
+    } else {
+        catalog.rel_type_id(&leg.rel_type)
+    };
+    if !leg.rel_type.is_empty() && rel_type_id.is_none() {
+        return 0;
+    }
+    one_hop_relationships(
+        store,
+        source,
+        rel_type_id,
+        None,
+        &BTreeMap::new(),
+        leg.direction,
+    )
+    .into_iter()
+    .filter(|(relationship, _)| {
+        relationship_count_filter_matches(relationship, leg.filter.as_ref())
+    })
+    .count()
+}
+
+fn relationship_count_filter_matches(
+    relationship: &RelRecord,
+    filter: Option<&RelationshipCountFilter>,
+) -> bool {
+    match filter {
+        None => true,
+        Some(RelationshipCountFilter::PropertyNotEqOrEmpty { property, value }) => {
+            match relationship.properties.get(property) {
+                None | Some(Value::Null) => true,
+                Some(Value::String(text)) if text.is_empty() => true,
+                Some(current) => current != value,
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn thread_repair_stats_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    label: &str,
+    identity_label: &str,
+    identity_ref_property: &str,
+    thread_id_property: &str,
+    message_rel_type: &str,
+    message_label: &str,
+    memory_rel_type: &str,
+    memory_label: &str,
+) -> Vec<Binding> {
+    let thread_label_ids = label_ids_for_pattern(catalog, label);
+    let identity_label_ids = label_ids_for_pattern(catalog, identity_label);
+    let message_label_ids = label_ids_for_pattern(catalog, message_label);
+    let memory_label_ids = label_ids_for_pattern(catalog, memory_label);
+    let message_rel_type_id = catalog.rel_type_id(message_rel_type);
+    let memory_rel_type_id = catalog.rel_type_id(memory_rel_type);
+    let identities = store
+        .scan_nodes(None)
+        .filter(|node| node_matches_label_pattern(node, identity_label_ids.as_deref()))
+        .collect::<Vec<_>>();
+    let mut threads = store
+        .scan_nodes(None)
+        .filter(|node| node_matches_label_pattern(node, thread_label_ids.as_deref()))
+        .collect::<Vec<_>>();
+    threads.sort_by(|left, right| {
+        left.properties
+            .get("id")
+            .unwrap_or(&Value::Null)
+            .cmp(right.properties.get("id").unwrap_or(&Value::Null))
+    });
+    threads
+        .into_iter()
+        .map(|thread| {
+            let thread_id = thread
+                .properties
+                .get(thread_id_property)
+                .cloned()
+                .unwrap_or(Value::Null);
+            let identity_refs = identities
+                .iter()
+                .filter(|identity| identity.properties.get(identity_ref_property) == Some(&thread_id))
+                .count();
+            let legacy_messages = message_rel_type_id
+                .map(|rel_type_id| {
+                    one_hop_relationships(
+                        store,
+                        thread.id,
+                        Some(rel_type_id),
+                        message_label_ids.as_deref(),
+                        &BTreeMap::new(),
+                        RelationshipDirection::Outgoing,
+                    )
+                    .len()
+                })
+                .unwrap_or(0);
+            let compacted_memories = memory_rel_type_id
+                .map(|rel_type_id| {
+                    one_hop_relationships(
+                        store,
+                        thread.id,
+                        Some(rel_type_id),
+                        memory_label_ids.as_deref(),
+                        &BTreeMap::new(),
+                        RelationshipDirection::Outgoing,
+                    )
+                    .len()
+                })
+                .unwrap_or(0);
+            let space_id = match thread.properties.get("space_id") {
+                Some(Value::String(value)) if !value.is_empty() => Value::String(value.clone()),
+                _ => Value::String("default".to_string()),
+            };
+            let message_count = match thread.properties.get("message_count") {
+                Some(Value::Null) | None => Value::Int(0),
+                Some(value) => value.clone(),
+            };
+            Binding {
+                values: BTreeMap::from([
+                    (
+                        "t.id".to_string(),
+                        thread.properties.get("id").cloned().unwrap_or(Value::Null),
+                    ),
+                    (
+                        "t.thread_id".to_string(),
+                        thread
+                            .properties
+                            .get("thread_id")
+                            .cloned()
+                            .unwrap_or(Value::Null),
+                    ),
+                    (
+                        "CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END"
+                            .to_string(),
+                        space_id,
+                    ),
+                    ("COALESCE(t.message_count, 0)".to_string(), message_count),
+                    ("identity_refs".to_string(), Value::Int(identity_refs as i64)),
+                    (
+                        "legacy_messages".to_string(),
+                        Value::Int(legacy_messages as i64),
+                    ),
+                    ("COUNT(m)".to_string(), Value::Int(compacted_memories as i64)),
+                ]),
+                nodes: BTreeMap::new(),
+                relationships: BTreeMap::new(),
+            }
+        })
+        .collect()
 }
 
 fn collect_one_hop_relationships<'a>(

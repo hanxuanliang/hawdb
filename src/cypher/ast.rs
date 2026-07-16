@@ -32,6 +32,8 @@ pub enum Statement {
     MatchNodesReturn(MatchNodesReturn),
     MatchSet(MatchSet),
     MatchSetReturn(MatchSetReturn),
+    MatchOptionalRelationshipCountSum(MatchOptionalRelationshipCountSum),
+    MatchThreadRepairStats(MatchThreadRepairStats),
     MatchDelete(MatchDelete),
     MatchCreateRelationship(MatchCreateRelationship),
     MatchMergeRelationship(MatchMergeRelationship),
@@ -327,6 +329,46 @@ pub struct MatchSet {
 pub struct MatchSetReturn {
     pub update: MatchSet,
     pub returns: Vec<ReturnItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchOptionalRelationshipCountSum {
+    pub variable: String,
+    pub label: String,
+    pub properties: BTreeMap<String, ValueExpression>,
+    pub legs: Vec<OptionalRelationshipCountLeg>,
+    pub output: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionalRelationshipCountLeg {
+    pub relationship_variable: String,
+    pub rel_type: String,
+    pub direction: RelationshipDirection,
+    pub distinct: bool,
+    pub filter: Option<OptionalRelationshipCountFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OptionalRelationshipCountFilter {
+    PropertyNotEqOrEmpty {
+        property: String,
+        value: ValueExpression,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchThreadRepairStats {
+    pub variable: String,
+    pub label: String,
+    pub identity_variable: String,
+    pub identity_label: String,
+    pub identity_ref_property: String,
+    pub thread_id_property: String,
+    pub message_rel_type: String,
+    pub message_label: String,
+    pub memory_rel_type: String,
+    pub memory_label: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

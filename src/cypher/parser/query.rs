@@ -13,6 +13,21 @@ struct ParsedWithClause {
     aggregate_with: Option<WithAggregateProjection>,
 }
 
+struct ParsedOptionalCountTerm {
+    variable: String,
+    distinct: bool,
+}
+
+impl ParsedOptionalCountTerm {
+    fn display_variable(&self) -> String {
+        if self.distinct {
+            format!("DISTINCT {}", self.variable)
+        } else {
+            self.variable.clone()
+        }
+    }
+}
+
 impl Parser<'_> {
     pub(super) fn parse_match_statement(&mut self) -> Result<Statement> {
         let path_variable = self.consume_match_path_binding_prefix();
@@ -283,6 +298,13 @@ impl Parser<'_> {
         }
         let optional_expand = if self.consume_keyword("OPTIONAL") {
             self.expect_keyword("MATCH")?;
+            let thread_repair_start = self.pos;
+            if let Ok(statement) =
+                self.parse_thread_repair_stats_after_optional_match(&variable, &label)
+            {
+                return Ok(statement);
+            }
+            self.pos = thread_repair_start;
             let mut scope = BTreeSet::from([variable.clone()]);
             if let Some(expand) = &expand {
                 scope.insert(expand.target_variable.clone());
@@ -294,6 +316,47 @@ impl Parser<'_> {
         } else {
             None
         };
+        if let Some(first_optional) = &optional_expand {
+            if self.next_keyword_is("WHERE") || self.next_keyword_is("OPTIONAL") {
+                let first_filter = if self.consume_keyword("WHERE") {
+                    Some(self.parse_optional_relationship_count_filter(first_optional)?)
+                } else {
+                    None
+                };
+                if self.consume_keyword("OPTIONAL") {
+                    self.expect_keyword("MATCH")?;
+                    let second_optional = self
+                        .parse_optional_relationship_expand(&BTreeSet::from([variable.clone()]))?;
+                    let second_filter = if self.consume_keyword("WHERE") {
+                        Some(self.parse_optional_relationship_count_filter(&second_optional)?)
+                    } else {
+                        None
+                    };
+                    self.expect_keyword("RETURN")?;
+                    let (first_count, second_count, output) =
+                        self.parse_optional_relationship_count_sum_return()?;
+                    let first_leg = self.optional_relationship_count_leg(
+                        first_optional,
+                        first_filter,
+                        &first_count,
+                    )?;
+                    let second_leg = self.optional_relationship_count_leg(
+                        &second_optional,
+                        second_filter,
+                        &second_count,
+                    )?;
+                    return Ok(Statement::MatchOptionalRelationshipCountSum(
+                        MatchOptionalRelationshipCountSum {
+                            variable,
+                            label,
+                            properties,
+                            legs: vec![first_leg, second_leg],
+                            output,
+                        },
+                    ));
+                }
+            }
+        }
         let with_clause = if self.consume_keyword("WITH") {
             self.parse_with_clause()?
         } else {
@@ -814,6 +877,284 @@ impl Parser<'_> {
         Ok(ReturnItem {
             expression,
             alias: Some(alias),
+        })
+    }
+
+    fn parse_thread_repair_stats_after_optional_match(
+        &mut self,
+        variable: &str,
+        label: &str,
+    ) -> Result<Statement> {
+        let (identity_variable, identity_label, identity_properties) =
+            self.parse_match_node_pattern()?;
+        if !identity_properties.is_empty() {
+            return Err(self.error("thread repair identity optional match cannot use properties"));
+        }
+        self.expect_keyword("WHERE")?;
+        let where_identity_variable = self.parse_ident()?;
+        if where_identity_variable != identity_variable {
+            return Err(self.error("thread repair identity WHERE must use the identity variable"));
+        }
+        self.expect_char('.')?;
+        let identity_ref_property = self.parse_ident()?;
+        self.expect_char('=')?;
+        let where_thread_variable = self.parse_ident()?;
+        if where_thread_variable != variable {
+            return Err(
+                self.error("thread repair identity WHERE must reference the thread variable")
+            );
+        }
+        self.expect_char('.')?;
+        let thread_id_property = self.parse_ident()?;
+
+        self.expect_keyword("WITH")?;
+        let with_thread_variable = self.parse_ident()?;
+        if with_thread_variable != variable {
+            return Err(self.error("thread repair WITH must keep the thread variable"));
+        }
+        self.expect_char(',')?;
+        let (identity_count_variable, identity_refs_alias) = self.parse_count_alias()?;
+        if identity_count_variable != identity_variable || identity_refs_alias != "identity_refs" {
+            return Err(self.error("thread repair WITH must count identity_refs"));
+        }
+
+        self.expect_keyword("OPTIONAL")?;
+        self.expect_keyword("MATCH")?;
+        let message_optional =
+            self.parse_optional_relationship_expand(&BTreeSet::from([variable.to_string()]))?;
+        if message_optional.source_variable != variable {
+            return Err(self.error("thread repair message optional must start from thread"));
+        }
+
+        self.expect_keyword("WITH")?;
+        let second_with_thread_variable = self.parse_ident()?;
+        if second_with_thread_variable != variable {
+            return Err(self.error("thread repair second WITH must keep the thread variable"));
+        }
+        self.expect_char(',')?;
+        let identity_refs_column = self.parse_ident()?;
+        if identity_refs_column != "identity_refs" {
+            return Err(self.error("thread repair second WITH must keep identity_refs"));
+        }
+        self.expect_char(',')?;
+        let (message_count_variable, legacy_messages_alias) = self.parse_count_alias()?;
+        if message_count_variable != message_optional.expand.target_variable
+            || legacy_messages_alias != "legacy_messages"
+        {
+            return Err(self.error("thread repair second WITH must count legacy_messages"));
+        }
+
+        self.expect_keyword("OPTIONAL")?;
+        self.expect_keyword("MATCH")?;
+        let memory_optional =
+            self.parse_optional_relationship_expand(&BTreeSet::from([variable.to_string()]))?;
+        if memory_optional.source_variable != variable {
+            return Err(self.error("thread repair memory optional must start from thread"));
+        }
+
+        self.expect_keyword("RETURN")?;
+        self.expect_thread_repair_return(variable, &memory_optional.expand.target_variable)?;
+        self.expect_keyword("ORDER")?;
+        self.expect_keyword("BY")?;
+        let order_variable = self.parse_ident()?;
+        if order_variable != variable {
+            return Err(self.error("thread repair ORDER BY must use the thread variable"));
+        }
+        self.expect_char('.')?;
+        let order_property = self.parse_ident()?;
+        if order_property != "id" {
+            return Err(self.error("thread repair ORDER BY must use thread id"));
+        }
+        self.expect_keyword("ASC")?;
+
+        Ok(Statement::MatchThreadRepairStats(MatchThreadRepairStats {
+            variable: variable.to_string(),
+            label: label.to_string(),
+            identity_variable,
+            identity_label,
+            identity_ref_property,
+            thread_id_property,
+            message_rel_type: message_optional.expand.rel_type,
+            message_label: message_optional.expand.target_label,
+            memory_rel_type: memory_optional.expand.rel_type,
+            memory_label: memory_optional.expand.target_label,
+        }))
+    }
+
+    fn parse_count_alias(&mut self) -> Result<(String, String)> {
+        self.expect_keyword("COUNT")?;
+        self.expect_char('(')?;
+        let variable = self.parse_ident()?;
+        self.expect_char(')')?;
+        self.expect_keyword("AS")?;
+        let alias = self.parse_ident()?;
+        Ok((variable, alias))
+    }
+
+    fn expect_thread_repair_return(&mut self, variable: &str, memory_variable: &str) -> Result<()> {
+        self.expect_property_return(variable, "id")?;
+        self.expect_char(',')?;
+        self.expect_property_return(variable, "thread_id")?;
+        self.expect_char(',')?;
+        let expression = self.parse_return_value_expression()?;
+        let space_id_matches = matches!(
+            expression,
+            ReturnValueExpression::DefaultIfNullOrEq {
+                variable: ref expression_variable,
+                ref property,
+                ..
+            } if expression_variable == variable && property == "space_id"
+        );
+        if !space_id_matches {
+            return Err(self.error("thread repair RETURN must normalize thread space_id"));
+        }
+        self.expect_char(',')?;
+        let expression = self.parse_return_value_expression()?;
+        if !matches!(expression, ReturnValueExpression::Coalesce(_)) {
+            return Err(self.error("thread repair RETURN must coalesce message_count"));
+        }
+        self.expect_char(',')?;
+        let identity_refs = self.parse_ident()?;
+        if identity_refs != "identity_refs" {
+            return Err(self.error("thread repair RETURN must include identity_refs"));
+        }
+        self.expect_char(',')?;
+        let legacy_messages = self.parse_ident()?;
+        if legacy_messages != "legacy_messages" {
+            return Err(self.error("thread repair RETURN must include legacy_messages"));
+        }
+        self.expect_char(',')?;
+        self.expect_keyword("COUNT")?;
+        self.expect_char('(')?;
+        let counted_memory = self.parse_ident()?;
+        if counted_memory != memory_variable {
+            return Err(self.error("thread repair RETURN must count compacted memories"));
+        }
+        self.expect_char(')')?;
+        Ok(())
+    }
+
+    fn expect_property_return(&mut self, variable: &str, property: &str) -> Result<()> {
+        let parsed_variable = self.parse_ident()?;
+        if parsed_variable != variable {
+            return Err(self.error("thread repair RETURN property has the wrong variable"));
+        }
+        self.expect_char('.')?;
+        let parsed_property = self.parse_ident()?;
+        if parsed_property != property {
+            return Err(self.error("thread repair RETURN property has the wrong property"));
+        }
+        Ok(())
+    }
+
+    fn parse_optional_relationship_count_filter(
+        &mut self,
+        optional: &OptionalRelationshipExpand,
+    ) -> Result<OptionalRelationshipCountFilter> {
+        let Some(relationship_variable) = optional.expand.variable.as_deref() else {
+            return Err(
+                self.error("OPTIONAL relationship count filter requires a relationship variable")
+            );
+        };
+        let variable = self.parse_ident()?;
+        if variable != relationship_variable {
+            return Err(self.error(
+                "OPTIONAL relationship count filter must use the counted relationship variable",
+            ));
+        }
+        self.expect_char('.')?;
+        let property = self.parse_ident()?;
+        self.expect_token("<>")?;
+        let value = self.parse_value()?;
+        self.expect_keyword("OR")?;
+        let null_variable = self.parse_ident()?;
+        if null_variable != relationship_variable {
+            return Err(self.error(
+                "OPTIONAL relationship count filter must repeat the relationship variable",
+            ));
+        }
+        self.expect_char('.')?;
+        let null_property = self.parse_ident()?;
+        if null_property != property {
+            return Err(
+                self.error("OPTIONAL relationship count filter must repeat the filtered property")
+            );
+        }
+        self.expect_keyword("IS")?;
+        self.expect_keyword("NULL")?;
+        self.expect_keyword("OR")?;
+        let empty_variable = self.parse_ident()?;
+        if empty_variable != relationship_variable {
+            return Err(self.error(
+                "OPTIONAL relationship count filter must repeat the relationship variable",
+            ));
+        }
+        self.expect_char('.')?;
+        let empty_property = self.parse_ident()?;
+        if empty_property != property {
+            return Err(
+                self.error("OPTIONAL relationship count filter must repeat the filtered property")
+            );
+        }
+        self.expect_char('=')?;
+        let empty = self.parse_value()?;
+        if empty != ValueExpression::Literal(crate::value::Value::String(String::new())) {
+            return Err(self.error(
+                "OPTIONAL relationship count filter only supports an empty-string fallback",
+            ));
+        }
+        Ok(OptionalRelationshipCountFilter::PropertyNotEqOrEmpty { property, value })
+    }
+
+    fn parse_optional_relationship_count_sum_return(
+        &mut self,
+    ) -> Result<(ParsedOptionalCountTerm, ParsedOptionalCountTerm, String)> {
+        let parenthesized = self.consume_char('(');
+        let first = self.parse_optional_count_term()?;
+        self.expect_char('+')?;
+        let second = self.parse_optional_count_term()?;
+        if parenthesized {
+            self.expect_char(')')?;
+        }
+        let output = format!(
+            "(count({}) + count({}))",
+            first.display_variable(),
+            second.display_variable()
+        );
+        Ok((first, second, output))
+    }
+
+    fn parse_optional_count_term(&mut self) -> Result<ParsedOptionalCountTerm> {
+        self.expect_keyword("COUNT")?;
+        self.expect_char('(')?;
+        let distinct = self.consume_keyword("DISTINCT");
+        let variable = self.parse_ident()?;
+        self.expect_char(')')?;
+        Ok(ParsedOptionalCountTerm { variable, distinct })
+    }
+
+    fn optional_relationship_count_leg(
+        &self,
+        optional: &OptionalRelationshipExpand,
+        filter: Option<OptionalRelationshipCountFilter>,
+        count: &ParsedOptionalCountTerm,
+    ) -> Result<OptionalRelationshipCountLeg> {
+        let Some(relationship_variable) = optional.expand.variable.clone() else {
+            return Err(
+                self.error("OPTIONAL relationship count sum requires relationship variables")
+            );
+        };
+        if relationship_variable != count.variable {
+            return Err(self.error(
+                "OPTIONAL relationship count sum must count the optional relationship variable",
+            ));
+        }
+        Ok(OptionalRelationshipCountLeg {
+            relationship_variable,
+            rel_type: optional.expand.rel_type.clone(),
+            direction: optional.expand.direction,
+            distinct: count.distinct,
+            filter,
         })
     }
 
