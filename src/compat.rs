@@ -14148,6 +14148,428 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest sources html parsed update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.parsed_path = $parsed_path, s.original_name = $original_name, s.mime_type = 'text/html', s.source_url = $source_url, s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at), s.metadata = $metadata",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-html-update".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/html.parsed".to_string())),
+                            ("original_name".to_string(), Value::String("HTML Source".to_string())),
+                            ("source_url".to_string(), Value::String("https://example.test/html".to_string())),
+                            ("summary".to_string(), Value::String("html summary".to_string())),
+                            ("sha256".to_string(), Value::String("sha-html".to_string())),
+                            ("size_bytes".to_string(), Value::Int(101)),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:00".to_string()),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"html\":true}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-html-update', lifecycle_state: 'ingested'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-html-update'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources file parsed update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.parsed_path = $parsed_path, s.file_path = $file_path, s.original_name = $original_name, s.mime_type = $mime_type, s.source_url = $source_url, s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at), s.metadata = $metadata",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-file-update".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/file.parsed".to_string())),
+                            ("file_path".to_string(), Value::String("/tmp/file.md".to_string())),
+                            ("original_name".to_string(), Value::String("File Source".to_string())),
+                            ("mime_type".to_string(), Value::String("text/markdown".to_string())),
+                            ("source_url".to_string(), Value::String("".to_string())),
+                            ("summary".to_string(), Value::String("file summary".to_string())),
+                            ("sha256".to_string(), Value::String("sha-file".to_string())),
+                            ("size_bytes".to_string(), Value::Int(102)),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:01".to_string()),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"file\":true}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-file-update', lifecycle_state: 'ingested'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-file-update'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources version lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.original_name = $name AND s.space_id = $space_id RETURN s.id, s.version ORDER BY s.version DESC LIMIT 1",
+                        BTreeMap::from([
+                            ("name".to_string(), Value::String("Versioned Source".to_string())),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-version-1', original_name: 'Versioned Source', space_id: 'default', version: 1})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-version-2', original_name: 'Versioned Source', space_id: 'default', version: 2})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source) WHERE s.id IN ['rest-source-version-1', 'rest-source-version-2'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources revised edge create",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (newer:Source {id: $newer_id}), (older:Source {id: $older_id}) CREATE (newer)-[:REVISED_AS { diff_summary: '', sections_changed: '[]', revision_type: 'update', detected_by: 'filename_match', created_at: timestamp($created_at) }]->(older)",
+                        BTreeMap::from([
+                            ("newer_id".to_string(), Value::String("rest-source-newer".to_string())),
+                            ("older_id".to_string(), Value::String("rest-source-older".to_string())),
+                            (
+                                "created_at".to_string(),
+                                Value::String("1970-01-01T00:00:02".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-newer'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-older'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source) WHERE s.id IN ['rest-source-newer', 'rest-source-older'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources markdown file create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: 'text/markdown', file_path: $file_path, parsed_path: $parsed_path, source_url: '', sha256: $sha256, size_bytes: $size_bytes, version: $version, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-markdown-versioned".to_string())),
+                            ("original_name".to_string(), Value::String("Versioned Markdown".to_string())),
+                            ("file_path".to_string(), Value::String("/tmp/versioned.md".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/versioned.parsed".to_string())),
+                            ("sha256".to_string(), Value::String("sha-md-versioned".to_string())),
+                            ("size_bytes".to_string(), Value::Int(201)),
+                            ("version".to_string(), Value::Int(3)),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("summary".to_string(), Value::String("markdown summary".to_string())),
+                            (
+                                "created_at".to_string(),
+                                Value::String("1970-01-01T00:00:03".to_string()),
+                            ),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:04".to_string()),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"md\":true}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-markdown-versioned'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources url create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (s:Source { id: $id, source_type: 'url', original_name: $original_name, mime_type: 'text/html', file_path: '', parsed_path: $parsed_path, source_url: $source_url, sha256: $sha256, size_bytes: $size_bytes, version: 1, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: $section_tree, summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-url-create".to_string())),
+                            ("original_name".to_string(), Value::String("URL Source".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/url.parsed".to_string())),
+                            ("source_url".to_string(), Value::String("https://example.test".to_string())),
+                            ("sha256".to_string(), Value::String("sha-url".to_string())),
+                            ("size_bytes".to_string(), Value::Int(202)),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("section_tree".to_string(), Value::String("{}".to_string())),
+                            ("summary".to_string(), Value::String("url summary".to_string())),
+                            (
+                                "created_at".to_string(),
+                                Value::String("1970-01-01T00:00:05".to_string()),
+                            ),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:06".to_string()),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"url\":true}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-url-create'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources pdf create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: 'application/pdf', file_path: $file_path, parsed_path: $parsed_path, source_url: $source_url, sha256: $sha256, size_bytes: $size_bytes, version: $version, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-pdf-create".to_string())),
+                            ("original_name".to_string(), Value::String("PDF Source".to_string())),
+                            ("file_path".to_string(), Value::String("/tmp/source.pdf".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/source.pdf.parsed".to_string())),
+                            ("source_url".to_string(), Value::String("file:///tmp/source.pdf".to_string())),
+                            ("sha256".to_string(), Value::String("sha-pdf".to_string())),
+                            ("size_bytes".to_string(), Value::Int(203)),
+                            ("version".to_string(), Value::Int(1)),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("summary".to_string(), Value::String("pdf summary".to_string())),
+                            (
+                                "created_at".to_string(),
+                                Value::String("1970-01-01T00:00:07".to_string()),
+                            ),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:08".to_string()),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"pdf\":true}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-pdf-create'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources generic file create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: $mime_type, file_path: $file_path, parsed_path: $parsed_path, source_url: '', sha256: $sha256, size_bytes: $size_bytes, version: $version, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-generic-file".to_string())),
+                            ("original_name".to_string(), Value::String("Generic File".to_string())),
+                            ("mime_type".to_string(), Value::String("text/plain".to_string())),
+                            ("file_path".to_string(), Value::String("/tmp/generic.txt".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/generic.parsed".to_string())),
+                            ("sha256".to_string(), Value::String("sha-generic".to_string())),
+                            ("size_bytes".to_string(), Value::Int(204)),
+                            ("version".to_string(), Value::Int(2)),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("summary".to_string(), Value::String("generic summary".to_string())),
+                            (
+                                "created_at".to_string(),
+                                Value::String("1970-01-01T00:00:09".to_string()),
+                            ),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:10".to_string()),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"generic\":true}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-generic-file'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources markdown import create",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: 'text/markdown', file_path: $file_path, parsed_path: $parsed_path, source_url: '', sha256: $sha256, size_bytes: $size_bytes, version: 1, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-markdown-import".to_string())),
+                            ("original_name".to_string(), Value::String("Markdown Import".to_string())),
+                            ("file_path".to_string(), Value::String("/tmp/import.md".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/import.parsed".to_string())),
+                            ("sha256".to_string(), Value::String("sha-md-import".to_string())),
+                            ("size_bytes".to_string(), Value::Int(205)),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                            ("summary".to_string(), Value::String("import summary".to_string())),
+                            (
+                                "created_at".to_string(),
+                                Value::String("1970-01-01T00:00:11".to_string()),
+                            ),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:12".to_string()),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"import\":true}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-markdown-import'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources parsed path summary update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.parsed_path = $parsed_path, s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at)",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-parsed-update".to_string())),
+                            ("parsed_path".to_string(), Value::String("/tmp/parsed-update".to_string())),
+                            ("summary".to_string(), Value::String("parsed update summary".to_string())),
+                            ("sha256".to_string(), Value::String("sha-parsed-update".to_string())),
+                            ("size_bytes".to_string(), Value::Int(301)),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:13".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-parsed-update', lifecycle_state: 'ingested'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-parsed-update'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources summary update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at)",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::String("rest-source-summary-update".to_string())),
+                            ("summary".to_string(), Value::String("summary update".to_string())),
+                            ("sha256".to_string(), Value::String("sha-summary-update".to_string())),
+                            ("size_bytes".to_string(), Value::Int(302)),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:14".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-summary-update', lifecycle_state: 'ingested'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-summary-update'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources whole node read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $source_id}) RETURN s",
+                        BTreeMap::from([(
+                            "source_id".to_string(),
+                            Value::String("rest-source-whole-read".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-whole-read', original_name: 'Whole Source'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-source-whole-read'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources sha version read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.sha256 = $sha256 AND s.space_id = $space_id RETURN s ORDER BY s.version DESC LIMIT 1",
+                        BTreeMap::from([
+                            ("sha256".to_string(), Value::String("sha-source-version".to_string())),
+                            ("space_id".to_string(), Value::String("default".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-sha-version-1', sha256: 'sha-source-version', space_id: 'default', version: 1})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-source-sha-version-2', sha256: 'sha-source-version', space_id: 'default', version: 2})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source) WHERE s.id IN ['rest-source-sha-version-1', 'rest-source-sha-version-2'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest sources label name read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label {id: $label_id}) RETURN l.name LIMIT 1",
+                        BTreeMap::from([(
+                            "label_id".to_string(),
+                            Value::String("rest-source-label-name".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'rest-source-label-name', name: 'Source Label'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label {id: 'rest-source-label-name'}) DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory relation multi property update",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.id = $relation_id SET r.relation_type = $relation_type, r.strength = $strength, r.confidence = $confidence, r.status = $status, r.reason = $reason, r.updated_at = timestamp($updated_at)",
@@ -19747,6 +20169,114 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source {id: $id}) SET s.metadata = $metadata, s.updated_at = timestamp($updated_at)",
             ),
             CompatibilityQueryCallSite::new(
+                "rest sources html parsed update",
+                "source_write",
+                "nmem-server::rest_sources::mark_html_source_parsed",
+            )
+            .with_cypher(
+                "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.parsed_path = $parsed_path, s.original_name = $original_name, s.mime_type = 'text/html', s.source_url = $source_url, s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at), s.metadata = $metadata",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources file parsed update",
+                "source_write",
+                "nmem-server::rest_sources::mark_file_source_parsed",
+            )
+            .with_cypher(
+                "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.parsed_path = $parsed_path, s.file_path = $file_path, s.original_name = $original_name, s.mime_type = $mime_type, s.source_url = $source_url, s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at), s.metadata = $metadata",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources version lookup",
+                "source_read",
+                "nmem-server::rest_sources::find_source_version_by_name",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.original_name = $name AND s.space_id = $space_id RETURN s.id, s.version ORDER BY s.version DESC LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources revised edge create",
+                "source_write",
+                "nmem-server::rest_sources::create_source_revision_edge",
+            )
+            .with_cypher(
+                "MATCH (newer:Source {id: $newer_id}), (older:Source {id: $older_id}) CREATE (newer)-[:REVISED_AS { diff_summary: '', sections_changed: '[]', revision_type: 'update', detected_by: 'filename_match', created_at: timestamp($created_at) }]->(older)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources markdown file create",
+                "source_write",
+                "nmem-server::rest_sources::create_markdown_file_source",
+            )
+            .with_cypher(
+                "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: 'text/markdown', file_path: $file_path, parsed_path: $parsed_path, source_url: '', sha256: $sha256, size_bytes: $size_bytes, version: $version, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources url create",
+                "source_write",
+                "nmem-server::rest_sources::create_url_source",
+            )
+            .with_cypher(
+                "CREATE (s:Source { id: $id, source_type: 'url', original_name: $original_name, mime_type: 'text/html', file_path: '', parsed_path: $parsed_path, source_url: $source_url, sha256: $sha256, size_bytes: $size_bytes, version: 1, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: $section_tree, summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources pdf create",
+                "source_write",
+                "nmem-server::rest_sources::create_pdf_source",
+            )
+            .with_cypher(
+                "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: 'application/pdf', file_path: $file_path, parsed_path: $parsed_path, source_url: $source_url, sha256: $sha256, size_bytes: $size_bytes, version: $version, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources generic file create",
+                "source_write",
+                "nmem-server::rest_sources::create_generic_file_source",
+            )
+            .with_cypher(
+                "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: $mime_type, file_path: $file_path, parsed_path: $parsed_path, source_url: '', sha256: $sha256, size_bytes: $size_bytes, version: $version, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources markdown import create",
+                "source_write",
+                "nmem-server::rest_sources::import_markdown_source",
+            )
+            .with_cypher(
+                "CREATE (s:Source { id: $id, source_type: 'file', original_name: $original_name, mime_type: 'text/markdown', file_path: $file_path, parsed_path: $parsed_path, source_url: '', sha256: $sha256, size_bytes: $size_bytes, version: 1, space_id: $space_id, lifecycle_state: 'parsed', chunk_count: 0, memory_count: 0, section_tree: '', summary: $summary, error_message: '', created_at: timestamp($created_at), updated_at: timestamp($updated_at), metadata: $metadata })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources parsed path summary update",
+                "source_write",
+                "nmem-server::rest_sources::mark_source_parsed_with_path",
+            )
+            .with_cypher(
+                "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.parsed_path = $parsed_path, s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources summary update",
+                "source_write",
+                "nmem-server::rest_sources::mark_source_parsed_summary",
+            )
+            .with_cypher(
+                "MATCH (s:Source {id: $id}) SET s.lifecycle_state = 'parsed', s.summary = $summary, s.sha256 = $sha256, s.size_bytes = $size_bytes, s.updated_at = timestamp($updated_at)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources whole node read",
+                "source_read",
+                "nmem-server::rest_sources::get_source_node",
+            )
+            .with_cypher("MATCH (s:Source {id: $source_id}) RETURN s"),
+            CompatibilityQueryCallSite::new(
+                "rest sources sha version read",
+                "source_read",
+                "nmem-server::rest_sources::find_source_by_sha",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.sha256 = $sha256 AND s.space_id = $space_id RETURN s ORDER BY s.version DESC LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest sources label name read",
+                "source_label_read",
+                "nmem-server::rest_sources::label_name_for_source",
+            )
+            .with_cypher("MATCH (l:Label {id: $label_id}) RETURN l.name LIMIT 1"),
+            CompatibilityQueryCallSite::new(
                 "memory relation multi property update",
                 "memory_relation_write",
                 "nmem-server::mcp_server::update_memory_relation",
@@ -24014,7 +24544,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 573);
+        assert_eq!(report.checks.len(), 587);
     }
 
     #[test]
@@ -24030,13 +24560,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 573);
-        assert_eq!(coverage.covered_checks, 573);
+        assert_eq!(coverage.required_checks, 587);
+        assert_eq!(coverage.covered_checks, 587);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 573);
+        assert_eq!(coverage_json["covered_checks"], 587);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -24066,10 +24596,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 573);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 587);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 573);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 587);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -24294,15 +24824,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 573);
-        assert_eq!(report.shadow_checks.len(), 573);
+        assert_eq!(report.primary_checks.len(), 587);
+        assert_eq!(report.shadow_checks.len(), 587);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            573
+            587
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -24311,7 +24841,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 573);
+        assert_eq!(cutover.matched_checks, 587);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
