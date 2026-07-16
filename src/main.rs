@@ -108,7 +108,7 @@ fn main() -> Result<()> {
                 )?,
                 (None, None) => ExternalShadowCommand::spawn(shadow_name, program, program_args)?,
             };
-            let shadow_ready_report = if shadow_ready {
+            let shadow_ready_report = if should_run_shadow_ready(require_ready, shadow_ready) {
                 Some(shadow.require_ready()?)
             } else {
                 None
@@ -214,6 +214,10 @@ fn add_shadow_trace_report(
     Ok(())
 }
 
+fn should_run_shadow_ready(require_ready: bool, shadow_ready: bool) -> bool {
+    require_ready || shadow_ready
+}
+
 fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[String]) -> bool {
     shadow_name == "self"
         || program.ends_with("skein-shadow-self")
@@ -224,7 +228,7 @@ fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[Stri
 mod tests {
     use super::{
         add_shadow_ready_report, add_shadow_trace_report, is_self_shadow_command,
-        parse_shadow_timeout_ms,
+        parse_shadow_timeout_ms, should_run_shadow_ready,
     };
     use skein::ExternalShadowReady;
     use std::time::Duration;
@@ -286,6 +290,21 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--shadow-timeout-ms must be greater than zero"));
+    }
+
+    #[test]
+    fn require_ready_runs_shadow_ready_preflight() {
+        assert!(should_run_shadow_ready(true, false));
+    }
+
+    #[test]
+    fn shadow_ready_runs_preflight_without_requiring_ready_decision() {
+        assert!(should_run_shadow_ready(false, true));
+    }
+
+    #[test]
+    fn skips_shadow_ready_preflight_by_default() {
+        assert!(!should_run_shadow_ready(false, false));
     }
 
     #[test]

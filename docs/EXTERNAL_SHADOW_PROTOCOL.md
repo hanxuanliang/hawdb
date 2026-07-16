@@ -79,9 +79,9 @@ the corresponding engine.
 
 ## `ready`
 
-`ready` is an optional preflight operation used by the migration gate when
-`--shadow-ready` is passed. It lets a previous-wrapper adapter fail fast before
-the full fixture set is executed.
+`ready` is a preflight operation used by the migration gate before the full
+fixture set is executed. It runs automatically when `--require-ready` is passed,
+and can also be requested independently with `--shadow-ready`.
 
 Request:
 
@@ -359,16 +359,19 @@ fixture through the external shadow process, prints a JSON migration-gate bundle
 and exits with an error when `--require-ready` is set and the final gate is
 blocked.
 
-`--require-ready` requires a previous-wrapper shadow by default. `skein-shadow-self`
-is allowed only when `--allow-self-shadow` is passed, and that flag is intended
-for protocol and CI smoke tests, not cutover evidence.
+`--require-ready` requires a previous-wrapper shadow by default, sends the
+`ready` preflight before fixture setup, and exits with an error unless the final
+migration gate decision is `ready`. `skein-shadow-self` is allowed only when
+`--allow-self-shadow` is passed, and that flag is intended for protocol and CI
+smoke tests, not cutover evidence.
 
-`--shadow-ready` sends the optional `ready` preflight before fixture setup. Use
-it for previous-wrapper adapter integration runs when failing fast on protocol
-version or capability drift is more useful than discovering the same problem
-partway through the fixture. When the preflight succeeds, the printed migration
-gate bundle includes a top-level `shadow_ready` object with the accepted
-`protocol_version` and advertised `capabilities`.
+`--shadow-ready` sends the same `ready` preflight without requiring the final
+migration gate decision to be `ready`. Use it for previous-wrapper adapter
+integration runs when failing fast on protocol version or capability drift is
+useful, but the local run still wants a report instead of a hard cutover gate.
+When the preflight succeeds, the printed migration gate bundle includes a
+top-level `shadow_ready` object with the accepted `protocol_version` and
+advertised `capabilities`.
 
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is

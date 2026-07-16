@@ -87,4 +87,5 @@ jobs:
             exit 1
           fi
           grep -q '"decision": "blocked"' "$root/gate.json"
+          grep -q '"shadow_ready"' "$root/gate.json"
           grep -q "nowledge migration gate is blocked" "$root/gate.err"
