@@ -8178,6 +8178,77 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "wiki topic entity mention-count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.community_id = $cid OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, COUNT(r) AS mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+                        BTreeMap::from([
+                            ("cid".to_string(), Value::Int(9750)),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("e.id", Value::String("wiki-topic-entity-alpha".to_string())),
+                            ("e.name", Value::String("Wiki Topic Alpha".to_string())),
+                            ("e.entity_type", Value::String("concept".to_string())),
+                            ("mention_count", Value::Int(3)),
+                        ]),
+                        compatibility_row([
+                            ("e.id", Value::String("wiki-topic-entity-beta".to_string())),
+                            ("e.name", Value::String("Wiki Topic Beta".to_string())),
+                            ("e.entity_type", Value::String("topic".to_string())),
+                            ("mention_count", Value::Int(2)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-entity-alpha', name: 'Wiki Topic Alpha', entity_type: 'concept', community_id: 9750})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-entity-beta', name: 'Wiki Topic Beta', entity_type: 'topic', community_id: 9750})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-entity-other', name: 'Wiki Topic Other', entity_type: 'topic', community_id: 9751})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-entity-m1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-entity-m2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-entity-m3'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-entity-m4'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-entity-m5'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-entity-m1'}), (e:Entity {id: 'wiki-topic-entity-alpha'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-entity-m2'}), (e:Entity {id: 'wiki-topic-entity-alpha'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-entity-m3'}), (e:Entity {id: 'wiki-topic-entity-alpha'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-entity-m4'}), (e:Entity {id: 'wiki-topic-entity-beta'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-entity-m5'}), (e:Entity {id: 'wiki-topic-entity-beta'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['wiki-topic-entity-alpha', 'wiki-topic-entity-beta', 'wiki-topic-entity-other', 'wiki-topic-entity-m1', 'wiki-topic-entity-m2', 'wiki-topic-entity-m3', 'wiki-topic-entity-m4', 'wiki-topic-entity-m5'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(8),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "okf export community list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
@@ -10413,6 +10484,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory) WHERE m.community_id IN $cids AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.community_id, m.id, m.title, m.content, m.importance, m.created_at, m.is_crystal, 0 AS mention_breadth, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state ORDER BY m.community_id ASC, CASE WHEN m.importance IS NOT NULL THEN m.importance ELSE 0.5 END DESC, m.created_at DESC",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki topic entity mention-count read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::render_single_topic_page.entities",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.community_id = $cid OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, COUNT(r) AS mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "okf export community list read",
                 "okf_export_read",
                 "nmem-server::okf_export::list_communities",
@@ -11764,7 +11843,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 254);
+        assert_eq!(report.checks.len(), 255);
     }
 
     #[test]
@@ -11780,13 +11859,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 254);
-        assert_eq!(coverage.covered_checks, 254);
+        assert_eq!(coverage.required_checks, 255);
+        assert_eq!(coverage.covered_checks, 255);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 254);
+        assert_eq!(coverage_json["covered_checks"], 255);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -11816,10 +11895,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 254);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 255);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 254);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 255);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12013,15 +12092,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 254);
-        assert_eq!(report.shadow_checks.len(), 254);
+        assert_eq!(report.primary_checks.len(), 255);
+        assert_eq!(report.shadow_checks.len(), 255);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            254
+            255
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12030,7 +12109,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 254);
+        assert_eq!(cutover.matched_checks, 255);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
