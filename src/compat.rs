@@ -12361,6 +12361,113 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(1),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph community member entity read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.community_id = $cid RETURN e.id, COALESCE(e.name, e.id), COALESCE(e.pagerank_score, e.confidence, 0.5)",
+                        BTreeMap::from([("cid".to_string(), Value::Int(3408))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'community-member-entity', name: 'Community Member Entity', community_id: 3408, confidence: 0.7})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'community-member-entity'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph community member memory read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.community_id = $cid RETURN m.id, COALESCE(m.title, LEFT(m.content, 60)), COALESCE(m.pagerank_score, m.importance, 0.5)",
+                        BTreeMap::from([("cid".to_string(), Value::Int(3424))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'community-member-memory', title: 'Community Member Memory', community_id: 3424, importance: 0.8})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'community-member-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph community subgraph entity ranking read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.community_id = $cid OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, e.confidence, COUNT(r) AS mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $max_entities",
+                        BTreeMap::from([
+                            ("cid".to_string(), Value::Int(3505)),
+                            ("max_entities".to_string(), Value::Int(5)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'community-subgraph-mention-memory'})-[:MENTIONS]->(:Entity {id: 'community-subgraph-entity', name: 'Community Subgraph Entity', entity_type: 'concept', community_id: 3505, confidence: 0.9})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['community-subgraph-mention-memory', 'community-subgraph-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph community subgraph relation edge read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e1:Entity)-[r:RELATES_TO]-(e2:Entity) WHERE e1.id IN $ids AND e2.id IN $ids AND e1.id < e2.id RETURN e1.id, e2.id, r.confidence, r.relation_type",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("community-edge-alpha".to_string()),
+                                Value::String("community-edge-beta".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'community-edge-alpha'})-[:RELATES_TO {confidence: 0.77, relation_type: 'related'}]->(:Entity {id: 'community-edge-beta'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['community-edge-alpha', 'community-edge-beta'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph community recent memories read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.community_id = $cid WITH m, COUNT(DISTINCT e) AS mention_breadth ORDER BY m.created_at DESC LIMIT $limit RETURN m.id, m.title, m.content, m.importance, m.created_at, m.updated_at, m.is_crystal, mention_breadth",
+                        BTreeMap::from([
+                            ("cid".to_string(), Value::Int(3676)),
+                            ("limit".to_string(), Value::Int(5)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'community-recent-memory', title: 'Community Recent Memory', content: 'recent body', importance: 0.9, created_at: 1700000001, is_crystal: false})-[:MENTIONS]->(:Entity {id: 'community-recent-entity', community_id: 3676})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['community-recent-memory', 'community-recent-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "pagerank mention edge count",
                 CypherFixtureStatement::new(
@@ -18566,6 +18673,46 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory) WHERE contains(LOWER(COALESCE(m.title, '')), LOWER($q)) OR contains(LOWER(COALESCE(m.content, '')), LOWER($q)) RETURN m.id ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph community member entity read",
+                "graph_community_read",
+                "nmem-server::rest_graph::community_members_handler",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.community_id = $cid RETURN e.id, COALESCE(e.name, e.id), COALESCE(e.pagerank_score, e.confidence, 0.5)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph community member memory read",
+                "graph_community_read",
+                "nmem-server::rest_graph::community_members_handler",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.community_id = $cid RETURN m.id, COALESCE(m.title, LEFT(m.content, 60)), COALESCE(m.pagerank_score, m.importance, 0.5)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph community subgraph entity ranking read",
+                "graph_community_read",
+                "nmem-server::rest_graph::community_subgraph_handler",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.community_id = $cid OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, e.confidence, COUNT(r) AS mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $max_entities",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph community subgraph relation edge read",
+                "graph_community_read",
+                "nmem-server::rest_graph::community_subgraph_handler",
+            )
+            .with_cypher(
+                "MATCH (e1:Entity)-[r:RELATES_TO]-(e2:Entity) WHERE e1.id IN $ids AND e2.id IN $ids AND e1.id < e2.id RETURN e1.id, e2.id, r.confidence, r.relation_type",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph community recent memories read",
+                "graph_community_read",
+                "nmem-server::rest_graph::community_recent_memories_handler",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.community_id = $cid WITH m, COUNT(DISTINCT e) AS mention_breadth ORDER BY m.created_at DESC LIMIT $limit RETURN m.id, m.title, m.content, m.importance, m.created_at, m.updated_at, m.is_crystal, mention_breadth",
+            ),
+            CompatibilityQueryCallSite::new(
                 "node detail neighbor counts",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::query_node_detail",
@@ -21803,7 +21950,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 506);
+        assert_eq!(report.checks.len(), 511);
     }
 
     #[test]
@@ -21819,13 +21966,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 506);
-        assert_eq!(coverage.covered_checks, 506);
+        assert_eq!(coverage.required_checks, 511);
+        assert_eq!(coverage.covered_checks, 511);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 506);
+        assert_eq!(coverage_json["covered_checks"], 511);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -21855,10 +22002,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 506);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 511);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 506);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 511);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -22083,15 +22230,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 506);
-        assert_eq!(report.shadow_checks.len(), 506);
+        assert_eq!(report.primary_checks.len(), 511);
+        assert_eq!(report.shadow_checks.len(), 511);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            506
+            511
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -22100,7 +22247,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 506);
+        assert_eq!(cutover.matched_checks, 511);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
