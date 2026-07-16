@@ -1395,6 +1395,139 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ])]),
             )),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "health stale count read",
+                CypherFixtureStatement::new(
+                    "MATCH (m:Memory) WHERE m.is_crystal = false AND m.decay_score_cached < 0.5 RETURN count(m)",
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([("count(m)", Value::Int(1))])]),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "activity digest recent memory read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.created_at >= $cutoff AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.id, m.title, m.unit_type, m.importance, m.created_at ORDER BY m.created_at DESC LIMIT 20",
+                        BTreeMap::from([(
+                            "cutoff".to_string(),
+                            Value::Int(1_000_000_000_000_000),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("digest-memory-1".to_string())),
+                        ("m.title", Value::String("Digest Memory".to_string())),
+                        ("m.unit_type", Value::String("fact".to_string())),
+                        ("m.importance", Value::Float(0.7)),
+                        ("m.created_at", Value::Int(2_000_000_000_000_000)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-memory-1', title: 'Digest Memory', unit_type: 'fact', importance: 0.7, is_crystal: false, created_at: 2000000000000000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-memory-crystal', title: 'Digest Crystal', unit_type: 'context', importance: 0.9, is_crystal: true, created_at: 2100000000000000})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['digest-memory-1', 'digest-memory-crystal'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "activity digest recent evolves read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (newer:Memory)-[e:EVOLVES]->(older:Memory) WHERE e.created_at >= $cutoff RETURN newer.id, newer.title, older.id, older.title, e.content_relation, e.created_at ORDER BY e.created_at DESC LIMIT 10",
+                        BTreeMap::from([("cutoff".to_string(), Value::Int(1000))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("newer.id", Value::String("digest-evolves-newer".to_string())),
+                        ("newer.title", Value::String("Newer Digest".to_string())),
+                        ("older.id", Value::String("digest-evolves-older".to_string())),
+                        ("older.title", Value::String("Older Digest".to_string())),
+                        ("e.content_relation", Value::String("updates".to_string())),
+                        ("e.created_at", Value::Int(3000)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-evolves-newer', title: 'Newer Digest'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-evolves-older', title: 'Older Digest'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-evolves-old-newer', title: 'Old Newer Digest'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-evolves-old-older', title: 'Old Older Digest'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (newer:Memory {id: 'digest-evolves-newer'}), (older:Memory {id: 'digest-evolves-older'}) CREATE (newer)-[:EVOLVES {content_relation: 'updates', created_at: 3000}]->(older)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (newer:Memory {id: 'digest-evolves-old-newer'}), (older:Memory {id: 'digest-evolves-old-older'}) CREATE (newer)-[:EVOLVES {content_relation: 'older', created_at: 500}]->(older)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['digest-evolves-newer', 'digest-evolves-older', 'digest-evolves-old-newer', 'digest-evolves-old-older'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "activity digest recent crystal read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Memory) WHERE c.is_crystal = true AND c.created_at >= $cutoff RETURN c.id, c.title, c.created_at ORDER BY c.created_at DESC LIMIT 5",
+                        BTreeMap::from([("cutoff".to_string(), Value::Int(1000))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("c.id", Value::String("digest-crystal-1".to_string())),
+                        ("c.title", Value::String("Digest Crystal One".to_string())),
+                        ("c.created_at", Value::Int(4000)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-crystal-1', title: 'Digest Crystal One', is_crystal: true, created_at: 4000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'digest-crystal-old', title: 'Digest Crystal Old', is_crystal: true, created_at: 500})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['digest-crystal-1', 'digest-crystal-old'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "activity digest recent source read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.created_at >= $cutoff RETURN s.id, s.original_name, s.source_type, s.lifecycle_state, s.memory_count ORDER BY s.created_at DESC LIMIT 10",
+                        BTreeMap::from([("cutoff".to_string(), Value::Int(1000))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("s.id", Value::String("digest-source-1".to_string())),
+                        ("s.original_name", Value::String("Digest Source".to_string())),
+                        ("s.source_type", Value::String("file".to_string())),
+                        ("s.lifecycle_state", Value::String("indexed".to_string())),
+                        ("s.memory_count", Value::Int(2)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'digest-source-1', original_name: 'Digest Source', source_type: 'file', lifecycle_state: 'indexed', memory_count: 2, created_at: 2000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'digest-source-old', original_name: 'Old Digest Source', source_type: 'file', lifecycle_state: 'parsed', memory_count: 1, created_at: 500})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source) WHERE s.id IN ['digest-source-1', 'digest-source-old'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "distinct relationship aggregation",
                 CypherFixtureStatement::new(
                     "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) RETURN count(DISTINCT m) AS memories, count(DISTINCT e.id) AS entities",
@@ -7404,6 +7537,46 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory) WHERE m.is_crystal = false RETURN count(m), avg(m.decay_score_cached)",
             ),
             CompatibilityQueryCallSite::new(
+                "health stale count read",
+                "agent_context_read",
+                "nmem-graph::agent_context::Q_HEALTH_STALE",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.is_crystal = false AND m.decay_score_cached < 0.5 RETURN count(m)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "activity digest recent memory read",
+                "agent_context_read",
+                "nmem-graph::agent_context::Q_DIGEST_MEMORIES",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.created_at >= $cutoff AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.id, m.title, m.unit_type, m.importance, m.created_at ORDER BY m.created_at DESC LIMIT 20",
+            ),
+            CompatibilityQueryCallSite::new(
+                "activity digest recent evolves read",
+                "agent_context_read",
+                "nmem-graph::agent_context::Q_DIGEST_EVOLVES",
+            )
+            .with_cypher(
+                "MATCH (newer:Memory)-[e:EVOLVES]->(older:Memory) WHERE e.created_at >= $cutoff RETURN newer.id, newer.title, older.id, older.title, e.content_relation, e.created_at ORDER BY e.created_at DESC LIMIT 10",
+            ),
+            CompatibilityQueryCallSite::new(
+                "activity digest recent crystal read",
+                "agent_context_read",
+                "nmem-graph::agent_context::Q_DIGEST_CRYSTALS",
+            )
+            .with_cypher(
+                "MATCH (c:Memory) WHERE c.is_crystal = true AND c.created_at >= $cutoff RETURN c.id, c.title, c.created_at ORDER BY c.created_at DESC LIMIT 5",
+            ),
+            CompatibilityQueryCallSite::new(
+                "activity digest recent source read",
+                "agent_context_read",
+                "nmem-graph::agent_context::Q_DIGEST_SOURCES",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.created_at >= $cutoff RETURN s.id, s.original_name, s.source_type, s.lifecycle_state, s.memory_count ORDER BY s.created_at DESC LIMIT 10",
+            ),
+            CompatibilityQueryCallSite::new(
                 "relationship min aggregation",
                 "schema_verification_read",
                 "nmem-graph::schema::backfill_synthesized_from",
@@ -8567,7 +8740,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 177);
+        assert_eq!(report.checks.len(), 182);
     }
 
     #[test]
@@ -8583,13 +8756,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 177);
-        assert_eq!(coverage.covered_checks, 177);
+        assert_eq!(coverage.required_checks, 182);
+        assert_eq!(coverage.covered_checks, 182);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 177);
+        assert_eq!(coverage_json["covered_checks"], 182);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -8619,10 +8792,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 177);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 182);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 177);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 182);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -8816,15 +8989,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 177);
-        assert_eq!(report.shadow_checks.len(), 177);
+        assert_eq!(report.primary_checks.len(), 182);
+        assert_eq!(report.shadow_checks.len(), 182);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            177
+            182
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -8833,7 +9006,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 177);
+        assert_eq!(cutover.matched_checks, 182);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
