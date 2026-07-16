@@ -772,9 +772,14 @@ mod tests {
         classify_query_family, extract_rust_string_literals, normalize_cypher_literal,
         scan_nowledge_query_inventory,
         scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
-        scan_nowledge_query_inventory_cypher_coverage_to_json, scan_source_file,
+        scan_nowledge_query_inventory_cypher_coverage_to_json,
+        scan_nowledge_query_inventory_cypher_migration_gate_to_json, scan_source_file,
         strip_cfg_test_modules,
     };
+    use crate::compat::{
+        CompatibilityShadowEngine, ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput,
+    };
+    use crate::{Database, QueryOutput, Result};
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1004,6 +1009,49 @@ mod tests {
     }
 
     #[test]
+    fn scanned_cypher_migration_gate_reports_ready_bundle() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-migration-gate-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let mut shadow = TestShadowEngine::default();
+        let bundle =
+            scan_nowledge_query_inventory_cypher_migration_gate_to_json(&root, &mut shadow)
+                .unwrap();
+
+        assert_eq!(bundle["coverage"]["required_checks"], 1);
+        assert_eq!(bundle["coverage"]["covered_checks"], 1);
+        assert_eq!(bundle["inventory_gate"]["decision"], "ready");
+        assert_eq!(bundle["cutover"]["decision"], "ready");
+        assert_eq!(bundle["migration_gate"]["decision"], "ready");
+        assert_eq!(bundle["migration_gate"]["shadow_decision"], "ready");
+        assert_eq!(
+            bundle["migration_gate"]["blockers"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn scanned_cypher_coverage_detail_reports_missing_item_metadata() {
         let root = std::env::temp_dir().join(format!(
             "skein-nowledge-inventory-detail-{}",
@@ -1047,6 +1095,87 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[derive(Default)]
+    struct TestShadowEngine {
+        db: Database,
+    }
+
+    impl CompatibilityShadowEngine for TestShadowEngine {
+        fn name(&self) -> &str {
+            "test-shadow"
+        }
+
+        fn execute(
+            &mut self,
+            statement: &crate::compat::CypherFixtureStatement,
+        ) -> Result<QueryOutput> {
+            self.db
+                .query_with_params(&statement.cypher, &statement.parameters)
+        }
+
+        fn execute_session(
+            &mut self,
+            statements: &[crate::compat::CypherFixtureStatement],
+        ) -> Result<Vec<QueryOutput>> {
+            let mut session = self.db.session();
+            statements
+                .iter()
+                .map(|statement| {
+                    session.query_with_params(&statement.cypher, &statement.parameters)
+                })
+                .collect()
+        }
+
+        fn project_graph(
+            &mut self,
+            check: &ProjectedGraphFixtureCheck,
+        ) -> Result<Option<ProjectedGraphShadowOutput>> {
+            let graph = self.db.project_graph(check.rel_type.as_deref());
+            let page_rank_scores = graph
+                .page_rank(Default::default())
+                .into_iter()
+                .map(|score| (score.node.0, score.score))
+                .collect::<Vec<_>>();
+            Ok(Some(ProjectedGraphShadowOutput {
+                node_count: graph.node_count(),
+                edge_count: graph.edge_count(),
+                incoming: check
+                    .expected_incoming
+                    .iter()
+                    .map(|(node, _)| {
+                        let sources = graph
+                            .incoming_sources(crate::store::NodeId(*node))
+                            .map(|sources| sources.map(|source| source.0).collect::<Vec<_>>())
+                            .unwrap_or_default();
+                        (*node, sources)
+                    })
+                    .collect(),
+                communities: if check.expected_communities.is_empty() {
+                    Vec::new()
+                } else {
+                    graph
+                        .louvain_communities(Default::default())
+                        .into_iter()
+                        .map(|assignment| (assignment.node.0, assignment.community.0))
+                        .collect()
+                },
+                hierarchical_communities: if check.expected_hierarchical_communities.is_empty() {
+                    Vec::new()
+                } else {
+                    graph
+                        .hierarchical_louvain_communities(Default::default())
+                        .into_iter()
+                        .map(|assignment| {
+                            (assignment.level, assignment.node.0, assignment.community.0)
+                        })
+                        .collect()
+                },
+                page_rank_top_node: page_rank_scores.first().map(|(node, _)| *node),
+                page_rank_scores,
+            }))
+        }
     }
 
     #[test]
