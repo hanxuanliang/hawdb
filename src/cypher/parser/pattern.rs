@@ -132,7 +132,20 @@ impl Parser<'_> {
         let source_variable = self.parse_ident()?;
         self.expect_char(')')?;
         self.expect_char('-')?;
-        let (rel_type, rel_properties) = self.parse_relationship_pattern()?;
+        self.expect_char('[')?;
+        if self.peek_char() != Some(':') {
+            self.parse_ident()?;
+            self.skip_ws();
+        }
+        self.expect_char(':')?;
+        let rel_type = self.parse_ident()?;
+        self.skip_ws();
+        let rel_properties = if self.peek_char() == Some('{') {
+            self.parse_properties()?
+        } else {
+            BTreeMap::new()
+        };
+        self.expect_char(']')?;
         self.expect_char('-')?;
         self.expect_char('>')?;
         self.expect_char('(')?;

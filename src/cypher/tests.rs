@@ -995,6 +995,24 @@ fn parses_matched_relationship_create() {
 }
 
 #[test]
+fn parses_matched_relationship_create_with_relationship_variable() {
+    let statement = parse(
+        "MATCH (source:Memory {id: $source_memory_id}), (target:Memory {id: $target_memory_id}) CREATE (source)-[r:MEMORY_RELATES_TO {id: $relation_id}]->(target)",
+    )
+    .unwrap();
+    let Statement::MatchCreateRelationship(create) = statement else {
+        panic!("expected matched relationship create");
+    };
+    assert_eq!(create.create_source_variable, "source");
+    assert_eq!(create.create_target_variable, "target");
+    assert_eq!(create.rel_type, "MEMORY_RELATES_TO");
+    assert_eq!(
+        create.rel_properties.get("id"),
+        Some(&ValueExpression::Parameter("relation_id".to_string()))
+    );
+}
+
+#[test]
 fn parses_matched_relationship_create_with_endpoint_where() {
     let statement = parse(
         "MATCH (a:Memory), (b:Memory) WHERE a.id = $older_id AND b.id = $newer_id CREATE (a)-[:EVOLVES {content_relation: 'replaces'}]->(b)",

@@ -13258,6 +13258,64 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest memory relation full update write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.id = $relation_id SET r.relation_type = $relation_type, r.strength = $strength, r.confidence = $confidence, r.bidirectional = $bidirectional, r.status = $status, r.reviewed = $reviewed, r.source = $source, r.author_id = $author_id, r.agent_id = $agent_id, r.source_app = $source_app, r.reason = $reason, r.properties = $properties, r.updated_at = timestamp($updated_at)",
+                        BTreeMap::from([
+                            (
+                                "relation_id".to_string(),
+                                Value::String("rest-mrel-update-1".to_string()),
+                            ),
+                            (
+                                "relation_type".to_string(),
+                                Value::String("contradicts".to_string()),
+                            ),
+                            ("strength".to_string(), Value::Float(0.51)),
+                            ("confidence".to_string(), Value::Float(0.52)),
+                            ("bidirectional".to_string(), Value::Bool(true)),
+                            ("status".to_string(), Value::String("active".to_string())),
+                            ("reviewed".to_string(), Value::Bool(true)),
+                            ("source".to_string(), Value::String("rest".to_string())),
+                            (
+                                "author_id".to_string(),
+                                Value::String("author-updated".to_string()),
+                            ),
+                            (
+                                "agent_id".to_string(),
+                                Value::String("agent-updated".to_string()),
+                            ),
+                            (
+                                "source_app".to_string(),
+                                Value::String("app-updated".to_string()),
+                            ),
+                            (
+                                "reason".to_string(),
+                                Value::String("rest update".to_string()),
+                            ),
+                            (
+                                "properties".to_string(),
+                                Value::String("{\"updated\":true}".to_string()),
+                            ),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:02".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-mrel-update-source'})-[:MEMORY_RELATES_TO {id: 'rest-mrel-update-1', relation_type: 'supports', strength: 0.1, confidence: 0.2, bidirectional: false, status: 'suggested', reviewed: false, source: 'fixture', author_id: '', agent_id: '', source_app: 'fixture', reason: 'old', properties: '{}', updated_at: 1}]->(:Memory {id: 'rest-mrel-update-target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-mrel-update-source', 'rest-mrel-update-target'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp memory relation create",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (source:Memory), (target:Memory) WHERE source.id = $source_memory_id AND target.id = $target_memory_id CREATE (source)-[:MEMORY_RELATES_TO { id: $relation_id, relation_type: $relation_type, strength: $strength, confidence: $confidence, bidirectional: $bidirectional, status: $status, reviewed: $reviewed, source: $source, author_id: $author_id, agent_id: $agent_id, source_app: $source_app, reason: $reason, properties: $properties, created_at: timestamp($created_at), updated_at: timestamp($updated_at) }]->(target)",
@@ -13316,6 +13374,70 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest memory relation create write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (source:Memory {id: $source_memory_id}), (target:Memory {id: $target_memory_id}) CREATE (source)-[r:MEMORY_RELATES_TO { id: $relation_id, relation_type: $relation_type, strength: $strength, confidence: $confidence, bidirectional: $bidirectional, status: $status, reviewed: $reviewed, source: $source, author_id: $author_id, agent_id: $agent_id, source_app: $source_app, reason: $reason, properties: $properties, created_at: timestamp($created_at), updated_at: timestamp($updated_at) }]->(target)",
+                        BTreeMap::from([
+                            (
+                                "source_memory_id".to_string(),
+                                Value::String("rest-mrel-create-source".to_string()),
+                            ),
+                            (
+                                "target_memory_id".to_string(),
+                                Value::String("rest-mrel-create-target".to_string()),
+                            ),
+                            (
+                                "relation_id".to_string(),
+                                Value::String("rest-mrel-create-1".to_string()),
+                            ),
+                            (
+                                "relation_type".to_string(),
+                                Value::String("supports".to_string()),
+                            ),
+                            ("strength".to_string(), Value::Float(0.81)),
+                            ("confidence".to_string(), Value::Float(0.82)),
+                            ("bidirectional".to_string(), Value::Bool(false)),
+                            ("status".to_string(), Value::String("active".to_string())),
+                            ("reviewed".to_string(), Value::Bool(true)),
+                            ("source".to_string(), Value::String("rest".to_string())),
+                            (
+                                "author_id".to_string(),
+                                Value::String("author-1".to_string()),
+                            ),
+                            ("agent_id".to_string(), Value::String("agent-1".to_string())),
+                            ("source_app".to_string(), Value::String("app-1".to_string())),
+                            (
+                                "reason".to_string(),
+                                Value::String("rest create".to_string()),
+                            ),
+                            ("properties".to_string(), Value::String("{}".to_string())),
+                            (
+                                "created_at".to_string(),
+                                Value::String("1970-01-01T00:00:00".to_string()),
+                            ),
+                            (
+                                "updated_at".to_string(),
+                                Value::String("1970-01-01T00:00:01".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-mrel-create-source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-mrel-create-target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-mrel-create-source', 'rest-mrel-create-target'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp memory relation identity read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory {id: $memory_id}) RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END",
@@ -13338,6 +13460,28 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (m:Memory {id: 'mcp-rel-identity-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest memory relation identity detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}) RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.metadata, m.is_latest, m.lifecycle_state",
+                        BTreeMap::from([(
+                            "memory_id".to_string(),
+                            Value::String("rest-mrel-identity-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-mrel-identity-memory', space_id: '', metadata: '{}', is_latest: true, lifecycle_state: 'active'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-mrel-identity-memory'}) DETACH DELETE m",
                     ),
                     ExpectedRows::RowCount(1),
                 ),
@@ -13381,6 +13525,40 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (n) WHERE n.id IN ['mcp-rel-existing-source', 'mcp-rel-existing-target'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest memory relation existing bidirectional lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.status <> 'deleted' AND ( (source.id = $source_memory_id AND target.id = $target_memory_id) OR ( source.id = $target_memory_id AND target.id = $source_memory_id AND r.bidirectional = true ) ) RETURN r.id LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "source_memory_id".to_string(),
+                                Value::String("rest-mrel-existing-source".to_string()),
+                            ),
+                            (
+                                "target_memory_id".to_string(),
+                                Value::String("rest-mrel-existing-target".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-mrel-existing-source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-mrel-existing-target'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (source:Memory {id: 'rest-mrel-existing-target'}), (target:Memory {id: 'rest-mrel-existing-source'}) CREATE (source)-[:MEMORY_RELATES_TO {id: 'rest-mrel-existing-1', status: 'active', bidirectional: true}]->(target)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-mrel-existing-source', 'rest-mrel-existing-target'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(2),
                 ),
@@ -18611,12 +18789,28 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.id = $relation_id SET r.relation_type = $relation_type, r.strength = $strength, r.confidence = $confidence, r.bidirectional = $bidirectional, r.status = $status, r.reviewed = $reviewed, r.source = $source, r.agent_id = $agent_id, r.source_app = $source_app, r.reason = $reason, r.updated_at = timestamp($updated_at)",
             ),
             CompatibilityQueryCallSite::new(
+                "rest memory relation full update write",
+                "memory_relation_write",
+                "nmem-server::rest_memory_relations::update_memory_relation",
+            )
+            .with_cypher(
+                "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.id = $relation_id SET r.relation_type = $relation_type, r.strength = $strength, r.confidence = $confidence, r.bidirectional = $bidirectional, r.status = $status, r.reviewed = $reviewed, r.source = $source, r.author_id = $author_id, r.agent_id = $agent_id, r.source_app = $source_app, r.reason = $reason, r.properties = $properties, r.updated_at = timestamp($updated_at)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "mcp memory relation create",
                 "mcp_write",
                 "nmem-server::mcp_server::memory_relation_create_or_update.create",
             )
             .with_cypher(
                 "MATCH (source:Memory), (target:Memory) WHERE source.id = $source_memory_id AND target.id = $target_memory_id CREATE (source)-[:MEMORY_RELATES_TO { id: $relation_id, relation_type: $relation_type, strength: $strength, confidence: $confidence, bidirectional: $bidirectional, status: $status, reviewed: $reviewed, source: $source, author_id: $author_id, agent_id: $agent_id, source_app: $source_app, reason: $reason, properties: $properties, created_at: timestamp($created_at), updated_at: timestamp($updated_at) }]->(target)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest memory relation create write",
+                "memory_relation_write",
+                "nmem-server::rest_memory_relations::create_memory_relation",
+            )
+            .with_cypher(
+                "MATCH (source:Memory {id: $source_memory_id}), (target:Memory {id: $target_memory_id}) CREATE (source)-[r:MEMORY_RELATES_TO { id: $relation_id, relation_type: $relation_type, strength: $strength, confidence: $confidence, bidirectional: $bidirectional, status: $status, reviewed: $reviewed, source: $source, author_id: $author_id, agent_id: $agent_id, source_app: $source_app, reason: $reason, properties: $properties, created_at: timestamp($created_at), updated_at: timestamp($updated_at) }]->(target)",
             ),
             CompatibilityQueryCallSite::new(
                 "mcp memory relation identity read",
@@ -18627,12 +18821,28 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory {id: $memory_id}) RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END",
             ),
             CompatibilityQueryCallSite::new(
+                "rest memory relation identity detail read",
+                "memory_relation_read",
+                "nmem-server::rest_memory_relations::memory_identity",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id}) RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.metadata, m.is_latest, m.lifecycle_state",
+            ),
+            CompatibilityQueryCallSite::new(
                 "mcp memory relation existing id lookup",
                 "mcp_read",
                 "nmem-server::mcp_server::find_existing_memory_relation",
             )
             .with_cypher(
                 "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE source.id = $source_memory_id AND target.id = $target_memory_id AND COALESCE(r.status, 'active') <> 'deleted' RETURN r.id ORDER BY r.updated_at DESC LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest memory relation existing bidirectional lookup",
+                "memory_relation_read",
+                "nmem-server::rest_memory_relations::find_existing_relation",
+            )
+            .with_cypher(
+                "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.status <> 'deleted' AND ( (source.id = $source_memory_id AND target.id = $target_memory_id) OR ( source.id = $target_memory_id AND target.id = $source_memory_id AND r.bidirectional = true ) ) RETURN r.id LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
                 "mcp memory relation outgoing read",
@@ -22550,7 +22760,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 530);
+        assert_eq!(report.checks.len(), 534);
     }
 
     #[test]
@@ -22566,13 +22776,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 530);
-        assert_eq!(coverage.covered_checks, 530);
+        assert_eq!(coverage.required_checks, 534);
+        assert_eq!(coverage.covered_checks, 534);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 530);
+        assert_eq!(coverage_json["covered_checks"], 534);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -22602,10 +22812,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 530);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 534);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 530);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 534);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -22830,15 +23040,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 530);
-        assert_eq!(report.shadow_checks.len(), 530);
+        assert_eq!(report.primary_checks.len(), 534);
+        assert_eq!(report.shadow_checks.len(), 534);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            530
+            534
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -22847,7 +23057,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 530);
+        assert_eq!(cutover.matched_checks, 534);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
