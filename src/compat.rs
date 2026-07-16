@@ -5048,6 +5048,44 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(4),
                 ),
             ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "mcp subgraph edge list read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (a)-[r]->(b) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id",
+                    BTreeMap::from([(
+                        "ids".to_string(),
+                        Value::List(vec![Value::Int(1), Value::Int(10)]),
+                    )]),
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([
+                    ("a.id", Value::Int(1)),
+                    ("b.id", Value::Int(10)),
+                ]),
+                compatibility_row([
+                    ("a.id", Value::Int(1)),
+                    ("b.id", Value::Int(10)),
+                ])]),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "mcp subgraph node title fallback read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (n) WHERE n.id IN $ids RETURN n.id, COALESCE(n.title, n.name, n.id)",
+                    BTreeMap::from([(
+                        "ids".to_string(),
+                        Value::List(vec![Value::Int(1), Value::Int(10)]),
+                    )]),
+                ),
+                ExpectedRows::Unordered(vec![
+                    compatibility_row([
+                        ("n.id", Value::Int(1)),
+                        ("coalesce", Value::String("Graph foundations".to_string())),
+                    ]),
+                    compatibility_row([
+                        ("n.id", Value::Int(10)),
+                        ("coalesce", Value::String("Rust".to_string())),
+                    ]),
+                ]),
+            )),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "source label relationship count read",
@@ -12317,6 +12355,34 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "mcp community summary list read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' RETURN c.id, c.community_id, c.name, c.ai_summary, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("c.id", Value::String("mcp-summary-community".to_string())),
+                        ("c.community_id", Value::Int(9904)),
+                        ("c.name", Value::String("MCP Summary Community".to_string())),
+                        ("c.ai_summary", Value::String("summary body".to_string())),
+                        ("c.member_count", Value::Int(1000)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'mcp-summary-community', community_id: 9904, name: 'MCP Summary Community', ai_summary: 'summary body', member_count: 1000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'mcp-summary-empty', community_id: 9905, name: 'MCP Empty Summary', ai_summary: '', member_count: 2000})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.id IN ['mcp-summary-community', 'mcp-summary-empty'] DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "okf export community list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
@@ -12554,6 +12620,180 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (n) WHERE n.id IN ['mcp-crystal-list-1', 'mcp-crystal-source-1'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp memory duplicate candidate read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (memory:Memory) WHERE memory.space_id = $space_id AND memory.content = $content AND (memory.is_latest IS NULL OR memory.is_latest = true) AND (memory.is_crystal IS NULL OR memory.is_crystal = false) RETURN memory.id, memory.title, memory.content LIMIT 3",
+                        BTreeMap::from([
+                            ("space_id".to_string(), Value::String("mcp-space".to_string())),
+                            (
+                                "content".to_string(),
+                                Value::String("candidate content".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "memory.id",
+                            Value::String("mcp-duplicate-memory".to_string()),
+                        ),
+                        (
+                            "memory.title",
+                            Value::String("MCP Duplicate Candidate".to_string()),
+                        ),
+                        (
+                            "memory.content",
+                            Value::String("candidate content".to_string()),
+                        ),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-duplicate-memory', title: 'MCP Duplicate Candidate', content: 'candidate content', space_id: 'mcp-space', is_latest: true, is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-duplicate-stale', title: 'MCP Duplicate Stale', content: 'candidate content', space_id: 'mcp-space', is_latest: false, is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-duplicate-crystal', title: 'MCP Duplicate Crystal', content: 'candidate content', space_id: 'mcp-space', is_latest: true, is_crystal: true})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['mcp-duplicate-memory', 'mcp-duplicate-stale', 'mcp-duplicate-crystal'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp source metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $source_ids RETURN m.id, m.space_id, m.unit_type",
+                        BTreeMap::from([(
+                            "source_ids".to_string(),
+                            Value::List(vec![
+                                Value::String("mcp-source-meta-1".to_string()),
+                                Value::String("mcp-source-meta-missing".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("mcp-source-meta-1".to_string())),
+                        ("m.space_id", Value::String("mcp-space".to_string())),
+                        ("m.unit_type", Value::String("fact".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-source-meta-1', space_id: 'mcp-space', unit_type: 'fact'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'mcp-source-meta-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp crystal create write",
+                    CypherFixtureStatement::with_parameters(
+                        "CREATE (m:Memory { id: $id, title: $title, content: $content, unit_type: $unit_type, is_crystal: true, is_latest: true, importance: 0.8, created_at: $now, updated_at: $now, last_evaluated_at: $now, source: 'agent', review_status: '', space_id: $space_id, crystal_title: $title, source_unit_count: $source_count, extraction_method: 'agent', version: 1, confidence: 0.5, access_count: 0, appearances: 0, clicks: 0, total_dwell_time_ms: 0, reindex_needed: false, temporal_context: 'timeless' })",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("mcp-created-crystal".to_string()),
+                            ),
+                            (
+                                "title".to_string(),
+                                Value::String("MCP Created Crystal".to_string()),
+                            ),
+                            (
+                                "content".to_string(),
+                                Value::String("created crystal content".to_string()),
+                            ),
+                            ("unit_type".to_string(), Value::String("context".to_string())),
+                            ("now".to_string(), Value::Int(12_345)),
+                            ("space_id".to_string(), Value::String("mcp-space".to_string())),
+                            ("source_count".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $id RETURN m.title, m.content, m.created_at, m.source",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-created-crystal".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "m.title",
+                            Value::String("MCP Created Crystal".to_string()),
+                        ),
+                        (
+                            "m.content",
+                            Value::String("created crystal content".to_string()),
+                        ),
+                        ("m.created_at", Value::Int(12_345)),
+                        ("m.source", Value::String("agent".to_string())),
+                    ])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp crystal source link merge",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Memory), (s:Memory) WHERE c.id = $crystal_id AND s.id = $src_id MERGE (c)-[r:SYNTHESIZED_FROM]->(s) ON CREATE SET r.weight = $weight, r.occasion_key = '', r.created_at = $now",
+                        BTreeMap::from([
+                            (
+                                "crystal_id".to_string(),
+                                Value::String("mcp-created-crystal".to_string()),
+                            ),
+                            (
+                                "src_id".to_string(),
+                                Value::String("mcp-crystal-link-source".to_string()),
+                            ),
+                            ("weight".to_string(), Value::Float(0.6)),
+                            ("now".to_string(), Value::Int(12_346)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-crystal-link-source', title: 'MCP Link Source'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Memory {id: 'mcp-created-crystal'})-[r:SYNTHESIZED_FROM]->(s:Memory {id: 'mcp-crystal-link-source'}) RETURN count(r) AS total, min(r.weight) AS weight, min(r.created_at) AS created_at",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("total", Value::Int(1)),
+                        ("weight", Value::Float(0.6)),
+                        ("created_at", Value::Int(12_346)),
+                    ])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp crystal delete write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id}) DETACH DELETE m",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-created-crystal".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['mcp-created-crystal', 'mcp-crystal-link-source'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -15468,6 +15708,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE e.community_id = $louvain_id OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, m.id, m.metadata, COALESCE(m.is_latest, true) ORDER BY e.name ASC",
             ),
             CompatibilityQueryCallSite::new(
+                "mcp community summary list read",
+                "mcp_read",
+                "nmem-server::mcp_server::community_summary_list",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' RETURN c.id, c.community_id, c.name, c.ai_summary, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "okf export community list read",
                 "okf_export_read",
                 "nmem-server::okf_export::list_communities",
@@ -15591,6 +15839,44 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             .with_cypher(
                 "MATCH (c:Memory)-[r:SYNTHESIZED_FROM]->(s:Memory) WHERE c.id = $id RETURN s.id, s.title, r.weight",
             ),
+            CompatibilityQueryCallSite::new(
+                "mcp memory duplicate candidate read",
+                "mcp_write_guard_read",
+                "nmem-server::mcp_server::create_crystal.duplicate_candidate",
+            )
+            .with_cypher(
+                "MATCH (memory:Memory) WHERE memory.space_id = $space_id AND memory.content = $content AND (memory.is_latest IS NULL OR memory.is_latest = true) AND (memory.is_crystal IS NULL OR memory.is_crystal = false) RETURN memory.id, memory.title, memory.content LIMIT 3",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp source metadata read",
+                "mcp_write_guard_read",
+                "nmem-server::mcp_server::create_crystal.source_metadata",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $source_ids RETURN m.id, m.space_id, m.unit_type",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp crystal create write",
+                "mcp_write",
+                "nmem-server::mcp_server::create_crystal.node",
+            )
+            .with_cypher(
+                "CREATE (m:Memory { id: $id, title: $title, content: $content, unit_type: $unit_type, is_crystal: true, is_latest: true, importance: 0.8, created_at: $now, updated_at: $now, last_evaluated_at: $now, source: 'agent', review_status: '', space_id: $space_id, crystal_title: $title, source_unit_count: $source_count, extraction_method: 'agent', version: 1, confidence: 0.5, access_count: 0, appearances: 0, clicks: 0, total_dwell_time_ms: 0, reindex_needed: false, temporal_context: 'timeless' })",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp crystal source link merge",
+                "mcp_write",
+                "nmem-server::mcp_server::create_crystal.source_link",
+            )
+            .with_cypher(
+                "MATCH (c:Memory), (s:Memory) WHERE c.id = $crystal_id AND s.id = $src_id MERGE (c)-[r:SYNTHESIZED_FROM]->(s) ON CREATE SET r.weight = $weight, r.occasion_key = '', r.created_at = $now",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp crystal delete write",
+                "mcp_write",
+                "nmem-server::mcp_server::delete_crystal",
+            )
+            .with_cypher("MATCH (m:Memory {id: $id}) DETACH DELETE m"),
             CompatibilityQueryCallSite::new(
                 "decay refresh score and confidence update",
                 "decay_refresh_write",
@@ -15843,6 +16129,20 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nowledge-memory-core::overview-edges",
             )
             .with_cypher("MATCH (a)-[r]->(b) RETURN a.id, b.id, label(r)"),
+            CompatibilityQueryCallSite::new(
+                "mcp subgraph edge list read",
+                "mcp_read",
+                "nmem-server::mcp_server::subgraph_edges",
+            )
+            .with_cypher(
+                "MATCH (a)-[r]->(b) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp subgraph node title fallback read",
+                "mcp_read",
+                "nmem-server::mcp_server::subgraph_nodes",
+            )
+            .with_cypher("MATCH (n) WHERE n.id IN $ids RETURN n.id, COALESCE(n.title, n.name, n.id)"),
             CompatibilityQueryCallSite::new(
                 "multi label overview read",
                 "relationship_read",
@@ -17179,7 +17479,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 382);
+        assert_eq!(report.checks.len(), 390);
     }
 
     #[test]
@@ -17195,13 +17495,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 382);
-        assert_eq!(coverage.covered_checks, 382);
+        assert_eq!(coverage.required_checks, 390);
+        assert_eq!(coverage.covered_checks, 390);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 382);
+        assert_eq!(coverage_json["covered_checks"], 390);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -17231,10 +17531,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 382);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 390);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 382);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 390);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -17459,15 +17759,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 382);
-        assert_eq!(report.shadow_checks.len(), 382);
+        assert_eq!(report.primary_checks.len(), 390);
+        assert_eq!(report.shadow_checks.len(), 390);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            382
+            390
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -17476,7 +17776,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 382);
+        assert_eq!(cutover.matched_checks, 390);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
