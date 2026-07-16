@@ -159,7 +159,7 @@ pub enum LogicalPlan {
         label: String,
         predicate: Option<Predicate>,
         assignments: Vec<SetAssignment>,
-        returns: Vec<Projection>,
+        returns: SetNodePropertiesReturnMode,
     },
     SetRelationshipProperty {
         source_variable: String,
@@ -467,6 +467,12 @@ pub struct GraphAlgorithmOptions {
 pub struct Projection {
     pub expression: ProjectionExpression,
     pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SetNodePropertiesReturnMode {
+    Project(Vec<Projection>),
+    Count { name: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1065,11 +1071,8 @@ pub fn plan_with_params(
                     value: plan_set_value(set, parameters)?,
                 });
             }
-            let returns = update_return
-                .returns
-                .iter()
-                .map(|item| plan_projection(&scope, item, parameters))
-                .collect::<Result<Vec<_>>>()?;
+            let returns =
+                plan_set_node_properties_return_mode(update, &update_return.returns, parameters)?;
             Ok(LogicalPlan::SetNodePropertiesReturn {
                 variable: update.variable.clone(),
                 label: update.label.clone(),
@@ -4105,6 +4108,44 @@ fn planned_sort_scope<'a>(
     } else {
         scope
     }
+}
+
+fn plan_set_node_properties_return_mode(
+    update: &crate::cypher::MatchSet,
+    returns: &[ReturnItem],
+    parameters: &BTreeMap<String, Value>,
+) -> Result<SetNodePropertiesReturnMode> {
+    if returns.len() == 1 {
+        let item = &returns[0];
+        match &item.expression {
+            ReturnExpression::CountAll => {
+                return Ok(SetNodePropertiesReturnMode::Count {
+                    name: item.alias.clone().unwrap_or_else(|| "count(*)".to_string()),
+                });
+            }
+            ReturnExpression::CountVariable { variable, distinct } if !distinct => {
+                if variable != &update.variable {
+                    return Err(SkeinError::Semantic(format!(
+                        "SET RETURN count variable '{variable}' does not match updated variable '{}'",
+                        update.variable
+                    )));
+                }
+                return Ok(SetNodePropertiesReturnMode::Count {
+                    name: item
+                        .alias
+                        .clone()
+                        .unwrap_or_else(|| format!("count({variable})")),
+                });
+            }
+            _ => {}
+        }
+    }
+    let scope = BTreeSet::from([update.variable.clone()]);
+    let projections = returns
+        .iter()
+        .map(|item| plan_projection(&scope, item, parameters))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(SetNodePropertiesReturnMode::Project(projections))
 }
 
 fn plan_return_items(

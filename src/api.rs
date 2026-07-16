@@ -6116,6 +6116,65 @@ mod tests {
     }
 
     #[test]
+    fn match_set_return_counts_updated_nodes() {
+        let mut db = Database::new();
+        db.query("CREATE (:AugmentationJob {job_id: 'pending-job', status: 'pending'})")
+            .unwrap();
+        db.query("CREATE (:AugmentationJob {job_id: 'running-job', status: 'running'})")
+            .unwrap();
+        db.query("CREATE (:AugmentationJob {job_id: 'completed-job', status: 'completed'})")
+            .unwrap();
+
+        let output = db
+            .query_with_params(
+                "MATCH (j:AugmentationJob) WHERE j.status = 'pending' OR j.status = 'running' SET j.status = 'failed', j.error_message = $reason RETURN count(j)",
+                &BTreeMap::from([(
+                    "reason".to_string(),
+                    Value::String("restart".to_string()),
+                )]),
+            )
+            .unwrap();
+
+        assert_eq!(
+            output.rows,
+            vec![BTreeMap::from([("count(j)".to_string(), Value::Int(2))])]
+        );
+
+        let status = db
+            .query("MATCH (j:AugmentationJob) RETURN j.job_id, j.status ORDER BY j.job_id")
+            .unwrap();
+        assert_eq!(
+            status.rows,
+            vec![
+                BTreeMap::from([
+                    (
+                        "j.job_id".to_string(),
+                        Value::String("completed-job".to_string())
+                    ),
+                    (
+                        "j.status".to_string(),
+                        Value::String("completed".to_string())
+                    ),
+                ]),
+                BTreeMap::from([
+                    (
+                        "j.job_id".to_string(),
+                        Value::String("pending-job".to_string())
+                    ),
+                    ("j.status".to_string(), Value::String("failed".to_string())),
+                ]),
+                BTreeMap::from([
+                    (
+                        "j.job_id".to_string(),
+                        Value::String("running-job".to_string())
+                    ),
+                    ("j.status".to_string(), Value::String("failed".to_string())),
+                ]),
+            ]
+        );
+    }
+
+    #[test]
     fn read_only_database_rejects_match_set_return() {
         let mut db = Database::new_with_config(DatabaseConfig {
             read_only: true,

@@ -3,8 +3,8 @@ use crate::planner::{
     AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, GraphAlgorithmKind,
     GraphAlgorithmOptions, LogicalPlan, Predicate, Projection, ProjectionExpression,
     RelationshipOnCreateValue, RelationshipSetAssignment, SchemaObjectState, SchemaPropertyType,
-    SchemaTableKind, SetAssignment, SetValue, ShortestPathProjection, SortDirection, SortItem,
-    SortKey,
+    SchemaTableKind, SetAssignment, SetNodePropertiesReturnMode, SetValue, ShortestPathProjection,
+    SortDirection, SortItem, SortKey,
 };
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -164,7 +164,7 @@ pub enum PhysicalPlan {
         label: String,
         predicate: Option<Predicate>,
         assignments: Vec<SetAssignment>,
-        returns: Vec<Projection>,
+        returns: SetNodePropertiesReturnMode,
     },
     SetRelationshipProperty {
         source_variable: String,
@@ -524,7 +524,7 @@ impl PhysicalPlan {
                 format!(
                     "{pad}SetNodePropertiesReturn variable={variable} label={label} assignments={} returns={}",
                     set_assignments_summary(assignments),
-                    returns.len()
+                    set_return_mode_summary(returns)
                 )
             }
             PhysicalPlan::SetRelationshipProperty {
@@ -1190,7 +1190,7 @@ impl PhysicalPlan {
                 output.push(',');
                 write_set_assignments(output, assignments);
                 output.push_str(",returns=");
-                write_projection_list(output, returns);
+                write_set_return_mode(output, returns);
                 output.push(')');
             }
             PhysicalPlan::SetRelationshipProperty {
@@ -4141,6 +4141,13 @@ fn set_assignments_summary(assignments: &[SetAssignment]) -> String {
         .join(",")
 }
 
+fn set_return_mode_summary(returns: &SetNodePropertiesReturnMode) -> String {
+    match returns {
+        SetNodePropertiesReturnMode::Project(items) => items.len().to_string(),
+        SetNodePropertiesReturnMode::Count { name } => format!("count:{name}"),
+    }
+}
+
 fn write_optional_predicate(output: &mut String, predicate: Option<&Predicate>) {
     match predicate {
         Some(predicate) => write_predicate(output, predicate),
@@ -4453,6 +4460,17 @@ fn write_projection_list(output: &mut String, items: &[Projection]) {
         write_projection(output, item);
     }
     output.push(']');
+}
+
+fn write_set_return_mode(output: &mut String, returns: &SetNodePropertiesReturnMode) {
+    match returns {
+        SetNodePropertiesReturnMode::Project(items) => write_projection_list(output, items),
+        SetNodePropertiesReturnMode::Count { name } => {
+            output.push_str("Count(");
+            write_identifier(output, name);
+            output.push(')');
+        }
+    }
 }
 
 fn write_projection(output: &mut String, item: &Projection) {

@@ -6480,7 +6480,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureCheck::expect_rows(
                     "augmentation job create",
                     CypherFixtureStatement::with_parameters(
-                        "CREATE (j:AugmentationJob {job_id: $job_id, job_type: $job_type, status: 'pending', progress: 0.0, message: 'Job created', parameters: $parameters, result: '{}', error_message: '', started_at: NULL, completed_at: NULL, created_at: CURRENT_TIMESTAMP()})",
+                        "CREATE (j:AugmentationJob { job_id: $job_id, job_type: $job_type, status: 'pending', progress: 0.0, message: 'Job created', parameters: $parameters, result: '{}', error_message: '', started_at: NULL, completed_at: NULL, created_at: CURRENT_TIMESTAMP() })",
                         BTreeMap::from([
                             (
                                 "job_id".to_string(),
@@ -6511,7 +6511,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureCheck::expect_rows(
                     "augmentation job mark running",
                     CypherFixtureStatement::with_parameters(
-                        "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.status = 'running', j.started_at = CURRENT_TIMESTAMP(), j.message = 'Job started'",
+                        "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'pending' SET j.status = 'running', j.started_at = CURRENT_TIMESTAMP(), j.message = 'Job started' RETURN j.job_id",
                         BTreeMap::from([(
                             "job_id".to_string(),
                             Value::String("job-ledger-1".to_string()),
@@ -6534,7 +6534,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureCheck::expect_rows(
                     "augmentation job progress update",
                     CypherFixtureStatement::with_parameters(
-                        "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.progress = $progress, j.message = $message",
+                        "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'running' SET j.progress = $progress, j.message = $message RETURN j.job_id",
                         BTreeMap::from([
                             (
                                 "job_id".to_string(),
@@ -6566,7 +6566,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureCheck::expect_rows(
                     "augmentation job mark completed",
                     CypherFixtureStatement::with_parameters(
-                        "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.status = 'completed', j.progress = 100.0, j.message = 'Job completed successfully', j.result = $result, j.completed_at = CURRENT_TIMESTAMP()",
+                        "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'running' SET j.status = 'completed', j.progress = 100.0, j.message = 'Job completed successfully', j.result = $result, j.completed_at = CURRENT_TIMESTAMP() RETURN j.job_id",
                         BTreeMap::from([
                             (
                                 "job_id".to_string(),
@@ -6600,7 +6600,7 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureCheck::expect_rows(
                     "augmentation job mark failed",
                     CypherFixtureStatement::with_parameters(
-                        "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.status = 'failed', j.message = 'Job failed', j.error_message = $error_message, j.completed_at = CURRENT_TIMESTAMP()",
+                        "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'pending' OR j.status = 'running' SET j.status = 'failed', j.message = 'Job failed', j.error_message = $error_message, j.completed_at = CURRENT_TIMESTAMP() RETURN j.job_id",
                         BTreeMap::from([
                             (
                                 "job_id".to_string(),
@@ -6643,21 +6643,36 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "augmentation job filtered list read",
                 CypherFixtureStatement::with_parameters(
-                    "MATCH (j:AugmentationJob) WHERE j.status = $status RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.created_at ORDER BY j.created_at DESC LIMIT $job_limit",
+                    "MATCH (j:AugmentationJob) WHERE j.status = $status RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.started_at, j.completed_at ORDER BY j.started_at DESC LIMIT $limit",
                     BTreeMap::from([
                         ("status".to_string(), Value::String("completed".to_string())),
-                        ("job_limit".to_string(), Value::Int(10)),
+                        ("limit".to_string(), Value::Int(10)),
                     ]),
                 ),
                 ExpectedRows::RowCount(1),
             )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "augmentation job list read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (j:AugmentationJob) RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.started_at, j.completed_at ORDER BY j.started_at DESC LIMIT $limit",
+                    BTreeMap::from([("limit".to_string(), Value::Int(10))]),
+                ),
+                ExpectedRows::RowCount(2),
+            )),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "augmentation stale interrupt write",
-                    CypherFixtureStatement::new(
-                        "MATCH (j:AugmentationJob) WHERE j.status = 'pending' OR j.status = 'running' SET j.status = 'failed', j.message = 'Interrupted before completion', j.error_message = 'Interrupted because the app restarted before completion.', j.completed_at = CURRENT_TIMESTAMP()",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (j:AugmentationJob) WHERE j.status = 'pending' OR j.status = 'running' SET j.status = 'failed', j.message = 'Interrupted before completion', j.error_message = $reason, j.completed_at = CURRENT_TIMESTAMP() RETURN count(j)",
+                        BTreeMap::from([(
+                            "reason".to_string(),
+                            Value::String(
+                                "Interrupted because the app restarted before completion."
+                                    .to_string(),
+                            ),
+                        )]),
                     ),
-                    ExpectedRows::RowCount(2),
+                    ExpectedRows::Exact(vec![compatibility_row([("count(j)", Value::Int(2))])]),
                 )
                 .with_setup_query(CypherFixtureStatement::new(
                     "CREATE (:AugmentationJob {job_id: 'job-stale-pending', job_type: 'pagerank_calculation', status: 'pending', progress: 0.0, message: 'Job created', created_at: 10})",
@@ -11111,7 +11126,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-graph::augmentation::create_job",
             )
             .with_cypher(
-                "CREATE (j:AugmentationJob {job_id: $job_id, job_type: $job_type, status: 'pending', progress: 0.0, message: 'Job created', parameters: $parameters, result: '{}', error_message: '', started_at: NULL, completed_at: NULL, created_at: CURRENT_TIMESTAMP()})",
+                "CREATE (j:AugmentationJob { job_id: $job_id, job_type: $job_type, status: 'pending', progress: 0.0, message: 'Job created', parameters: $parameters, result: '{}', error_message: '', started_at: NULL, completed_at: NULL, created_at: CURRENT_TIMESTAMP() })",
             ),
             CompatibilityQueryCallSite::new(
                 "augmentation job mark running",
@@ -11119,7 +11134,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-graph::augmentation::mark_running",
             )
             .with_cypher(
-                "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.status = 'running', j.started_at = CURRENT_TIMESTAMP(), j.message = 'Job started'",
+                "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'pending' SET j.status = 'running', j.started_at = CURRENT_TIMESTAMP(), j.message = 'Job started' RETURN j.job_id",
             ),
             CompatibilityQueryCallSite::new(
                 "augmentation job progress update",
@@ -11127,7 +11142,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-graph::augmentation::update_progress",
             )
             .with_cypher(
-                "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.progress = $progress, j.message = $message",
+                "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'running' SET j.progress = $progress, j.message = $message RETURN j.job_id",
             ),
             CompatibilityQueryCallSite::new(
                 "augmentation job mark completed",
@@ -11135,7 +11150,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-graph::augmentation::mark_completed",
             )
             .with_cypher(
-                "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.status = 'completed', j.progress = 100.0, j.message = 'Job completed successfully', j.result = $result, j.completed_at = CURRENT_TIMESTAMP()",
+                "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'running' SET j.status = 'completed', j.progress = 100.0, j.message = 'Job completed successfully', j.result = $result, j.completed_at = CURRENT_TIMESTAMP() RETURN j.job_id",
             ),
             CompatibilityQueryCallSite::new(
                 "augmentation job mark failed",
@@ -11143,7 +11158,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-graph::augmentation::mark_failed",
             )
             .with_cypher(
-                "MATCH (j:AugmentationJob {job_id: $job_id}) SET j.status = 'failed', j.message = 'Job failed', j.error_message = $error_message, j.completed_at = CURRENT_TIMESTAMP()",
+                "MATCH (j:AugmentationJob {job_id: $job_id}) WHERE j.status = 'pending' OR j.status = 'running' SET j.status = 'failed', j.message = 'Job failed', j.error_message = $error_message, j.completed_at = CURRENT_TIMESTAMP() RETURN j.job_id",
             ),
             CompatibilityQueryCallSite::new(
                 "augmentation job status read",
@@ -11156,18 +11171,26 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             CompatibilityQueryCallSite::new(
                 "augmentation job filtered list read",
                 "augmentation_job_read",
-                "nmem-server::rest_graph::augmentation_jobs_handler",
+                "nmem-graph::augmentation::list_jobs::filtered",
             )
             .with_cypher(
-                "MATCH (j:AugmentationJob) WHERE j.status = $status_filter RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.created_at ORDER BY j.created_at DESC LIMIT $job_limit",
+                "MATCH (j:AugmentationJob) WHERE j.status = $status RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.started_at, j.completed_at ORDER BY j.started_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "augmentation job list read",
+                "augmentation_job_read",
+                "nmem-graph::augmentation::list_jobs::all",
+            )
+            .with_cypher(
+                "MATCH (j:AugmentationJob) RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.started_at, j.completed_at ORDER BY j.started_at DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
                 "augmentation stale interrupt write",
                 "augmentation_job_write",
-                "nmem-server::rest_graph::augmentation_jobs_handler",
+                "nmem-graph::augmentation::interrupt_orphaned_jobs",
             )
             .with_cypher(
-                "MATCH (j:AugmentationJob) WHERE j.status = 'pending' OR j.status = 'running' SET j.status = 'failed', j.message = 'Interrupted before completion', j.error_message = 'Interrupted because the app restarted before completion.', j.completed_at = CURRENT_TIMESTAMP()",
+                "MATCH (j:AugmentationJob) WHERE j.status = 'pending' OR j.status = 'running' SET j.status = 'failed', j.message = 'Interrupted before completion', j.error_message = $reason, j.completed_at = CURRENT_TIMESTAMP() RETURN count(j)",
             ),
             CompatibilityQueryCallSite::new(
                 "merge node on create set",
@@ -13088,7 +13111,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 276);
+        assert_eq!(report.checks.len(), 277);
     }
 
     #[test]
@@ -13104,13 +13127,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 276);
-        assert_eq!(coverage.covered_checks, 276);
+        assert_eq!(coverage.required_checks, 277);
+        assert_eq!(coverage.covered_checks, 277);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 276);
+        assert_eq!(coverage_json["covered_checks"], 277);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -13140,10 +13163,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 276);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 277);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 276);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 277);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -13368,15 +13391,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 276);
-        assert_eq!(report.shadow_checks.len(), 276);
+        assert_eq!(report.primary_checks.len(), 277);
+        assert_eq!(report.shadow_checks.len(), 277);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            276
+            277
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -13385,7 +13408,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 276);
+        assert_eq!(cutover.matched_checks, 277);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

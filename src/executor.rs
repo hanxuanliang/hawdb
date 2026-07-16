@@ -5,8 +5,9 @@ use crate::optimizer::PhysicalPlan;
 use crate::planner::{
     AggregateFunction, AggregateTarget, Aggregation, CoalesceDifferenceProjectionTerm,
     ComparisonOp, DatePart, GraphAlgorithmKind, Predicate, Projection, ProjectionExpression,
-    RelationshipOnCreateValue, SchemaObjectState, SchemaPropertyType, SchemaTableKind, SetValue,
-    ShortestPathProjection, ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
+    RelationshipOnCreateValue, SchemaObjectState, SchemaPropertyType, SchemaTableKind,
+    SetNodePropertiesReturnMode, SetValue, ShortestPathProjection,
+    ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
 };
 use crate::schema::{Catalog, PropertyType, TableKind};
 use crate::store::{
@@ -1231,33 +1232,41 @@ fn execute_bindings(
                 .map(|node| node.id)
                 .collect::<Vec<_>>();
             let ids = store.set_node_properties_by_ids(catalog, &ids, &assignments)?;
-            ids.into_iter()
-                .map(|id| {
-                    let node = store.node(id).cloned().ok_or_else(|| {
-                        SkeinError::Execution(format!(
-                            "updated node {} is missing during SET RETURN projection",
-                            id.0
-                        ))
-                    })?;
-                    let binding = Binding {
-                        values: BTreeMap::new(),
-                        nodes: BTreeMap::from([(variable.clone(), node)]),
-                        relationships: BTreeMap::new(),
-                    };
-                    let values = returns
-                        .iter()
-                        .map(|item| {
-                            project_value(item, catalog, &binding)
-                                .map(|value| (item.name.clone(), value))
+            match returns {
+                SetNodePropertiesReturnMode::Project(returns) => ids
+                    .into_iter()
+                    .map(|id| {
+                        let node = store.node(id).cloned().ok_or_else(|| {
+                            SkeinError::Execution(format!(
+                                "updated node {} is missing during SET RETURN projection",
+                                id.0
+                            ))
+                        })?;
+                        let binding = Binding {
+                            values: BTreeMap::new(),
+                            nodes: BTreeMap::from([(variable.clone(), node)]),
+                            relationships: BTreeMap::new(),
+                        };
+                        let values = returns
+                            .iter()
+                            .map(|item| {
+                                project_value(item, catalog, &binding)
+                                    .map(|value| (item.name.clone(), value))
+                            })
+                            .collect::<Result<BTreeMap<_, _>>>()?;
+                        Ok(Binding {
+                            values,
+                            nodes: BTreeMap::new(),
+                            relationships: BTreeMap::new(),
                         })
-                        .collect::<Result<BTreeMap<_, _>>>()?;
-                    Ok(Binding {
-                        values,
-                        nodes: BTreeMap::new(),
-                        relationships: BTreeMap::new(),
                     })
-                })
-                .collect()
+                    .collect(),
+                SetNodePropertiesReturnMode::Count { name } => Ok(vec![Binding {
+                    values: BTreeMap::from([(name.clone(), Value::Int(ids.len() as i64))]),
+                    nodes: BTreeMap::new(),
+                    relationships: BTreeMap::new(),
+                }]),
+            }
         }
         PhysicalPlan::SetRelationshipProperty {
             source_label,
