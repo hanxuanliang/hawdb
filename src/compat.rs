@@ -436,15 +436,15 @@ impl ExternalShadowCommand {
         let response = match self.stdout.read_line(self.request_timeout) {
             ExternalShadowStdoutRead::Line(response) => response,
             ExternalShadowStdoutRead::Closed => {
-                let message = format!("shadow engine '{}' closed stdout", self.name);
+                let status = self.shadow_child_status_after_stdout_close();
+                let message = format!("shadow engine '{}' closed stdout{status}", self.name);
                 self.trace_error(trace_sequence, &message);
                 return Err(self.request_error(message));
             }
             ExternalShadowStdoutRead::Timeout => {
-                let _ = self.child.kill();
-                let _ = self.child.wait();
+                let status = self.kill_shadow_child_status();
                 let message = format!(
-                    "shadow engine '{}' did not return a response within {} ms",
+                    "shadow engine '{}' did not return a response within {} ms{status}",
                     self.name,
                     self.request_timeout.as_millis()
                 );
@@ -484,6 +484,25 @@ impl ExternalShadowCommand {
         match self.stderr.tail() {
             Some(stderr) => SkeinError::Execution(format!("{message}; stderr tail: {stderr}")),
             None => SkeinError::Execution(message),
+        }
+    }
+
+    fn shadow_child_status_after_stdout_close(&mut self) -> String {
+        match self.child.try_wait() {
+            Ok(Some(status)) => format!("; child status: {status}"),
+            Ok(None) => {
+                let killed_status = self.kill_shadow_child_status();
+                format!("; child was still running after stdout close{killed_status}")
+            }
+            Err(error) => format!("; failed to read child status: {error}"),
+        }
+    }
+
+    fn kill_shadow_child_status(&mut self) -> String {
+        let _ = self.child.kill();
+        match self.child.wait() {
+            Ok(status) => format!("; child status: {status}"),
+            Err(error) => format!("; failed to wait for child status: {error}"),
         }
     }
 
@@ -27655,6 +27674,7 @@ done
         assert!(error
             .to_string()
             .contains("shadow engine 'external-shadow-stderr-tail' closed stdout"));
+        assert!(error.to_string().contains("child status: exit status: 7"));
         assert!(error
             .to_string()
             .contains("stderr tail: wrapper boot failed"));
@@ -27662,6 +27682,7 @@ done
         let trace = fs::read_to_string(&trace_path).unwrap();
         assert!(trace.contains("\"event\":\"request\""));
         assert!(trace.contains("\"event\":\"error\""));
+        assert!(trace.contains("child status: exit status: 7"));
         assert!(trace.contains("wrapper boot failed"));
         let _ = fs::remove_file(trace_path);
     }
@@ -27747,10 +27768,12 @@ done
         assert!(error
             .to_string()
             .contains("shadow engine 'external-shadow-timeout' did not return a response within"));
+        assert!(error.to_string().contains("child status:"));
         drop(shadow);
         let trace = fs::read_to_string(&trace_path).unwrap();
         assert!(trace.contains("\"event\":\"error\""));
         assert!(trace.contains("did not return a response within"));
+        assert!(trace.contains("child status:"));
         let _ = fs::remove_file(trace_path);
     }
 
