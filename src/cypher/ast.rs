@@ -257,13 +257,6 @@ pub struct WithAggregateProjection {
     pub items: Vec<ReturnItem>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WithAliasFilter {
-    pub alias: String,
-    pub op: WithAliasFilterOp,
-    pub value: ValueExpression,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WithAliasFilterOp {
     Eq,
@@ -272,6 +265,24 @@ pub enum WithAliasFilterOp {
     Lte,
     Gt,
     Gte,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WithAliasFilterExpression {
+    Column(String),
+    Property { variable: String, property: String },
+    Value(ValueExpression),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WithAliasFilter {
+    And(Vec<WithAliasFilter>),
+    Or(Vec<WithAliasFilter>),
+    Comparison {
+        left: WithAliasFilterExpression,
+        op: WithAliasFilterOp,
+        right: WithAliasFilterExpression,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

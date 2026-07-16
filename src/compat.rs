@@ -8348,9 +8348,10 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureCheck::expect_rows(
                     "wiki entity listing mention-count cursor read",
                     CypherFixtureStatement::with_parameters(
-                        "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+                        "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count OR (mention_count = $after_count AND e.name > $after_name) RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
                         BTreeMap::from([
-                            ("after_count".to_string(), Value::Int(4)),
+                            ("after_count".to_string(), Value::Int(3)),
+                            ("after_name".to_string(), Value::String("Cursor A".to_string())),
                             ("limit".to_string(), Value::Int(2)),
                         ]),
                     ),
@@ -10982,7 +10983,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-server::rest_fs::ls_wiki_entities.cursor_count",
             )
             .with_cypher(
-                "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+                "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count OR (mention_count = $after_count AND e.name > $after_name) RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
                 "wiki export summary entity count",

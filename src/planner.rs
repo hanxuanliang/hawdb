@@ -7,7 +7,8 @@ use crate::cypher::{
     SchemaObjectState as CypherSchemaObjectState, SchemaPropertyType as CypherSchemaPropertyType,
     SchemaTableKind as CypherSchemaTableKind, SetProperty, SetValueExpression, ShortestPathReturn,
     ShortestPathReturnExpression, Statement, ValueExpression, WithAggregateProjection,
-    WithAliasFilter, WithAliasFilterOp, WithCollect, WithDistinctProjection,
+    WithAliasFilter, WithAliasFilterExpression, WithAliasFilterOp, WithCollect,
+    WithDistinctProjection,
 };
 use crate::error::{Result, SkeinError};
 use crate::value::Value;
@@ -1417,14 +1418,11 @@ pub fn plan_with_params(
                             "OPTIONAL MATCH WITH supports only projection returns".to_string(),
                         ));
                     }
-                    if let Some(filter) = &query.aggregate_with_filter {
-                        if filter.alias != optional_with.alias {
-                            return Err(SkeinError::Semantic(format!(
-                                "unknown OPTIONAL MATCH WITH filter column '{}'",
-                                filter.alias
-                            )));
-                        }
-                    }
+                    validate_with_alias_filter(
+                        query.aggregate_with_filter.as_ref(),
+                        &scope,
+                        &BTreeSet::from([optional_with.alias.clone()]),
+                    )?;
                 } else {
                     let aggregate_with = optional_with_as_aggregate(optional_with);
                     validate_aggregate_with_match_return(query, &aggregate_with)?;
@@ -2059,14 +2057,11 @@ fn validate_aggregate_with_match_return(
             )));
         }
     }
-    if let Some(filter) = &query.aggregate_with_filter {
-        if !column_names.contains(&filter.alias) {
-            return Err(SkeinError::Semantic(format!(
-                "unknown WITH aggregate filter column '{}'",
-                filter.alias
-            )));
-        }
-    }
+    validate_with_alias_filter(
+        query.aggregate_with_filter.as_ref(),
+        &post_lookup_scope,
+        &column_names,
+    )?;
     if let Some(lookup) = &query.post_with_match {
         if !column_names.contains(&lookup.column) {
             return Err(SkeinError::Semantic(format!(
@@ -2095,6 +2090,64 @@ fn optional_with_as_aggregate(
                 alias: Some(optional_with.alias.clone()),
             },
         ],
+    }
+}
+
+fn validate_with_alias_filter(
+    filter: Option<&WithAliasFilter>,
+    scope: &BTreeSet<String>,
+    column_names: &BTreeSet<String>,
+) -> Result<()> {
+    let Some(filter) = filter else {
+        return Ok(());
+    };
+    validate_with_alias_filter_node(filter, scope, column_names)
+}
+
+fn validate_with_alias_filter_node(
+    filter: &WithAliasFilter,
+    scope: &BTreeSet<String>,
+    column_names: &BTreeSet<String>,
+) -> Result<()> {
+    match filter {
+        WithAliasFilter::And(filters) | WithAliasFilter::Or(filters) => {
+            for filter in filters {
+                validate_with_alias_filter_node(filter, scope, column_names)?;
+            }
+            Ok(())
+        }
+        WithAliasFilter::Comparison { left, right, .. } => {
+            validate_with_alias_filter_expression(left, scope, column_names)?;
+            validate_with_alias_filter_expression(right, scope, column_names)
+        }
+    }
+}
+
+fn validate_with_alias_filter_expression(
+    expression: &WithAliasFilterExpression,
+    scope: &BTreeSet<String>,
+    column_names: &BTreeSet<String>,
+) -> Result<()> {
+    match expression {
+        WithAliasFilterExpression::Column(column) => {
+            if column_names.contains(column) {
+                Ok(())
+            } else {
+                Err(SkeinError::Semantic(format!(
+                    "unknown WITH filter column '{column}'"
+                )))
+            }
+        }
+        WithAliasFilterExpression::Property { variable, .. } => {
+            if scope.contains(variable) || column_names.contains(variable) {
+                Ok(())
+            } else {
+                Err(SkeinError::Semantic(format!(
+                    "unknown WITH filter variable '{variable}'"
+                )))
+            }
+        }
+        WithAliasFilterExpression::Value(_) => Ok(()),
     }
 }
 
@@ -2708,31 +2761,65 @@ fn plan_with_alias_filter(
     filter: &WithAliasFilter,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Predicate> {
-    let expression = ProjectionExpression::Column(filter.alias.clone());
-    let value = ProjectionExpression::Literal(bind_value(&filter.value, parameters)?);
-    Ok(match filter.op {
-        WithAliasFilterOp::Eq => Predicate::ExpressionEq { expression, value },
-        WithAliasFilterOp::Ne => Predicate::ExpressionNotEq { expression, value },
-        WithAliasFilterOp::Lt => Predicate::ExpressionCompare {
-            expression,
-            op: ComparisonOp::Lt,
-            value,
-        },
-        WithAliasFilterOp::Lte => Predicate::ExpressionCompare {
-            expression,
-            op: ComparisonOp::Lte,
-            value,
-        },
-        WithAliasFilterOp::Gt => Predicate::ExpressionCompare {
-            expression,
-            op: ComparisonOp::Gt,
-            value,
-        },
-        WithAliasFilterOp::Gte => Predicate::ExpressionCompare {
-            expression,
-            op: ComparisonOp::Gte,
-            value,
-        },
+    Ok(match filter {
+        WithAliasFilter::And(filters) => Predicate::And(
+            filters
+                .iter()
+                .map(|filter| plan_with_alias_filter(filter, parameters))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        WithAliasFilter::Or(filters) => Predicate::Or(
+            filters
+                .iter()
+                .map(|filter| plan_with_alias_filter(filter, parameters))
+                .collect::<Result<Vec<_>>>()?,
+        ),
+        WithAliasFilter::Comparison { left, op, right } => {
+            let expression = plan_with_alias_filter_expression(left, parameters)?;
+            let value = plan_with_alias_filter_expression(right, parameters)?;
+            match op {
+                WithAliasFilterOp::Eq => Predicate::ExpressionEq { expression, value },
+                WithAliasFilterOp::Ne => Predicate::ExpressionNotEq { expression, value },
+                WithAliasFilterOp::Lt => Predicate::ExpressionCompare {
+                    expression,
+                    op: ComparisonOp::Lt,
+                    value,
+                },
+                WithAliasFilterOp::Lte => Predicate::ExpressionCompare {
+                    expression,
+                    op: ComparisonOp::Lte,
+                    value,
+                },
+                WithAliasFilterOp::Gt => Predicate::ExpressionCompare {
+                    expression,
+                    op: ComparisonOp::Gt,
+                    value,
+                },
+                WithAliasFilterOp::Gte => Predicate::ExpressionCompare {
+                    expression,
+                    op: ComparisonOp::Gte,
+                    value,
+                },
+            }
+        }
+    })
+}
+
+fn plan_with_alias_filter_expression(
+    expression: &WithAliasFilterExpression,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<ProjectionExpression> {
+    Ok(match expression {
+        WithAliasFilterExpression::Column(column) => ProjectionExpression::Column(column.clone()),
+        WithAliasFilterExpression::Property { variable, property } => {
+            ProjectionExpression::Property {
+                variable: variable.clone(),
+                property: property.clone(),
+            }
+        }
+        WithAliasFilterExpression::Value(value) => {
+            ProjectionExpression::Literal(bind_value(value, parameters)?)
+        }
     })
 }
 

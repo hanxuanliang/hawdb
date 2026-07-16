@@ -825,7 +825,41 @@ impl Parser<'_> {
     }
 
     fn parse_with_alias_filter(&mut self) -> Result<WithAliasFilter> {
-        let alias = self.parse_ident()?;
+        self.parse_with_alias_filter_disjunction()
+    }
+
+    fn parse_with_alias_filter_disjunction(&mut self) -> Result<WithAliasFilter> {
+        let mut filters = vec![self.parse_with_alias_filter_conjunction()?];
+        while self.consume_keyword("OR") {
+            filters.push(self.parse_with_alias_filter_conjunction()?);
+        }
+        if filters.len() == 1 {
+            Ok(filters.remove(0))
+        } else {
+            Ok(WithAliasFilter::Or(filters))
+        }
+    }
+
+    fn parse_with_alias_filter_conjunction(&mut self) -> Result<WithAliasFilter> {
+        let mut filters = vec![self.parse_with_alias_filter_atom()?];
+        while self.consume_keyword("AND") {
+            filters.push(self.parse_with_alias_filter_atom()?);
+        }
+        if filters.len() == 1 {
+            Ok(filters.remove(0))
+        } else {
+            Ok(WithAliasFilter::And(filters))
+        }
+    }
+
+    fn parse_with_alias_filter_atom(&mut self) -> Result<WithAliasFilter> {
+        self.skip_ws();
+        if self.consume_char('(') {
+            let filter = self.parse_with_alias_filter_disjunction()?;
+            self.expect_char(')')?;
+            return Ok(filter);
+        }
+        let left = self.parse_with_alias_filter_expression()?;
         self.skip_ws();
         let op = if self.consume_token("<>") || self.consume_token("!=") {
             WithAliasFilterOp::Ne
@@ -842,11 +876,35 @@ impl Parser<'_> {
         } else {
             return Err(self.error("expected WITH alias comparison operator"));
         };
-        Ok(WithAliasFilter {
-            alias,
+        Ok(WithAliasFilter::Comparison {
+            left,
             op,
-            value: self.parse_value()?,
+            right: self.parse_with_alias_filter_expression()?,
         })
+    }
+
+    fn parse_with_alias_filter_expression(&mut self) -> Result<WithAliasFilterExpression> {
+        self.skip_ws();
+        if self.peek_char() == Some('$')
+            || self.peek_char() == Some('\'')
+            || self.peek_char() == Some('"')
+            || self.peek_char() == Some('-')
+            || self.peek_char().is_some_and(|ch| ch.is_ascii_digit())
+            || self.next_keyword_is("TRUE")
+            || self.next_keyword_is("FALSE")
+            || self.next_keyword_is("NULL")
+        {
+            return Ok(WithAliasFilterExpression::Value(self.parse_value()?));
+        }
+        let variable = self.parse_ident()?;
+        if self.consume_char('.') {
+            Ok(WithAliasFilterExpression::Property {
+                variable,
+                property: self.parse_ident()?,
+            })
+        } else {
+            Ok(WithAliasFilterExpression::Column(variable))
+        }
     }
 
     fn parse_bound_relationship_create_pattern(

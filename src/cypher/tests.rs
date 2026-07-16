@@ -3,7 +3,8 @@ use super::{
     CreateProperty, GraphAlgorithm, GraphAlgorithmKind, GraphAlgorithmOptions, OrderDirection,
     OrderExpression, ProjectGraph, PropertyPredicate, RelationshipDirection, ReturnExpression,
     ReturnValueExpression, SchemaObjectState, SchemaPropertyType, SchemaTableKind,
-    SetValueExpression, Statement, ValueExpression, WithAliasFilterOp,
+    SetValueExpression, Statement, ValueExpression, WithAliasFilter, WithAliasFilterExpression,
+    WithAliasFilterOp,
 };
 use crate::value::Value;
 
@@ -1257,9 +1258,18 @@ fn parses_with_variable_group_multiple_count_aggregates_and_filter() {
     let aggregate_with = query.aggregate_with.expect("aggregate with");
     assert_eq!(aggregate_with.items.len(), 3);
     let filter = query.aggregate_with_filter.expect("aggregate filter");
-    assert_eq!(filter.alias, "community_span");
-    assert_eq!(filter.op, WithAliasFilterOp::Gte);
-    assert_eq!(filter.value, ValueExpression::Literal(Value::Int(2)));
+    let WithAliasFilter::Comparison { left, op, right } = filter else {
+        panic!("expected comparison filter");
+    };
+    assert_eq!(
+        left,
+        WithAliasFilterExpression::Column("community_span".to_string())
+    );
+    assert_eq!(op, WithAliasFilterOp::Gte);
+    assert_eq!(
+        right,
+        WithAliasFilterExpression::Value(ValueExpression::Literal(Value::Int(2)))
+    );
     assert_eq!(query.returns.len(), 5);
 }
 
@@ -1277,11 +1287,52 @@ fn parses_optional_count_with_alias_filter() {
     assert_eq!(optional_with.count_variable, "r");
     assert_eq!(optional_with.alias, "mention_count");
     let filter = query.aggregate_with_filter.expect("aggregate filter");
-    assert_eq!(filter.alias, "mention_count");
-    assert_eq!(filter.op, WithAliasFilterOp::Lt);
+    let WithAliasFilter::Comparison { left, op, right } = filter else {
+        panic!("expected comparison filter");
+    };
     assert_eq!(
-        filter.value,
-        ValueExpression::Parameter("after_count".to_string())
+        left,
+        WithAliasFilterExpression::Column("mention_count".to_string())
+    );
+    assert_eq!(op, WithAliasFilterOp::Lt);
+    assert_eq!(
+        right,
+        WithAliasFilterExpression::Value(ValueExpression::Parameter("after_count".to_string()))
+    );
+}
+
+#[test]
+fn parses_optional_count_with_keyset_filter() {
+    let statement = parse(
+        "MATCH (e:Entity) WHERE e.name IS NOT NULL AND e.id IS NOT NULL OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) WITH e, COUNT(r) AS mention_count WHERE mention_count < $after_count OR (mention_count = $after_count AND e.name > $after_name) RETURN e.id, e.name, e.updated_at, mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let filter = query.aggregate_with_filter.expect("aggregate filter");
+    let WithAliasFilter::Or(filters) = filter else {
+        panic!("expected disjunction filter");
+    };
+    assert_eq!(filters.len(), 2);
+    let WithAliasFilter::And(tie_breaker) = &filters[1] else {
+        panic!("expected tie-breaker conjunction");
+    };
+    assert_eq!(tie_breaker.len(), 2);
+    let WithAliasFilter::Comparison { left, op, right } = &tie_breaker[1] else {
+        panic!("expected name comparison");
+    };
+    assert_eq!(
+        left,
+        &WithAliasFilterExpression::Property {
+            variable: "e".to_string(),
+            property: "name".to_string(),
+        }
+    );
+    assert_eq!(*op, WithAliasFilterOp::Gt);
+    assert_eq!(
+        right,
+        &WithAliasFilterExpression::Value(ValueExpression::Parameter("after_name".to_string()))
     );
 }
 
@@ -1510,7 +1561,13 @@ fn parses_with_aggregate_alias_filter_return() {
     assert_eq!(aggregate_with.items[0].alias.as_deref(), Some("cid"));
     assert_eq!(aggregate_with.items[1].alias.as_deref(), Some("covered"));
     let filter = query.aggregate_with_filter.expect("aggregate filter");
-    assert_eq!(filter.alias, "covered");
+    let WithAliasFilter::Comparison { left, .. } = filter else {
+        panic!("expected comparison filter");
+    };
+    assert_eq!(
+        left,
+        WithAliasFilterExpression::Column("covered".to_string())
+    );
     assert_eq!(query.returns.len(), 1);
     assert_eq!(
         query.returns[0].expression,
