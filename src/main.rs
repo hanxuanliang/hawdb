@@ -326,6 +326,20 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "graph-lightning-publish-staging" {
+            let staging_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_publish_staging_usage()))?;
+            let publish_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_publish_staging_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+            }
+            let report = publish_graph_lightning_staging_catalog(staging_dir, publish_dir)?;
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            return Ok(());
+        }
         if command == "graph-lightning-graph-stream" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
@@ -433,6 +447,10 @@ fn graph_lightning_stage_bootstrap_usage() -> String {
 
 fn graph_lightning_verify_staging_usage() -> String {
     "graph-lightning-verify-staging requires [--require-ready] <staging-dir>".to_string()
+}
+
+fn graph_lightning_publish_staging_usage() -> String {
+    "graph-lightning-publish-staging requires <staging-dir> <publish-dir>".to_string()
 }
 
 fn graph_lightning_graph_stream_usage() -> String {
@@ -865,6 +883,135 @@ fn verify_graph_lightning_staging_catalog(
     }))
 }
 
+fn publish_graph_lightning_staging_catalog(
+    staging_dir: impl AsRef<Path>,
+    publish_dir: impl AsRef<Path>,
+) -> Result<serde_json::Value> {
+    let staging_dir = staging_dir.as_ref();
+    let publish_dir = publish_dir.as_ref();
+    let verification = verify_graph_lightning_staging_catalog(staging_dir)?;
+    if verification
+        .get("validation_gate")
+        .and_then(|gate| gate.get("decision"))
+        .and_then(serde_json::Value::as_str)
+        != Some("ready")
+    {
+        return Err(SkeinError::Execution(
+            "graph lightning staging verification is not ready".to_string(),
+        ));
+    }
+
+    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let catalog_bytes = fs::read(&catalog_path)?;
+    let catalog_checksum = checksum_bytes(&catalog_bytes);
+    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes).map_err(|error| {
+        SkeinError::Execution(format!(
+            "invalid JSON at {}: {error}",
+            catalog_path.display()
+        ))
+    })?;
+    let manifest = read_staging_artifact_json(&catalog, staging_dir, "manifest")?;
+    let pointer = serde_json::json!({
+        "protocol": "graph-lightning-published-manifest",
+        "protocol_version": 1,
+        "state": "PUBLISHED",
+        "graph_commit_epoch": manifest["graph_commit_epoch"].clone(),
+        "logical_checksum": manifest["logical_checksum"].clone(),
+        "schema_checksum": manifest["schema_checksum"].clone(),
+        "graph_stream_checksum": manifest["graph_stream_checksum"].clone(),
+        "graph_stream_byte_len": manifest["graph_stream_byte_len"].clone(),
+        "node_count": manifest["node_count"].clone(),
+        "relationship_count": manifest["relationship_count"].clone(),
+        "staging_catalog": {
+            "path": "graph_lightning_staging_catalog.json",
+            "checksum": catalog_checksum,
+            "byte_len": catalog_bytes.len(),
+        },
+    });
+
+    fs::create_dir_all(publish_dir)?;
+    let pointer_path = publish_dir.join("graph_lightning_published_manifest.json");
+    if pointer_path.exists() {
+        let existing = read_json_file(&pointer_path)?;
+        if same_published_manifest_identity(&existing, &pointer) {
+            let mut report = pointer;
+            if let Some(object) = report.as_object_mut() {
+                object.insert(
+                    "publish_gate".to_string(),
+                    serde_json::json!({
+                        "decision": "idempotent",
+                        "errors": [],
+                    }),
+                );
+            }
+            return Ok(report);
+        }
+        return Err(SkeinError::Execution(
+            "published graph lightning manifest already points to a different snapshot".to_string(),
+        ));
+    }
+
+    let mut report = pointer;
+    if let Some(object) = report.as_object_mut() {
+        object.insert(
+            "publish_gate".to_string(),
+            serde_json::json!({
+                "decision": "published",
+                "errors": [],
+            }),
+        );
+    }
+    let pointer_bytes = serde_json::to_vec_pretty(&report).unwrap();
+    write_atomic_file(
+        publish_dir,
+        "graph_lightning_published_manifest.json",
+        &pointer_bytes,
+    )?;
+    sync_directory(publish_dir)?;
+    Ok(report)
+}
+
+fn read_staging_artifact_json(
+    catalog: &serde_json::Value,
+    staging_dir: &Path,
+    kind: &str,
+) -> Result<serde_json::Value> {
+    let artifacts = catalog
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SkeinError::Execution("staging catalog missing artifacts array".to_string())
+        })?;
+    let artifact = artifacts
+        .iter()
+        .find(|artifact| artifact.get("kind").and_then(serde_json::Value::as_str) == Some(kind))
+        .ok_or_else(|| SkeinError::Execution(format!("staging catalog missing {kind} artifact")))?;
+    let path = artifact
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| SkeinError::Execution(format!("staging {kind} artifact missing path")))?;
+    if path.contains('/') || path.contains('\\') {
+        return Err(SkeinError::Execution(format!(
+            "staging {kind} artifact uses non-local path {path}"
+        )));
+    }
+    read_json_file(&staging_dir.join(path))
+}
+
+fn same_published_manifest_identity(left: &serde_json::Value, right: &serde_json::Value) -> bool {
+    [
+        "graph_commit_epoch",
+        "logical_checksum",
+        "schema_checksum",
+        "graph_stream_checksum",
+        "graph_stream_byte_len",
+        "node_count",
+        "relationship_count",
+    ]
+    .iter()
+    .all(|key| left.get(*key) == right.get(*key))
+}
+
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let bytes = fs::read(path)?;
     serde_json::from_slice(&bytes).map_err(|error| {
@@ -879,19 +1026,32 @@ fn write_staging_artifact(
 ) -> Result<serde_json::Value> {
     let path = staging_dir.join(file_name);
     let tmp_path = staging_dir.join(format!("{file_name}.tmp"));
-    {
-        let mut file = File::create(&tmp_path)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
-    fs::rename(&tmp_path, &path)?;
-    sync_directory(staging_dir)?;
+    write_atomic_path(&path, &tmp_path, bytes)?;
     Ok(serde_json::json!({
         "kind": graph_lightning_artifact_kind(file_name),
         "path": file_name,
         "byte_len": bytes.len(),
         "checksum": checksum_bytes(bytes),
     }))
+}
+
+fn write_atomic_file(dir: &Path, file_name: &str, bytes: &[u8]) -> Result<()> {
+    let path = dir.join(file_name);
+    let tmp_path = dir.join(format!("{file_name}.tmp"));
+    write_atomic_path(&path, &tmp_path, bytes)
+}
+
+fn write_atomic_path(path: &Path, tmp_path: &Path, bytes: &[u8]) -> Result<()> {
+    {
+        let mut file = File::create(tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(tmp_path, path)?;
+    if let Some(parent) = path.parent() {
+        sync_directory(parent)?;
+    }
+    Ok(())
 }
 
 fn graph_lightning_artifact_kind(file_name: &str) -> &'static str {
@@ -995,8 +1155,9 @@ mod tests {
         graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
         graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
-        graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
-        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_shadow_timeout_ms,
+        graph_lightning_publish_staging_usage, graph_lightning_stage_bootstrap_usage,
+        graph_lightning_verify_export_usage, graph_lightning_verify_staging_usage,
+        is_self_shadow_command, parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
         should_run_shadow_ready, stable_identity_audit_json,
         stage_graph_lightning_bootstrap_export, validate_canonical_snapshot_usage, value_json,
         verify_graph_lightning_staging_catalog,
@@ -1386,6 +1547,72 @@ mod tests {
     }
 
     #[test]
+    fn publishes_graph_lightning_staging_catalog_idempotently() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_publish_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_publish_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+
+        let published =
+            publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+        let idempotent =
+            publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(published["protocol"], "graph-lightning-published-manifest");
+        assert_eq!(published["state"], "PUBLISHED");
+        assert_eq!(published["publish_gate"]["decision"], "published");
+        assert_eq!(idempotent["publish_gate"]["decision"], "idempotent");
+        assert!(publish_dir
+            .join("graph_lightning_published_manifest.json")
+            .exists());
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+        std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn publish_staging_rejects_different_manifest_overwrite() {
+        let staging_dir = unique_main_test_dir("graph_lightning_publish_staging_conflict_a");
+        let second_staging_dir = unique_main_test_dir("graph_lightning_publish_staging_conflict_b");
+        let publish_dir = unique_main_test_dir("graph_lightning_publish_target_conflict");
+        let mut first = Database::new();
+        first
+            .query(
+                "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+            )
+            .unwrap();
+        let first_export = first.prepare_graph_lightning_bootstrap_export().unwrap();
+        stage_graph_lightning_bootstrap_export(&first_export, &staging_dir).unwrap();
+        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+
+        let mut second = Database::new();
+        second
+            .query(
+                "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+            )
+            .unwrap();
+        second
+            .query("CREATE (:Source {id: 'source-1', path: '/tmp/source.md'})")
+            .unwrap();
+        let second_export = second.prepare_graph_lightning_bootstrap_export().unwrap();
+        stage_graph_lightning_bootstrap_export(&second_export, &second_staging_dir).unwrap();
+
+        let error =
+            publish_graph_lightning_staging_catalog(&second_staging_dir, &publish_dir).unwrap_err();
+
+        assert!(error.to_string().contains("different snapshot"));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+        std::fs::remove_dir_all(second_staging_dir).unwrap();
+        std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
     fn renders_stable_identity_audit_values() {
         let audit = CanonicalSnapshotIdentityAudit {
             requires_stable_id_mapping: true,
@@ -1458,6 +1685,12 @@ mod tests {
     fn validates_graph_lightning_verify_staging_usage_text() {
         assert!(graph_lightning_verify_staging_usage().contains("<staging-dir>"));
         assert!(graph_lightning_verify_staging_usage().contains("--require-ready"));
+    }
+
+    #[test]
+    fn validates_graph_lightning_publish_staging_usage_text() {
+        assert!(graph_lightning_publish_staging_usage().contains("<staging-dir>"));
+        assert!(graph_lightning_publish_staging_usage().contains("<publish-dir>"));
     }
 
     #[test]

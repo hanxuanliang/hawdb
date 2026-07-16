@@ -147,6 +147,11 @@ it is outside the graph WAL and does not alter the published graph snapshot.
 that staging catalog without the source database, verifies artifact byte
 lengths and checksums, recomputes GraphStream validation, and checks agreement
 between the catalog, manifest, bundle, and GraphStream artifact.
+`skein graph-lightning-publish-staging <staging-dir> <publish-dir>` verifies a
+READY staging catalog and atomically writes
+`graph_lightning_published_manifest.json`. Repeating the command for the same
+manifest is idempotent; attempting to publish a different manifest over an
+existing pointer fails instead of overwriting the published graph pointer.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
