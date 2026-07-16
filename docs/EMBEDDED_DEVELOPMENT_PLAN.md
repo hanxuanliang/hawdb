@@ -583,6 +583,8 @@ reads,
 PageRank membership/visibility reads, score persist/clear writes, central-entity
 lookup, GraphMeta clear stamps, planner node/relationship totals, and changed
 count reads,
+community scheduler GraphMeta, candidate scan, member entity, and summary
+write queries,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label

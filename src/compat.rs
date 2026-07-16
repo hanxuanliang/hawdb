@@ -4702,6 +4702,136 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "community scheduler graph meta read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.community_detection_computed_at, m.community_count, m.last_augmentation_at",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.community_detection_computed_at", Value::Int(101)),
+                        ("m.community_count", Value::Int(2)),
+                        ("m.last_augmentation_at", Value::Int(202)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.community_detection_computed_at = 101, m.community_count = 2, m.last_augmentation_at = 202",
+                )),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community scheduler candidate scan",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 RETURN c.id, c.community_id, c.name, c.description, c.ai_summary, c.member_count ORDER BY c.member_count DESC, c.community_id ASC LIMIT $row_limit",
+                        BTreeMap::from([("row_limit".to_string(), Value::Int(2))]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("c.id", Value::String("community-scheduler-high".to_string())),
+                            ("c.community_id", Value::Int(802)),
+                            ("c.name", Value::String("Scheduler High".to_string())),
+                            ("c.description", Value::String("high description".to_string())),
+                            ("c.ai_summary", Value::String("high summary".to_string())),
+                            ("c.member_count", Value::Int(20)),
+                        ]),
+                        compatibility_row([
+                            ("c.id", Value::String("community-scheduler-low".to_string())),
+                            ("c.community_id", Value::Int(801)),
+                            ("c.name", Value::String("Scheduler Low".to_string())),
+                            ("c.description", Value::String("low description".to_string())),
+                            ("c.ai_summary", Value::String("low summary".to_string())),
+                            ("c.member_count", Value::Int(10)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'community-scheduler-low', community_id: 801, name: 'Scheduler Low', description: 'low description', ai_summary: 'low summary', member_count: 10})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'community-scheduler-high', community_id: 802, name: 'Scheduler High', description: 'high description', ai_summary: 'high summary', member_count: 20})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'community-scheduler-negative', community_id: -1, name: 'Scheduler Negative', description: 'negative description', ai_summary: 'negative summary', member_count: 100})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.id IN ['community-scheduler-low', 'community-scheduler-high', 'community-scheduler-negative'] DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community scheduler member entity ids",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.community_id = $cid RETURN e.id",
+                        BTreeMap::from([("cid".to_string(), Value::Int(811))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "e.id",
+                        Value::String("community-scheduler-entity".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'community-scheduler-entity', community_id: 811})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'community-scheduler-entity'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "community scheduler summary write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community {id: $id}) SET c.name = $name, c.description = $description, c.ai_summary = $ai_summary, c.updated_at = CURRENT_TIMESTAMP()",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("community-scheduler-write".to_string()),
+                            ),
+                            ("name".to_string(), Value::String("Written Name".to_string())),
+                            (
+                                "description".to_string(),
+                                Value::String("Written description".to_string()),
+                            ),
+                            (
+                                "ai_summary".to_string(),
+                                Value::String("TITLE: Written Name\nWritten description".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'community-scheduler-write', community_id: 812, name: 'Old Name', description: 'old description', ai_summary: '', member_count: 1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: 'community-scheduler-write'}) RETURN c.name, c.description, c.ai_summary, count(c.updated_at) AS updated",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("c.name", Value::String("Written Name".to_string())),
+                        (
+                            "c.description",
+                            Value::String("Written description".to_string()),
+                        ),
+                        (
+                            "c.ai_summary",
+                            Value::String("TITLE: Written Name\nWritten description".to_string()),
+                        ),
+                        ("updated", Value::Int(1)),
+                    ])]),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: 'community-scheduler-write'}) DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "crystallized provenance backfill merge",
                     CypherFixtureStatement::new(
                         "MATCH (c:Memory)-[r:CRYSTALLIZED_FROM]->(s:Memory) MERGE (c)-[n:SYNTHESIZED_FROM]->(s) ON CREATE SET n.weight = r.contribution_weight, n.occasion_key = '', n.created_at = r.created_at",
@@ -8439,6 +8569,36 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:GraphMeta {meta_id: 'main'}) SET m.community_detection_applied = false, m.community_algorithm = '', m.community_resolution = 1.0, m.community_count = 0, m.community_detection_computed_at = NULL, m.updated_at = CURRENT_TIMESTAMP()",
             ),
             CompatibilityQueryCallSite::new(
+                "community scheduler graph meta read",
+                "community_plan_read",
+                "nmem-server::scheduler_service::run_community_detection",
+            )
+            .with_cypher(
+                "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.community_detection_computed_at, m.community_count, m.last_augmentation_at",
+            ),
+            CompatibilityQueryCallSite::new(
+                "community scheduler candidate scan",
+                "community_plan_read",
+                "nmem-server::scheduler_service::run_community_detection",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 RETURN c.id, c.community_id, c.name, c.description, c.ai_summary, c.member_count ORDER BY c.member_count DESC, c.community_id ASC LIMIT $row_limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "community scheduler member entity ids",
+                "community_plan_read",
+                "nmem-server::scheduler_service::run_community_detection",
+            )
+            .with_cypher("MATCH (e:Entity) WHERE e.community_id = $cid RETURN e.id"),
+            CompatibilityQueryCallSite::new(
+                "community scheduler summary write",
+                "community_plan_write",
+                "nmem-server::scheduler_service::run_community_detection",
+            )
+            .with_cypher(
+                "MATCH (c:Community {id: $id}) SET c.name = $name, c.description = $description, c.ai_summary = $ai_summary, c.updated_at = CURRENT_TIMESTAMP()",
+            ),
+            CompatibilityQueryCallSite::new(
                 "crystallized provenance backfill merge",
                 "schema_migration_write",
                 "nmem-graph::schema::m_backfill_crystallized_from",
@@ -10566,7 +10726,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 231);
+        assert_eq!(report.checks.len(), 235);
     }
 
     #[test]
@@ -10582,13 +10742,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 231);
-        assert_eq!(coverage.covered_checks, 231);
+        assert_eq!(coverage.required_checks, 235);
+        assert_eq!(coverage.covered_checks, 235);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 231);
+        assert_eq!(coverage_json["covered_checks"], 235);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -10618,10 +10778,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 231);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 235);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 231);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 235);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -10815,15 +10975,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 231);
-        assert_eq!(report.shadow_checks.len(), 231);
+        assert_eq!(report.primary_checks.len(), 235);
+        assert_eq!(report.shadow_checks.len(), 235);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            231
+            235
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -10832,7 +10992,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 231);
+        assert_eq!(cutover.matched_checks, 235);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
