@@ -159,8 +159,8 @@ execution.
 current Nowledge core compatibility contract as public migration inputs,
 including Nowledge-used entity reuse exact, case-insensitive, alias-containment,
 same-type bounded scan reads, entity temporal metadata create/update writes, and
-the incoming one-hop relationship read pattern
-`MATCH (e:Entity)<-[:MENTIONS]-(m:Memory)`.
+the production entity `MENTIONS`/`RELATES_TO` relationship write shapes used by
+`entity_write`.
 `CompatibilityQueryCallSite` and `build_compatibility_query_inventory` provide a
 stable production call-site inventory builder with source metadata and duplicate
 check-name validation. `build_compatibility_query_inventory_from_json` and
@@ -574,6 +574,7 @@ be attached as a subprocess without linking Kuzu or Python into Skein.
 The current fixture covers indexed parameter lookup, null predicates, list
 predicates with pagination, entity alias list lookup, entity reuse lookup reads,
 entity temporal metadata create/update writes, current timestamp writes,
+entity `MENTIONS` and temporal `RELATES_TO` creation writes, entity count reads,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label

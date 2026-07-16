@@ -1600,6 +1600,120 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(1),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity mention relationship create",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}), (e:Entity {id: $entity_id}) CREATE (m)-[:MENTIONS { confidence: $confidence, mention_count: 1, created_at: $created_at, properties: $properties }]->(e)",
+                        BTreeMap::from([
+                            (
+                                "memory_id".to_string(),
+                                Value::String("entity-mention-memory-1".to_string()),
+                            ),
+                            (
+                                "entity_id".to_string(),
+                                Value::String("entity-mention-entity-1".to_string()),
+                            ),
+                            ("confidence".to_string(), Value::Float(0.7)),
+                            ("created_at".to_string(), Value::Int(60)),
+                            (
+                                "properties".to_string(),
+                                Value::String("{\"source_memory_id\":\"entity-mention-memory-1\"}".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'entity-mention-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-mention-entity-1', name: 'Mention Entity'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['entity-mention-memory-1', 'entity-mention-entity-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity temporal relationship create",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (source:Entity {id: $source_entity_id}), (target:Entity {id: $target_entity_id}) CREATE (source)-[:RELATES_TO { relation_type: $relation_type, strength: $confidence, confidence: $confidence, context: $context, conditions: $conditions, temporal_info: $temporal_info, source_reference: $source_reference, bidirectional: false, created_at: $created_at, properties: $properties, temporal_type: $temporal_type, rel_start: $rel_start, rel_end: $rel_end, temporal_precision: $temporal_precision, is_ongoing: $is_ongoing, temporal_confidence: $temporal_confidence }]->(target)",
+                        BTreeMap::from([
+                            (
+                                "source_entity_id".to_string(),
+                                Value::String("entity-rel-source-1".to_string()),
+                            ),
+                            (
+                                "target_entity_id".to_string(),
+                                Value::String("entity-rel-target-1".to_string()),
+                            ),
+                            (
+                                "relation_type".to_string(),
+                                Value::String("supports".to_string()),
+                            ),
+                            ("confidence".to_string(), Value::Float(0.82)),
+                            (
+                                "context".to_string(),
+                                Value::String("relationship context".to_string()),
+                            ),
+                            (
+                                "conditions".to_string(),
+                                Value::String("when active".to_string()),
+                            ),
+                            (
+                                "temporal_info".to_string(),
+                                Value::String("since 2024".to_string()),
+                            ),
+                            (
+                                "source_reference".to_string(),
+                                Value::String("entity-rel-source-memory".to_string()),
+                            ),
+                            ("created_at".to_string(), Value::Int(70)),
+                            (
+                                "properties".to_string(),
+                                Value::String("{\"reasoning\":\"test\"}".to_string()),
+                            ),
+                            (
+                                "temporal_type".to_string(),
+                                Value::String("ongoing".to_string()),
+                            ),
+                            (
+                                "rel_start".to_string(),
+                                Value::String("2024-01-01".to_string()),
+                            ),
+                            ("rel_end".to_string(), Value::Null),
+                            (
+                                "temporal_precision".to_string(),
+                                Value::String("day".to_string()),
+                            ),
+                            ("is_ongoing".to_string(), Value::Bool(true)),
+                            ("temporal_confidence".to_string(), Value::Float(0.77)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-rel-source-1', name: 'Relationship Source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-rel-target-1', name: 'Relationship Target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['entity-rel-source-1', 'entity-rel-target-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "entity total count read",
+                CypherFixtureStatement::new("MATCH (e:Entity) RETURN count(e)"),
+                ExpectedRows::Exact(vec![compatibility_row([("count(e)", Value::Int(2))])]),
+            )),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "current timestamp write",
                 CypherFixtureStatement::new(
@@ -7858,6 +7972,28 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "CREATE (e:Entity { id: $id, name: $name, entity_type: $entity_type, description: $description, aliases: $aliases, confidence: $confidence, entity_created: $entity_created, entity_ended: $entity_ended, temporal_precision: $temporal_precision, temporal_confidence: $temporal_confidence, temporal_context: $temporal_context, created_at: $created_at, updated_at: $updated_at, metadata: $metadata })",
             ),
             CompatibilityQueryCallSite::new(
+                "entity mention relationship create",
+                "entity_write",
+                "nmem-graph::entity_write::create_entity_mention",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id}), (e:Entity {id: $entity_id}) CREATE (m)-[:MENTIONS { confidence: $confidence, mention_count: 1, created_at: $created_at, properties: $properties }]->(e)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "entity temporal relationship create",
+                "entity_relationship_write",
+                "nmem-graph::entity_write::create_entity_relationship",
+            )
+            .with_cypher(
+                "MATCH (source:Entity {id: $source_entity_id}), (target:Entity {id: $target_entity_id}) CREATE (source)-[:RELATES_TO { relation_type: $relation_type, strength: $confidence, confidence: $confidence, context: $context, conditions: $conditions, temporal_info: $temporal_info, source_reference: $source_reference, bidirectional: false, created_at: $created_at, properties: $properties, temporal_type: $temporal_type, rel_start: $rel_start, rel_end: $rel_end, temporal_precision: $temporal_precision, is_ongoing: $is_ongoing, temporal_confidence: $temporal_confidence }]->(target)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "entity total count read",
+                "entity_write_read",
+                "nmem-graph::entity_write::entity_count",
+            )
+            .with_cypher("MATCH (e:Entity) RETURN count(e)"),
+            CompatibilityQueryCallSite::new(
                 "current timestamp write",
                 "augmentation_write",
                 "nmem-graph::augmentation::create_job",
@@ -9413,7 +9549,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 196);
+        assert_eq!(report.checks.len(), 199);
     }
 
     #[test]
@@ -9429,13 +9565,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 196);
-        assert_eq!(coverage.covered_checks, 196);
+        assert_eq!(coverage.required_checks, 199);
+        assert_eq!(coverage.covered_checks, 199);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 196);
+        assert_eq!(coverage_json["covered_checks"], 199);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -9465,10 +9601,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 196);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 199);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 196);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 199);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -9662,15 +9798,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 196);
-        assert_eq!(report.shadow_checks.len(), 196);
+        assert_eq!(report.primary_checks.len(), 199);
+        assert_eq!(report.shadow_checks.len(), 199);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            196
+            199
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -9679,7 +9815,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 196);
+        assert_eq!(cutover.matched_checks, 199);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
