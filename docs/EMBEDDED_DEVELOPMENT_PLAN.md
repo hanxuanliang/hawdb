@@ -589,7 +589,8 @@ cleanup scheduler seed scans, bounded EVOLVES pair reads, cleanup fingerprint
 row fetches, floor-zero engagement `CASE` ordering, and decay scheduler
 EVOLVES/crystal synthesis count reads,
 wiki export summary entity/crystal/community count reads, topic entity/crystal
-ranking reads, and community top memory ranking reads,
+ranking reads, entity id-or-name lookup reads, and community top memory ranking
+reads,
 OKF export community list, entity list, crystal list, and crystal-source entity
 community reads, shared OKF/wiki entity mention detail reads, and shared OKF/wiki
 related entity reads, plus OKF memory row exports with row-preserving label

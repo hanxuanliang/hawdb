@@ -8372,6 +8372,43 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "wiki entity id-or-name lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.id = $key OR LOWER(e.name) = LOWER($key) RETURN e.id, e.name, e.entity_type, e.description, e.aliases, e.confidence, e.community_id, e.created_at LIMIT 1",
+                        BTreeMap::from([(
+                            "key".to_string(),
+                            Value::String("wiki lookup entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("e.id", Value::String("wiki-entity-lookup".to_string())),
+                        ("e.name", Value::String("Wiki Lookup Entity".to_string())),
+                        ("e.entity_type", Value::String("concept".to_string())),
+                        (
+                            "e.description",
+                            Value::String("wiki lookup description".to_string()),
+                        ),
+                        (
+                            "e.aliases",
+                            Value::List(vec![Value::String("lookup alias".to_string())]),
+                        ),
+                        ("e.confidence", Value::Float(0.91)),
+                        ("e.community_id", Value::Int(9770)),
+                        ("e.created_at", Value::Int(1_700_000_000_000_000_200)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-entity-lookup', name: 'Wiki Lookup Entity', entity_type: 'concept', description: 'wiki lookup description', aliases: ['lookup alias'], confidence: 0.91, community_id: 9770, created_at: 1700000000000000200})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'wiki-entity-lookup'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "okf export community list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
@@ -10623,6 +10660,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id = $cid RETURN m.id, m.crystal_title, m.title, m.content, m.importance, COUNT(e) AS hits ORDER BY hits DESC, m.importance DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki entity id-or-name lookup read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::render_single_entity_page.lookup",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.id = $key OR LOWER(e.name) = LOWER($key) RETURN e.id, e.name, e.entity_type, e.description, e.aliases, e.confidence, e.community_id, e.created_at LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
                 "okf export community list read",
                 "okf_export_read",
                 "nmem-server::okf_export::list_communities",
@@ -11974,7 +12019,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 256);
+        assert_eq!(report.checks.len(), 257);
     }
 
     #[test]
@@ -11990,13 +12035,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 256);
-        assert_eq!(coverage.covered_checks, 256);
+        assert_eq!(coverage.required_checks, 257);
+        assert_eq!(coverage.covered_checks, 257);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 256);
+        assert_eq!(coverage_json["covered_checks"], 257);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -12026,10 +12071,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 256);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 257);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 256);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 257);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12223,15 +12268,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 256);
-        assert_eq!(report.shadow_checks.len(), 256);
+        assert_eq!(report.primary_checks.len(), 257);
+        assert_eq!(report.shadow_checks.len(), 257);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            256
+            257
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12240,7 +12285,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 256);
+        assert_eq!(cutover.matched_checks, 257);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
