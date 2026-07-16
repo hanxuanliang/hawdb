@@ -6204,6 +6204,314 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "pagerank entity membership read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.id IN $node_ids RETURN e.id",
+                        BTreeMap::from([(
+                            "node_ids".to_string(),
+                            Value::List(vec![
+                                Value::String("pagerank-entity-1".to_string()),
+                                Value::String("missing-pagerank-entity".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "e.id",
+                        Value::String("pagerank-entity-1".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-entity-1', name: 'Pagerank Entity'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'pagerank-entity-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank memory membership read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $node_ids RETURN m.id",
+                        BTreeMap::from([(
+                            "node_ids".to_string(),
+                            Value::List(vec![
+                                Value::String("pagerank-memory-1".to_string()),
+                                Value::String("missing-pagerank-memory".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "m.id",
+                        Value::String("pagerank-memory-1".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-memory-1'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'pagerank-memory-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank memory visibility read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id, m.metadata, COALESCE(m.is_latest, true)",
+                        BTreeMap::from([(
+                            "memory_ids".to_string(),
+                            Value::List(vec![
+                                Value::String("pagerank-visible-memory".to_string()),
+                                Value::String("pagerank-hidden-memory".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            (
+                                "m.id",
+                                Value::String("pagerank-visible-memory".to_string()),
+                            ),
+                            ("m.metadata", Value::String("{}".to_string())),
+                            ("coalesce", Value::Bool(true)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "m.id",
+                                Value::String("pagerank-hidden-memory".to_string()),
+                            ),
+                            (
+                                "m.metadata",
+                                Value::String("{\"lifecycle_state\":\"archived\"}".to_string()),
+                            ),
+                            ("coalesce", Value::Bool(false)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-visible-memory', metadata: '{}', is_latest: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-hidden-memory', metadata: '{\"lifecycle_state\":\"archived\"}', is_latest: false})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['pagerank-visible-memory', 'pagerank-hidden-memory'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank entity score write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.id = $id SET e.pagerank_score = $score",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("pagerank-score-entity".to_string()),
+                            ),
+                            ("score".to_string(), Value::Float(0.42)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-score-entity', name: 'Score Entity'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'pagerank-score-entity'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank memory score write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $id SET m.pagerank_score = $score",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("pagerank-score-memory".to_string()),
+                            ),
+                            ("score".to_string(), Value::Float(0.64)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-score-memory'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'pagerank-score-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank central entity name read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $entity_id}) RETURN e.name",
+                        BTreeMap::from([(
+                            "entity_id".to_string(),
+                            Value::String("pagerank-central-entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "e.name",
+                        Value::String("Central Entity".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-central-entity', name: 'Central Entity'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'pagerank-central-entity'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank clear entity scores",
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.pagerank_score IS NOT NULL SET e.pagerank_score = NULL",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-clear-entity', pagerank_score: 0.9})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'pagerank-clear-entity'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank clear memory scores",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.pagerank_score IS NOT NULL SET m.pagerank_score = NULL",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-clear-memory', pagerank_score: 0.8})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'pagerank-clear-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "graph meta pagerank clear stamp",
+                    CypherFixtureStatement::new(
+                        "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = false, m.pagerank_computed_at = NULL, m.updated_at = CURRENT_TIMESTAMP()",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.pagerank_applied AS applied, count(m.pagerank_computed_at) AS computed",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("applied", Value::Bool(false)),
+                        ("computed", Value::Int(0)),
+                    ])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "pagerank mention edge count",
+                CypherFixtureStatement::new(
+                    "MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN COUNT(r)",
+                ),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank changed entity count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.created_at > timestamp($cutoff) OR e.updated_at > timestamp($cutoff) RETURN COUNT(e)",
+                        BTreeMap::from([(
+                            "cutoff".to_string(),
+                            Value::String("1970-01-01T00:00:00".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-changed-entity', created_at: 2, updated_at: 3})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'pagerank-changed-entity'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank changed mentions count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > timestamp($cutoff) RETURN COUNT(r)",
+                        BTreeMap::from([(
+                            "cutoff".to_string(),
+                            Value::String("1970-01-01T00:00:00".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-changed-mention-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'pagerank-changed-mention-entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'pagerank-changed-mention-memory'}), (e:Entity {id: 'pagerank-changed-mention-entity'}) CREATE (m)-[:MENTIONS {created_at: 2}]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['pagerank-changed-mention-memory', 'pagerank-changed-mention-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "pagerank active memory relation count",
+                    CypherFixtureStatement::new(
+                        "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN COUNT(r)",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'pagerank-rel-source'})-[:MEMORY_RELATES_TO {status: 'active'}]->(:Memory {id: 'pagerank-rel-target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['pagerank-rel-source', 'pagerank-rel-target'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "source metadata timestamp update",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (s:Source {id: $id}) SET s.metadata = $metadata, s.updated_at = timestamp($updated_at)",
@@ -8515,6 +8823,98 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = true, m.pagerank_algorithm = 'pagerank', m.pagerank_damping = 0.85, m.pagerank_iterations = 20, m.pagerank_computed_at = CURRENT_TIMESTAMP(), m.updated_at = CURRENT_TIMESTAMP()",
             ),
             CompatibilityQueryCallSite::new(
+                "pagerank entity membership read",
+                "pagerank_read",
+                "nmem-graph::pagerank::split_unified_scores",
+            )
+            .with_cypher("MATCH (e:Entity) WHERE e.id IN $node_ids RETURN e.id"),
+            CompatibilityQueryCallSite::new(
+                "pagerank memory membership read",
+                "pagerank_read",
+                "nmem-graph::pagerank::split_unified_scores",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id IN $node_ids RETURN m.id"),
+            CompatibilityQueryCallSite::new(
+                "pagerank memory visibility read",
+                "pagerank_read",
+                "nmem-graph::pagerank::filter_default_visible_memory",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id, m.metadata, COALESCE(m.is_latest, true)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "pagerank entity score write",
+                "pagerank_write",
+                "nmem-graph::pagerank::persist_pagerank",
+            )
+            .with_cypher("MATCH (e:Entity) WHERE e.id = $id SET e.pagerank_score = $score"),
+            CompatibilityQueryCallSite::new(
+                "pagerank memory score write",
+                "pagerank_write",
+                "nmem-graph::pagerank::persist_pagerank",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id = $id SET m.pagerank_score = $score"),
+            CompatibilityQueryCallSite::new(
+                "pagerank central entity name read",
+                "pagerank_read",
+                "nmem-graph::pagerank::most_central_entity",
+            )
+            .with_cypher("MATCH (e:Entity {id: $entity_id}) RETURN e.name"),
+            CompatibilityQueryCallSite::new(
+                "pagerank clear entity scores",
+                "pagerank_write",
+                "nmem-graph::pagerank::clear_pagerank",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.pagerank_score IS NOT NULL SET e.pagerank_score = NULL",
+            ),
+            CompatibilityQueryCallSite::new(
+                "pagerank clear memory scores",
+                "pagerank_write",
+                "nmem-graph::pagerank::clear_pagerank",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.pagerank_score IS NOT NULL SET m.pagerank_score = NULL",
+            ),
+            CompatibilityQueryCallSite::new(
+                "graph meta pagerank clear stamp",
+                "pagerank_write",
+                "nmem-graph::pagerank::clear_pagerank",
+            )
+            .with_cypher(
+                "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = false, m.pagerank_computed_at = NULL, m.updated_at = CURRENT_TIMESTAMP()",
+            ),
+            CompatibilityQueryCallSite::new(
+                "pagerank mention edge count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::graph_counts",
+            )
+            .with_cypher("MATCH (:Memory)-[r:MENTIONS]->(:Entity) RETURN COUNT(r)"),
+            CompatibilityQueryCallSite::new(
+                "pagerank changed entity count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::changed_counts",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.created_at > timestamp($cutoff) OR e.updated_at > timestamp($cutoff) RETURN COUNT(e)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "pagerank changed mentions count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::changed_counts",
+            )
+            .with_cypher(
+                "MATCH (:Memory)-[r:MENTIONS]->(:Entity) WHERE r.created_at > timestamp($cutoff) RETURN COUNT(r)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "pagerank active memory relation count",
+                "pagerank_plan_read",
+                "nmem-graph::pagerank_plan::graph_counts",
+            )
+            .with_cypher(
+                "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' RETURN COUNT(r)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "label merge node on create seed",
                 "label_write",
                 "nmem-graph::label_write::upsert_label",
@@ -10030,7 +10430,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 212);
+        assert_eq!(report.checks.len(), 225);
     }
 
     #[test]
@@ -10046,13 +10446,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 212);
-        assert_eq!(coverage.covered_checks, 212);
+        assert_eq!(coverage.required_checks, 225);
+        assert_eq!(coverage.covered_checks, 225);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 212);
+        assert_eq!(coverage_json["covered_checks"], 225);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -10082,10 +10482,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 212);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 225);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 212);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 225);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -10279,15 +10679,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 212);
-        assert_eq!(report.shadow_checks.len(), 212);
+        assert_eq!(report.primary_checks.len(), 225);
+        assert_eq!(report.shadow_checks.len(), 225);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            212
+            225
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -10296,7 +10696,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 212);
+        assert_eq!(cutover.matched_checks, 225);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

@@ -41,7 +41,9 @@ label resolver null-canonical scans/backfills, rename collision guards,
 existence reads, and remove-all count/delete writes. Source provenance coverage
 includes Source endpoint checks, full `SOURCED_FROM` creation writes,
 edge-existence/global counts, exact repair candidate scans, and source
-memory-count reads.
+memory-count reads. PageRank coverage includes membership/visibility reads,
+score persist/clear writes, central-entity lookup, GraphMeta clear stamps, and
+plan edge/change count reads.
 
 ## LanceDB Replacement Surface
 

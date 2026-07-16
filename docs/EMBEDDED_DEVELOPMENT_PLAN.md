@@ -580,6 +580,8 @@ label existence reads, label remove-all count/delete writes,
 source provenance Source endpoint checks, full `SOURCED_FROM` creation writes,
 edge-existence/global counts, exact repair candidate scans, source memory-count
 reads,
+PageRank membership/visibility reads, score persist/clear writes, central-entity
+lookup, GraphMeta clear stamps, and plan edge/change count reads,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label
