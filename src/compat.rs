@@ -9265,18 +9265,30 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "matched relationship merge on create set",
-                    CypherFixtureStatement::new(
-                        "MATCH (m:Memory {id: 1}), (l:Label {id: 'label-1'}) MERGE (m)-[r:HAS_LABEL]->(l) ON CREATE SET r.assigned_by = 'system', r.properties = '{}'",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}), (l:Label {id: $label_id}) MERGE (m)-[r:HAS_LABEL]->(l) ON CREATE SET r.assigned_by = $assigned_by, r.created_at = $created_at, r.properties = $properties",
+                        BTreeMap::from([
+                            ("memory_id".to_string(), Value::Int(1)),
+                            ("label_id".to_string(), Value::String("label-1".to_string())),
+                            (
+                                "assigned_by".to_string(),
+                                Value::String("system".to_string()),
+                            ),
+                            ("created_at".to_string(), Value::Int(77)),
+                            ("properties".to_string(), Value::String("{}".to_string())),
+                        ]),
                     ),
                     ExpectedRows::RowCount(1),
                 )
                 .with_effect_query(
                     CypherFixtureStatement::new(
-                        "MATCH (m:Memory {id: 1})-[r:HAS_LABEL]->(l:Label {id: 'label-1'}) RETURN count(r) AS total, min(r.assigned_by) AS assigned_by",
+                        "MATCH (m:Memory {id: 1})-[r:HAS_LABEL]->(l:Label {id: 'label-1'}) RETURN count(r) AS total, min(r.assigned_by) AS assigned_by, min(r.created_at) AS created_at, min(r.properties) AS properties",
                     ),
                     ExpectedRows::Exact(vec![compatibility_row([
                         ("total", Value::Int(1)),
                         ("assigned_by", Value::String("system".to_string())),
+                        ("created_at", Value::Int(77)),
+                        ("properties", Value::String("{}".to_string())),
                     ])]),
                 ),
             ),
