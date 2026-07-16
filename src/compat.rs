@@ -11597,6 +11597,344 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest write entity source reference read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity)-[r:RELATES_TO]-() WHERE r.source_reference = $id RETURN DISTINCT e.id",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-write-source-ref".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-source-ref-a'})-[:RELATES_TO {source_reference: 'rest-write-source-ref'}]->(:Entity {id: 'rest-write-source-ref-b'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity) WHERE e.id IN ['rest-write-source-ref-a', 'rest-write-source-ref-b'] DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write entity mention count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $eid})<-[:MENTIONS]-(other:Memory) WHERE other.id <> $mid RETURN count(*)",
+                        BTreeMap::from([
+                            (
+                                "eid".to_string(),
+                                Value::String("rest-write-mention-count-entity".to_string()),
+                            ),
+                            (
+                                "mid".to_string(),
+                                Value::String("rest-write-mention-excluded".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-write-mention-other'})-[:MENTIONS]->(:Entity {id: 'rest-write-mention-count-entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-write-mention-excluded'})-[:MENTIONS]->(:Entity {id: 'rest-write-mention-count-entity'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-write-mention-other', 'rest-write-mention-excluded', 'rest-write-mention-count-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write entity label count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $eid})-[:HAS_LABEL]-() RETURN count(*)",
+                        BTreeMap::from([(
+                            "eid".to_string(),
+                            Value::String("rest-write-label-count-entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-label-count-entity'})-[:HAS_LABEL]->(:Label {id: 'rest-write-label-count-label'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-write-label-count-entity', 'rest-write-label-count-label'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write entity delete",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity {id: $eid}) DETACH DELETE e",
+                        BTreeMap::from([(
+                            "eid".to_string(),
+                            Value::String("rest-write-delete-entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-write-delete-entity'})",
+                )),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write compact thread metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory {id: $id}) RETURN t.id, t.metadata",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-write-compact-meta-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-write-compact-meta-thread', metadata: '{\"source\":\"rest\"}'})-[:COMPACTS_TO]->(:Memory {id: 'rest-write-compact-meta-memory'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-write-compact-meta-thread', 'rest-write-compact-meta-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write compact memory count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $uuid})-[:COMPACTS_TO]->(m:Memory) RETURN count(m)",
+                        BTreeMap::from([(
+                            "uuid".to_string(),
+                            Value::String("rest-write-compact-count-thread".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-write-compact-count-thread'})-[:COMPACTS_TO]->(:Memory {id: 'rest-write-compact-count-memory'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-write-compact-count-thread', 'rest-write-compact-count-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write thread metadata replace",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $uuid}) SET t.metadata = $metadata",
+                        BTreeMap::from([
+                            (
+                                "uuid".to_string(),
+                                Value::String("rest-write-thread-metadata".to_string()),
+                            ),
+                            (
+                                "metadata".to_string(),
+                                Value::String("{\"updated\":true}".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-write-thread-metadata', metadata: '{}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-write-thread-metadata'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler dedup reviewed update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids SET m.dedup_reviewed_at = $reviewed_at",
+                        BTreeMap::from([
+                            (
+                                "ids".to_string(),
+                                Value::List(vec![Value::String("scheduler-dedup-1".to_string())]),
+                            ),
+                            ("reviewed_at".to_string(), Value::Int(1_700_000_070)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'scheduler-dedup-1'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'scheduler-dedup-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler skill stage node read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill) WHERE s.stage = $stage RETURN s ORDER BY s.updated_at DESC LIMIT $limit",
+                        BTreeMap::from([
+                            ("stage".to_string(), Value::String("active".to_string())),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'scheduler-stage-skill', stage: 'active', updated_at: 1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'scheduler-stage-skill'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler memory prefix read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id STARTS WITH $prefix RETURN m.id, m.space_id LIMIT 2",
+                        BTreeMap::from([(
+                            "prefix".to_string(),
+                            Value::String("scheduler-prefix-".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'scheduler-prefix-1', space_id: 'default'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'scheduler-prefix-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler memory compact detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.content, m.unit_type",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("scheduler-memory-detail".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'scheduler-memory-detail', title: 'Scheduler Memory', content: 'detail', unit_type: 'fact'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'scheduler-memory-detail'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler memory import detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.content, m.unit_type, m.importance, m.created_at, m.space_id, m.is_crystal",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("scheduler-memory-import".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'scheduler-memory-import', title: 'Import Memory', content: 'import', unit_type: 'fact', importance: 0.7, created_at: 10, space_id: 'default', is_crystal: false})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'scheduler-memory-import'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler community snapshot read",
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) RETURN c.id, c.community_id, COALESCE(c.name, ''), COALESCE(c.description, ''), COALESCE(c.ai_summary, ''), COALESCE(c.member_count, 0)",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'scheduler-community', community_id: 700, name: 'Scheduler Community', description: 'desc', ai_summary: 'summary', member_count: 3})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: 'scheduler-community'}) DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler memory metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id}) RETURN m.metadata",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("scheduler-memory-metadata".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'scheduler-memory-metadata', metadata: '{\"scheduler\":true}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'scheduler-memory-metadata'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "scheduler entity ids read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.id IN $entity_ids RETURN e.id, e.name, e.entity_type, e.description",
+                        BTreeMap::from([(
+                            "entity_ids".to_string(),
+                            Value::List(vec![Value::String("scheduler-entity-1".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'scheduler-entity-1', name: 'Scheduler Entity', entity_type: 'concept', description: 'entity desc'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'scheduler-entity-1'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "learning memory latest read",
                     CypherFixtureStatement::new(
                         "MATCH (m:Memory) WHERE m.unit_type = 'learning' AND m.is_crystal = false AND m.is_latest = true RETURN m.id, m.title, m.content ORDER BY m.created_at DESC LIMIT 40",
@@ -22390,6 +22728,112 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (m:Memory {id: $id})-[:MENTIONS]->(e:Entity) RETURN e.id"),
             CompatibilityQueryCallSite::new(
+                "rest write entity source reference read",
+                "rest_write_read",
+                "nmem-server::rest_write::source_reference_entities_for_delete",
+            )
+            .with_cypher(
+                "MATCH (e:Entity)-[r:RELATES_TO]-() WHERE r.source_reference = $id RETURN DISTINCT e.id",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest write entity mention count read",
+                "rest_write_read",
+                "nmem-server::rest_write::other_memory_mentions_for_entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity {id: $eid})<-[:MENTIONS]-(other:Memory) WHERE other.id <> $mid RETURN count(*)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest write entity label count read",
+                "rest_write_read",
+                "nmem-server::rest_write::entity_label_count_for_delete",
+            )
+            .with_cypher("MATCH (e:Entity {id: $eid})-[:HAS_LABEL]-() RETURN count(*)"),
+            CompatibilityQueryCallSite::new(
+                "rest write entity delete",
+                "rest_write",
+                "nmem-server::rest_write::delete_orphan_entity",
+            )
+            .with_cypher("MATCH (e:Entity {id: $eid}) DETACH DELETE e"),
+            CompatibilityQueryCallSite::new(
+                "rest write compact thread metadata read",
+                "rest_write_read",
+                "nmem-server::rest_write::thread_metadata_for_memory",
+            )
+            .with_cypher(
+                "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory {id: $id}) RETURN t.id, t.metadata",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest write compact memory count read",
+                "rest_write_read",
+                "nmem-server::rest_write::thread_compacted_memory_count",
+            )
+            .with_cypher("MATCH (t:Thread {id: $uuid})-[:COMPACTS_TO]->(m:Memory) RETURN count(m)"),
+            CompatibilityQueryCallSite::new(
+                "rest write thread metadata replace",
+                "rest_write",
+                "nmem-server::rest_write::replace_thread_metadata",
+            )
+            .with_cypher("MATCH (t:Thread {id: $uuid}) SET t.metadata = $metadata"),
+            CompatibilityQueryCallSite::new(
+                "scheduler dedup reviewed update",
+                "scheduler_write",
+                "nmem-server::scheduler_service::mark_dedup_reviewed",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id IN $ids SET m.dedup_reviewed_at = $reviewed_at"),
+            CompatibilityQueryCallSite::new(
+                "scheduler skill stage node read",
+                "scheduler_read",
+                "nmem-server::scheduler_service::skills_by_stage",
+            )
+            .with_cypher(
+                "MATCH (s:Skill) WHERE s.stage = $stage RETURN s ORDER BY s.updated_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "scheduler memory prefix read",
+                "scheduler_read",
+                "nmem-server::scheduler_service::memory_prefix_lookup",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id STARTS WITH $prefix RETURN m.id, m.space_id LIMIT 2"),
+            CompatibilityQueryCallSite::new(
+                "scheduler memory compact detail read",
+                "scheduler_read",
+                "nmem-server::scheduler_service::memory_compact_details",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.content, m.unit_type",
+            ),
+            CompatibilityQueryCallSite::new(
+                "scheduler memory import detail read",
+                "scheduler_read",
+                "nmem-server::scheduler_service::memory_import_details",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.content, m.unit_type, m.importance, m.created_at, m.space_id, m.is_crystal",
+            ),
+            CompatibilityQueryCallSite::new(
+                "scheduler community snapshot read",
+                "scheduler_read",
+                "nmem-server::scheduler_service::community_snapshot",
+            )
+            .with_cypher(
+                "MATCH (c:Community) RETURN c.id, c.community_id, COALESCE(c.name, ''), COALESCE(c.description, ''), COALESCE(c.ai_summary, ''), COALESCE(c.member_count, 0)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "scheduler memory metadata read",
+                "scheduler_read",
+                "nmem-server::scheduler_service::memory_metadata",
+            )
+            .with_cypher("MATCH (m:Memory {id: $id}) RETURN m.metadata"),
+            CompatibilityQueryCallSite::new(
+                "scheduler entity ids read",
+                "scheduler_read",
+                "nmem-server::scheduler_service::entities_by_ids",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.id IN $entity_ids RETURN e.id, e.name, e.entity_type, e.description",
+            ),
+            CompatibilityQueryCallSite::new(
                 "learning memory latest read",
                 "memory_retrieval_read",
                 "nmem-server::context_wiring::learning_memory_latest",
@@ -25353,7 +25797,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 610);
+        assert_eq!(report.checks.len(), 625);
     }
 
     #[test]
@@ -25369,13 +25813,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 610);
-        assert_eq!(coverage.covered_checks, 610);
+        assert_eq!(coverage.required_checks, 625);
+        assert_eq!(coverage.covered_checks, 625);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 610);
+        assert_eq!(coverage_json["covered_checks"], 625);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -25405,10 +25849,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 610);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 625);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 610);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 625);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -25633,15 +26077,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 610);
-        assert_eq!(report.shadow_checks.len(), 610);
+        assert_eq!(report.primary_checks.len(), 625);
+        assert_eq!(report.shadow_checks.len(), 625);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            610
+            625
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -25650,7 +26094,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 610);
+        assert_eq!(cutover.matched_checks, 625);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
