@@ -270,12 +270,14 @@ with:
 
 ```json
 {
-  "primary_only": true
+  "primary_only": true,
+  "reason": "projection metadata is not exposed"
 }
 ```
 
-The migration gate treats primary-only projected graph checks as blockers by
-default.
+`reason` is optional. When provided, it is included in the cutover report's
+`primary_only_reasons` object and in the blocker text. The migration gate treats
+primary-only projected graph checks as blockers by default.
 
 ## Errors
 

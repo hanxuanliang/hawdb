@@ -171,12 +171,19 @@ pub struct CompatibilityShadowReport {
 pub struct CompatibilityShadowCheckReport {
     pub name: String,
     pub status: CompatibilityShadowStatus,
+    pub primary_only_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompatibilityShadowStatus {
     Matched,
     PrimaryOnly,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProjectedGraphShadowResult {
+    Output(ProjectedGraphShadowOutput),
+    PrimaryOnly { reason: Option<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -193,6 +200,7 @@ pub struct CompatibilityCutoverReport {
     pub total_checks: usize,
     pub matched_checks: usize,
     pub primary_only_checks: Vec<String>,
+    pub primary_only_reasons: BTreeMap<String, String>,
     pub blockers: Vec<String>,
 }
 
@@ -261,6 +269,16 @@ pub trait CompatibilityShadowEngine {
         _context: ShadowRequestContext,
     ) -> Result<Option<ProjectedGraphShadowOutput>> {
         self.project_graph(check)
+    }
+    fn project_graph_result_with_context(
+        &mut self,
+        check: &ProjectedGraphFixtureCheck,
+        context: ShadowRequestContext,
+    ) -> Result<ProjectedGraphShadowResult> {
+        match self.project_graph_with_context(check, context)? {
+            Some(output) => Ok(ProjectedGraphShadowResult::Output(output)),
+            None => Ok(ProjectedGraphShadowResult::PrimaryOnly { reason: None }),
+        }
     }
 }
 
@@ -752,6 +770,17 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         check: &ProjectedGraphFixtureCheck,
         context: ShadowRequestContext,
     ) -> Result<Option<ProjectedGraphShadowOutput>> {
+        match self.project_graph_result_with_context(check, context)? {
+            ProjectedGraphShadowResult::Output(output) => Ok(Some(output)),
+            ProjectedGraphShadowResult::PrimaryOnly { .. } => Ok(None),
+        }
+    }
+
+    fn project_graph_result_with_context(
+        &mut self,
+        check: &ProjectedGraphFixtureCheck,
+        context: ShadowRequestContext,
+    ) -> Result<ProjectedGraphShadowResult> {
         let response = self.request(serde_json::json!({
             "op": "project_graph",
             "context": json_from_shadow_request_context(context),
@@ -977,6 +1006,7 @@ pub fn compatibility_cutover_report_to_json(
         "total_checks": report.total_checks,
         "matched_checks": report.matched_checks,
         "primary_only_checks": report.primary_only_checks,
+        "primary_only_reasons": report.primary_only_reasons,
         "blockers": report.blockers,
     })
 }
@@ -1438,13 +1468,15 @@ fn decode_external_session_response(
 fn decode_external_projected_graph_response(
     engine_name: &str,
     response: serde_json::Value,
-) -> Result<Option<ProjectedGraphShadowOutput>> {
+) -> Result<ProjectedGraphShadowResult> {
     if response
         .get("primary_only")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false)
     {
-        return Ok(None);
+        return Ok(ProjectedGraphShadowResult::PrimaryOnly {
+            reason: optional_external_string(engine_name, &response, "reason")?,
+        });
     }
     if let Some(error) = response.get("error") {
         return Err(error_from_external_response(engine_name, error));
@@ -1454,19 +1486,21 @@ fn decode_external_projected_graph_response(
             "shadow engine '{engine_name}' projected graph response missing 'ok', 'error', or primary_only"
         ))
     })?;
-    Ok(Some(ProjectedGraphShadowOutput {
-        node_count: required_usize(engine_name, ok, "node_count")?,
-        edge_count: required_usize(engine_name, ok, "edge_count")?,
-        incoming: tuple_vec_u64_list(engine_name, ok, "incoming")?,
-        communities: tuple_vec_u64_u64(engine_name, ok, "communities")?,
-        hierarchical_communities: tuple_vec_usize_u64_u64(
-            engine_name,
-            ok,
-            "hierarchical_communities",
-        )?,
-        page_rank_scores: tuple_vec_u64_f64(engine_name, ok, "page_rank_scores")?,
-        page_rank_top_node: optional_u64(engine_name, ok, "page_rank_top_node")?,
-    }))
+    Ok(ProjectedGraphShadowResult::Output(
+        ProjectedGraphShadowOutput {
+            node_count: required_usize(engine_name, ok, "node_count")?,
+            edge_count: required_usize(engine_name, ok, "edge_count")?,
+            incoming: tuple_vec_u64_list(engine_name, ok, "incoming")?,
+            communities: tuple_vec_u64_u64(engine_name, ok, "communities")?,
+            hierarchical_communities: tuple_vec_usize_u64_u64(
+                engine_name,
+                ok,
+                "hierarchical_communities",
+            )?,
+            page_rank_scores: tuple_vec_u64_f64(engine_name, ok, "page_rank_scores")?,
+            page_rank_top_node: optional_u64(engine_name, ok, "page_rank_top_node")?,
+        },
+    ))
 }
 
 fn error_from_external_response(engine_name: &str, error: &serde_json::Value) -> SkeinError {
@@ -1581,6 +1615,24 @@ fn optional_u64(engine_name: &str, object: &serde_json::Value, field: &str) -> R
                 "shadow engine '{engine_name}' field '{field}' must be a u64 or null"
             ))
         }),
+    }
+}
+
+fn optional_external_string(
+    engine_name: &str,
+    object: &serde_json::Value,
+    field: &str,
+) -> Result<Option<String>> {
+    match object.get(field) {
+        Some(serde_json::Value::Null) | None => Ok(None),
+        Some(value) => value
+            .as_str()
+            .map(|value| Some(value.to_string()))
+            .ok_or_else(|| {
+                SkeinError::Execution(format!(
+                    "shadow engine '{engine_name}' field '{field}' must be a string or null"
+                ))
+            }),
     }
 }
 
@@ -25825,6 +25877,7 @@ pub fn run_compatibility_fixture_with_shadow(
                 shadow_checks.push(CompatibilityShadowCheckReport {
                     name: check.name.clone(),
                     status: CompatibilityShadowStatus::Matched,
+                    primary_only_reason: None,
                 });
             }
             CompatibilityCheck::ProjectedGraph(check) => {
@@ -25832,7 +25885,7 @@ pub fn run_compatibility_fixture_with_shadow(
                 primary_checks.push(CompatibilityCheckReport {
                     name: check.name.clone(),
                 });
-                let status = match shadow.project_graph_with_context(
+                let (status, primary_only_reason) = match shadow.project_graph_result_with_context(
                     check,
                     ShadowRequestContext {
                         fixture: &fixture.name,
@@ -25841,7 +25894,7 @@ pub fn run_compatibility_fixture_with_shadow(
                         statement_index: None,
                     },
                 )? {
-                    Some(shadow_output) => {
+                    ProjectedGraphShadowResult::Output(shadow_output) => {
                         compare_projected_graph_shadow(
                             fixture,
                             check,
@@ -25849,13 +25902,16 @@ pub fn run_compatibility_fixture_with_shadow(
                             &primary,
                             &shadow_output,
                         )?;
-                        CompatibilityShadowStatus::Matched
+                        (CompatibilityShadowStatus::Matched, None)
                     }
-                    None => CompatibilityShadowStatus::PrimaryOnly,
+                    ProjectedGraphShadowResult::PrimaryOnly { reason } => {
+                        (CompatibilityShadowStatus::PrimaryOnly, reason)
+                    }
                 };
                 shadow_checks.push(CompatibilityShadowCheckReport {
                     name: check.name.clone(),
                     status,
+                    primary_only_reason,
                 });
             }
         }
@@ -25885,6 +25941,17 @@ pub fn assess_compatibility_cutover(
         .filter(|check| check.status == CompatibilityShadowStatus::PrimaryOnly)
         .map(|check| check.name.clone())
         .collect::<Vec<_>>();
+    let primary_only_reasons = report
+        .shadow_checks
+        .iter()
+        .filter(|check| check.status == CompatibilityShadowStatus::PrimaryOnly)
+        .filter_map(|check| {
+            check
+                .primary_only_reason
+                .as_ref()
+                .map(|reason| (check.name.clone(), reason.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut blockers = Vec::new();
 
     if total_checks == 0 {
@@ -25904,10 +25971,19 @@ pub fn assess_compatibility_cutover(
         ));
     }
     if policy.require_shadow_for_all_checks && !primary_only_checks.is_empty() {
+        let primary_only_descriptions = report
+            .shadow_checks
+            .iter()
+            .filter(|check| check.status == CompatibilityShadowStatus::PrimaryOnly)
+            .map(|check| match &check.primary_only_reason {
+                Some(reason) => format!("{} ({})", check.name, reason),
+                None => check.name.clone(),
+            })
+            .collect::<Vec<_>>();
         blockers.push(format!(
             "shadow engine '{}' did not cover checks: {}",
             report.shadow_engine,
-            primary_only_checks.join(", ")
+            primary_only_descriptions.join(", ")
         ));
     }
 
@@ -25922,6 +25998,7 @@ pub fn assess_compatibility_cutover(
         total_checks,
         matched_checks,
         primary_only_checks,
+        primary_only_reasons,
         blockers,
     }
 }
@@ -27343,6 +27420,7 @@ mod tests {
             shadow_checks: vec![CompatibilityShadowCheckReport {
                 name: "semantic memory lookup".to_string(),
                 status: CompatibilityShadowStatus::Matched,
+                primary_only_reason: None,
             }],
         };
         let bundle = assess_compatibility_cypher_migration_gate_bundle(
@@ -27444,6 +27522,7 @@ mod tests {
             total_checks: 1,
             matched_checks: 0,
             primary_only_checks: vec!["extra check".to_string()],
+            primary_only_reasons: BTreeMap::new(),
             blockers: vec!["shadow failed".to_string()],
         };
 
@@ -27493,6 +27572,7 @@ mod tests {
             shadow_checks: vec![CompatibilityShadowCheckReport {
                 name: "extra check".to_string(),
                 status: CompatibilityShadowStatus::PrimaryOnly,
+                primary_only_reason: None,
             }],
         };
 
@@ -27560,6 +27640,77 @@ done
         assert_eq!(
             report.shadow_checks[0].status,
             CompatibilityShadowStatus::Matched
+        );
+    }
+
+    #[test]
+    fn reports_external_shadow_project_graph_primary_only_reason() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-projection-primary-only-reason",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *project_graph*) echo '{"primary_only":true,"reason":"projection metadata is not exposed"}' ;;
+    *) echo '{"ok":{"rows":[]}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow = ExternalShadowCommand::spawn(
+            "external-shadow-projection-primary-only-reason",
+            "sh",
+            [script],
+        )
+        .unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-projection-primary-only-reason-fixture".to_string(),
+            setup: vec![CypherFixtureStatement::new(
+                "CREATE (:Memory {id: 1})-[:MENTIONS]->(:Entity {id: 2})",
+            )],
+            checks: vec![CompatibilityCheck::ProjectedGraph(
+                ProjectedGraphFixtureCheck {
+                    name: "mentions projection".to_string(),
+                    rel_type: Some("MENTIONS".to_string()),
+                    expected_node_count: 2,
+                    expected_edge_count: 1,
+                    expected_incoming: vec![(1, vec![0])],
+                    expected_communities: Vec::new(),
+                    expected_hierarchical_communities: Vec::new(),
+                    expected_page_rank_scores: Vec::new(),
+                    page_rank_top_node: None,
+                    tolerance: CompatibilityTolerance::default(),
+                },
+            )],
+        };
+
+        let report =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
+        let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
+        let cutover_json = super::compatibility_cutover_report_to_json(&cutover);
+
+        assert_eq!(
+            report.shadow_checks[0].status,
+            CompatibilityShadowStatus::PrimaryOnly
+        );
+        assert_eq!(
+            report.shadow_checks[0].primary_only_reason.as_deref(),
+            Some("projection metadata is not exposed")
+        );
+        assert_eq!(
+            cutover
+                .primary_only_reasons
+                .get("mentions projection")
+                .map(String::as_str),
+            Some("projection metadata is not exposed")
+        );
+        assert!(cutover
+            .blockers
+            .iter()
+            .any(|blocker| blocker.contains("projection metadata is not exposed")));
+        assert_eq!(
+            cutover_json["primary_only_reasons"]["mentions projection"],
+            "projection metadata is not exposed"
         );
     }
 
