@@ -53,13 +53,16 @@ jobs:
             --require-ready \
             --allow-self-shadow \
             --shadow-ready \
+            --shadow-trace "$root/shadow.jsonl" \
             "$root" \
             self \
             cargo run --quiet --bin skein-shadow-self -- \
             > "$root/gate.json"
           grep -q '"decision": "ready"' "$root/gate.json"
           grep -q '"shadow_ready"' "$root/gate.json"
+          grep -q '"shadow_trace"' "$root/gate.json"
           grep -q '"project_graph"' "$root/gate.json"
+          test -s "$root/shadow.jsonl"
 
       - name: Migration gate blocked smoke
         run: |

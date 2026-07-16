@@ -83,6 +83,7 @@ fn main() -> Result<()> {
                     .to_string(),
                 ));
             }
+            let shadow_trace_report = shadow_trace.clone();
             let mut shadow = match (shadow_trace, shadow_timeout) {
                 (Some(trace_path), Some(timeout)) => {
                     ExternalShadowCommand::spawn_with_trace_path_and_request_timeout(
@@ -116,6 +117,9 @@ fn main() -> Result<()> {
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
             if let Some(ready) = shadow_ready_report {
                 add_shadow_ready_report(&mut json, &ready)?;
+            }
+            if let Some(trace_path) = shadow_trace_report {
+                add_shadow_trace_report(&mut json, &trace_path)?;
             }
             let rendered = serde_json::to_string_pretty(&json).unwrap();
             println!("{rendered}");
@@ -192,6 +196,19 @@ fn add_shadow_ready_report(
     Ok(())
 }
 
+fn add_shadow_trace_report(bundle: &mut serde_json::Value, trace_path: &str) -> Result<()> {
+    let object = bundle.as_object_mut().ok_or_else(|| {
+        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+    })?;
+    object.insert(
+        "shadow_trace".to_string(),
+        serde_json::json!({
+            "path": trace_path,
+        }),
+    );
+    Ok(())
+}
+
 fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[String]) -> bool {
     shadow_name == "self"
         || program.ends_with("skein-shadow-self")
@@ -200,7 +217,10 @@ fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{add_shadow_ready_report, is_self_shadow_command, parse_shadow_timeout_ms};
+    use super::{
+        add_shadow_ready_report, add_shadow_trace_report, is_self_shadow_command,
+        parse_shadow_timeout_ms,
+    };
     use skein::ExternalShadowReady;
     use std::time::Duration;
 
@@ -285,6 +305,22 @@ mod tests {
         assert_eq!(
             bundle["shadow_ready"]["capabilities"],
             serde_json::json!(["execute", "execute_session", "project_graph"])
+        );
+    }
+
+    #[test]
+    fn adds_shadow_trace_report_to_migration_gate_bundle() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready"
+            }
+        });
+
+        add_shadow_trace_report(&mut bundle, "/tmp/skein-shadow.jsonl").unwrap();
+
+        assert_eq!(
+            bundle["shadow_trace"]["path"],
+            serde_json::json!("/tmp/skein-shadow.jsonl")
         );
     }
 }

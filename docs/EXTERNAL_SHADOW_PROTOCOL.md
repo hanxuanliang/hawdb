@@ -370,7 +370,9 @@ conversation. Each line contains `sequence`, `event`, and `payload`; `event` is
 `request`, `response`, or `error`. Error events include the failure message and
 the current stderr tail when available. The transcript is intended for
 previous-wrapper parity debugging and should be treated as local diagnostic
-output because Cypher parameters may contain graph data.
+output because Cypher parameters may contain graph data. When trace logging is
+enabled, the printed migration gate bundle includes a top-level `shadow_trace`
+object with the local `path` so the report can be paired with the transcript.
 
 Each request waits up to 30000 ms for one stdout response line by default.
 `--shadow-timeout-ms <ms>` overrides that per-request timeout. A timeout kills
