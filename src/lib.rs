@@ -29,11 +29,12 @@ pub use analytics::{
 pub use api::{
     CanonicalGraphSnapshotExport, CanonicalGraphSnapshotValidation,
     CanonicalSnapshotEndpointViolation, CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode,
-    CanonicalSnapshotRelationship, Database, DatabaseConfig, DatabaseReadTransaction,
-    DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
-    KnowledgeGraphContextPath, KnowledgeGraphPathDirection, KnowledgeRetrievalOutput,
-    KnowledgeRetrievalRequest, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
-    NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
+    CanonicalSnapshotRelationship, CanonicalStableIdMapping, Database, DatabaseConfig,
+    DatabaseReadTransaction, DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport,
+    DerivedArtifactJobStatus, KnowledgeGraphContextPath, KnowledgeGraphPathDirection,
+    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, NowledgeGraphAdapter,
+    NowledgeGraphExplainOutput, NowledgeGraphStatement, NowledgeGraphTransactionOutput,
+    QueryOutput,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,

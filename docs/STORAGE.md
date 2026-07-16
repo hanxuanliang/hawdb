@@ -85,6 +85,11 @@ physical import or delta replay. `CanonicalGraphSnapshotExport::validate`
 recomputes the logical checksum and stable-identity audit, checks node and
 relationship ID uniqueness, and reports missing relationship endpoints before an
 export is handed to an importer, shadow gate, or storage-equivalence oracle.
+`CanonicalStableIdMapping` can overlay a caller-persisted mapping for records
+that do not carry an `id` property. Applying the mapping recomputes the
+stable-identity audit and logical checksum, so `validate().is_import_ready`
+remains the gate before first physical import, resumed export, reimport, or
+delta comparison.
 The CLI command `skein validate-canonical-snapshot [--require-valid]
 [--require-import-ready] <database-path>` opens the database read-only, exports
 the current canonical snapshot, and prints the validation report as JSON.

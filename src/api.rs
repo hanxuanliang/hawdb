@@ -78,6 +78,28 @@ pub struct CanonicalGraphSnapshotExport {
 }
 
 impl CanonicalGraphSnapshotExport {
+    pub fn with_stable_id_mapping(&self, mapping: &CanonicalStableIdMapping) -> Self {
+        let mut export = self.clone();
+        for node in &mut export.nodes {
+            if node.stable_id.is_none() {
+                node.stable_id = mapping.node_stable_ids.get(&node.node_id).cloned();
+            }
+        }
+        for relationship in &mut export.relationships {
+            if relationship.stable_id.is_none() {
+                relationship.stable_id = mapping
+                    .relationship_stable_ids
+                    .get(&relationship.relationship_id)
+                    .cloned();
+            }
+        }
+        export.stable_identity =
+            canonical_snapshot_identity_audit(&export.nodes, &export.relationships);
+        export.logical_checksum =
+            canonical_graph_snapshot_checksum(&export.nodes, &export.relationships);
+        export
+    }
+
     pub fn validate(&self) -> CanonicalGraphSnapshotValidation {
         let expected_logical_checksum =
             canonical_graph_snapshot_checksum(&self.nodes, &self.relationships);
@@ -151,6 +173,12 @@ pub struct CanonicalGraphSnapshotValidation {
     pub duplicate_relationship_ids: Vec<u64>,
     pub missing_sources: Vec<CanonicalSnapshotEndpointViolation>,
     pub missing_targets: Vec<CanonicalSnapshotEndpointViolation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CanonicalStableIdMapping {
+    pub node_stable_ids: BTreeMap<u64, Value>,
+    pub relationship_stable_ids: BTreeMap<u64, Value>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2753,11 +2781,11 @@ impl DatabaseReadTransaction {
 #[cfg(test)]
 mod tests {
     use super::{
-        Database, DatabaseConfig, DerivedArtifactJobStatus, KnowledgeCandidateScoringPolicy,
-        KnowledgeCandidateSource, KnowledgeEntityRequest, KnowledgeGraphPathDirection,
-        KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-        KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, NowledgeGraphAdapter,
-        NowledgeGraphStatement, RecoveryMode,
+        CanonicalStableIdMapping, Database, DatabaseConfig, DerivedArtifactJobStatus,
+        KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
+        KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+        KnowledgePathRequest, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
+        NowledgeGraphAdapter, NowledgeGraphStatement, RecoveryMode,
     };
     use crate::schema::{
         ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
@@ -6402,6 +6430,78 @@ mod tests {
                 .expected_stable_identity
                 .relationships_without_stable_id,
             vec![0]
+        );
+    }
+
+    #[test]
+    fn canonical_snapshot_stable_id_mapping_makes_export_import_ready() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+
+        let snapshot = db.export_canonical_graph_snapshot();
+        assert!(snapshot.validate().is_valid);
+        assert!(!snapshot.validate().is_import_ready);
+        assert_eq!(
+            snapshot.stable_identity.relationships_without_stable_id,
+            vec![0]
+        );
+
+        let mapped = snapshot.with_stable_id_mapping(&CanonicalStableIdMapping {
+            relationship_stable_ids: BTreeMap::from([(
+                0,
+                Value::String("rel-root-mid".to_string()),
+            )]),
+            ..CanonicalStableIdMapping::default()
+        });
+        let validation = mapped.validate();
+
+        assert!(validation.is_valid);
+        assert!(validation.is_import_ready);
+        assert!(validation.stable_identity_ready);
+        assert!(mapped
+            .stable_identity
+            .relationships_without_stable_id
+            .is_empty());
+        assert_eq!(
+            mapped.relationships[0].stable_id,
+            Some(Value::String("rel-root-mid".to_string()))
+        );
+        assert_ne!(mapped.logical_checksum, snapshot.logical_checksum);
+    }
+
+    #[test]
+    fn canonical_snapshot_stable_id_mapping_rejects_duplicate_overlay() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        db.query(
+            "MATCH (m:Memory {id: 'root'}), (e:Entity {id: 'mid'}) CREATE (m)-[:MENTIONS]->(e)",
+        )
+        .unwrap();
+
+        let snapshot = db.export_canonical_graph_snapshot();
+        let mapped = snapshot.with_stable_id_mapping(&CanonicalStableIdMapping {
+            relationship_stable_ids: BTreeMap::from([
+                (0, Value::String("duplicate-rel".to_string())),
+                (1, Value::String("duplicate-rel".to_string())),
+            ]),
+            ..CanonicalStableIdMapping::default()
+        });
+        let validation = mapped.validate();
+
+        assert!(validation.is_valid);
+        assert!(!validation.is_import_ready);
+        assert!(!validation.stable_identity_ready);
+        assert_eq!(
+            validation
+                .expected_stable_identity
+                .duplicate_relationship_stable_ids,
+            vec![Value::String("duplicate-rel".to_string())]
         );
     }
 
