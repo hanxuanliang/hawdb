@@ -87,6 +87,7 @@ pub enum LogicalPlan {
         algorithm: GraphAlgorithmKind,
         graph_name: String,
         options: GraphAlgorithmOptions,
+        score_column: String,
     },
     CreateNode {
         label: String,
@@ -733,6 +734,7 @@ pub fn plan_with_params(
             algorithm: plan_graph_algorithm_kind(algorithm.algorithm),
             graph_name: algorithm.graph_name.clone(),
             options: bind_graph_algorithm_options(&algorithm.options, parameters)?,
+            score_column: algorithm.score_column.clone(),
         }),
         Statement::CreateNode(node) => Ok(LogicalPlan::CreateNode {
             label: node.label.clone(),

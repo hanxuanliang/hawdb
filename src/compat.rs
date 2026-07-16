@@ -5711,6 +5711,17 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ("edge_count", Value::Int(2)),
                 ])]),
             )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "unified projected graph map definition",
+                CypherFixtureStatement::new(
+                    "CALL PROJECT_GRAPH('UnifiedGraph', ['Entity', 'Memory'], { 'RELATES_TO': '', 'MENTIONS': '', 'MEMORY_RELATES_TO': \"r.status = 'active'\" })",
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([
+                    ("graph_name", Value::String("UnifiedGraph".to_string())),
+                    ("node_count", Value::Int(5)),
+                    ("edge_count", Value::Int(2)),
+                ])]),
+            )),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "page rank procedure",
@@ -5737,6 +5748,37 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         compatibility_row([
                             ("node", Value::Int(4)),
                             ("pagerank_score", Value::Float(0.1492537318649099)),
+                        ]),
+                    ]),
+                )
+                .with_tolerance(CompatibilityTolerance { float_abs: 1.0e-6 }),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "unified page rank procedure",
+                    CypherFixtureStatement::new(
+                        "CALL page_rank('UnifiedGraph', dampingFactor := 0.85, maxIterations := 20, tolerance := 0.0000001, normalizeInitial := true) RETURN node, rank",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("node", Value::Int(1)),
+                            ("rank", Value::Float(0.2761194029526352)),
+                        ]),
+                        compatibility_row([
+                            ("node", Value::Int(3)),
+                            ("rank", Value::Float(0.2761194029526352)),
+                        ]),
+                        compatibility_row([
+                            ("node", Value::Int(0)),
+                            ("rank", Value::Float(0.1492537318649099)),
+                        ]),
+                        compatibility_row([
+                            ("node", Value::Int(2)),
+                            ("rank", Value::Float(0.1492537318649099)),
+                        ]),
+                        compatibility_row([
+                            ("node", Value::Int(4)),
+                            ("rank", Value::Float(0.1492537318649099)),
                         ]),
                     ]),
                 )
@@ -8003,17 +8045,18 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureCheck::expect_rows(
                     "graph meta merge post set",
                     CypherFixtureStatement::new(
-                        "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = true, m.pagerank_algorithm = 'pagerank', m.pagerank_iterations = 20, m.pagerank_computed_at = CURRENT_TIMESTAMP(), m.updated_at = CURRENT_TIMESTAMP()",
+                        "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = true, m.pagerank_algorithm = 'pagerank', m.pagerank_damping = 0.85, m.pagerank_iterations = 20, m.pagerank_computed_at = CURRENT_TIMESTAMP(), m.updated_at = CURRENT_TIMESTAMP()",
                     ),
                     ExpectedRows::RowCount(1),
                 )
                 .with_effect_query(
                     CypherFixtureStatement::new(
-                        "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.pagerank_applied AS applied, m.pagerank_algorithm AS algorithm, m.pagerank_iterations AS iterations, count(m.pagerank_computed_at) AS computed",
+                        "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.pagerank_applied AS applied, m.pagerank_algorithm AS algorithm, m.pagerank_damping AS damping, m.pagerank_iterations AS iterations, count(m.pagerank_computed_at) AS computed",
                     ),
                     ExpectedRows::Exact(vec![compatibility_row([
                         ("applied", Value::Bool(true)),
                         ("algorithm", Value::String("pagerank".to_string())),
+                        ("damping", Value::Float(0.85)),
                         ("iterations", Value::Int(20)),
                         ("computed", Value::Int(1)),
                     ])]),
@@ -13271,12 +13314,28 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "CALL project_graph('MemoryMentions', ['Memory', 'Entity'], ['MENTIONS'])",
             ),
             CompatibilityQueryCallSite::new(
+                "unified projected graph map definition",
+                "projected_graph_definition",
+                "nmem-graph::pagerank::run_pagerank_unified",
+            )
+            .with_cypher(
+                "CALL PROJECT_GRAPH('UnifiedGraph', ['Entity', 'Memory'], { 'RELATES_TO': '', 'MENTIONS': '', 'MEMORY_RELATES_TO': \"r.status = 'active'\" })",
+            ),
+            CompatibilityQueryCallSite::new(
                 "page rank procedure",
                 "graph_algorithm",
                 "nowledge-memory-core::pagerank",
             )
             .with_cypher(
                 "CALL page_rank('MemoryMentions', dampingFactor := 0.85, maxIterations := 20)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "unified page rank procedure",
+                "graph_algorithm",
+                "nmem-graph::pagerank::run_pagerank_unified",
+            )
+            .with_cypher(
+                "CALL page_rank('UnifiedGraph', dampingFactor := 0.85, maxIterations := 20, tolerance := 0.0000001, normalizeInitial := true) RETURN node, rank",
             ),
             CompatibilityQueryCallSite::new(
                 "hierarchical louvain procedure",
@@ -14514,7 +14573,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 319);
+        assert_eq!(report.checks.len(), 321);
     }
 
     #[test]
@@ -14530,13 +14589,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 319);
-        assert_eq!(coverage.covered_checks, 319);
+        assert_eq!(coverage.required_checks, 321);
+        assert_eq!(coverage.covered_checks, 321);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 319);
+        assert_eq!(coverage_json["covered_checks"], 321);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -14566,10 +14625,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 319);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 321);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 319);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 321);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -14794,15 +14853,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 319);
-        assert_eq!(report.shadow_checks.len(), 319);
+        assert_eq!(report.primary_checks.len(), 321);
+        assert_eq!(report.shadow_checks.len(), 321);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            319
+            321
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -14811,7 +14870,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 319);
+        assert_eq!(cutover.matched_checks, 321);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

@@ -391,6 +391,38 @@ fn parses_graph_algorithm_calls() {
                 max_iterations: Some(ValueExpression::Literal(Value::Int(20))),
                 max_levels: None,
             },
+            score_column: "pagerank_score".to_string(),
+        })
+    );
+    assert_eq!(
+        parse(
+            "CALL PROJECT_GRAPH('UnifiedGraph', ['Entity', 'Memory'], { 'RELATES_TO': '', 'MENTIONS': '', 'MEMORY_RELATES_TO': \"r.status = 'active'\" })"
+        )
+        .unwrap(),
+        Statement::ProjectGraph(ProjectGraph {
+            name: "UnifiedGraph".to_string(),
+            node_labels: vec!["Entity".to_string(), "Memory".to_string()],
+            rel_types: vec![
+                "RELATES_TO".to_string(),
+                "MENTIONS".to_string(),
+                "MEMORY_RELATES_TO".to_string(),
+            ],
+        })
+    );
+    assert_eq!(
+        parse(
+            "CALL page_rank('UnifiedGraph', dampingFactor := 0.85, maxIterations := 20, tolerance := 0.0000001, normalizeInitial := true) RETURN node, rank"
+        )
+        .unwrap(),
+        Statement::GraphAlgorithm(GraphAlgorithm {
+            algorithm: GraphAlgorithmKind::PageRank,
+            graph_name: "UnifiedGraph".to_string(),
+            options: GraphAlgorithmOptions {
+                damping: Some(ValueExpression::Literal(Value::Float(0.85))),
+                max_iterations: Some(ValueExpression::Literal(Value::Int(20))),
+                max_levels: None,
+            },
+            score_column: "rank".to_string(),
         })
     );
     assert_eq!(
@@ -404,6 +436,7 @@ fn parses_graph_algorithm_calls() {
                 max_iterations: None,
                 max_levels: Some(ValueExpression::Literal(Value::Int(2))),
             },
+            score_column: "louvain_id".to_string(),
         })
     );
     assert_eq!(
@@ -417,6 +450,7 @@ fn parses_graph_algorithm_calls() {
                 max_iterations: Some(ValueExpression::Parameter("iterations".to_string())),
                 max_levels: None,
             },
+            score_column: "pagerank_score".to_string(),
         })
     );
 }

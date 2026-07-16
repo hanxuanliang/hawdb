@@ -114,6 +114,7 @@ pub struct GraphAlgorithm {
     pub algorithm: GraphAlgorithmKind,
     pub graph_name: String,
     pub options: GraphAlgorithmOptions,
+    pub score_column: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

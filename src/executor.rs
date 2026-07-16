@@ -866,6 +866,7 @@ fn execute_bindings(
             algorithm,
             graph_name,
             options,
+            score_column,
         } => {
             let Some(definition) = store.projected_graph_definition(graph_name) else {
                 return Err(SkeinError::Execution(format!(
@@ -897,7 +898,7 @@ fn execute_bindings(
                     .map(|score| Binding {
                         values: BTreeMap::from([
                             ("node".to_string(), Value::Int(score.node.0 as i64)),
-                            ("pagerank_score".to_string(), Value::Float(score.score)),
+                            (score_column.clone(), Value::Float(score.score)),
                         ]),
                         nodes: BTreeMap::new(),
                         relationships: BTreeMap::new(),

@@ -13,7 +13,7 @@ impl Parser<'_> {
             self.expect_char(',')?;
             let node_labels = self.parse_string_list()?;
             self.expect_char(',')?;
-            let rel_types = self.parse_string_list()?;
+            let rel_types = self.parse_project_graph_rel_types()?;
             self.skip_procedure_args_tail()?;
             return Ok(Statement::ProjectGraph(ProjectGraph {
                 name: graph_name,
@@ -28,11 +28,12 @@ impl Parser<'_> {
             _ => return Err(self.error("unsupported procedure")),
         };
         let options = self.parse_graph_algorithm_options()?;
-        self.skip_algorithm_return_clause(algorithm)?;
+        let score_column = self.parse_algorithm_return_clause(algorithm)?;
         Ok(Statement::GraphAlgorithm(GraphAlgorithm {
             algorithm,
             graph_name,
             options,
+            score_column,
         }))
     }
 
@@ -46,6 +47,28 @@ impl Parser<'_> {
             }
             values.push(self.parse_string()?);
             if self.consume_separator_or_end(',', ']')? {
+                break;
+            }
+        }
+        Ok(values)
+    }
+
+    pub(super) fn parse_project_graph_rel_types(&mut self) -> Result<Vec<String>> {
+        self.skip_ws();
+        if self.peek_char() == Some('[') {
+            return self.parse_string_list();
+        }
+        self.expect_char('{')?;
+        let mut values = Vec::new();
+        loop {
+            self.skip_ws();
+            if self.consume_char('}') {
+                break;
+            }
+            values.push(self.parse_string()?);
+            self.expect_char(':')?;
+            self.skip_procedure_option_value()?;
+            if self.consume_separator_or_end(',', '}')? {
                 break;
             }
         }
@@ -102,6 +125,9 @@ impl Parser<'_> {
             Some('[') => {
                 self.parse_string_list()?;
             }
+            Some('{') => {
+                self.skip_procedure_map_value()?;
+            }
             Some(ch) if ch.is_ascii_digit() || ch == '-' => {
                 self.parse_float()?;
             }
@@ -115,12 +141,36 @@ impl Parser<'_> {
         Ok(())
     }
 
-    pub(super) fn skip_algorithm_return_clause(
+    pub(super) fn skip_procedure_map_value(&mut self) -> Result<()> {
+        self.expect_char('{')?;
+        loop {
+            self.skip_ws();
+            if self.consume_char('}') {
+                break;
+            }
+            if matches!(self.peek_char(), Some('\'') | Some('"')) {
+                self.parse_string()?;
+            } else {
+                self.parse_ident()?;
+            }
+            self.expect_char(':')?;
+            self.skip_procedure_option_value()?;
+            if self.consume_separator_or_end(',', '}')? {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn parse_algorithm_return_clause(
         &mut self,
         algorithm: GraphAlgorithmKind,
-    ) -> Result<()> {
+    ) -> Result<String> {
         if !self.consume_keyword("RETURN") {
-            return Ok(());
+            return Ok(match algorithm {
+                GraphAlgorithmKind::PageRank => "pagerank_score".to_string(),
+                GraphAlgorithmKind::Louvain => "louvain_id".to_string(),
+            });
         }
         self.skip_ws();
         let first = self.parse_ident()?;
@@ -141,9 +191,13 @@ impl Parser<'_> {
             GraphAlgorithmKind::PageRank => "pagerank_score",
             GraphAlgorithmKind::Louvain => "louvain_id",
         };
+        if matches!(algorithm, GraphAlgorithmKind::PageRank) && second.eq_ignore_ascii_case("rank")
+        {
+            return Ok(second);
+        }
         if !second.eq_ignore_ascii_case(expected) {
             return Err(self.error("unexpected procedure RETURN column"));
         }
-        Ok(())
+        Ok(second)
     }
 }

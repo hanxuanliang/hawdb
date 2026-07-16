@@ -85,6 +85,7 @@ pub enum PhysicalPlan {
         algorithm: GraphAlgorithmKind,
         graph_name: String,
         options: GraphAlgorithmOptions,
+        score_column: String,
     },
     CreateNode {
         label: String,
@@ -427,9 +428,10 @@ impl PhysicalPlan {
                 algorithm,
                 graph_name,
                 options,
+                score_column,
             } => {
                 format!(
-                    "{pad}GraphAlgorithm algorithm={algorithm:?} graph={graph_name} options={options:?}"
+                    "{pad}GraphAlgorithm algorithm={algorithm:?} graph={graph_name} options={options:?} score_column={score_column}"
                 )
             }
             PhysicalPlan::CreateNode { label, .. } => {
@@ -958,6 +960,7 @@ impl PhysicalPlan {
                 algorithm,
                 graph_name,
                 options,
+                score_column,
             } => {
                 output.push_str("GraphAlgorithm(");
                 output.push_str(match algorithm {
@@ -974,6 +977,8 @@ impl PhysicalPlan {
                 if let Some(iterations) = options.max_iterations {
                     output.push_str(&iterations.to_string());
                 }
+                output.push_str(":score=");
+                write_identifier(output, score_column);
                 output.push(')');
             }
             PhysicalPlan::CreateNode { label, properties } => {
@@ -2266,10 +2271,12 @@ impl GroupExpr {
                 algorithm,
                 graph_name,
                 options,
+                score_column,
             } => PhysicalPlan::GraphAlgorithm {
                 algorithm: *algorithm,
                 graph_name: graph_name.clone(),
                 options: *options,
+                score_column: score_column.clone(),
             },
             LogicalPlan::CreateNode { label, properties } => PhysicalPlan::CreateNode {
                 label: label.clone(),
@@ -2841,10 +2848,12 @@ fn logical_to_physical_direct(
             algorithm,
             graph_name,
             options,
+            score_column,
         } => PhysicalPlan::GraphAlgorithm {
             algorithm: *algorithm,
             graph_name: graph_name.clone(),
             options: *options,
+            score_column: score_column.clone(),
         },
         LogicalPlan::CreateNode { label, properties } => PhysicalPlan::CreateNode {
             label: label.clone(),
