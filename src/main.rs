@@ -373,6 +373,20 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             return Ok(());
         }
+        if command == "graph-lightning-import-status" {
+            let staging_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_import_status_usage()))?;
+            let publish_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_import_status_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(graph_lightning_import_status_usage()));
+            }
+            let report = graph_lightning_import_status(staging_dir, publish_dir)?;
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            return Ok(());
+        }
         if command == "graph-lightning-graph-stream" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
@@ -492,6 +506,10 @@ fn graph_lightning_verify_published_usage() -> String {
 
 fn graph_lightning_gc_staging_report_usage() -> String {
     "graph-lightning-gc-staging-report requires <staging-dir> <publish-dir>".to_string()
+}
+
+fn graph_lightning_import_status_usage() -> String {
+    "graph-lightning-import-status requires <staging-dir> <publish-dir>".to_string()
 }
 
 fn graph_lightning_graph_stream_usage() -> String {
@@ -1258,6 +1276,87 @@ fn graph_lightning_staging_gc_candidates(
     Ok(candidates)
 }
 
+fn graph_lightning_import_status(
+    staging_dir: impl AsRef<Path>,
+    publish_dir: impl AsRef<Path>,
+) -> Result<serde_json::Value> {
+    let staging_dir = staging_dir.as_ref();
+    let publish_dir = publish_dir.as_ref();
+    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let published_path = publish_dir.join("graph_lightning_published_manifest.json");
+    let staging_catalog_present = catalog_path.exists();
+    let published_pointer_present = published_path.exists();
+    let mut errors = Vec::new();
+    let mut staging_verification = None;
+    let mut published_verification = None;
+    let import_state = if !staging_catalog_present {
+        "CREATED"
+    } else {
+        let staging_report = verify_graph_lightning_staging_catalog(staging_dir)?;
+        let staging_ready = gate_decision(&staging_report, "validation_gate") == Some("ready");
+        if !staging_ready {
+            errors.extend(gate_errors(&staging_report, "validation_gate"));
+        }
+        staging_verification = Some(staging_report);
+        if !staging_ready {
+            "QUARANTINED"
+        } else if published_pointer_present {
+            let published_report =
+                verify_graph_lightning_published_manifest(staging_dir, publish_dir)?;
+            let published_ready =
+                gate_decision(&published_report, "validation_gate") == Some("ready");
+            if !published_ready {
+                errors.extend(gate_errors(&published_report, "validation_gate"));
+            }
+            published_verification = Some(published_report);
+            if published_ready {
+                "PUBLISHED"
+            } else {
+                "QUARANTINED"
+            }
+        } else {
+            "READY"
+        }
+    };
+    let decision = if import_state == "QUARANTINED" {
+        "blocked"
+    } else {
+        "ready"
+    };
+    Ok(serde_json::json!({
+        "protocol": "graph-lightning-import-status",
+        "protocol_version": 1,
+        "import_state": import_state,
+        "staging_catalog_present": staging_catalog_present,
+        "published_pointer_present": published_pointer_present,
+        "staging_verification": staging_verification,
+        "published_verification": published_verification,
+        "status_gate": {
+            "decision": decision,
+            "errors": errors,
+        },
+    }))
+}
+
+fn gate_decision<'a>(report: &'a serde_json::Value, gate: &str) -> Option<&'a str> {
+    report
+        .get(gate)
+        .and_then(|gate| gate.get("decision"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn gate_errors(report: &serde_json::Value, gate: &str) -> Vec<String> {
+    report
+        .get(gate)
+        .and_then(|gate| gate.get("errors"))
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
 fn read_staging_artifact_json(
     catalog: &serde_json::Value,
     staging_dir: &Path,
@@ -1442,13 +1541,14 @@ mod tests {
         graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
         graph_lightning_gc_staging_report, graph_lightning_graph_stream_usage,
-        graph_lightning_graph_stream_validation_json, graph_lightning_publish_staging_usage,
-        graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
-        graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
-        is_self_shadow_command, parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
-        should_run_shadow_ready, stable_identity_audit_json,
-        stage_graph_lightning_bootstrap_export, validate_canonical_snapshot_usage, value_json,
-        verify_graph_lightning_published_manifest, verify_graph_lightning_staging_catalog,
+        graph_lightning_graph_stream_validation_json, graph_lightning_import_status,
+        graph_lightning_publish_staging_usage, graph_lightning_stage_bootstrap_usage,
+        graph_lightning_verify_export_usage, graph_lightning_verify_published_usage,
+        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_shadow_timeout_ms,
+        publish_graph_lightning_staging_catalog, should_run_shadow_ready,
+        stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
+        validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
+        verify_graph_lightning_staging_catalog,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -2068,6 +2168,111 @@ mod tests {
 
         std::fs::remove_dir_all(staging_dir).unwrap();
         std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_reports_created_without_staging_catalog() {
+        let staging_dir = unique_main_test_dir("graph_lightning_status_created_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_created_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["protocol"], "graph-lightning-import-status");
+        assert_eq!(report["import_state"], "CREATED");
+        assert_eq!(report["staging_catalog_present"], false);
+        assert_eq!(report["published_pointer_present"], false);
+        assert_eq!(report["status_gate"]["decision"], "ready");
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_reports_ready_after_staging_verifies() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_status_ready_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_ready_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "READY");
+        assert_eq!(report["staging_catalog_present"], true);
+        assert_eq!(report["published_pointer_present"], false);
+        assert_eq!(
+            report["staging_verification"]["validation_gate"]["decision"],
+            "ready"
+        );
+        assert_eq!(report["published_verification"], serde_json::Value::Null);
+        assert_eq!(report["status_gate"]["decision"], "ready");
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_reports_published_after_pointer_verifies() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_status_published_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_published_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "PUBLISHED");
+        assert_eq!(report["published_pointer_present"], true);
+        assert_eq!(
+            report["published_verification"]["validation_gate"]["decision"],
+            "ready"
+        );
+        assert_eq!(report["status_gate"]["decision"], "ready");
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+        std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_reports_quarantined_when_staging_fails() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_status_quarantined_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_quarantined_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+        let tampered = std::fs::read_to_string(&catalog_path).unwrap().replace(
+            "\"stage_state\": \"READY\"",
+            "\"stage_state\": \"QUARANTINED\"",
+        );
+        std::fs::write(&catalog_path, tampered).unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "QUARANTINED");
+        assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert!(report["status_gate"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("staging catalog is not READY")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
     }
 
     #[test]
