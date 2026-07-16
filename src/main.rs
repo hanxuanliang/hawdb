@@ -2,8 +2,9 @@ use skein::{
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_to_json,
-    scan_nowledge_query_inventory_to_json, Database, ExternalShadowCommand, ExternalShadowReady,
-    Result, SkeinError,
+    scan_nowledge_query_inventory_to_json, CanonicalGraphSnapshotValidation,
+    CanonicalSnapshotIdentityAudit, Database, DatabaseConfig, ExternalShadowCommand,
+    ExternalShadowReady, Result, SkeinError, Value,
 };
 use std::time::Duration;
 
@@ -136,6 +137,47 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "validate-canonical-snapshot" {
+            let mut require_valid = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-valid" => {
+                        require_valid = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(validate_canonical_snapshot_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(validate_canonical_snapshot_usage()));
+            }
+            let db = Database::open_with_config(
+                path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )?;
+            let snapshot = db.export_canonical_graph_snapshot();
+            let validation = snapshot.validate();
+            let rendered = canonical_snapshot_validation_json(
+                snapshot.graph_commit_epoch,
+                snapshot.logical_checksum,
+                snapshot.nodes.len(),
+                snapshot.relationships.len(),
+                &validation,
+            );
+            println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            if require_valid && !validation.is_valid {
+                return Err(SkeinError::Execution(
+                    "canonical snapshot validation failed".to_string(),
+                ));
+            }
+            return Ok(());
+        }
         return Err(SkeinError::Semantic(format!("unknown command '{command}'")));
     }
 
@@ -163,6 +205,10 @@ fn main() -> Result<()> {
 fn nowledge_cypher_migration_gate_usage() -> String {
     "nowledge-cypher-migration-gate requires [--require-ready] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]"
         .to_string()
+}
+
+fn validate_canonical_snapshot_usage() -> String {
+    "validate-canonical-snapshot requires [--require-valid] <database-path>".to_string()
 }
 
 fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
@@ -224,13 +270,88 @@ fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[Stri
         || program_args.iter().any(|arg| arg == "skein-shadow-self")
 }
 
+fn canonical_snapshot_validation_json(
+    graph_commit_epoch: u64,
+    logical_checksum: u64,
+    node_count: usize,
+    relationship_count: usize,
+    validation: &CanonicalGraphSnapshotValidation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "graph_commit_epoch": graph_commit_epoch,
+        "logical_checksum": logical_checksum,
+        "node_count": node_count,
+        "relationship_count": relationship_count,
+        "validation": {
+            "is_valid": validation.is_valid,
+            "checksum_matches": validation.checksum_matches,
+            "expected_logical_checksum": validation.expected_logical_checksum,
+            "stable_identity_matches": validation.stable_identity_matches,
+            "expected_stable_identity": stable_identity_audit_json(&validation.expected_stable_identity),
+            "duplicate_node_ids": validation.duplicate_node_ids,
+            "duplicate_relationship_ids": validation.duplicate_relationship_ids,
+            "missing_sources": endpoint_violations_json(&validation.missing_sources),
+            "missing_targets": endpoint_violations_json(&validation.missing_targets),
+        }
+    })
+}
+
+fn stable_identity_audit_json(audit: &CanonicalSnapshotIdentityAudit) -> serde_json::Value {
+    serde_json::json!({
+        "requires_stable_id_mapping": audit.requires_stable_id_mapping,
+        "nodes_without_stable_id": audit.nodes_without_stable_id,
+        "relationships_without_stable_id": audit.relationships_without_stable_id,
+        "duplicate_node_stable_ids": audit.duplicate_node_stable_ids.iter().map(value_json).collect::<Vec<_>>(),
+        "duplicate_relationship_stable_ids": audit.duplicate_relationship_stable_ids.iter().map(value_json).collect::<Vec<_>>(),
+    })
+}
+
+fn endpoint_violations_json(
+    violations: &[skein::CanonicalSnapshotEndpointViolation],
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        violations
+            .iter()
+            .map(|violation| {
+                serde_json::json!({
+                    "relationship_id": violation.relationship_id,
+                    "missing_node_id": violation.missing_node_id,
+                })
+            })
+            .collect(),
+    )
+}
+
+fn value_json(value: &Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(value) => serde_json::Value::Bool(*value),
+        Value::Int(value) => serde_json::json!(value),
+        Value::Float(value) => serde_json::json!(value),
+        Value::String(value) => serde_json::Value::String(value.clone()),
+        Value::List(values) => {
+            serde_json::Value::Array(values.iter().map(value_json).collect::<Vec<_>>())
+        }
+        Value::Map(values) => serde_json::Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| (key.clone(), value_json(value)))
+                .collect(),
+        ),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        add_shadow_ready_report, add_shadow_trace_report, is_self_shadow_command,
-        parse_shadow_timeout_ms, should_run_shadow_ready,
+        add_shadow_ready_report, add_shadow_trace_report, canonical_snapshot_validation_json,
+        is_self_shadow_command, parse_shadow_timeout_ms, should_run_shadow_ready,
+        stable_identity_audit_json, validate_canonical_snapshot_usage, value_json,
     };
-    use skein::ExternalShadowReady;
+    use skein::{
+        CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
+        CanonicalSnapshotIdentityAudit, ExternalShadowReady, Value,
+    };
     use std::time::Duration;
 
     #[test]
@@ -347,5 +468,102 @@ mod tests {
             serde_json::json!("/tmp/skein-shadow.jsonl")
         );
         assert_eq!(bundle["shadow_trace"]["request_count"], 42);
+    }
+
+    #[test]
+    fn renders_canonical_snapshot_validation_json() {
+        let validation = CanonicalGraphSnapshotValidation {
+            is_valid: false,
+            checksum_matches: false,
+            expected_logical_checksum: 77,
+            stable_identity_matches: false,
+            expected_stable_identity: CanonicalSnapshotIdentityAudit {
+                requires_stable_id_mapping: true,
+                nodes_without_stable_id: vec![1],
+                relationships_without_stable_id: vec![2],
+                duplicate_node_stable_ids: vec![Value::String("dup-node".to_string())],
+                duplicate_relationship_stable_ids: vec![Value::String("dup-rel".to_string())],
+            },
+            duplicate_node_ids: vec![1],
+            duplicate_relationship_ids: vec![2],
+            missing_sources: vec![CanonicalSnapshotEndpointViolation {
+                relationship_id: 2,
+                missing_node_id: 10,
+            }],
+            missing_targets: vec![CanonicalSnapshotEndpointViolation {
+                relationship_id: 3,
+                missing_node_id: 11,
+            }],
+        };
+
+        let json = canonical_snapshot_validation_json(5, 99, 3, 2, &validation);
+
+        assert_eq!(json["graph_commit_epoch"], 5);
+        assert_eq!(json["logical_checksum"], 99);
+        assert_eq!(json["node_count"], 3);
+        assert_eq!(json["relationship_count"], 2);
+        assert_eq!(json["validation"]["is_valid"], false);
+        assert_eq!(json["validation"]["expected_logical_checksum"], 77);
+        assert_eq!(
+            json["validation"]["expected_stable_identity"]["duplicate_node_stable_ids"],
+            serde_json::json!(["dup-node"])
+        );
+        assert_eq!(
+            json["validation"]["missing_sources"][0]["missing_node_id"],
+            10
+        );
+        assert_eq!(
+            json["validation"]["missing_targets"][0]["relationship_id"],
+            3
+        );
+    }
+
+    #[test]
+    fn renders_stable_identity_audit_values() {
+        let audit = CanonicalSnapshotIdentityAudit {
+            requires_stable_id_mapping: true,
+            nodes_without_stable_id: vec![7],
+            relationships_without_stable_id: vec![9],
+            duplicate_node_stable_ids: vec![Value::Int(42)],
+            duplicate_relationship_stable_ids: vec![Value::Bool(true)],
+        };
+
+        let json = stable_identity_audit_json(&audit);
+
+        assert_eq!(json["requires_stable_id_mapping"], true);
+        assert_eq!(json["nodes_without_stable_id"], serde_json::json!([7]));
+        assert_eq!(json["duplicate_node_stable_ids"], serde_json::json!([42]));
+        assert_eq!(
+            json["duplicate_relationship_stable_ids"],
+            serde_json::json!([true])
+        );
+    }
+
+    #[test]
+    fn renders_nested_values_as_json() {
+        let value = Value::Map(
+            [(
+                "items".to_string(),
+                Value::List(vec![
+                    Value::Null,
+                    Value::Int(1),
+                    Value::String("two".to_string()),
+                ]),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        assert_eq!(
+            value_json(&value),
+            serde_json::json!({
+                "items": [null, 1, "two"]
+            })
+        );
+    }
+
+    #[test]
+    fn validates_canonical_snapshot_usage_text() {
+        assert!(validate_canonical_snapshot_usage().contains("<database-path>"));
     }
 }

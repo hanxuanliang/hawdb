@@ -85,6 +85,10 @@ physical import or delta replay. `CanonicalGraphSnapshotExport::validate`
 recomputes the logical checksum and stable-identity audit, checks node and
 relationship ID uniqueness, and reports missing relationship endpoints before an
 export is handed to an importer, shadow gate, or storage-equivalence oracle.
+The CLI command `skein validate-canonical-snapshot [--require-valid]
+<database-path>` opens the database read-only, exports the current canonical
+snapshot, prints the validation report as JSON, and returns a non-zero status
+when `--require-valid` is set and the snapshot is invalid.
 This is the local export boundary for future GraphStream encoding; it does not
 copy local pages, WAL records, adjacency pointers, or rebuildable projection
 artifacts.
