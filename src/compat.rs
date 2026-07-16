@@ -5231,6 +5231,61 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "skill synthesized memory direct id read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill {id: $id})-[:SYNTHESIZED_FROM]->(m:Memory) RETURN m.id",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("skill-evidence-id-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("skill-evidence-id-memory-1".to_string()),
+                        )]),
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("skill-evidence-id-memory-2".to_string()),
+                        )]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'skill-evidence-id-1', stage: 'published'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'skill-evidence-id-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'skill-evidence-id-memory-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (s:Skill {id: 'skill-evidence-id-1'}), (m:Memory {id: 'skill-evidence-id-memory-1'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (s:Skill {id: 'skill-evidence-id-1'}), (m:Memory {id: 'skill-evidence-id-memory-2'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'skill-evidence-id-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'skill-evidence-id-memory-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'skill-evidence-id-memory-2'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "skill metadata read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (sk:Skill {id: $id}) RETURN sk.stage, sk.metadata",
@@ -10199,6 +10254,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (sk:Skill {id: $id})-[:SYNTHESIZED_FROM]->(m:Memory) RETURN m.id, m.title, m.content, m.unit_type ORDER BY m.created_at",
             ),
             CompatibilityQueryCallSite::new(
+                "skill synthesized memory direct id read",
+                "skill_read",
+                "nmem-server::rest_skills::skill_memory_ids; nmem-server::rest_lists::skill_memory_ids; nmem-server::mcp_server::skill_memory_ids; nmem-server::scheduler_service::skill_memory_ids",
+            )
+            .with_cypher(
+                "MATCH (s:Skill {id: $id})-[:SYNTHESIZED_FROM]->(m:Memory) RETURN m.id",
+            ),
+            CompatibilityQueryCallSite::new(
                 "skill metadata read",
                 "skill_read",
                 "nmem-server::context_wiring::skill_metadata",
@@ -12442,7 +12505,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 263);
+        assert_eq!(report.checks.len(), 264);
     }
 
     #[test]
@@ -12458,13 +12521,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 263);
-        assert_eq!(coverage.covered_checks, 263);
+        assert_eq!(coverage.required_checks, 264);
+        assert_eq!(coverage.covered_checks, 264);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 263);
+        assert_eq!(coverage_json["covered_checks"], 264);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -12494,10 +12557,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 263);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 264);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 263);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 264);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12691,15 +12754,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 263);
-        assert_eq!(report.shadow_checks.len(), 263);
+        assert_eq!(report.primary_checks.len(), 264);
+        assert_eq!(report.shadow_checks.len(), 264);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            263
+            264
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12708,7 +12771,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 263);
+        assert_eq!(cutover.matched_checks, 264);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
