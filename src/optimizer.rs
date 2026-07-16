@@ -4338,7 +4338,7 @@ fn write_predicate(output: &mut String, predicate: &Predicate) {
                 ComparisonOp::Gt => ">",
                 ComparisonOp::Gte => ">=",
             });
-            write_value(output, value);
+            write_projection_expression(output, value);
             output.push(')');
         }
         Predicate::ExpressionContains { expression, value } => {

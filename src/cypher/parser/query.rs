@@ -148,7 +148,7 @@ impl Parser<'_> {
         } else {
             None
         };
-        let predicate = if self.consume_keyword("WHERE") {
+        let mut predicate = if self.consume_keyword("WHERE") {
             Some(self.parse_property_predicate()?)
         } else {
             None
@@ -184,6 +184,110 @@ impl Parser<'_> {
         if self.consume_keyword("MATCH") {
             let (matched_target_variable, matched_target_label, matched_target_properties) =
                 self.parse_match_node_pattern()?;
+            let post_match_expand = if self.peek_char() == Some('<') {
+                self.expect_char('<')?;
+                self.expect_char('-')?;
+                let (rel_variable, rel_type, properties, min_hops, max_hops) =
+                    self.parse_match_relationship_pattern()?;
+                self.expect_char('-')?;
+                let (target_variable, target_label, target_properties) =
+                    self.parse_match_node_pattern()?;
+                Some(PostMatchRelationshipExpand {
+                    source_variable: matched_target_variable.clone(),
+                    source_label: matched_target_label.clone(),
+                    source_properties: matched_target_properties.clone(),
+                    expand: RelationshipExpand {
+                        variable: rel_variable,
+                        rel_type,
+                        properties,
+                        direction: RelationshipDirection::Incoming,
+                        target_variable,
+                        target_label,
+                        target_properties,
+                        min_hops,
+                        max_hops,
+                    },
+                })
+            } else if self.peek_char() == Some('-') {
+                self.expect_char('-')?;
+                let (rel_variable, rel_type, properties, min_hops, max_hops) =
+                    self.parse_match_relationship_pattern()?;
+                self.expect_char('-')?;
+                let direction = if self.consume_char('>') {
+                    RelationshipDirection::Outgoing
+                } else {
+                    RelationshipDirection::Undirected
+                };
+                let (target_variable, target_label, target_properties) =
+                    self.parse_match_node_pattern()?;
+                Some(PostMatchRelationshipExpand {
+                    source_variable: matched_target_variable.clone(),
+                    source_label: matched_target_label.clone(),
+                    source_properties: matched_target_properties.clone(),
+                    expand: RelationshipExpand {
+                        variable: rel_variable,
+                        rel_type,
+                        properties,
+                        direction,
+                        target_variable,
+                        target_label,
+                        target_properties,
+                        min_hops,
+                        max_hops,
+                    },
+                })
+            } else {
+                None
+            };
+            if let Some(post_match_expand) = post_match_expand {
+                if self.consume_keyword("WHERE") {
+                    predicate = Some(combine_match_predicates(
+                        predicate,
+                        self.parse_property_predicate()?,
+                    ));
+                }
+                if !self.consume_keyword("RETURN") {
+                    return Err(self.error("expected RETURN"));
+                }
+                let distinct = self.consume_keyword("DISTINCT");
+                let returns = self.parse_return_items()?;
+                let order_by = if self.consume_keyword("ORDER") {
+                    self.expect_keyword("BY")?;
+                    self.parse_order_items()?
+                } else {
+                    Vec::new()
+                };
+                let offset = if self.consume_keyword("SKIP") || self.consume_keyword("OFFSET") {
+                    Some(self.parse_value()?)
+                } else {
+                    None
+                };
+                let limit = if self.consume_keyword("LIMIT") {
+                    Some(self.parse_value()?)
+                } else {
+                    None
+                };
+                return Ok(Statement::MatchReturn(Box::new(MatchReturn {
+                    variable,
+                    label,
+                    properties,
+                    expand,
+                    post_match_expand: Some(post_match_expand),
+                    optional_expand: None,
+                    optional_with: None,
+                    collect_with: None,
+                    distinct_with: None,
+                    aggregate_with: None,
+                    aggregate_with_filter: None,
+                    post_with_match: None,
+                    predicate,
+                    distinct,
+                    returns,
+                    order_by,
+                    offset,
+                    limit,
+                })));
+            }
             self.expect_keyword("MERGE")?;
             let Some(expand) = expand else {
                 return Err(self.error("MATCH MERGE requires a bound relationship pattern"));
@@ -338,6 +442,7 @@ impl Parser<'_> {
             label,
             properties,
             expand,
+            post_match_expand: None,
             optional_expand,
             optional_with: with_clause.optional_with,
             collect_with: with_clause.collect_with,
@@ -861,6 +966,20 @@ fn skip_ascii_whitespace(input: &str, mut index: usize) -> usize {
         index += ch.len_utf8();
     }
     index
+}
+
+fn combine_match_predicates(
+    left: Option<PropertyPredicate>,
+    right: PropertyPredicate,
+) -> PropertyPredicate {
+    match left {
+        Some(PropertyPredicate::And(mut predicates)) => {
+            predicates.push(right);
+            PropertyPredicate::And(predicates)
+        }
+        Some(left) => PropertyPredicate::And(vec![left, right]),
+        None => right,
+    }
 }
 
 fn is_path_binding_ident_start(ch: char) -> bool {

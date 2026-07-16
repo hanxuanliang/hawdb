@@ -2803,9 +2803,15 @@ fn evaluate_predicate(
             expression,
             op,
             value,
-        } => predicate_expression_value(expression, catalog, binding)
-            .map(|actual| compare_property_values(&actual, *op, value))
-            .unwrap_or(false),
+        } => {
+            match (
+                predicate_expression_value(expression, catalog, binding),
+                predicate_expression_value(value, catalog, binding),
+            ) {
+                (Some(actual), Some(expected)) => compare_property_values(&actual, *op, &expected),
+                _ => false,
+            }
+        }
         Predicate::ExpressionContains { expression, value } => {
             match (
                 predicate_expression_value(expression, catalog, binding),

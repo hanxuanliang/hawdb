@@ -373,7 +373,7 @@ pub enum Predicate {
     ExpressionCompare {
         expression: ProjectionExpression,
         op: ComparisonOp,
-        value: Value,
+        value: ProjectionExpression,
     },
     ExpressionContains {
         expression: ProjectionExpression,
@@ -1287,6 +1287,46 @@ pub fn plan_with_params(
                     scope.insert(rel_variable.clone());
                 }
             }
+            if let Some(post_expand) = &query.post_match_expand {
+                if !scope.contains(&post_expand.source_variable) {
+                    return Err(SkeinError::Semantic(format!(
+                        "post-MATCH source variable '{}' is not bound",
+                        post_expand.source_variable
+                    )));
+                }
+                if !post_expand.source_properties.is_empty() {
+                    return Err(SkeinError::Semantic(
+                        "post-MATCH relationship reads do not support source property patterns"
+                            .to_string(),
+                    ));
+                }
+                if !post_expand.expand.properties.is_empty()
+                    && (post_expand.expand.min_hops != 1 || post_expand.expand.max_hops != 1)
+                {
+                    return Err(SkeinError::Semantic(
+                        "post-MATCH relationship property patterns are supported only for one-hop patterns"
+                            .to_string(),
+                    ));
+                }
+                if !post_expand.expand.target_properties.is_empty()
+                    && (post_expand.expand.min_hops != 1 || post_expand.expand.max_hops != 1)
+                {
+                    return Err(SkeinError::Semantic(
+                        "post-MATCH target node property patterns are supported only for one-hop patterns"
+                            .to_string(),
+                    ));
+                }
+                scope.insert(post_expand.expand.target_variable.clone());
+                if let Some(rel_variable) = &post_expand.expand.variable {
+                    if post_expand.expand.min_hops != 1 || post_expand.expand.max_hops != 1 {
+                        return Err(SkeinError::Semantic(
+                            "post-MATCH relationship variables are supported only for one-hop patterns"
+                                .to_string(),
+                        ));
+                    }
+                    scope.insert(rel_variable.clone());
+                }
+            }
             if let Some(optional) = &query.optional_expand {
                 if !scope.contains(&optional.source_variable) {
                     return Err(SkeinError::Semantic(format!(
@@ -1381,6 +1421,21 @@ pub fn plan_with_params(
                     target_label: expand.target_label.clone(),
                     min_hops: expand.min_hops,
                     max_hops: expand.max_hops,
+                    input: Box::new(input),
+                };
+            }
+            if let Some(post_expand) = &query.post_match_expand {
+                input = LogicalPlan::Expand {
+                    source_variable: post_expand.source_variable.clone(),
+                    source_label: post_expand.source_label.clone(),
+                    rel_variable: post_expand.expand.variable.clone(),
+                    rel_type: post_expand.expand.rel_type.clone(),
+                    rel_properties: bind_properties(&post_expand.expand.properties, parameters)?,
+                    direction: post_expand.expand.direction,
+                    target_variable: post_expand.expand.target_variable.clone(),
+                    target_label: post_expand.expand.target_label.clone(),
+                    min_hops: post_expand.expand.min_hops,
+                    max_hops: post_expand.expand.max_hops,
                     input: Box::new(input),
                 };
             }
@@ -2396,22 +2451,22 @@ fn plan_with_alias_filter(
         WithAliasFilterOp::Lt => Predicate::ExpressionCompare {
             expression,
             op: ComparisonOp::Lt,
-            value: bind_value(&filter.value, parameters)?,
+            value,
         },
         WithAliasFilterOp::Lte => Predicate::ExpressionCompare {
             expression,
             op: ComparisonOp::Lte,
-            value: bind_value(&filter.value, parameters)?,
+            value,
         },
         WithAliasFilterOp::Gt => Predicate::ExpressionCompare {
             expression,
             op: ComparisonOp::Gt,
-            value: bind_value(&filter.value, parameters)?,
+            value,
         },
         WithAliasFilterOp::Gte => Predicate::ExpressionCompare {
             expression,
             op: ComparisonOp::Gte,
-            value: bind_value(&filter.value, parameters)?,
+            value,
         },
     })
 }
@@ -3149,7 +3204,7 @@ fn plan_predicate(
         } => Ok(Predicate::ExpressionCompare {
             expression: plan_return_value_expression(scope, expression, parameters)?,
             op: plan_comparison_op(*op),
-            value: bind_value(value, parameters)?,
+            value: plan_return_value_expression(scope, value, parameters)?,
         }),
         PropertyPredicate::ExpressionContains { expression, value } => {
             Ok(Predicate::ExpressionContains {
@@ -3404,8 +3459,8 @@ fn collect_predicate_variables(predicate: &PropertyPredicate, variables: &mut BT
             let value = match predicate {
                 PropertyPredicate::ExpressionEq { value, .. }
                 | PropertyPredicate::ExpressionNotEq { value, .. }
+                | PropertyPredicate::ExpressionCompare { value, .. }
                 | PropertyPredicate::ExpressionContains { value, .. } => Some(value),
-                PropertyPredicate::ExpressionCompare { .. } => None,
                 _ => None,
             };
             if let Some(value) = value {

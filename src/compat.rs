@@ -1668,6 +1668,119 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(2),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "activity task evolves cluster read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory)-[:EVOLVES]-(other:Memory) WHERE (m.is_crystal IS NULL OR m.is_crystal = false) AND (other.is_crystal IS NULL OR other.is_crystal = false) RETURN m.id, m.title, m.unit_type, count(DISTINCT other) as neighbor_count ORDER BY neighbor_count DESC LIMIT 30",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("task-evolves-cluster-a".to_string())),
+                            (
+                                "m.title",
+                                Value::String("Task Evolves Cluster A".to_string()),
+                            ),
+                            ("m.unit_type", Value::String("fact".to_string())),
+                            ("neighbor_count", Value::Int(1)),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("task-evolves-cluster-b".to_string())),
+                            (
+                                "m.title",
+                                Value::String("Task Evolves Cluster B".to_string()),
+                            ),
+                            ("m.unit_type", Value::String("fact".to_string())),
+                            ("neighbor_count", Value::Int(1)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'task-evolves-cluster-a', title: 'Task Evolves Cluster A', unit_type: 'fact', is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'task-evolves-cluster-b', title: 'Task Evolves Cluster B', unit_type: 'fact', is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Memory {id: 'task-evolves-cluster-a'}), (b:Memory {id: 'task-evolves-cluster-b'}) CREATE (a)-[:EVOLVES]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['task-evolves-cluster-a', 'task-evolves-cluster-b'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "activity task oldest crystal read",
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Memory) WHERE c.is_crystal = true RETURN c.id, c.title, c.created_at, c.last_evaluated_at, c.review_status ORDER BY c.created_at ASC LIMIT 10",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("c.id", Value::Int(3)),
+                            ("c.title", Value::String("Cloud projection".to_string())),
+                            ("c.created_at", Value::Null),
+                            ("c.last_evaluated_at", Value::Null),
+                            ("c.review_status", Value::Null),
+                        ]),
+                        compatibility_row([
+                            ("c.id", Value::String("task-oldest-crystal-1".to_string())),
+                            ("c.title", Value::String("Task Oldest Crystal".to_string())),
+                            ("c.created_at", Value::Int(-1000)),
+                            ("c.last_evaluated_at", Value::Int(-500)),
+                            ("c.review_status", Value::String("pending".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'task-oldest-crystal-1', title: 'Task Oldest Crystal', is_crystal: true, created_at: -1000, last_evaluated_at: -500, review_status: 'pending'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'task-oldest-crystal-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "activity task stale crystal source read",
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Memory {is_crystal: true})-[:SYNTHESIZED_FROM]->(src:Memory) MATCH (src)-[:EVOLVES]-(newer:Memory) WHERE newer.created_at > c.created_at AND c.review_status <> 'dismissed' RETURN c.id, c.title, newer.id, newer.title, newer.created_at, c.review_status ORDER BY newer.created_at DESC LIMIT 10",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("c.id", Value::String("task-stale-crystal".to_string())),
+                        ("c.title", Value::String("Task Stale Crystal".to_string())),
+                        ("newer.id", Value::String("task-stale-newer".to_string())),
+                        ("newer.title", Value::String("Task Stale Newer".to_string())),
+                        ("newer.created_at", Value::Int(4000)),
+                        ("c.review_status", Value::String("pending".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'task-stale-crystal', title: 'Task Stale Crystal', is_crystal: true, created_at: 3000, review_status: 'pending'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'task-stale-source', title: 'Task Stale Source', is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'task-stale-newer', title: 'Task Stale Newer', is_crystal: false, created_at: 4000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (c:Memory {id: 'task-stale-crystal'}), (src:Memory {id: 'task-stale-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'task-stale-source'}), (newer:Memory {id: 'task-stale-newer'}) CREATE (src)-[:EVOLVES]->(newer)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['task-stale-crystal', 'task-stale-source', 'task-stale-newer'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "distinct relationship aggregation",
                 CypherFixtureStatement::new(
@@ -7758,6 +7871,30 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source) WHERE s.lifecycle_state = 'ingested' OR s.lifecycle_state = 'parsed' OR s.lifecycle_state = 'chunked' OR s.lifecycle_state = 'error' RETURN s.id, s.original_name, s.lifecycle_state, s.memory_count, s.created_at ORDER BY s.created_at ASC LIMIT 15",
             ),
             CompatibilityQueryCallSite::new(
+                "activity task evolves cluster read",
+                "agent_context_read",
+                "nmem-graph::agent_context_tasks::Q_EVOLVES_CLUSTERS",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:EVOLVES]-(other:Memory) WHERE (m.is_crystal IS NULL OR m.is_crystal = false) AND (other.is_crystal IS NULL OR other.is_crystal = false) RETURN m.id, m.title, m.unit_type, count(DISTINCT other) as neighbor_count ORDER BY neighbor_count DESC LIMIT 30",
+            ),
+            CompatibilityQueryCallSite::new(
+                "activity task oldest crystal read",
+                "agent_context_read",
+                "nmem-graph::agent_context_tasks::Q_OLDEST_CRYSTALS",
+            )
+            .with_cypher(
+                "MATCH (c:Memory) WHERE c.is_crystal = true RETURN c.id, c.title, c.created_at, c.last_evaluated_at, c.review_status ORDER BY c.created_at ASC LIMIT 10",
+            ),
+            CompatibilityQueryCallSite::new(
+                "activity task stale crystal source read",
+                "agent_context_read",
+                "nmem-graph::agent_context_tasks::Q_STALE_CRYSTAL_SOURCES",
+            )
+            .with_cypher(
+                "MATCH (c:Memory {is_crystal: true})-[:SYNTHESIZED_FROM]->(src:Memory) MATCH (src)-[:EVOLVES]-(newer:Memory) WHERE newer.created_at > c.created_at AND c.review_status <> 'dismissed' RETURN c.id, c.title, newer.id, newer.title, newer.created_at, c.review_status ORDER BY newer.created_at DESC LIMIT 10",
+            ),
+            CompatibilityQueryCallSite::new(
                 "relationship min aggregation",
                 "schema_verification_read",
                 "nmem-graph::schema::backfill_synthesized_from",
@@ -8921,7 +9058,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 187);
+        assert_eq!(report.checks.len(), 190);
     }
 
     #[test]
@@ -8937,13 +9074,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 187);
-        assert_eq!(coverage.covered_checks, 187);
+        assert_eq!(coverage.required_checks, 190);
+        assert_eq!(coverage.covered_checks, 190);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 187);
+        assert_eq!(coverage_json["covered_checks"], 190);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -8973,10 +9110,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 187);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 190);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 187);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 190);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -9170,15 +9307,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 187);
-        assert_eq!(report.shadow_checks.len(), 187);
+        assert_eq!(report.primary_checks.len(), 190);
+        assert_eq!(report.shadow_checks.len(), 190);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            187
+            190
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -9187,7 +9324,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 187);
+        assert_eq!(cutover.matched_checks, 190);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

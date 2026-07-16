@@ -155,6 +155,7 @@ pub struct MatchReturn {
     pub label: String,
     pub properties: BTreeMap<String, ValueExpression>,
     pub expand: Option<RelationshipExpand>,
+    pub post_match_expand: Option<PostMatchRelationshipExpand>,
     pub optional_expand: Option<OptionalRelationshipExpand>,
     pub optional_with: Option<OptionalWithAggregate>,
     pub collect_with: Option<WithCollect>,
@@ -218,6 +219,14 @@ pub enum ShortestPathReturnExpression {
 pub struct OptionalRelationshipExpand {
     pub source_variable: String,
     pub source_label: String,
+    pub expand: RelationshipExpand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostMatchRelationshipExpand {
+    pub source_variable: String,
+    pub source_label: String,
+    pub source_properties: BTreeMap<String, ValueExpression>,
     pub expand: RelationshipExpand,
 }
 
@@ -486,7 +495,7 @@ pub enum PropertyPredicate {
     ExpressionCompare {
         expression: ReturnValueExpression,
         op: ComparisonOp,
-        value: ValueExpression,
+        value: ReturnValueExpression,
     },
     ExpressionContains {
         expression: ReturnValueExpression,

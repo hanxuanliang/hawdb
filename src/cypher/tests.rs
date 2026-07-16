@@ -1022,6 +1022,28 @@ fn parses_consecutive_two_node_match_return() {
 }
 
 #[test]
+fn parses_consecutive_relationship_match_return() {
+    let statement = parse(
+        "MATCH (c:Memory {is_crystal: true})-[:SYNTHESIZED_FROM]->(src:Memory) MATCH (src)-[:EVOLVES]-(newer:Memory) WHERE newer.created_at > c.created_at AND c.review_status <> 'dismissed' RETURN c.id, newer.id ORDER BY newer.created_at DESC LIMIT 10",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    assert_eq!(query.variable, "c");
+    assert!(query.expand.is_some());
+    let post_match = query.post_match_expand.expect("post-match expand");
+    assert_eq!(post_match.source_variable, "src");
+    assert_eq!(post_match.expand.rel_type, "EVOLVES");
+    assert_eq!(post_match.expand.target_variable, "newer");
+    assert_eq!(
+        post_match.expand.direction,
+        RelationshipDirection::Undirected
+    );
+    assert_eq!(query.returns.len(), 2);
+}
+
+#[test]
 fn parses_optional_match_count_after_node_match() {
     let statement = parse(
         "MATCH (t:Thread {id: $thread_uuid}) OPTIONAL MATCH (t)-[:CONTAINS]->(m:Message) RETURN COUNT(m)",
@@ -1588,7 +1610,7 @@ fn parses_coalesce_and_left_predicates() {
                 },
             ]),
             op: ComparisonOp::Gte,
-            value: ValueExpression::Parameter("cutoff".to_string()),
+            value: ReturnValueExpression::Value(ValueExpression::Parameter("cutoff".to_string(),)),
         }
     );
     assert_eq!(

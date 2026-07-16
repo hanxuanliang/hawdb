@@ -174,26 +174,42 @@ impl Parser<'_> {
             } else {
                 ComparisonOp::Lt
             };
-            let value = self.parse_value()?;
-            Ok(PropertyPredicate::Compare {
-                variable,
-                property,
-                op,
-                value,
-            })
+            match self.parse_property_predicate_right()? {
+                PropertyPredicateRight::Value(value) => Ok(PropertyPredicate::Compare {
+                    variable,
+                    property,
+                    op,
+                    value,
+                }),
+                PropertyPredicateRight::Expression(value) => {
+                    Ok(PropertyPredicate::ExpressionCompare {
+                        expression: ReturnValueExpression::Property { variable, property },
+                        op,
+                        value,
+                    })
+                }
+            }
         } else if self.consume_char('>') {
             let op = if self.consume_char('=') {
                 ComparisonOp::Gte
             } else {
                 ComparisonOp::Gt
             };
-            let value = self.parse_value()?;
-            Ok(PropertyPredicate::Compare {
-                variable,
-                property,
-                op,
-                value,
-            })
+            match self.parse_property_predicate_right()? {
+                PropertyPredicateRight::Value(value) => Ok(PropertyPredicate::Compare {
+                    variable,
+                    property,
+                    op,
+                    value,
+                }),
+                PropertyPredicateRight::Expression(value) => {
+                    Ok(PropertyPredicate::ExpressionCompare {
+                        expression: ReturnValueExpression::Property { variable, property },
+                        op,
+                        value,
+                    })
+                }
+            }
         } else {
             self.expect_char('=')?;
             match self.parse_property_predicate_right()? {
@@ -399,7 +415,7 @@ impl Parser<'_> {
             return Ok(PropertyPredicate::ExpressionCompare {
                 expression,
                 op,
-                value: self.parse_value()?,
+                value: self.parse_return_value_expression()?,
             });
         }
         if self.consume_char('>') {
@@ -411,7 +427,7 @@ impl Parser<'_> {
             return Ok(PropertyPredicate::ExpressionCompare {
                 expression,
                 op,
-                value: self.parse_value()?,
+                value: self.parse_return_value_expression()?,
             });
         }
         if self.consume_keyword("CONTAINS") {

@@ -588,6 +588,7 @@ node-detail neighbor count reads,
 label usage count reads including direct optional source-projection counts,
 agent context activity digest reads,
 agent context activity task reads,
+agent context stale crystal and EVOLVES cluster reads,
 health stale memory count reads,
 entity lifecycle impact counts, detail projections, relation/label/community
 preview reads, and entity-node `DETACH DELETE` cascade checks,
