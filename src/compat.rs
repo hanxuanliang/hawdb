@@ -7169,6 +7169,199 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest fs thread source distinct listing read",
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread) WHERE t.source IS NOT NULL AND t.source <> '' RETURN DISTINCT t.source AS s ORDER BY s ASC",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([("s", Value::String("codex".to_string()))]),
+                        compatibility_row([("s", Value::String("web".to_string()))]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new("MATCH (t:Thread) DETACH DELETE t"))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-fs-thread-source-1', source: 'codex'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-fs-thread-source-2', source: 'web'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-fs-thread-source-empty', source: ''})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread) WHERE t.id IN ['rest-fs-thread-source-1', 'rest-fs-thread-source-2', 'rest-fs-thread-source-empty'] DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs thread source page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.source = $source AND t.id > $after RETURN t.id, t.title, t.updated_at ORDER BY t.id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            ("source".to_string(), Value::String("codex".to_string())),
+                            (
+                                "after".to_string(),
+                                Value::String("rest-fs-thread-page-0".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "t.id",
+                            Value::String("rest-fs-thread-page-1".to_string()),
+                        ),
+                        ("t.title", Value::String("REST FS Thread Page".to_string())),
+                        ("t.updated_at", Value::Int(1700000104)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-fs-thread-page-1', title: 'REST FS Thread Page', source: 'codex', updated_at: 1700000104})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-fs-thread-page-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs thread meta lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source RETURN t.id, t.thread_id, t.title, t.summary, t.message_count, t.source, t.created_at, t.updated_at, t.space_id, t.project, t.workspace LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "key".to_string(),
+                                Value::String("rest-fs-thread-meta-1".to_string()),
+                            ),
+                            ("source".to_string(), Value::String("codex".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "t.id",
+                            Value::String("rest-fs-thread-meta-1".to_string()),
+                        ),
+                        (
+                            "t.thread_id",
+                            Value::String("rest-fs-thread-logical-1".to_string()),
+                        ),
+                        ("t.title", Value::String("REST FS Thread Meta".to_string())),
+                        ("t.summary", Value::String("meta summary".to_string())),
+                        ("t.message_count", Value::Int(2)),
+                        ("t.source", Value::String("codex".to_string())),
+                        ("t.created_at", Value::Int(1700000105)),
+                        ("t.updated_at", Value::Int(1700000106)),
+                        ("t.space_id", Value::String("default".to_string())),
+                        ("t.project", Value::String("skein".to_string())),
+                        ("t.workspace", Value::String("local".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-fs-thread-meta-1', thread_id: 'rest-fs-thread-logical-1', title: 'REST FS Thread Meta', summary: 'meta summary', message_count: 2, source: 'codex', created_at: 1700000105, updated_at: 1700000106, space_id: 'default', project: 'skein', workspace: 'local'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-fs-thread-meta-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs thread messages lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source RETURN t.id, t.message_count, t.space_id LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "key".to_string(),
+                                Value::String("rest-fs-thread-messages-1".to_string()),
+                            ),
+                            ("source".to_string(), Value::String("codex".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "t.id",
+                            Value::String("rest-fs-thread-messages-1".to_string()),
+                        ),
+                        ("t.message_count", Value::Int(2)),
+                        ("t.space_id", Value::String("default".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-fs-thread-messages-1', message_count: 2, source: 'codex', space_id: 'default'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-fs-thread-messages-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs thread legacy messages read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread {id: $thread_uuid})-[c:CONTAINS]->(m:Message) RETURN m.id, m.role, m.content, COALESCE(c.order_index, m.order_index), m.timestamp, m.token_count ORDER BY COALESCE(c.order_index, m.order_index)",
+                        BTreeMap::from([(
+                            "thread_uuid".to_string(),
+                            Value::String("rest-fs-thread-legacy-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            (
+                                "m.id",
+                                Value::String("rest-fs-thread-legacy-msg-1".to_string()),
+                            ),
+                            ("m.role", Value::String("user".to_string())),
+                            ("m.content", Value::String("first message".to_string())),
+                            ("coalesce", Value::Int(1)),
+                            ("m.timestamp", Value::Int(1700000107)),
+                            ("m.token_count", Value::Int(3)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "m.id",
+                                Value::String("rest-fs-thread-legacy-msg-2".to_string()),
+                            ),
+                            ("m.role", Value::String("assistant".to_string())),
+                            ("m.content", Value::String("second message".to_string())),
+                            ("coalesce", Value::Int(2)),
+                            ("m.timestamp", Value::Int(1700000108)),
+                            ("m.token_count", Value::Null),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-fs-thread-legacy-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'rest-fs-thread-legacy-msg-1', role: 'user', content: 'first message', order_index: 9, timestamp: 1700000107, token_count: 3})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'rest-fs-thread-legacy-msg-2', role: 'assistant', content: 'second message', order_index: 2, timestamp: 1700000108})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'rest-fs-thread-legacy-1'}), (m:Message {id: 'rest-fs-thread-legacy-msg-1'}) CREATE (t)-[:CONTAINS {order_index: 1}]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'rest-fs-thread-legacy-1'}), (m:Message {id: 'rest-fs-thread-legacy-msg-2'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-fs-thread-legacy-1', 'rest-fs-thread-legacy-msg-1', 'rest-fs-thread-legacy-msg-2'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "rest agent thread attachment title read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (t:Thread) WHERE t.thread_id = $id OR t.id = $id RETURN t.title LIMIT 1",
@@ -8539,6 +8732,77 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (s:Skill) WHERE s.id IN ['skill-active-list-1', 'skill-active-list-2', 'skill-active-list-3', 'skill-active-list-draft'] DETACH DELETE s",
                     ),
                     ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs active skill listing read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill) WHERE s.stage = 'active' AND s.id > $after RETURN s.id, s.name, s.title, s.updated_at, s.version ORDER BY s.id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "after".to_string(),
+                                Value::String("rest-fs-skill-0".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("rest-fs-skill-active-1".to_string()),
+                        ),
+                        ("s.name", Value::String("rest-fs-active".to_string())),
+                        ("s.title", Value::String("REST FS Active Skill".to_string())),
+                        ("s.updated_at", Value::Int(1700000100)),
+                        ("s.version", Value::Int(2)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new("MATCH (s:Skill) DETACH DELETE s"))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-fs-skill-active-1', name: 'rest-fs-active', title: 'REST FS Active Skill', stage: 'active', updated_at: 1700000100, version: 2})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-fs-skill-draft-1', name: 'rest-fs-draft', title: 'REST FS Draft Skill', stage: 'draft', updated_at: 1700000101, version: 1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill) WHERE s.id IN ['rest-fs-skill-active-1', 'rest-fs-skill-draft-1'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs active skill detail lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill) WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.name, s.title, s.stage, s.version, s.created_at, s.updated_at LIMIT 1",
+                        BTreeMap::from([(
+                            "key".to_string(),
+                            Value::String("rest-fs-skill-detail-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("rest-fs-skill-detail-1".to_string()),
+                        ),
+                        ("s.name", Value::String("rest-fs-detail".to_string())),
+                        ("s.title", Value::String("REST FS Detail Skill".to_string())),
+                        ("s.stage", Value::String("active".to_string())),
+                        ("s.version", Value::Int(3)),
+                        ("s.created_at", Value::Int(1700000102)),
+                        ("s.updated_at", Value::Int(1700000103)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-fs-skill-detail-1', name: 'rest-fs-detail', title: 'REST FS Detail Skill', stage: 'active', version: 3, created_at: 1700000102, updated_at: 1700000103})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-fs-skill-detail-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -16816,6 +17080,46 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread) WHERE t.thread_id = $sid OR t.id = $sid RETURN t.thread_id, t.title, t.source, t.created_at LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
+                "rest fs thread source distinct listing read",
+                "thread_read",
+                "nmem-server::rest_fs::ls_thread_sources",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.source IS NOT NULL AND t.source <> '' RETURN DISTINCT t.source AS s ORDER BY s ASC",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs thread source page read",
+                "thread_read",
+                "nmem-server::rest_fs::ls_threads_in_source",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.source = $source AND t.id > $after RETURN t.id, t.title, t.updated_at ORDER BY t.id ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs thread meta lookup read",
+                "thread_read",
+                "nmem-server::rest_fs::render_thread_meta",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source RETURN t.id, t.thread_id, t.title, t.summary, t.message_count, t.source, t.created_at, t.updated_at, t.space_id, t.project, t.workspace LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs thread messages lookup read",
+                "thread_read",
+                "nmem-server::rest_fs::render_thread_messages.lookup",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source RETURN t.id, t.message_count, t.space_id LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs thread legacy messages read",
+                "thread_read",
+                "nmem-server::rest_fs::legacy_kuzu_messages_jsonl",
+            )
+            .with_cypher(
+                "MATCH (t:Thread {id: $thread_uuid})-[c:CONTAINS]->(m:Message) RETURN m.id, m.role, m.content, COALESCE(c.order_index, m.order_index), m.timestamp, m.token_count ORDER BY COALESCE(c.order_index, m.order_index)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest agent thread attachment title read",
                 "thread_read",
                 "nmem-server::rest_agent::attached_source.thread",
@@ -17490,6 +17794,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (s:Skill) WHERE s.stage = 'active' RETURN s ORDER BY s.updated_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs active skill listing read",
+                "skill_read",
+                "nmem-server::rest_fs::ls_skills",
+            )
+            .with_cypher(
+                "MATCH (s:Skill) WHERE s.stage = 'active' AND s.id > $after RETURN s.id, s.name, s.title, s.updated_at, s.version ORDER BY s.id ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs active skill detail lookup read",
+                "skill_read",
+                "nmem-server::rest_fs::fetch_active_skill",
+            )
+            .with_cypher(
+                "MATCH (s:Skill) WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.name, s.title, s.stage, s.version, s.created_at, s.updated_at LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
                 "mcp skill prefix lookup read",
@@ -20485,7 +20805,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 463);
+        assert_eq!(report.checks.len(), 470);
     }
 
     #[test]
@@ -20501,13 +20821,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 463);
-        assert_eq!(coverage.covered_checks, 463);
+        assert_eq!(coverage.required_checks, 470);
+        assert_eq!(coverage.covered_checks, 470);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 463);
+        assert_eq!(coverage_json["covered_checks"], 470);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -20537,10 +20857,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 463);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 470);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 463);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 470);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -20765,15 +21085,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 463);
-        assert_eq!(report.shadow_checks.len(), 463);
+        assert_eq!(report.primary_checks.len(), 470);
+        assert_eq!(report.shadow_checks.len(), 470);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            463
+            470
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -20782,7 +21102,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 463);
+        assert_eq!(cutover.matched_checks, 470);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
