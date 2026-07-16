@@ -343,6 +343,9 @@ artifact upload. The `nowledge-cypher-migration-gate <root> <shadow-name>
 Nowledge core fixture through `ExternalShadowCommand`, uses normalized Cypher
 coverage so scanner-generated `file:line:hash` names do not have to match
 semantic fixture names, and prints the same migration-gate bundle JSON.
+`skein-shadow-self` is a JSON-lines self-shadow process for protocol and CLI
+smoke testing; it exercises the process boundary but does not replace the
+required previous-wrapper parity run.
 
 Cloud integration should not embed Skein as canonical storage. Cloud can reuse
 Cypher parsing, logical planning, and graph projection semantics if useful, but

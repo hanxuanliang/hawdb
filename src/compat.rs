@@ -359,6 +359,13 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         let response = self.request(serde_json::json!({
             "op": "project_graph",
             "rel_type": check.rel_type,
+            "expected_incoming_nodes": check
+                .expected_incoming
+                .iter()
+                .map(|(node, _)| *node)
+                .collect::<Vec<_>>(),
+            "include_communities": !check.expected_communities.is_empty(),
+            "include_hierarchical_communities": !check.expected_hierarchical_communities.is_empty(),
         }))?;
         decode_external_projected_graph_response(&self.name, response)
     }
