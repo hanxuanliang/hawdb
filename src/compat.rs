@@ -14376,6 +14376,228 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "mcp evolves chain backward read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Memory)-[e:EVOLVES]->(b:Memory) WHERE b.id = $id RETURN a.id, a.title, a.content, e.content_relation, e.confidence, a.is_latest, a.unit_type LIMIT 1",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-chain-current".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("a.id", Value::String("mcp-chain-prev".to_string())),
+                        ("a.title", Value::String("MCP Chain Previous".to_string())),
+                        ("a.content", Value::String("previous content".to_string())),
+                        ("e.content_relation", Value::String("revises".to_string())),
+                        ("e.confidence", Value::Float(0.81)),
+                        ("a.is_latest", Value::Bool(false)),
+                        ("a.unit_type", Value::String("fact".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-chain-prev', title: 'MCP Chain Previous', content: 'previous content', is_latest: false, unit_type: 'fact'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-chain-current', title: 'MCP Chain Current', content: 'current content', is_latest: true, unit_type: 'fact'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Memory {id: 'mcp-chain-prev'}), (b:Memory {id: 'mcp-chain-current'}) CREATE (a)-[:EVOLVES {content_relation: 'revises', confidence: 0.81}]->(b)",
+                )),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp evolves chain forward read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Memory)-[e:EVOLVES]->(b:Memory) WHERE a.id = $id RETURN b.id, b.title, b.content, e.content_relation, e.confidence, b.is_latest, b.unit_type LIMIT 1",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-chain-current".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("b.id", Value::String("mcp-chain-next".to_string())),
+                        ("b.title", Value::String("MCP Chain Next".to_string())),
+                        ("b.content", Value::String("next content".to_string())),
+                        ("e.content_relation", Value::String("supersedes".to_string())),
+                        ("e.confidence", Value::Float(0.91)),
+                        ("b.is_latest", Value::Bool(true)),
+                        ("b.unit_type", Value::String("fact".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-chain-next', title: 'MCP Chain Next', content: 'next content', is_latest: true, unit_type: 'fact'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Memory {id: 'mcp-chain-current'}), (b:Memory {id: 'mcp-chain-next'}) CREATE (a)-[:EVOLVES {content_relation: 'supersedes', confidence: 0.91}]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m) WHERE m.id IN ['mcp-chain-prev', 'mcp-chain-current', 'mcp-chain-next'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp memory summary read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $id RETURN m.id, m.title, m.content, m.is_latest, m.unit_type, m.is_crystal, m.importance, m.metadata, m.lifecycle_state",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-summary-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("mcp-summary-memory".to_string())),
+                        ("m.title", Value::String("MCP Summary Memory".to_string())),
+                        ("m.content", Value::String("summary content".to_string())),
+                        ("m.is_latest", Value::Bool(true)),
+                        ("m.unit_type", Value::String("fact".to_string())),
+                        ("m.is_crystal", Value::Bool(false)),
+                        ("m.importance", Value::Float(0.73)),
+                        ("m.metadata", Value::String("{\"state\":\"active\"}".to_string())),
+                        ("m.lifecycle_state", Value::String("active".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-summary-memory', title: 'MCP Summary Memory', content: 'summary content', is_latest: true, unit_type: 'fact', is_crystal: false, importance: 0.73, metadata: '{\"state\":\"active\"}', lifecycle_state: 'active'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'mcp-summary-memory'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp graph node memory detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $id OPTIONAL MATCH (m)-[r]-() RETURN m.id, m.title, m.created_at, COUNT(r), m.content, m.is_crystal, m.is_latest, m.unit_type, m.importance, m.community_id",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-node-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("mcp-node-memory".to_string())),
+                        ("m.title", Value::String("MCP Node Memory".to_string())),
+                        ("m.created_at", Value::Int(1_700_000_050)),
+                        ("count(r)", Value::Int(1)),
+                        ("m.content", Value::String("node memory content".to_string())),
+                        ("m.is_crystal", Value::Bool(false)),
+                        ("m.is_latest", Value::Bool(true)),
+                        ("m.unit_type", Value::String("fact".to_string())),
+                        ("m.importance", Value::Float(0.62)),
+                        ("m.community_id", Value::Int(9830)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-node-memory', title: 'MCP Node Memory', created_at: 1700000050, content: 'node memory content', is_crystal: false, is_latest: true, unit_type: 'fact', importance: 0.62, community_id: 9830})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'mcp-node-memory-entity'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'mcp-node-memory'}), (e:Entity {id: 'mcp-node-memory-entity'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['mcp-node-memory', 'mcp-node-memory-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp graph node entity detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.id = $id OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, COUNT(m), e.description, e.community_id, e.pagerank_score",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-node-entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("e.id", Value::String("mcp-node-entity".to_string())),
+                        ("e.name", Value::String("MCP Node Entity".to_string())),
+                        ("e.entity_type", Value::String("concept".to_string())),
+                        ("count(m)", Value::Int(1)),
+                        ("e.description", Value::String("entity detail".to_string())),
+                        ("e.community_id", Value::Int(9831)),
+                        ("e.pagerank_score", Value::Float(0.44)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'mcp-node-entity', name: 'MCP Node Entity', entity_type: 'concept', description: 'entity detail', community_id: 9831, pagerank_score: 0.44})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-node-entity-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'mcp-node-entity-memory'}), (e:Entity {id: 'mcp-node-entity'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['mcp-node-entity', 'mcp-node-entity-memory'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp graph node thread detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.id = $id RETURN t.id, t.title, t.source, t.message_count",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-node-thread".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("t.id", Value::String("mcp-node-thread".to_string())),
+                        ("t.title", Value::String("MCP Node Thread".to_string())),
+                        ("t.source", Value::String("codex".to_string())),
+                        ("t.message_count", Value::Null),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'mcp-node-thread', title: 'MCP Node Thread', source: 'codex', message_count: null})",
+                )),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "mcp graph node thread message count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.id = $id OPTIONAL MATCH (t)-[:CONTAINS]->(msg:Message) RETURN COUNT(msg)",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("mcp-node-thread".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([("count(msg)", Value::Int(2))])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'mcp-node-msg-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Message {id: 'mcp-node-msg-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'mcp-node-thread'}), (m:Message {id: 'mcp-node-msg-1'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'mcp-node-thread'}), (m:Message {id: 'mcp-node-msg-2'}) CREATE (t)-[:CONTAINS]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['mcp-node-thread', 'mcp-node-msg-1', 'mcp-node-msg-2'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp graph all shortest path read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH p = (a)-[e* ALL SHORTEST 1..3]-(b) WHERE a.id = $from_id AND b.id = $to_id RETURN properties(nodes(p), 'id') AS node_ids, properties(nodes(p), 'name') AS names, length(p) AS hops",
@@ -15603,6 +15825,60 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (a:Memory)-[e:EVOLVES]->(b:Memory) WHERE b.id = $id RETURN a.id, a.title, e.content_relation, e.confidence, e.reviewed, a.is_latest",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp evolves chain backward read",
+                "mcp_read",
+                "nmem-server::mcp_server::walk_evolves_chain.backward",
+            )
+            .with_cypher(
+                "MATCH (a:Memory)-[e:EVOLVES]->(b:Memory) WHERE b.id = $id RETURN a.id, a.title, a.content, e.content_relation, e.confidence, a.is_latest, a.unit_type LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp evolves chain forward read",
+                "mcp_read",
+                "nmem-server::mcp_server::walk_evolves_chain.forward",
+            )
+            .with_cypher(
+                "MATCH (a:Memory)-[e:EVOLVES]->(b:Memory) WHERE a.id = $id RETURN b.id, b.title, b.content, e.content_relation, e.confidence, b.is_latest, b.unit_type LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp memory summary read",
+                "mcp_read",
+                "nmem-server::mcp_server::memory_summary",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id = $id RETURN m.id, m.title, m.content, m.is_latest, m.unit_type, m.is_crystal, m.importance, m.metadata, m.lifecycle_state",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp graph node memory detail read",
+                "mcp_read",
+                "nmem-server::mcp_server::lookup_graph_node.memory",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id = $id OPTIONAL MATCH (m)-[r]-() RETURN m.id, m.title, m.created_at, COUNT(r), m.content, m.is_crystal, m.is_latest, m.unit_type, m.importance, m.community_id",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp graph node entity detail read",
+                "mcp_read",
+                "nmem-server::mcp_server::lookup_graph_node.entity",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.id = $id OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, COUNT(m), e.description, e.community_id, e.pagerank_score",
+            ),
+            CompatibilityQueryCallSite::new(
+                "mcp graph node thread detail read",
+                "mcp_read",
+                "nmem-server::mcp_server::lookup_graph_node.thread",
+            )
+            .with_cypher("MATCH (t:Thread) WHERE t.id = $id RETURN t.id, t.title, t.source, t.message_count"),
+            CompatibilityQueryCallSite::new(
+                "mcp graph node thread message count read",
+                "mcp_read",
+                "nmem-server::mcp_server::lookup_graph_node.thread_legacy_count",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.id = $id OPTIONAL MATCH (t)-[:CONTAINS]->(msg:Message) RETURN COUNT(msg)",
             ),
             CompatibilityQueryCallSite::new(
                 "source revision history path read",
@@ -18938,7 +19214,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 426);
+        assert_eq!(report.checks.len(), 433);
     }
 
     #[test]
@@ -18954,13 +19230,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 426);
-        assert_eq!(coverage.covered_checks, 426);
+        assert_eq!(coverage.required_checks, 433);
+        assert_eq!(coverage.covered_checks, 433);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 426);
+        assert_eq!(coverage_json["covered_checks"], 433);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -18990,10 +19266,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 426);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 433);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 426);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 433);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -19218,15 +19494,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 426);
-        assert_eq!(report.shadow_checks.len(), 426);
+        assert_eq!(report.primary_checks.len(), 433);
+        assert_eq!(report.shadow_checks.len(), 433);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            426
+            433
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -19235,7 +19511,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 426);
+        assert_eq!(cutover.matched_checks, 433);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
