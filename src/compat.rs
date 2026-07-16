@@ -6131,6 +6131,181 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest fs community topic detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.community_id = $cid RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count LIMIT 1",
+                        BTreeMap::from([("cid".to_string(), Value::Int(170001))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("c.community_id", Value::Int(170001)),
+                        ("c.name", Value::String("REST FS Community".to_string())),
+                        ("c.ai_summary", Value::String("community summary".to_string())),
+                        (
+                            "c.description",
+                            Value::String("community description".to_string()),
+                        ),
+                        ("c.member_count", Value::Int(12)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'rest-fs-community-topic-1', community_id: 170001, name: 'REST FS Community', ai_summary: 'community summary', description: 'community description', member_count: 12})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community {id: 'rest-fs-community-topic-1'}) DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs crystal wiki detail read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.is_crystal = true AND (m.id = $key OR m.id STARTS WITH $key OR m.id CONTAINS $key) RETURN m.id, m.crystal_title, m.title, m.content, m.importance, m.unit_type, m.created_at LIMIT 1",
+                        BTreeMap::from([(
+                            "key".to_string(),
+                            Value::String("rest-fs-crystal-detail-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "m.id",
+                            Value::String("rest-fs-crystal-detail-1".to_string()),
+                        ),
+                        (
+                            "m.crystal_title",
+                            Value::String("REST FS Crystal".to_string()),
+                        ),
+                        ("m.title", Value::String("Crystal fallback".to_string())),
+                        ("m.content", Value::String("crystal body".to_string())),
+                        ("m.importance", Value::Float(0.91)),
+                        ("m.unit_type", Value::String("insight".to_string())),
+                        ("m.created_at", Value::Int(1700000110)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-crystal-detail-1', is_crystal: true, crystal_title: 'REST FS Crystal', title: 'Crystal fallback', content: 'crystal body', importance: 0.91, unit_type: 'insight', created_at: 1700000110})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-fs-crystal-detail-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs crystal page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.is_crystal = true AND m.id > $after RETURN m.id, m.title, m.crystal_title, m.is_crystal, m.updated_at, m.metadata, m.is_latest ORDER BY m.id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "after".to_string(),
+                                Value::String("zzzz-rest-fs-crystal-page-0".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "m.id",
+                            Value::String("zzzz-rest-fs-crystal-page-1".to_string()),
+                        ),
+                        ("m.title", Value::String("Crystal Page".to_string())),
+                        (
+                            "m.crystal_title",
+                            Value::String("Crystal Page Title".to_string()),
+                        ),
+                        ("m.is_crystal", Value::Bool(true)),
+                        ("m.updated_at", Value::Int(1700000111)),
+                        ("m.metadata", Value::String("{\"state\":\"active\"}".to_string())),
+                        ("m.is_latest", Value::Bool(true)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'zzzz-rest-fs-crystal-page-1', title: 'Crystal Page', crystal_title: 'Crystal Page Title', is_crystal: true, updated_at: 1700000111, metadata: '{\"state\":\"active\"}', is_latest: true})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'zzzz-rest-fs-crystal-page-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs imported artifact source page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.id > $after RETURN s.id, s.original_name, s.mime_type, s.updated_at ORDER BY s.id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "after".to_string(),
+                                Value::String("zzzz-rest-fs-artifact-source-0".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("zzzz-rest-fs-artifact-source-1".to_string()),
+                        ),
+                        (
+                            "s.original_name",
+                            Value::String("Artifact Source.md".to_string()),
+                        ),
+                        ("s.mime_type", Value::String("text/markdown".to_string())),
+                        ("s.updated_at", Value::Int(1700000112)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'zzzz-rest-fs-artifact-source-1', original_name: 'Artifact Source.md', mime_type: 'text/markdown', updated_at: 1700000112})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'zzzz-rest-fs-artifact-source-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs generated artifact source page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.id > $after AND s.metadata IS NOT NULL AND s.metadata CONTAINS $marker RETURN s.id, s.original_name, s.updated_at ORDER BY s.id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "after".to_string(),
+                                Value::String("zzzz-rest-fs-generated-source-0".to_string()),
+                            ),
+                            ("marker".to_string(), Value::String("report".to_string())),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("zzzz-rest-fs-generated-source-1".to_string()),
+                        ),
+                        (
+                            "s.original_name",
+                            Value::String("Generated Report".to_string()),
+                        ),
+                        ("s.updated_at", Value::Int(1700000113)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'zzzz-rest-fs-generated-source-1', original_name: 'Generated Report', metadata: '{\"artifact_kind\":\"report\"}', updated_at: 1700000113})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'zzzz-rest-fs-generated-source-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "source list fallback page read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (s:Source) RETURN s.id, COALESCE(s.original_name, ''), COALESCE(s.summary, ''), COALESCE(s.mime_type, ''), COALESCE(s.source_type, 'file'), COALESCE(s.source_url, ''), COALESCE(s.size_bytes, 0), COALESCE(s.version, 1), COALESCE(s.memory_count, 0), COALESCE(s.chunk_count, 0), COALESCE(s.lifecycle_state, 'indexed'), COALESCE(s.space_id, 'default'), s.created_at, s.updated_at ORDER BY s.id SKIP $offset LIMIT $limit",
@@ -16834,6 +17009,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source) WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.original_name, s.mime_type, s.parsed_path, s.summary, s.size_bytes, s.chunk_count, s.memory_count, s.created_at, s.updated_at, s.space_id, s.lifecycle_state LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
+                "rest fs imported artifact source page read",
+                "source_read",
+                "nmem-server::rest_fs::ls_imported_artifacts",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.id > $after RETURN s.id, s.original_name, s.mime_type, s.updated_at ORDER BY s.id ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs generated artifact source page read",
+                "source_read",
+                "nmem-server::rest_fs::ls_artifacts",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.id > $after AND s.metadata IS NOT NULL AND s.metadata CONTAINS $marker RETURN s.id, s.original_name, s.updated_at ORDER BY s.id ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "source list fallback page read",
                 "source_read",
                 "nmem-server::source_repo::list_sources_page",
@@ -18994,6 +19185,30 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE e.community_id = $cid OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, COUNT(r) AS mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "rest fs community topic detail read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::render_single_topic_page.community",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.community_id = $cid RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs crystal wiki detail read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::render_single_crystal_page",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.is_crystal = true AND (m.id = $key OR m.id STARTS WITH $key OR m.id CONTAINS $key) RETURN m.id, m.crystal_title, m.title, m.content, m.importance, m.unit_type, m.created_at LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs crystal page read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::fetch_visible_crystal_rows_page",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.is_crystal = true AND m.id > $after RETURN m.id, m.title, m.crystal_title, m.is_crystal, m.updated_at, m.metadata, m.is_latest ORDER BY m.id ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "wiki topic crystal ranking read",
                 "wiki_export_read",
                 "nmem-server::rest_fs::render_single_topic_page.crystals",
@@ -20805,7 +21020,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 470);
+        assert_eq!(report.checks.len(), 475);
     }
 
     #[test]
@@ -20821,13 +21036,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 470);
-        assert_eq!(coverage.covered_checks, 470);
+        assert_eq!(coverage.required_checks, 475);
+        assert_eq!(coverage.covered_checks, 475);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 470);
+        assert_eq!(coverage_json["covered_checks"], 475);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -20857,10 +21072,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 470);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 475);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 470);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 475);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -21085,15 +21300,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 470);
-        assert_eq!(report.shadow_checks.len(), 470);
+        assert_eq!(report.primary_checks.len(), 475);
+        assert_eq!(report.shadow_checks.len(), 475);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            470
+            475
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -21102,7 +21317,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 470);
+        assert_eq!(cutover.matched_checks, 475);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
