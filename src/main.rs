@@ -1,4 +1,7 @@
-use skein::{scan_nowledge_query_inventory_to_json, Database, Result, SkeinError};
+use skein::{
+    scan_nowledge_query_inventory_cypher_coverage_to_json, scan_nowledge_query_inventory_to_json,
+    Database, Result, SkeinError,
+};
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
@@ -6,6 +9,12 @@ fn main() -> Result<()> {
         if command == "scan-nowledge-inventory" {
             let root = args.next().unwrap_or_else(|| ".".to_string());
             let json = scan_nowledge_query_inventory_to_json(root)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            return Ok(());
+        }
+        if command == "scan-nowledge-cypher-coverage" {
+            let root = args.next().unwrap_or_else(|| ".".to_string());
+            let json = scan_nowledge_query_inventory_cypher_coverage_to_json(root)?;
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
         }

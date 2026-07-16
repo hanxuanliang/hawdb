@@ -181,7 +181,10 @@ cutover gate into one migration decision. `scan_nowledge_query_inventory` and
 the `scan-nowledge-inventory` CLI command provide a production graph-source
 scanner for Nowledge Cypher string literals, filtering out non-graph content
 store SQL, prompt text, tests, benches, and smoke binaries while emitting the
-same audited JSON inventory artifact. Current local scans find 349
+same audited JSON inventory artifact. `scan-nowledge-cypher-coverage` emits the
+same coverage report shape after matching scanner-generated call sites to
+fixture checks by normalized Cypher text, preserving source metadata without
+requiring duplicate semantic fixture names. Current local scans find 349
 `nmem-graph/src` call-site entries, 696 `nmem-server/src` entries, and 6
 additional graph-facing harness/scheduler/search entries, including
 AugmentationJob lifecycle, projected graph, relationship-creation queries, and

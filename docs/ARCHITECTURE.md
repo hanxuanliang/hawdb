@@ -323,7 +323,10 @@ validates this through `build_compatibility_query_inventory_from_json`, rejects
 duplicate check names, and can export the audited artifact through
 `compatibility_query_inventory_to_json` for CI reuse. Coverage and shadow gates
 then compare that inventory against the public compatibility fixture instead of
-relying on an informal checklist. Gate reports can be exported as JSON through
+relying on an informal checklist. `scan-nowledge-cypher-coverage` scans the same
+source tree and reports fixture coverage by normalized Cypher text, which lets
+scanner-generated `file:line:hash` call-site names map to existing semantic
+fixture names without duplicating fixtures. Gate reports can be exported as JSON through
 the coverage, inventory gate, shadow cutover, and migration gate report helpers;
 their `decision` fields are lowercase `ready` or `blocked` strings so CI does
 not need to parse Rust debug output. `assess_compatibility_migration_gate_bundle`

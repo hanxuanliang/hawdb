@@ -54,8 +54,9 @@ pub use compat::{
 pub use cypher::RelationshipDirection;
 pub use error::{Result, SkeinError};
 pub use nowledge_inventory::{
-    scan_nowledge_query_inventory, scan_nowledge_query_inventory_to_json,
-    scan_nowledge_query_inventory_with_options, NowledgeInventoryScanOptions,
+    scan_nowledge_query_inventory, scan_nowledge_query_inventory_cypher_coverage_to_json,
+    scan_nowledge_query_inventory_to_json, scan_nowledge_query_inventory_with_options,
+    NowledgeInventoryScanOptions,
 };
 pub use schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,

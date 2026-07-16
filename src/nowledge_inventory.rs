@@ -1,5 +1,7 @@
 use crate::compat::{
-    build_compatibility_query_inventory, CompatibilityQueryCallSite, CompatibilityQueryInventory,
+    assess_query_inventory_cypher_coverage, build_compatibility_query_inventory,
+    compatibility_inventory_coverage_report_to_json, nowledge_memory_core_fixture,
+    CompatibilityQueryCallSite, CompatibilityQueryInventory,
 };
 use crate::error::{Result, SkeinError};
 use std::fs;
@@ -98,6 +100,15 @@ pub fn scan_nowledge_query_inventory_to_json(root: impl AsRef<Path>) -> Result<s
     Ok(crate::compat::compatibility_query_inventory_to_json(
         &inventory,
     ))
+}
+
+pub fn scan_nowledge_query_inventory_cypher_coverage_to_json(
+    root: impl AsRef<Path>,
+) -> Result<serde_json::Value> {
+    let inventory = scan_nowledge_query_inventory(root)?;
+    let fixture = nowledge_memory_core_fixture();
+    let coverage = assess_query_inventory_cypher_coverage(&fixture, &inventory);
+    Ok(compatibility_inventory_coverage_report_to_json(&coverage))
 }
 
 fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
@@ -452,8 +463,10 @@ fn path_to_slash_string(path: &Path) -> String {
 mod tests {
     use super::{
         classify_query_family, extract_rust_string_literals, normalize_cypher_literal,
-        scan_source_file,
+        scan_nowledge_query_inventory_cypher_coverage_to_json, scan_source_file,
     };
+    use std::fs;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn extracts_cooked_and_raw_rust_cypher_literals() {
@@ -553,5 +566,40 @@ mod tests {
         ));
         assert!(scan_source_file("crates/nmem-graph/src/community.rs"));
         assert!(scan_source_file("crates/nmem-server/src/rest_fs.rs"));
+    }
+
+    #[test]
+    fn scanned_cypher_coverage_reports_fixture_matches() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-inventory-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let coverage = scan_nowledge_query_inventory_cypher_coverage_to_json(&root).unwrap();
+
+        assert_eq!(coverage["fixture"], "nowledge-memory-core");
+        assert_eq!(coverage["required_checks"], 1);
+        assert_eq!(coverage["covered_checks"], 1);
+        assert_eq!(coverage["missing_checks"].as_array().unwrap().len(), 0);
+        assert_eq!(
+            coverage["extra_fixture_checks"].as_array().unwrap().len(),
+            273
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
