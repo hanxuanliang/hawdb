@@ -8,27 +8,77 @@ not an LSM tree and it does not depend on RocksDB or another storage engine.
 Files:
 
 - `checkpoint.skein`: full durable snapshot of catalog tokens, nodes, and
-  relationships.
+  relationships, written through the default zstd compression envelope.
+- `manifest.skein`: checksummed checkpoint publication metadata with checkpoint
+  epoch, checkpoint commit epoch, WAL replay start LSN, and next WAL LSN.
+- `projected_graphs.skein`: checksummed, checkpoint-generated CSR/CSC
+  projection artifacts derived from persisted projected graph definitions,
+  written through the default zstd compression envelope.
 - `wal.skein`: append-only committed mutation log.
 
 Recovery:
 
-1. Load `checkpoint.skein` when present.
-2. Verify the checkpoint checksum.
-3. Replay valid WAL entries in order.
-4. Stop replay at a torn tail or checksum mismatch.
-5. Rebuild in-memory adjacency indexes from relationship records.
+1. Load `manifest.skein` when present and verify its checksum.
+2. Reject unsupported manifest storage versions before using manifest state.
+3. Load `checkpoint.skein` when present.
+4. Verify the checkpoint checksum.
+5. Reject unsupported checkpoint storage versions before importing records.
+6. Replay valid WAL entries in order. When configured, the WAL replay entry
+   limit is checked after a record is decoded and before applying it.
+7. In the default recovery mode, stop replay at a torn tail or checksum
+   mismatch. In strict recovery mode, reject the open instead.
+8. Rebuild in-memory adjacency indexes from relationship records.
+9. Verify projected graph artifacts when present. Corrupt artifacts are
+   discarded because they are rebuildable derived state, not canonical graph
+   state.
+
+Checkpoint, manifest, and projected graph artifact publication write a
+temporary file, sync the file contents, atomically rename it into place, and
+sync the parent directory. Checkpoint and projected graph artifact payloads use
+zstd by default inside a checksummed binary envelope while preserving legacy
+plain-text read compatibility. Manifest and WAL files remain plain text so boot
+metadata and append-only mutation records stay inspectable and avoid compression
+work on every mutation. This keeps publication durable while avoiding
+per-mutation directory syncs, manifest writes, or WAL compression write
+amplification.
+Search projection snapshots use the same temporary-file, file sync, atomic
+rename, and parent-directory sync boundary when `SearchIndex::checkpoint`
+publishes `search_projection.skein`; the snapshot uses the same zstd envelope
+by default. The projection remains rebuildable and is not part of canonical
+graph WAL recovery.
 
 WAL entries can represent either a single mutation or a batch commit record.
 The relationship pattern create path uses a single batch record for source node,
 target node, and relationship creation. Recovery only applies a batch after its
 whole record passes checksum validation, so a torn tail cannot leave behind a
 half-created path.
+`max_wal_replay_entries` counts these top-level WAL records, not the child
+operations inside a batch, so a budgeted recovery either applies a complete
+batch record or rejects the open before applying the next record.
 
 `DatabaseTransaction` buffers mutation statements and commits them as one WAL
-batch. Rollback drops the buffered mutations without touching the store. This is
-the first transaction slice; it does not yet provide snapshot read transactions,
-MVCC visibility, or concurrent writer coordination.
+batch. Rollback drops the buffered mutations without touching the store.
+`DatabaseReadTransaction` owns an immutable catalog and graph snapshot for
+read-only Cypher execution. It rejects mutation statements, does not observe
+later commits, and remains usable after the writer checkpoints. Active read
+transactions register their snapshot commit epoch in a process-local reader pin
+registry and unregister on drop. This is an API snapshot slice. The store also
+tracks a commit epoch and publishes a checksummed manifest after each successful
+checkpoint. The manifest records the checkpoint epoch, the checkpoint-covered
+commit epoch, the oldest active reader commit epoch, the safe reclamation commit
+epoch, the WAL replay start LSN, and the next WAL LSN. This does not yet provide
+page-level MVCC visibility, physical page/segment reclamation, or concurrent
+writer coordination. `Database::storage_reclamation_watermark` exposes the same
+boundary in structured form for future page/segment garbage collection: current
+commit epoch, optional checkpoint epoch and checkpoint commit epoch, active
+oldest reader epoch, computed safe reclaim commit epoch, and whether the store
+is durable.
+
+`Database::storage_version` exposes the currently supported storage version.
+`GraphStore::open` also validates the stored version in both the manifest and
+checkpoint images at boot. Unsupported versions fail with an explicit storage
+compatibility error instead of falling through to a generic parse error or a
+checksum-corruption path.
 
 The implementation currently persists:
 
@@ -37,14 +87,127 @@ The implementation currently persists:
 - node records
 - relationship records
 - relationship properties
+- node and relationship table descriptors with durable schema state
+- property schema descriptors for node and relationship tables
+- unique node-property constraint descriptors
+- composite equality index descriptors
+- projected graph definitions
+- checkpoint-generated projected graph CSR/CSC artifacts
 - outgoing adjacency index
 - incoming adjacency index
 
-The implementation also maintains a rebuildable in-memory property equality
-index keyed by `(label_id, property, value)`. The optimizer can choose
-`IndexNodeSeek` for simple label plus property equality predicates. The
-adjacency and property indexes are rebuilt from canonical records after
-checkpoint load or WAL replay. They are not separate canonical state.
+The implementation also maintains rebuildable in-memory property indexes. The
+single-property index is keyed by `(label_id, property, value)`, the composite
+equality index is keyed by `(label_id, [(property, value), ...])`, and the
+full-text candidate index is keyed by `(label_id, property, ngram)`. The
+catalog stores persistent equality, composite equality, range, and full-text
+index descriptors, while the execution indexes remain rebuildable from
+canonical records after checkpoint load or WAL replay. The optimizer can choose
+`IndexNodeSeek` for simple label plus property equality predicates when an
+equality index descriptor exists, `IndexNodeCompositeSeek` for conjunctions
+that bind every property in a composite equality descriptor, `IndexNodeTextSeek`
+for `CONTAINS` predicates backed by a full-text descriptor, and
+`IndexNodeRangeSeek` for single-bound and conjunctive bounded range predicates
+when a range index descriptor exists. Text seeks use the ngram index only as a
+candidate source and retain a residual `FilterExec` so exact string containment
+semantics remain authoritative. Conjunctive range seeks keep the complete `AND`
+predicate as a residual filter while using merged lower and upper bounds as the
+access path. Statistics now include per-label/property distinct counts and
+bounded sorted value histograms. Histograms use deterministic adaptive samples:
+small distinct sets remain exact, medium sets keep up to 256 values, and large
+sets keep up to 512 values while always retaining the minimum and maximum
+sampled bounds. Range costing uses these histograms for selectivity estimates.
+Statistics are rebuildable derived data and are written to checkpoints for
+observability and future costing.
+
+The catalog also stores persistent property constraint descriptors.
+Node unique constraints use
+`CREATE CONSTRAINT ON :Label(property) ASSERT UNIQUE`. Relationship unique
+constraints use `CREATE CONSTRAINT ON -[:TYPE(property)]-> ASSERT UNIQUE`.
+Node existence constraints use
+`CREATE CONSTRAINT ON :Label(property) ASSERT EXISTS` or the equivalent
+`ASSERT NOT NULL`. Relationship existence constraints use
+`CREATE CONSTRAINT ON -[:TYPE(property)]-> ASSERT EXISTS` or the equivalent
+`ASSERT NOT NULL`. Constraint creation scans existing canonical records and
+fails if duplicate non-null property values already exist for the constrained
+node label or relationship type, or if any constrained node or relationship is
+missing the required property or stores `NULL`. Subsequent node creation,
+relationship pattern creation, merge-created records, and `MATCH ... SET`
+updates are validated against the active descriptors before appending the WAL
+batch.
+
+Node and relationship table descriptors are persistent catalog metadata created
+by `CREATE NODE TABLE Name` and `CREATE RELATIONSHIP TABLE Name`. Descriptor
+state transitions are supported through `ALTER NODE TABLE Name SET STATE State`
+and `ALTER RELATIONSHIP TABLE Name SET STATE State`, where `State` is
+`DELETE_ONLY`, `WRITE_ONLY`, `BACKFILL`, `VALIDATING`, `PUBLIC`, or `GC`. Table
+creation also ensures the matching label or relationship type token exists.
+
+Property schema descriptors are persistent catalog metadata created by
+`CREATE PROPERTY ON NODE TABLE Name(property) TYPE Type` and
+`CREATE PROPERTY ON RELATIONSHIP TABLE Name(property) TYPE Type`, with optional
+`NOT NULL`. Supported types are `ANY`, `BOOL`, `INT`, `FLOAT`, `STRING`, and
+`LIST`.
+Descriptor creation validates existing records for that table before appending
+the WAL batch. Later node creation, relationship pattern creation, merge-created
+records, and `MATCH ... SET` updates are validated against the active property
+schema descriptors before any WAL append. Property descriptor state transitions
+are supported through
+`ALTER PROPERTY ON NODE TABLE Name(property) SET STATE State` and
+`ALTER PROPERTY ON RELATIONSHIP TABLE Name(property) SET STATE State`. Only
+`PUBLIC` table and property descriptors participate in write-time and recovery
+validation. Promoting a property descriptor to `PUBLIC` validates existing
+records before appending the WAL batch.
+
+Schema maintenance is explicit. `Database::run_schema_maintenance` scans table
+and property descriptors, validates the next state before appending WAL, and
+then writes all selected maintenance operations as one grouped WAL batch.
+`BACKFILL` descriptors advance to `VALIDATING`, `VALIDATING` descriptors advance
+to `PUBLIC` only after validation, and `GC` descriptors are tombstoned from the
+catalog. WAL replay applies descriptor GC before the database is exposed, while
+record pages and index artifacts remain separately rebuildable or reclaimable.
+
+Checkpoint files include a statistics snapshot for observability and future
+costing: total node count, total relationship count, per-label counts,
+per-relationship-type counts, relationship-type source counts,
+label/type/label path cardinalities, bounded exact path cardinalities up to the
+current statistics hop limit, and per-label/property distinct-value counts. The
+statistics snapshot also records the commit epoch at which it was computed, the
+histogram sample limit, and whether each per-property histogram is an exact
+value set or a bounded deterministic sample. These statistics are derived data;
+the store recomputes the live API view from canonical records and accepts old
+checkpoints that do not contain statistics lines.
+
+Checkpoint also writes `projected_graphs.skein` for every persisted projected
+graph definition. The artifact records its format version, projection epoch,
+covered commit epoch, node IDs, CSR outgoing offsets and targets, and CSC
+incoming offsets and sources. It is checksum-protected and atomically replaced.
+Recovery parses valid artifacts into an in-memory cache. Graph algorithm
+execution reuses a cached artifact only when the artifact commit epoch equals
+the store commit epoch and the stored definition still matches the active
+projected graph definition; otherwise it rebuilds from canonical records.
+Recovery also filters the in-memory artifact cache with the same commit-epoch
+and definition checks, so stale artifacts left by a later WAL replay or changed
+projection definition are not exposed through projected graph status metadata.
+`Database::rebuild_projected_graph_artifacts` can refresh these derived
+artifacts independently of checkpoint publication. `Database::rebuild_derived_artifacts`
+wraps the same projected graph refresh in a report-oriented orchestration API
+that returns artifact type, name, reusable-state transition, projection epoch,
+commit epoch, and graph cardinalities. Neither path appends WAL, truncates WAL,
+or publishes a new checkpoint manifest; they only advance the projection epoch
+and atomically replace `projected_graphs.skein`.
+`Database::schedule_derived_artifact_rebuild` and
+`Database::run_next_derived_artifact_job` add a small embedded job state machine
+for these projected graph artifacts. Jobs expose pending/running/succeeded/failed
+state, attempts, and last error without adding threads or hiding rebuild
+failures.
+
+Search projection rebuild has the same orchestration shape at the search layer:
+`SearchIndex::rebuild_derived_artifacts` reports the search projection artifact
+type, document counts before and after rebuild, scanned graph nodes, indexed
+documents, and lifecycle-marker state. It still uses the bounded all-or-nothing
+graph-to-search rebuild path, so a row-limit failure keeps the previous search
+projection intact.
 
 ## Durability Policy
 
@@ -89,24 +252,22 @@ layout should split sparse and dense adjacency:
 This is not a production page store yet:
 
 - no MVCC snapshots
-- no snapshot read transaction API
 - no page cache
-- no segment manifest
-- no delayed garbage collection
+- no delayed garbage collection or reclamation policy
 - no property spill blocks
-- no persistent index descriptors or index statistics
+- no cost model that consumes persistent statistics for join ordering
 - no columnar property segments
-- no CSR/CSC analytical projection
-- no relationship delete/update path
+- no blob/content parser job runtime
 
 It is a correctness-first recovery slice that keeps the public direction
 aligned with the intended Adaptive Native Graph Store.
 
 ## Next Storage Tasks
 
-1. Add snapshot read transactions and MVCC reader isolation.
-2. Add a manifest file with checkpoint epoch and WAL replay boundary.
+1. Add page-level MVCC reader isolation.
+2. Add physical page/segment reclamation using pinned manifest epochs.
 3. Add sparse adjacency blocks before dense adjacency segments.
 4. Add property spill blocks for large values.
-5. Add persistent index descriptors and richer index statistics.
-6. Add CSR/CSC projection generation as rebuildable checkpoint artifacts.
+5. Add richer index statistics and text analyzer parity.
+6. Add blob/content parser job integration at the boundary outside the graph
+   kernel.

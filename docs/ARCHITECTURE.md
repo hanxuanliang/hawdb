@@ -42,7 +42,8 @@ must cover the used surface before it can replace that dependency:
 - ACID transactions with explicit begin, commit, and rollback
 - checkpoint and WAL recovery
 - storage compatibility/version checks
-- projected graph lifecycle and basic algorithm entry points
+- projected graph lifecycle and Kuzu-style algorithm procedure entry points
+  for `project_graph`, `page_rank`, and `louvain`
 
 Arrow integration is not part of the replacement boundary. Nowledge stores graph
 identity and scalar properties in the graph database, while vector search remains
@@ -50,20 +51,36 @@ outside the graph engine.
 
 ## Crate Layout
 
+Skein follows Chryso's workspace-and-facade layout. The root crate remains the
+stable embedded facade, while implementation crates are split out as the
+interfaces harden. The current crate split starts with `skein-core`; parser,
+planner, optimizer, storage, executor, search, and API modules remain in the
+root crate until their contracts are ready to freeze.
+
 ```text
 crates/
-  skein-core/          errors, values, ids, common data model
-  skein-cypher/        lexer, parser, AST, parameter model
-  skein-catalog/       labels, relationship types, property schema, stats
-  skein-planner/       semantic analysis, logical plan, physical plan
-  skein-optimizer/     Cascades memo, rules, costing, properties, trace
-  skein-storage/       embedded persistence, WAL, MVCC, indexes
-  skein-executor/      physical operators and query execution
-  skein-api/           stable embedded API facade
+  core/                errors, values, ids, catalog names, schema descriptors
+  cypher/              lexer, parser, AST, parameter model
+  catalog/             labels, relationship types, property schema, stats
+  planner/             semantic analysis, logical plan, physical plan
+  optimizer/           Cascades memo, rules, costing, properties, trace
+  storage/             embedded persistence, WAL, MVCC, indexes
+  executor/            physical operators and query execution
+  api/                 stable embedded API facade
 ```
 
-The public API should live in `skein-api`. Internal crates should be allowed to
-evolve while the embedded API stays small and stable.
+The public facade should stay in the root `skein` crate. Internal crates should
+be allowed to evolve while the embedded API stays small and stable.
+
+Inside the root crate, larger subsystems should still be split by ownership. The
+current Cypher module uses:
+
+```text
+src/cypher.rs          public facade and re-exports
+src/cypher/ast.rs      syntax-only statement and expression types
+src/cypher/parser.rs   cursor-based parser implementation
+src/cypher/tests.rs    parser coverage for the supported subset
+```
 
 ## Data Model
 
@@ -90,7 +107,8 @@ The initial storage engine should optimize for correctness and embeddability:
 - column families or logical trees for nodes, relationships, properties, and
   indexes
 - adjacency indexes by `(source, type, target)` and `(target, type, source)`
-- property indexes for high-selectivity equality and range filters
+- property indexes for high-selectivity equality, composite equality, range,
+  and text filters
 - catalog metadata versioned independently from data pages
 
 The storage API should be iterator-oriented. The executor should be able to
@@ -113,6 +131,18 @@ The semantic graph query model is a separate layer between AST and logical plan.
 It resolves labels, relationship types, variable scopes, property references,
 and cardinality constraints. This keeps parser syntax compatibility separate
 from planning semantics.
+
+The Cypher parser should stay systematic as the supported subset grows. The AST
+types define syntax data only; parser entry points dispatch by top-level
+statement family; reusable cursor helpers own keyword matching, token
+expectations, delimiter handling, whitespace movement, and end-of-input checks.
+Statement parsers should compose those helpers rather than open-coding byte
+movement or separator loops. This keeps syntax changes reviewable and avoids
+leaking semantic validation into parsing.
+This mirrors the `parser_yacc` practice in Chryso: grammar recognition, AST
+construction, and semantic validation remain separate concerns. The current
+hand-written parser should preserve that boundary until the Cypher grammar is
+large enough to justify a generated lexer/parser crate.
 
 ## Logical Plan
 
@@ -148,6 +178,8 @@ Core physical operators:
 
 - `SeqNodeScan`
 - `IndexNodeSeek`
+- `IndexNodeCompositeSeek`
+- `IndexNodeTextSeek`
 - `SeqRelScan`
 - `AdjacencyExpand`
 - `ExpandIntoCheck`
@@ -171,11 +203,15 @@ Skein should use a Cascades model similar to Chryso:
 - `GroupExpr`: stores an operator plus child group references.
 - `Rule`: transforms logical expressions into equivalent logical alternatives.
 - `ImplementationRule`: maps logical expressions to physical alternatives.
-- `CostModel`: scores physical alternatives using graph statistics.
+- `CostModel`: scores physical alternatives using graph statistics. The current
+  slice applies this to scan-vs-index-seek choices and records a recursive
+  selected-plan row/cost summary that includes bounded expand estimates.
 - `PhysicalProperties`: required and delivered ordering, distinctness, and
   binding properties.
 - `OptimizerTrace`: deterministic diagnostics for rules, groups, candidates,
-  costs, warnings, and search limits.
+  costs, warnings, and search limits. If a logical plan exceeds
+  `OptimizerConfig::max_groups`, Skein does not build an oversized memo; it
+  records a budget warning and selects a deterministic direct physical fallback.
 
 Unlike Chryso, Skein needs graph-specific properties:
 
@@ -222,6 +258,8 @@ The catalog should track:
 - property distinct count
 - optional histogram or top-k values for indexed properties
 - degree distribution summaries per label/type pair
+- per-hop exact/fallback path cardinality estimates for bounded expands
+- selected physical plan row and cost estimates for optimizer diagnostics
 
 The first cost model can be simple, but it must be structured enough to improve
 without changing optimizer APIs.
@@ -251,6 +289,31 @@ The replacement should preserve the current local wrapper shape:
 - recovery path for WAL/lock sidecars
 - projected graph operations as rebuildable outputs, not canonical data
 
+`NowledgeGraphAdapter` is the typed front door for this local wrapper shape. It
+accepts `NowledgeGraphStatement` values containing Cypher text plus typed
+parameters, and exposes query, explain, and grouped mutation transaction
+execution through the same planner and storage paths as `Database`. This keeps
+the compatibility boundary parameterized and reviewable without adding an ACL
+layer to the embedded built-in core.
+
+Migration gates use a machine-readable query inventory. `scan-nowledge-inventory`
+walks Nowledge Rust source files, extracts conservative Cypher string-literal
+call sites, classifies them as read, mutation, schema, procedure, or transaction
+control, and emits the audited `required_checks` JSON artifact. The lower-level
+JSON importer also accepts scanner-shaped `name` plus `call_sites` objects; each
+call site has `name`, `query_family`, `source`, and optional `cypher`. Skein
+validates this through `build_compatibility_query_inventory_from_json`, rejects
+duplicate check names, and can export the audited artifact through
+`compatibility_query_inventory_to_json` for CI reuse. Coverage and shadow gates
+then compare that inventory against the public compatibility fixture instead of
+relying on an informal checklist. Gate reports can be exported as JSON through
+the coverage, inventory gate, shadow cutover, and migration gate report helpers;
+their `decision` fields are lowercase `ready` or `blocked` strings so CI does
+not need to parse Rust debug output. `assess_compatibility_migration_gate_bundle`
+packages the four reports into one result, and
+`compatibility_migration_gate_bundle_to_json` preserves the same structure for
+artifact upload.
+
 Cloud integration should not embed Skein as canonical storage. Cloud can reuse
 Cypher parsing, logical planning, and graph projection semantics if useful, but
 the execution backend remains PostgreSQL-backed facts and edges.
@@ -267,6 +330,12 @@ typed projection rows from canonical graph nodes into a temporary map, then
 replaces the in-memory projection only after the configured row bound is not
 exceeded. Successful rebuilds clear projection lifecycle markers; failed rebuilds
 leave the previous projection intact and keep a full-reindex marker.
+Persistent search projection snapshots publish through a synced temporary file,
+atomic rename, and parent-directory sync, while remaining rebuildable projection
+state outside the graph WAL.
+`SearchIndex::rebuild_derived_artifacts` wraps the full rebuild path in a
+report-oriented orchestration API with document counts, scanned nodes, indexed
+documents, and lifecycle-marker state.
 
 Metadata-only repairs use the same graph-derived projection row mapping but only
 replace document metadata for already-present projection rows. They preserve
@@ -274,12 +343,126 @@ existing titles, text content, and embeddings. If repair discovers missing rows,
 it marks full reindex as needed because metadata repair cannot create the absent
 search documents without becoming a rebuild.
 
+Embedding lifecycle is tracked by an explicit model manifest. The search
+projection persists the embedding model name, optional model version, and vector
+dimension next to the snapshot. Row writes must match the manifest dimension,
+query vectors with mismatched dimensions degrade to the text leg, and model or
+dimension manifest changes mark full reindex as needed instead of silently
+reusing stale vectors.
+
+The text leg uses BM25-style scoring rather than simple token coverage:
+case-insensitive tokenizer output preserves Nowledge-style underscore
+identifiers, splits camelCase/snake_case/kebab/path-like identifiers, creates
+adjacent chunk bigrams, splits acronym-to-titlecase technical identifiers such
+as `LSMTree` and `HTTPServer`, normalizes common English suffixes for
+memory/source/thread-style terms, and expands conservative knowledge-retrieval
+aliases such as `rag`, `graph_rag`, `graph_retrieval`, and `kg`. Conservative
+English stopwords are removed before query scoring, corpus statistics, and
+matched-term reporting, while raw compound identifiers such as `the_source`
+remain searchable. Term frequency affects rank, inverse document frequency is
+computed from the current projection, and document length normalization prevents
+verbose rows from dominating short focused matches. This keeps text fallback
+useful while the projection remains rebuildable.
+
+Search hits expose the information needed by a knowledge retrieval surface:
+fused RRF score, vector score, text score, vector rank, text rank, fallback
+reasons, projection kind, external ID, source ID, matched analyzer terms, and
+projection freshness derived from the current projection marker and embedding
+manifest state. Hybrid ranking uses reciprocal-rank fusion over the vector and
+text child retrievers, preserving each child position for explainability. Callers
+that need bounded candidate growth can use `SearchIndex::search_with_options`
+with a rank window, which limits which child candidates participate in RRF while
+still reporting each child's total candidate count. The same options also carry
+exact-match metadata filters such as `kind` or `source_id`; filters are applied
+before vector scoring, BM25 corpus statistics, retriever candidate counts, and
+final truncation so scoped retrieval does not leak unscoped candidates into
+ranking diagnostics.
+Higher-level retrieval APIs can use those fields for score breakdowns,
+provenance, and stale projection warnings without making the search projection
+canonical. Callers that need response-level diagnostics can use
+`SearchIndex::search_with_report` to get the pre-limit hit count, requested
+limit, rank window, truncation flag, truncation reasons, child retriever
+availability, candidate counts, top hit IDs, and per-child top candidate ranks
+and scores.
+
+The stable embedded facade exposes this boundary without owning search state:
+`Database::rebuild_search_projection` derives projection rows from the canonical
+graph into a caller-owned `SearchIndex`, and `Database::retrieve_knowledge`
+combines that projection report with the current graph commit epoch. Retrieval
+callers can pass a rank window through `KnowledgeRetrievalRequest` to bound
+hybrid child retriever participation before graph context expansion, and can
+pass metadata filters that scope both search hits and graph-native seed
+candidates. Filter keys align with graph-derived projection metadata:
+`kind` maps to canonical node labels, `external_id` maps to node `id`, and other
+keys map to same-name scalar node properties. Returned diagnostics preserve the
+rank window and filtered candidate counts. This keeps Knowledge Retrieval as the
+primary application-facing path while preserving the rule that search artifacts
+are rebuildable and outside the graph WAL.
+
+`Database::retrieve_knowledge` also includes a bounded graph-native seed
+retriever over canonical nodes. `KnowledgeRetrievalRequest::graph_seed_limit`
+controls the budget. A limit of zero disables the graph seed leg; otherwise the
+facade matches query tokens against stable graph properties such as `id`,
+`title`, `name`, `summary`, `content`, `body`, and `text`, then returns
+deterministically scored `KnowledgeGraphSeed` entries with canonical entity
+snapshots and matched property names. This gives the retriever DAG an explicit
+graph child even when the caller has no usable search projection.
+At the knowledge facade level, `KnowledgeRetrieverReport` normalizes child
+retriever diagnostics for vector, text, and graph seed legs: availability,
+candidate count, and top candidate rank/score are exposed in one place.
+`KnowledgeCandidate` then projects returned search hits and graph-native seeds
+into one application-facing candidate surface. Each candidate records its source
+leg, source-local rank, merged source legs, combined score, score breakdown,
+optional canonical entity snapshot, optional search evidence summary, matched
+graph properties, and graph-context path count. Search-hit and graph-seed
+candidates that resolve to the same canonical node are merged by graph identity,
+with the search hit kept as the primary leg and the graph seed recorded in
+`merged_sources`. `KnowledgeCandidateScoringPolicy` currently supports default
+max scoring and weighted sum scoring over search and graph-seed scores, giving
+future rerank policies a stable hook while preserving per-leg score provenance.
+`KnowledgeRetrievalRequest::candidate_limit` applies a response-level candidate
+budget after this merge and reports a fan-out reason when the budget truncates
+the merged candidate set. This gives the future retriever DAG a typed candidate
+boundary without making the search projection part of canonical graph state.
+
+The same facade performs bounded multi-hop graph context
+expansion for returned search hits whose projection metadata maps back to a
+canonical graph node and for graph-native seeds matched directly from canonical
+nodes. The result includes hop number, source/target node labels, external IDs,
+relationship type, path direction, and fan-out reasons when the configured graph
+context limit cuts expansion short. This gives RAG callers graph evidence paths
+without issuing ad hoc Cypher for common neighborhood and short-path context,
+including pure graph-seed retrieval when no search projection is available. It
+also returns `KnowledgeEvidence` summaries that bind each search hit to its
+projection kind, external ID, source ID, canonical node ID, matched terms, score
+components, ranks, and graph context path count. This keeps raw evidence
+provenance explicit even though the search projection remains outside canonical
+graph storage.
+
+Typed knowledge operations can bypass the search projection entirely when the
+caller already has graph identity. `Database::knowledge_entity` returns a
+canonical node snapshot by label and external ID, including node id, labels,
+external ID, graph commit epoch, and scalar properties. `Database::knowledge_neighbors`
+accepts the same identity plus optional relationship type, direction, hop bound,
+and result limit, then returns the same path evidence structure plus fan-out
+reasons. `Database::knowledge_paths` accepts source and target identities plus
+the same traversal budget and returns bounded graph paths as ordered evidence
+segments. `Database::knowledge_subgraph` expands a bounded typed subgraph from
+one identity, returning canonical node snapshots, relationship evidence
+segments, and node/relationship fan-out reasons. `DatabaseReadTransaction`
+exposes the same typed knowledge operations over its pinned catalog and graph
+snapshot, so callers can perform stable knowledge navigation without falling
+back to ad hoc Cypher. This makes common
+knowledge-application navigation a first-class API instead of forcing
+application code to construct ad hoc Cypher for every entity lookup,
+neighborhood lookup, path query, or local subgraph expansion.
+
 ## Milestones
 
 1. Parser and AST for the Cypher subset used by Nowledge.
 2. In-memory graph store with transactions for semantic and planner tests.
 3. Logical plan builder for `MATCH`, `WHERE`, `RETURN`, `CREATE`, `MERGE`, and
-   `DELETE`.
+   node and relationship `DELETE`.
 4. Cascades memo, logical rules, implementation rules, cost model, and explain
    traces.
 5. Persistent storage with WAL, checkpoint, catalog versioning, and recovery
@@ -298,8 +481,14 @@ Required test suites:
 - deterministic optimizer trace tests
 - transaction commit/rollback tests
 - WAL recovery and checkpoint tests
+- internal Nowledge-shaped compatibility fixtures against the Skein facade
+- external-process shadow adapter tests for Ladybug/Kuzu wrapper wiring
 - compatibility tests against the current Nowledge Ladybug-backed wrapper
 
 Before replacing Ladybug in Nowledge, the compatibility suite should run both
-engines against the same fixtures and compare rows, mutation effects, and error
-classes.
+engines against the same fixtures through `ExternalShadowCommand` or an
+equivalent `CompatibilityShadowEngine` implementation, and compare rows,
+mutation effects, error classes, and projected graph outputs. The shadow report
+must also pass the compatibility cutover gate: every required check is matched
+by the shadow engine, primary-only checks are reported as blockers by default,
+and the configured minimum matched-check count is satisfied.

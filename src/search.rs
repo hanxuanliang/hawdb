@@ -5,12 +5,17 @@ use crate::value::Value;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 pub const FULL_REINDEX_MARKER: &str = ".reindex_needed";
 pub const METADATA_REPAIR_MARKER: &str = ".projection_metadata_repair_needed";
+const BM25_K1: f64 = 1.2;
+const BM25_B: f64 = 0.75;
+const RRF_K: f64 = 60.0;
+const SEARCH_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
+const SEARCH_COMPRESSION_LEVEL: i32 = 3;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchDocument {
@@ -55,6 +60,23 @@ pub struct SearchProjectionRow {
     pub metadata: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchEmbeddingManifest {
+    pub model: String,
+    pub version: Option<String>,
+    pub dimension: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionFreshness {
+    pub document_count: usize,
+    pub full_reindex_needed: bool,
+    pub metadata_repair_needed: bool,
+    pub embedding_model: Option<String>,
+    pub embedding_version: Option<String>,
+    pub embedding_dimension: Option<usize>,
+}
+
 impl SearchProjectionRow {
     pub fn into_document(self) -> SearchDocument {
         let kind = self.kind.as_str();
@@ -87,7 +109,49 @@ pub struct SearchHit {
     pub score: f64,
     pub vector_score: f64,
     pub text_score: f64,
+    pub rrf_score: f64,
+    pub vector_rank: Option<usize>,
+    pub text_rank: Option<usize>,
+    pub kind: Option<String>,
+    pub external_id: Option<String>,
+    pub source_id: Option<String>,
+    pub matched_terms: Vec<String>,
     pub fallback_reasons: Vec<String>,
+    pub projection_freshness: SearchProjectionFreshness,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchResultSet {
+    pub hits: Vec<SearchHit>,
+    pub total_hits: usize,
+    pub limit: usize,
+    pub truncated: bool,
+    pub truncation_reasons: Vec<String>,
+    pub retrievers: Vec<SearchRetrieverReport>,
+    pub rank_window: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchRetrieverReport {
+    pub name: String,
+    pub available: bool,
+    pub candidate_count: usize,
+    pub top_hit_ids: Vec<String>,
+    pub top_candidates: Vec<SearchRetrieverCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SearchRetrieverCandidate {
+    pub id: String,
+    pub rank: usize,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchQueryOptions {
+    pub limit: usize,
+    pub rank_window: Option<usize>,
+    pub metadata_filters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -113,11 +177,25 @@ pub struct MetadataRepairSummary {
     pub missing_documents: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchDerivedArtifactReport {
+    pub artifact_type: String,
+    pub name: String,
+    pub action: String,
+    pub before_document_count: usize,
+    pub after_document_count: usize,
+    pub scanned_nodes: usize,
+    pub indexed_documents: usize,
+    pub full_reindex_needed: bool,
+    pub metadata_repair_needed: bool,
+}
+
 #[derive(Debug, Default)]
 pub struct SearchIndex {
     documents: BTreeMap<String, SearchDocument>,
     path: Option<PathBuf>,
     embedding_dimension: Option<usize>,
+    embedding_manifest: Option<SearchEmbeddingManifest>,
 }
 
 impl SearchIndex {
@@ -131,6 +209,7 @@ impl SearchIndex {
             documents: BTreeMap::new(),
             path: Some(path.as_ref().to_path_buf()),
             embedding_dimension: None,
+            embedding_manifest: None,
         };
         index.load_snapshot()?;
         Ok(index)
@@ -158,6 +237,52 @@ impl SearchIndex {
 
     pub fn document_count(&self) -> usize {
         self.documents.len()
+    }
+
+    pub fn embedding_manifest(&self) -> Option<&SearchEmbeddingManifest> {
+        self.embedding_manifest.as_ref()
+    }
+
+    pub fn projection_freshness(&self) -> SearchProjectionFreshness {
+        SearchProjectionFreshness {
+            document_count: self.documents.len(),
+            full_reindex_needed: self.full_reindex_needed(),
+            metadata_repair_needed: self.metadata_repair_needed(),
+            embedding_model: self
+                .embedding_manifest
+                .as_ref()
+                .map(|manifest| manifest.model.clone()),
+            embedding_version: self
+                .embedding_manifest
+                .as_ref()
+                .and_then(|manifest| manifest.version.clone()),
+            embedding_dimension: self
+                .embedding_manifest
+                .as_ref()
+                .map(|manifest| manifest.dimension)
+                .or(self.embedding_dimension),
+        }
+    }
+
+    pub fn apply_embedding_manifest(&mut self, manifest: SearchEmbeddingManifest) -> Result<()> {
+        if let Some(existing) = &self.embedding_manifest {
+            if existing == &manifest {
+                return Ok(());
+            }
+            self.mark_full_reindex_needed(&format!(
+                "embedding manifest changed from {} to {}",
+                format_embedding_manifest(existing),
+                format_embedding_manifest(&manifest)
+            ))?;
+        } else if !self.documents.is_empty() {
+            self.mark_full_reindex_needed(&format!(
+                "embedding manifest initialized as {} for existing projection",
+                format_embedding_manifest(&manifest)
+            ))?;
+        }
+        self.embedding_dimension = Some(manifest.dimension);
+        self.embedding_manifest = Some(manifest);
+        Ok(())
     }
 
     pub fn rebuild_from_graph(
@@ -190,12 +315,36 @@ impl SearchIndex {
         }
 
         self.documents = next_documents;
-        self.embedding_dimension = None;
+        self.embedding_dimension = self
+            .embedding_manifest
+            .as_ref()
+            .map(|manifest| manifest.dimension);
         self.clear_marker(FULL_REINDEX_MARKER)?;
         self.clear_marker(METADATA_REPAIR_MARKER)?;
         Ok(SearchRebuildSummary {
             scanned_nodes,
             indexed_documents: self.documents.len(),
+        })
+    }
+
+    pub fn rebuild_derived_artifacts(
+        &mut self,
+        catalog: &Catalog,
+        store: &GraphStore,
+        options: SearchRebuildOptions,
+    ) -> Result<SearchDerivedArtifactReport> {
+        let before_document_count = self.documents.len();
+        let summary = self.rebuild_from_graph(catalog, store, options)?;
+        Ok(SearchDerivedArtifactReport {
+            artifact_type: "search_projection".to_string(),
+            name: "search_projection".to_string(),
+            action: "rebuilt".to_string(),
+            before_document_count,
+            after_document_count: self.documents.len(),
+            scanned_nodes: summary.scanned_nodes,
+            indexed_documents: summary.indexed_documents,
+            full_reindex_needed: self.full_reindex_needed(),
+            metadata_repair_needed: self.metadata_repair_needed(),
         })
     }
 
@@ -257,6 +406,14 @@ impl SearchIndex {
         let snapshot_path = path.join(SEARCH_SNAPSHOT_FILE);
         let mut body = String::new();
         body.push_str("SKEIN_SEARCH_PROJECTION_V1\n");
+        if let Some(manifest) = &self.embedding_manifest {
+            body.push_str(&format!(
+                "embedding_manifest\t{}\t{}\t{}\n",
+                encode_string(&manifest.model),
+                encode_string(manifest.version.as_deref().unwrap_or_default()),
+                manifest.dimension
+            ));
+        }
         if let Some(dimension) = self.embedding_dimension {
             body.push_str(&format!("embedding_dimension\t{dimension}\n"));
         }
@@ -275,10 +432,12 @@ impl SearchIndex {
         let tmp_path = snapshot_path.with_extension("skein.tmp");
         {
             let mut file = File::create(&tmp_path)?;
-            file.write_all(data.as_bytes())?;
+            let encoded = encode_search_snapshot_text(&data)?;
+            file.write_all(&encoded)?;
             file.sync_all()?;
         }
-        fs::rename(tmp_path, snapshot_path)?;
+        fs::rename(tmp_path, &snapshot_path)?;
+        sync_parent_dir(&snapshot_path)?;
         Ok(())
     }
 
@@ -289,8 +448,44 @@ impl SearchIndex {
         mode: SearchMode,
         limit: usize,
     ) -> Vec<SearchHit> {
+        self.search_with_report(query_text, query_embedding, mode, limit)
+            .hits
+    }
+
+    pub fn search_with_report(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        limit: usize,
+    ) -> SearchResultSet {
+        self.search_with_options(
+            query_text,
+            query_embedding,
+            mode,
+            SearchQueryOptions {
+                limit,
+                rank_window: None,
+                metadata_filters: BTreeMap::new(),
+            },
+        )
+    }
+
+    pub fn search_with_options(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+    ) -> SearchResultSet {
         let query_terms = tokenize(query_text);
         let mut fallback_reasons = Vec::new();
+        let limit = options.limit;
+        let filtered_documents = self
+            .documents
+            .values()
+            .filter(|document| metadata_matches(document, &options.metadata_filters))
+            .collect::<Vec<_>>();
         let vector_available = match (query_embedding, self.embedding_dimension) {
             (Some(vector), Some(dimension)) if vector.len() == dimension => true,
             (Some(vector), Some(dimension)) => {
@@ -307,9 +502,18 @@ impl SearchIndex {
             (None, _) => false,
         };
         let text_available = !query_terms.is_empty();
+        let text_corpus = if text_available && mode != SearchMode::Vector {
+            Some(TextCorpusStats::from_documents(
+                filtered_documents.iter().copied(),
+            ))
+        } else {
+            None
+        };
+        let projection_freshness = self.projection_freshness();
 
-        let mut hits = Vec::new();
-        for document in self.documents.values() {
+        let mut vector_scores = BTreeMap::new();
+        let mut text_scores = BTreeMap::new();
+        for document in &filtered_documents {
             let vector_score = if vector_available && mode != SearchMode::Text {
                 query_embedding
                     .zip(document.embedding.as_deref())
@@ -319,12 +523,56 @@ impl SearchIndex {
                 0.0
             };
             let text_score = if text_available && mode != SearchMode::Vector {
-                text_score(&query_terms, document)
+                text_corpus
+                    .as_ref()
+                    .map(|corpus| bm25_score(&query_terms, document, corpus))
+                    .unwrap_or(0.0)
             } else {
                 0.0
             };
+            if vector_score > 0.0 {
+                vector_scores.insert(document.id.clone(), vector_score);
+            }
+            if text_score > 0.0 {
+                text_scores.insert(document.id.clone(), text_score);
+            }
+        }
+
+        let vector_ranks = ranked_scores(&vector_scores);
+        let text_ranks = ranked_scores(&text_scores);
+        let vector_window_ranks = window_ranks(&vector_ranks, options.rank_window);
+        let text_window_ranks = window_ranks(&text_ranks, options.rank_window);
+        let retrievers = vec![
+            SearchRetrieverReport {
+                name: "vector".to_string(),
+                available: vector_available && mode != SearchMode::Text,
+                candidate_count: vector_scores.len(),
+                top_hit_ids: top_ranked_ids(&vector_window_ranks, limit),
+                top_candidates: top_ranked_candidates(&vector_window_ranks, &vector_scores, limit),
+            },
+            SearchRetrieverReport {
+                name: "text".to_string(),
+                available: text_available && mode != SearchMode::Vector,
+                candidate_count: text_scores.len(),
+                top_hit_ids: top_ranked_ids(&text_window_ranks, limit),
+                top_candidates: top_ranked_candidates(&text_window_ranks, &text_scores, limit),
+            },
+        ];
+        let mut hits = Vec::new();
+        for document in filtered_documents {
+            let vector_score = vector_scores.get(&document.id).copied().unwrap_or(0.0);
+            let text_score = text_scores.get(&document.id).copied().unwrap_or(0.0);
+            let vector_rank = match mode {
+                SearchMode::Hybrid => vector_window_ranks.get(&document.id).copied(),
+                SearchMode::Vector | SearchMode::Text => vector_ranks.get(&document.id).copied(),
+            };
+            let text_rank = match mode {
+                SearchMode::Hybrid => text_window_ranks.get(&document.id).copied(),
+                SearchMode::Vector | SearchMode::Text => text_ranks.get(&document.id).copied(),
+            };
+            let rrf_score = rrf_score(vector_rank, text_rank);
             let score = match mode {
-                SearchMode::Hybrid => fuse_score(vector_score, text_score, text_available),
+                SearchMode::Hybrid => rrf_score,
                 SearchMode::Vector => vector_score,
                 SearchMode::Text => text_score,
             };
@@ -334,7 +582,15 @@ impl SearchIndex {
                     score,
                     vector_score,
                     text_score,
+                    rrf_score,
+                    vector_rank,
+                    text_rank,
+                    kind: document.metadata.get("kind").cloned(),
+                    external_id: document.metadata.get("external_id").cloned(),
+                    source_id: document.metadata.get("source_id").cloned(),
+                    matched_terms: matched_query_terms(&query_terms, document),
                     fallback_reasons: fallback_reasons.clone(),
+                    projection_freshness: projection_freshness.clone(),
                 });
             }
         }
@@ -345,8 +601,25 @@ impl SearchIndex {
                 .unwrap_or(Ordering::Equal)
                 .then_with(|| left.id.cmp(&right.id))
         });
+        let total_hits = hits.len();
+        let truncated = total_hits > limit;
         hits.truncate(limit);
-        hits
+        let truncation_reasons = if truncated {
+            vec![format!(
+                "limit {limit} returned from {total_hits} matching hits"
+            )]
+        } else {
+            Vec::new()
+        };
+        SearchResultSet {
+            hits,
+            total_hits,
+            limit,
+            truncated,
+            truncation_reasons,
+            retrievers,
+            rank_window: options.rank_window,
+        }
     }
 
     pub fn mark_full_reindex_needed(&self, reason: &str) -> Result<()> {
@@ -370,6 +643,14 @@ impl SearchIndex {
     }
 
     fn validate_or_set_dimension(&mut self, dimension: usize) -> Result<()> {
+        if let Some(manifest) = &self.embedding_manifest {
+            if manifest.dimension != dimension {
+                return Err(SkeinError::Storage(format!(
+                    "embedding dimension mismatch: manifest expects {}, row has {dimension}",
+                    manifest.dimension
+                )));
+            }
+        }
         match self.embedding_dimension {
             Some(existing) if existing != dimension => Err(SkeinError::Storage(format!(
                 "embedding dimension mismatch: index has {existing}, row has {dimension}"
@@ -390,7 +671,7 @@ impl SearchIndex {
         if !snapshot_path.exists() {
             return Ok(());
         }
-        let text = fs::read_to_string(snapshot_path)?;
+        let text = read_search_snapshot_text(&snapshot_path)?;
         let (body, checksum) = split_checksum(&text)?;
         let actual = checksum_bytes(body.as_bytes());
         if checksum != actual {
@@ -404,8 +685,31 @@ impl SearchIndex {
             }
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
+                ["embedding_manifest", raw_model, raw_version, raw_dimension] => {
+                    let version = decode_string(raw_version)?;
+                    let manifest = SearchEmbeddingManifest {
+                        model: decode_string(raw_model)?,
+                        version: if version.is_empty() {
+                            None
+                        } else {
+                            Some(version)
+                        },
+                        dimension: parse_usize(raw_dimension, "embedding manifest dimension")?,
+                    };
+                    self.embedding_dimension = Some(manifest.dimension);
+                    self.embedding_manifest = Some(manifest);
+                }
                 ["embedding_dimension", raw] => {
-                    self.embedding_dimension = Some(parse_usize(raw, "embedding dimension")?);
+                    let dimension = parse_usize(raw, "embedding dimension")?;
+                    if let Some(manifest) = &self.embedding_manifest {
+                        if manifest.dimension != dimension {
+                            return Err(SkeinError::Storage(format!(
+                                "embedding manifest dimension {} does not match snapshot dimension {dimension}",
+                                manifest.dimension
+                            )));
+                        }
+                    }
+                    self.embedding_dimension = Some(dimension);
                 }
                 ["doc", raw_id, raw_title, raw_content, raw_embedding, raw_metadata] => {
                     let embedding = decode_embedding(raw_embedding)?;
@@ -544,46 +848,449 @@ fn value_to_projection_string(value: &Value) -> String {
         Value::Null => String::new(),
         Value::Bool(value) => value.to_string(),
         Value::Int(value) => value.to_string(),
+        Value::Float(value) => value.to_string(),
         Value::String(value) => value.clone(),
+        Value::List(values) => values
+            .iter()
+            .map(value_to_projection_string)
+            .collect::<Vec<_>>()
+            .join(","),
+        Value::Map(values) => values
+            .iter()
+            .map(|(key, value)| format!("{key}:{}", value_to_projection_string(value)))
+            .collect::<Vec<_>>()
+            .join(","),
     }
 }
 
-fn fuse_score(vector_score: f64, text_score: f64, text_available: bool) -> f64 {
-    let score = if vector_score > 0.0 && text_score > 0.0 {
-        (vector_score * 0.6 + text_score * 0.4) * 1.1
-    } else if vector_score > 0.0 {
-        if text_available {
-            vector_score * 0.95
-        } else {
-            vector_score
-        }
-    } else {
-        text_score * 0.7
-    };
-    score.min(0.99)
-}
-
-fn text_score(query_terms: &BTreeSet<String>, document: &SearchDocument) -> f64 {
-    let haystack = tokenize(&format!("{} {}", document.title, document.content));
-    if haystack.is_empty() {
-        return 0.0;
-    }
-    let matches = query_terms
+fn ranked_scores(scores: &BTreeMap<String, f64>) -> BTreeMap<String, usize> {
+    let mut ranked = scores
         .iter()
-        .filter(|term| haystack.contains(*term))
-        .count();
-    if matches == 0 {
+        .map(|(id, score)| (id.clone(), *score))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_id, left_score), (right_id, right_score)| {
+        right_score
+            .partial_cmp(left_score)
+            .unwrap_or(Ordering::Equal)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    ranked
+        .into_iter()
+        .enumerate()
+        .map(|(index, (id, _score))| (id, index + 1))
+        .collect()
+}
+
+fn window_ranks(
+    ranks: &BTreeMap<String, usize>,
+    rank_window: Option<usize>,
+) -> BTreeMap<String, usize> {
+    let Some(rank_window) = rank_window else {
+        return ranks.clone();
+    };
+    ranks
+        .iter()
+        .filter_map(|(id, rank)| (*rank <= rank_window).then_some((id.clone(), *rank)))
+        .collect()
+}
+
+fn top_ranked_ids(ranks: &BTreeMap<String, usize>, limit: usize) -> Vec<String> {
+    let mut ranked = ranks
+        .iter()
+        .map(|(id, rank)| (id.clone(), *rank))
+        .collect::<Vec<_>>();
+    ranked.sort_by(|(left_id, left_rank), (right_id, right_rank)| {
+        left_rank
+            .cmp(right_rank)
+            .then_with(|| left_id.cmp(right_id))
+    });
+    ranked
+        .into_iter()
+        .take(limit)
+        .map(|(id, _rank)| id)
+        .collect()
+}
+
+fn top_ranked_candidates(
+    ranks: &BTreeMap<String, usize>,
+    scores: &BTreeMap<String, f64>,
+    limit: usize,
+) -> Vec<SearchRetrieverCandidate> {
+    let mut ranked = ranks
+        .iter()
+        .filter_map(|(id, rank)| {
+            scores.get(id).map(|score| SearchRetrieverCandidate {
+                id: id.clone(),
+                rank: *rank,
+                score: *score,
+            })
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| {
+        left.rank
+            .cmp(&right.rank)
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    ranked.truncate(limit);
+    ranked
+}
+
+fn rrf_score(vector_rank: Option<usize>, text_rank: Option<usize>) -> f64 {
+    [vector_rank, text_rank]
+        .into_iter()
+        .flatten()
+        .map(|rank| 1.0 / (RRF_K + rank as f64))
+        .sum()
+}
+
+fn format_embedding_manifest(manifest: &SearchEmbeddingManifest) -> String {
+    match &manifest.version {
+        Some(version) => format!("{}@{}:{}", manifest.model, version, manifest.dimension),
+        None => format!("{}:{}", manifest.model, manifest.dimension),
+    }
+}
+
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent() else {
+        return Ok(());
+    };
+    File::open(parent)?.sync_all()?;
+    Ok(())
+}
+
+fn metadata_matches(document: &SearchDocument, filters: &BTreeMap<String, String>) -> bool {
+    filters
+        .iter()
+        .all(|(key, value)| document.metadata.get(key) == Some(value))
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct TextCorpusStats {
+    document_count: usize,
+    average_document_len: f64,
+    document_frequency: BTreeMap<String, usize>,
+}
+
+impl TextCorpusStats {
+    fn from_documents<'a>(documents: impl Iterator<Item = &'a SearchDocument>) -> Self {
+        let mut document_count = 0;
+        let mut total_len = 0;
+        let mut document_frequency = BTreeMap::new();
+        for document in documents {
+            document_count += 1;
+            let tokens = document_tokens(document);
+            total_len += tokens.len();
+            for term in tokens.into_iter().collect::<BTreeSet<_>>() {
+                *document_frequency.entry(term).or_insert(0) += 1;
+            }
+        }
+        Self {
+            document_count,
+            average_document_len: if document_count == 0 {
+                0.0
+            } else {
+                total_len as f64 / document_count as f64
+            },
+            document_frequency,
+        }
+    }
+}
+
+fn bm25_score(
+    query_terms: &BTreeSet<String>,
+    document: &SearchDocument,
+    corpus: &TextCorpusStats,
+) -> f64 {
+    if query_terms.is_empty() || corpus.document_count == 0 {
         return 0.0;
     }
-    matches as f64 / query_terms.len() as f64
+    let tokens = document_tokens(document);
+    if tokens.is_empty() {
+        return 0.0;
+    }
+    let term_frequency = token_frequencies(tokens.iter().cloned());
+    let document_len = tokens.len() as f64;
+    let average_document_len = corpus.average_document_len.max(1.0);
+    let mut score = 0.0;
+    for term in query_terms {
+        let Some(frequency) = term_frequency.get(term).copied() else {
+            continue;
+        };
+        let document_frequency = corpus
+            .document_frequency
+            .get(term)
+            .copied()
+            .unwrap_or_default();
+        if document_frequency == 0 {
+            continue;
+        }
+        let idf = (1.0
+            + (corpus.document_count as f64 - document_frequency as f64 + 0.5)
+                / (document_frequency as f64 + 0.5))
+            .ln();
+        let frequency = frequency as f64;
+        let denominator =
+            frequency + BM25_K1 * (1.0 - BM25_B + BM25_B * document_len / average_document_len);
+        score += idf * (frequency * (BM25_K1 + 1.0)) / denominator;
+    }
+    score
+}
+
+fn matched_query_terms(query_terms: &BTreeSet<String>, document: &SearchDocument) -> Vec<String> {
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
+    let document_terms = document_tokens(document)
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    query_terms
+        .iter()
+        .filter(|term| document_terms.contains(*term))
+        .cloned()
+        .collect()
+}
+
+fn document_tokens(document: &SearchDocument) -> Vec<String> {
+    let mut tokens = tokenize_list(&document.title);
+    tokens.extend(tokenize_list(&document.title));
+    tokens.extend(tokenize_list(&document.content));
+    tokens
+}
+
+fn token_frequencies(tokens: impl Iterator<Item = String>) -> BTreeMap<String, usize> {
+    let mut frequencies = BTreeMap::new();
+    for token in tokens {
+        *frequencies.entry(token).or_insert(0) += 1;
+    }
+    frequencies
 }
 
 fn tokenize(text: &str) -> BTreeSet<String> {
-    text.split(|ch: char| !ch.is_alphanumeric() && ch != '_')
-        .map(str::trim)
-        .filter(|token| !token.is_empty())
-        .map(|token| token.to_lowercase())
-        .collect()
+    tokenize_list(text).into_iter().collect()
+}
+
+fn tokenize_list(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut previous_part = None::<String>;
+    for raw in text.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
+        let parts = identifier_parts(raw);
+        if let (Some(previous), Some(first)) = (previous_part.as_ref(), parts.first()) {
+            push_analyzed_token(&mut tokens, format!("{previous}_{first}"));
+        }
+        tokens.extend(identifier_tokens(raw));
+        if let Some(last) = parts.last() {
+            previous_part = Some(last.clone());
+        }
+    }
+    tokens
+}
+
+fn identifier_tokens(raw: &str) -> Vec<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Vec::new();
+    }
+    let mut tokens = Vec::new();
+    push_unique_token(&mut tokens, raw.to_lowercase());
+    let parts = identifier_parts(raw);
+    for part in &parts {
+        push_analyzed_token(&mut tokens, part.clone());
+    }
+    for pair in parts.windows(2) {
+        push_analyzed_token(&mut tokens, pair.join("_"));
+    }
+    tokens
+}
+
+fn identifier_parts(raw: &str) -> Vec<String> {
+    let mut parts = Vec::new();
+    let mut current = String::new();
+    let mut previous_kind = IdentifierCharKind::Other;
+    let chars = raw.chars().collect::<Vec<_>>();
+    for (index, ch) in chars.iter().copied().enumerate() {
+        if ch == '_' {
+            push_identifier_part(&mut parts, &mut current);
+            previous_kind = IdentifierCharKind::Other;
+            continue;
+        }
+        let kind = IdentifierCharKind::from_char(ch);
+        let next_kind = chars
+            .get(index + 1)
+            .copied()
+            .map(IdentifierCharKind::from_char);
+        if !current.is_empty()
+            && ((previous_kind == IdentifierCharKind::Lower && kind == IdentifierCharKind::Upper)
+                || (previous_kind == IdentifierCharKind::Upper
+                    && kind == IdentifierCharKind::Upper
+                    && next_kind == Some(IdentifierCharKind::Lower))
+                || (previous_kind != IdentifierCharKind::Digit
+                    && kind == IdentifierCharKind::Digit)
+                || (previous_kind == IdentifierCharKind::Digit
+                    && kind != IdentifierCharKind::Digit))
+        {
+            push_identifier_part(&mut parts, &mut current);
+        }
+        current.extend(ch.to_lowercase());
+        previous_kind = kind;
+    }
+    push_identifier_part(&mut parts, &mut current);
+    parts
+}
+
+fn push_identifier_part(parts: &mut Vec<String>, current: &mut String) {
+    if !current.is_empty() {
+        parts.push(std::mem::take(current));
+    }
+}
+
+fn push_unique_token(tokens: &mut Vec<String>, token: String) {
+    if !token.is_empty()
+        && !is_search_stopword(&token)
+        && !tokens.iter().any(|existing| existing == &token)
+    {
+        tokens.push(token);
+    }
+}
+
+fn push_analyzed_token(tokens: &mut Vec<String>, token: String) {
+    push_unique_token(tokens, token.clone());
+    for normalized in normalize_english_suffixes(&token) {
+        push_unique_token(tokens, normalized);
+    }
+    for alias in semantic_aliases(&token) {
+        push_unique_token(tokens, alias);
+    }
+}
+
+fn normalize_english_suffixes(token: &str) -> Vec<String> {
+    if token.len() <= 4 || token.contains('_') || token.chars().any(|ch| ch.is_ascii_digit()) {
+        return Vec::new();
+    }
+    if let Some(stem) = token.strip_suffix("ies") {
+        if stem.len() >= 2 {
+            return vec![format!("{stem}y")];
+        }
+    }
+    if let Some(stem) = token.strip_suffix("ing") {
+        if stem.len() >= 3 {
+            return suffix_stem_variants(trim_doubled_suffix_consonant(stem));
+        }
+    }
+    if let Some(stem) = token.strip_suffix("ed") {
+        if stem.len() >= 3 {
+            return suffix_stem_variants(trim_doubled_suffix_consonant(stem));
+        }
+    }
+    if let Some(stem) = token.strip_suffix('s') {
+        if stem.len() >= 3 && !stem.ends_with('s') {
+            return vec![stem.to_string()];
+        }
+    }
+    Vec::new()
+}
+
+fn semantic_aliases(token: &str) -> Vec<String> {
+    match token {
+        "kg" => vec!["knowledge_graph".to_string()],
+        "knowledge_graph" => vec!["kg".to_string()],
+        "rag" => vec![
+            "retrieval_augmented_generation".to_string(),
+            "graph_rag".to_string(),
+            "graph_retrieval".to_string(),
+        ],
+        "graph_rag" => vec![
+            "rag".to_string(),
+            "retrieval_augmented_generation".to_string(),
+            "graph_retrieval".to_string(),
+        ],
+        "graphrag" => vec![
+            "graph_rag".to_string(),
+            "rag".to_string(),
+            "graph_retrieval".to_string(),
+        ],
+        "graph_retrieval" => vec!["graph_rag".to_string(), "rag".to_string()],
+        "retrieval_augmented" | "augmented_generation" | "retrieval_augmented_generation" => {
+            vec!["rag".to_string(), "graph_rag".to_string()]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn is_search_stopword(token: &str) -> bool {
+    matches!(
+        token,
+        "a" | "an"
+            | "and"
+            | "are"
+            | "as"
+            | "at"
+            | "be"
+            | "by"
+            | "for"
+            | "from"
+            | "how"
+            | "in"
+            | "is"
+            | "it"
+            | "of"
+            | "on"
+            | "or"
+            | "that"
+            | "the"
+            | "this"
+            | "to"
+            | "was"
+            | "with"
+    )
+}
+
+fn suffix_stem_variants(stem: &str) -> Vec<String> {
+    let mut variants = vec![stem.to_string()];
+    if matches!(stem.chars().last(), Some('c' | 'v' | 'z')) {
+        variants.push(format!("{stem}e"));
+    }
+    variants
+}
+
+fn trim_doubled_suffix_consonant(stem: &str) -> &str {
+    let mut chars = stem.char_indices().rev();
+    let Some((last_index, last)) = chars.next() else {
+        return stem;
+    };
+    let Some((_, previous)) = chars.next() else {
+        return stem;
+    };
+    if last == previous && is_ascii_consonant(last) {
+        &stem[..last_index]
+    } else {
+        stem
+    }
+}
+
+fn is_ascii_consonant(ch: char) -> bool {
+    ch.is_ascii_alphabetic() && !matches!(ch, 'a' | 'e' | 'i' | 'o' | 'u')
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IdentifierCharKind {
+    Lower,
+    Upper,
+    Digit,
+    Other,
+}
+
+impl IdentifierCharKind {
+    fn from_char(ch: char) -> Self {
+        if ch.is_ascii_lowercase() {
+            Self::Lower
+        } else if ch.is_ascii_uppercase() {
+            Self::Upper
+        } else if ch.is_ascii_digit() {
+            Self::Digit
+        } else {
+            Self::Other
+        }
+    }
 }
 
 fn cosine_similarity(left: &[f32], right: &[f32]) -> Option<f64> {
@@ -690,6 +1397,136 @@ fn split_checksum(text: &str) -> Result<(&str, u64)> {
     Ok((body, checksum))
 }
 
+fn encode_search_snapshot_text(text: &str) -> Result<Vec<u8>> {
+    let compressed = zstd::stream::encode_all(text.as_bytes(), SEARCH_COMPRESSION_LEVEL)
+        .map_err(|error| SkeinError::Storage(format!("zstd compression failed: {error}")))?;
+    let compressed_checksum = checksum_bytes(&compressed);
+    let uncompressed_checksum = checksum_bytes(text.as_bytes());
+    let header = format!(
+        "{SEARCH_COMPRESSION_HEADER}\ncodec\tzstd\nuncompressed_checksum\t{uncompressed_checksum}\ncompressed_checksum\t{compressed_checksum}\nuncompressed_len\t{}\ncompressed_len\t{}\n\n",
+        text.len(),
+        compressed.len()
+    );
+    let mut encoded = header.into_bytes();
+    encoded.extend_from_slice(&compressed);
+    Ok(encoded)
+}
+
+fn read_search_snapshot_text(path: &Path) -> Result<String> {
+    let bytes = fs::read(path)?;
+    if bytes.starts_with(SEARCH_COMPRESSION_HEADER.as_bytes()) {
+        decode_search_snapshot_text(&bytes)
+    } else {
+        String::from_utf8(bytes).map_err(|error| {
+            SkeinError::Storage(format!("search projection is not valid UTF-8: {error}"))
+        })
+    }
+}
+
+fn decode_search_snapshot_text(bytes: &[u8]) -> Result<String> {
+    let Some(header_end) = bytes.windows(2).position(|window| window == b"\n\n") else {
+        return Err(SkeinError::Storage(
+            "search projection compressed envelope missing header terminator".to_string(),
+        ));
+    };
+    let header = std::str::from_utf8(&bytes[..header_end]).map_err(|error| {
+        SkeinError::Storage(format!(
+            "search projection compressed envelope header is invalid: {error}"
+        ))
+    })?;
+    let payload = &bytes[header_end + 2..];
+    let mut codec = None;
+    let mut compressed_checksum = None;
+    let mut uncompressed_checksum = None;
+    let mut compressed_len = None;
+    let mut uncompressed_len = None;
+    for line in header.lines() {
+        if line == SEARCH_COMPRESSION_HEADER {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        match fields.as_slice() {
+            ["codec", value] => codec = Some(*value),
+            ["compressed_checksum", value] => {
+                compressed_checksum = Some(parse_u64(value, "compressed checksum")?);
+            }
+            ["uncompressed_checksum", value] => {
+                uncompressed_checksum = Some(parse_u64(value, "uncompressed checksum")?);
+            }
+            ["compressed_len", value] => {
+                compressed_len = Some(parse_usize(value, "compressed length")?);
+            }
+            ["uncompressed_len", value] => {
+                uncompressed_len = Some(parse_usize(value, "uncompressed length")?);
+            }
+            _ => {
+                return Err(SkeinError::Storage(format!(
+                    "search projection compressed envelope has invalid header line: {line}"
+                )));
+            }
+        }
+    }
+    if codec != Some("zstd") {
+        return Err(SkeinError::Storage(
+            "search projection compressed envelope uses unsupported codec".to_string(),
+        ));
+    }
+    let expected_compressed_len = compressed_len.ok_or_else(|| {
+        SkeinError::Storage(
+            "search projection compressed envelope missing compressed_len".to_string(),
+        )
+    })?;
+    if payload.len() != expected_compressed_len {
+        return Err(SkeinError::Storage(format!(
+            "search projection compressed length mismatch: expected {expected_compressed_len}, got {}",
+            payload.len()
+        )));
+    }
+    let expected_compressed_checksum = compressed_checksum.ok_or_else(|| {
+        SkeinError::Storage(
+            "search projection compressed envelope missing compressed_checksum".to_string(),
+        )
+    })?;
+    let actual_compressed_checksum = checksum_bytes(payload);
+    if actual_compressed_checksum != expected_compressed_checksum {
+        return Err(SkeinError::Storage(format!(
+            "search projection compressed checksum mismatch: expected {expected_compressed_checksum}, got {actual_compressed_checksum}"
+        )));
+    }
+    let decoded = zstd::stream::decode_all(Cursor::new(payload)).map_err(|error| {
+        SkeinError::Storage(format!(
+            "search projection zstd decompression failed: {error}"
+        ))
+    })?;
+    let expected_uncompressed_len = uncompressed_len.ok_or_else(|| {
+        SkeinError::Storage(
+            "search projection compressed envelope missing uncompressed_len".to_string(),
+        )
+    })?;
+    if decoded.len() != expected_uncompressed_len {
+        return Err(SkeinError::Storage(format!(
+            "search projection uncompressed length mismatch: expected {expected_uncompressed_len}, got {}",
+            decoded.len()
+        )));
+    }
+    let expected_uncompressed_checksum = uncompressed_checksum.ok_or_else(|| {
+        SkeinError::Storage(
+            "search projection compressed envelope missing uncompressed_checksum".to_string(),
+        )
+    })?;
+    let actual_uncompressed_checksum = checksum_bytes(&decoded);
+    if actual_uncompressed_checksum != expected_uncompressed_checksum {
+        return Err(SkeinError::Storage(format!(
+            "search projection uncompressed checksum mismatch: expected {expected_uncompressed_checksum}, got {actual_uncompressed_checksum}"
+        )));
+    }
+    String::from_utf8(decoded).map_err(|error| {
+        SkeinError::Storage(format!(
+            "search projection decompressed payload is not valid UTF-8: {error}"
+        ))
+    })
+}
+
 fn checksum_bytes(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf29ce484222325u64;
     for byte in bytes {
@@ -732,6 +1569,200 @@ mod tests {
         assert_eq!(hits[0].id, "a");
         assert!(hits[0].vector_score > 0.99);
         assert!(hits[0].text_score > 0.0);
+        assert_eq!(hits[0].vector_rank, Some(1));
+        assert_eq!(hits[0].text_rank, Some(1));
+        assert_eq!(hits[0].score, hits[0].rrf_score);
+        assert!(hits[0].rrf_score > 0.0);
+    }
+
+    #[test]
+    fn hybrid_search_uses_rrf_child_ranks() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "both",
+                "Graph retrieval",
+                "Hybrid ranking evidence",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+        index
+            .upsert(doc(
+                "vector_only",
+                "Embedding",
+                "Vector candidate",
+                [0.9, 0.1],
+            ))
+            .unwrap();
+        index
+            .upsert(doc(
+                "text_only",
+                "Graph retrieval",
+                "Graph graph",
+                [0.0, 1.0],
+            ))
+            .unwrap();
+
+        let hits = index.search("graph", Some(&[1.0, 0.0]), SearchMode::Hybrid, 10);
+
+        assert_eq!(hits[0].id, "both");
+        assert_eq!(hits[0].vector_rank, Some(1));
+        assert_eq!(hits[0].text_rank, Some(2));
+        assert!(hits[0].rrf_score > hits[1].rrf_score);
+        assert!(hits.iter().any(|hit| hit.vector_rank.is_some()));
+        assert!(hits.iter().any(|hit| hit.text_rank.is_some()));
+    }
+
+    #[test]
+    fn search_report_exposes_child_retriever_summary() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("both", "Graph retrieval", "Hybrid", [1.0, 0.0]))
+            .unwrap();
+        index
+            .upsert(doc("vector_only", "Embedding", "Vector", [0.9, 0.1]))
+            .unwrap();
+        index
+            .upsert(doc(
+                "text_only",
+                "Graph retrieval",
+                "Graph graph",
+                [0.0, 1.0],
+            ))
+            .unwrap();
+
+        let result = index.search_with_report("graph", Some(&[1.0, 0.0]), SearchMode::Hybrid, 2);
+
+        let vector = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "vector")
+            .expect("expected vector retriever report");
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert!(vector.available);
+        assert!(text.available);
+        assert_eq!(vector.candidate_count, 2);
+        assert_eq!(text.candidate_count, 2);
+        assert_eq!(vector.top_hit_ids[0], "both");
+        assert_eq!(vector.top_candidates[0].id, "both");
+        assert_eq!(vector.top_candidates[0].rank, 1);
+        assert!(vector.top_candidates[0].score > 0.99);
+        assert_eq!(text.top_hit_ids.len(), 2);
+        assert_eq!(text.top_candidates.len(), 2);
+        assert_eq!(text.top_candidates[0].rank, 1);
+        assert!(text.top_candidates[0].score >= text.top_candidates[1].score);
+    }
+
+    #[test]
+    fn hybrid_search_rank_window_limits_rrf_candidates() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "top_vector",
+                "Vector only",
+                "Embedding candidate",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+        index
+            .upsert(doc(
+                "top_text",
+                "Graph graph",
+                "Text only graph",
+                [0.0, 1.0],
+            ))
+            .unwrap();
+        index
+            .upsert(doc(
+                "second_text",
+                "Graph",
+                "Secondary graph evidence",
+                [0.0, 0.9],
+            ))
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            Some(&[1.0, 0.0]),
+            SearchMode::Hybrid,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: Some(1),
+                metadata_filters: BTreeMap::new(),
+            },
+        );
+
+        assert_eq!(result.rank_window, Some(1));
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert_eq!(text.candidate_count, 2);
+        assert_eq!(text.top_candidates.len(), 1);
+        assert_eq!(text.top_candidates[0].rank, 1);
+        assert!(result
+            .hits
+            .iter()
+            .all(|hit| hit.id != "second_text" || hit.text_rank.is_none()));
+    }
+
+    #[test]
+    fn search_with_options_applies_metadata_filters_before_ranking() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:thread_1".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: Some(vec![1.0, 0.0]),
+                metadata: BTreeMap::from([
+                    ("kind".to_string(), "memory".to_string()),
+                    ("source_id".to_string(), "thread_1".to_string()),
+                ]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:thread_2".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: Some(vec![0.0, 1.0]),
+                metadata: BTreeMap::from([
+                    ("kind".to_string(), "memory".to_string()),
+                    ("source_id".to_string(), "thread_2".to_string()),
+                ]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                metadata_filters: BTreeMap::from([(
+                    "source_id".to_string(),
+                    "thread_1".to_string(),
+                )]),
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.hits[0].id, "memory:thread_1");
+        assert_eq!(result.hits[0].source_id.as_deref(), Some("thread_1"));
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert_eq!(text.candidate_count, 1);
+        assert_eq!(text.top_hit_ids, vec!["memory:thread_1".to_string()]);
     }
 
     #[test]
@@ -746,7 +1777,312 @@ mod tests {
         assert_eq!(hits[0].id, "a");
         assert_eq!(hits[0].vector_score, 0.0);
         assert!(hits[0].text_score > 0.0);
+        assert_eq!(hits[0].vector_rank, None);
+        assert_eq!(hits[0].text_rank, Some(1));
         assert!(hits[0].fallback_reasons[0].contains("dimension"));
+    }
+
+    #[test]
+    fn text_search_uses_bm25_term_frequency_and_length_normalization() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "focused".to_string(),
+                title: "Graph graph storage".to_string(),
+                content: "graph wal".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "verbose".to_string(),
+                title: "Graph storage".to_string(),
+                content: "graph runtime parser optimizer storage checkpoint wal manifest"
+                    .to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let hits = index.search("graph storage", None, SearchMode::Text, 10);
+
+        assert_eq!(hits[0].id, "focused");
+        assert!(hits[0].text_score > hits[1].text_score);
+    }
+
+    #[test]
+    fn tokenizer_keeps_nowledge_style_identifiers_case_insensitive() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory".to_string(),
+                title: "Nowledge_Source".to_string(),
+                content: "Graph-storage, graph storage.".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let underscore_hits = index.search("nowledge_source", None, SearchMode::Text, 10);
+        let punctuation_hits = index.search("GRAPH storage", None, SearchMode::Text, 10);
+
+        assert_eq!(underscore_hits[0].id, "memory");
+        assert_eq!(punctuation_hits[0].id, "memory");
+    }
+
+    #[test]
+    fn tokenizer_matches_camel_snake_kebab_and_path_identifiers() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "chunk".to_string(),
+                title: "SourceChunk nowledge_source".to_string(),
+                content: "artifact-source/chunk parserV2".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let camel_hits = index.search("source chunk", None, SearchMode::Text, 10);
+        let snake_hits = index.search("source_chunk", None, SearchMode::Text, 10);
+        let kebab_hits = index.search("artifact source", None, SearchMode::Text, 10);
+        let version_hits = index.search("parser v2", None, SearchMode::Text, 10);
+
+        assert_eq!(camel_hits[0].id, "chunk");
+        assert_eq!(snake_hits[0].id, "chunk");
+        assert_eq!(kebab_hits[0].id, "chunk");
+        assert_eq!(version_hits[0].id, "chunk");
+    }
+
+    #[test]
+    fn tokenizer_splits_acronym_titlecase_boundaries() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "runtime".to_string(),
+                title: "LSMTree HTTPServer GraphQLParser".to_string(),
+                content: "WALCheckpoint handles MVCCSnapshot readers".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let lsm_hits = index.search("lsm tree", None, SearchMode::Text, 10);
+        let http_hits = index.search("http server", None, SearchMode::Text, 10);
+        let graphql_hits = index.search("graphql parser", None, SearchMode::Text, 10);
+        let checkpoint_hits = index.search("wal checkpoint", None, SearchMode::Text, 10);
+        let mvcc_hits = index.search_with_report("mvcc snapshot", None, SearchMode::Text, 10);
+
+        assert_eq!(lsm_hits[0].id, "runtime");
+        assert_eq!(http_hits[0].id, "runtime");
+        assert_eq!(graphql_hits[0].id, "runtime");
+        assert_eq!(checkpoint_hits[0].id, "runtime");
+        assert_eq!(mvcc_hits.hits[0].id, "runtime");
+        assert!(mvcc_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "mvcc"));
+        assert!(mvcc_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "snapshot"));
+    }
+
+    #[test]
+    fn tokenizer_normalizes_common_english_suffixes() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory".to_string(),
+                title: "Memories linked sources".to_string(),
+                content: "threading normalized archived chunks".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let memory_hits = index.search("memory", None, SearchMode::Text, 10);
+        let source_hits = index.search("source", None, SearchMode::Text, 10);
+        let thread_hits = index.search("thread", None, SearchMode::Text, 10);
+        let archive_hits = index.search("archive", None, SearchMode::Text, 10);
+        let chunk_hits = index.search("chunk", None, SearchMode::Text, 10);
+
+        assert_eq!(memory_hits[0].id, "memory");
+        assert_eq!(source_hits[0].id, "memory");
+        assert_eq!(thread_hits[0].id, "memory");
+        assert_eq!(archive_hits[0].id, "memory");
+        assert_eq!(chunk_hits[0].id, "memory");
+    }
+
+    #[test]
+    fn tokenizer_expands_knowledge_retrieval_aliases() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "graph-rag".to_string(),
+                title: "GraphRAG over knowledge graph evidence".to_string(),
+                content: "retrieval augmented generation with bounded graph expansion".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let graph_retrieval_hits = index.search("graph retrieval", None, SearchMode::Text, 10);
+        let rag_hits = index.search("rag", None, SearchMode::Text, 10);
+        let expanded_hits =
+            index.search("retrieval augmented generation", None, SearchMode::Text, 10);
+        let kg_hits = index.search("kg", None, SearchMode::Text, 10);
+        let knowledge_graph_hits = index.search("knowledge graph", None, SearchMode::Text, 10);
+
+        assert_eq!(graph_retrieval_hits[0].id, "graph-rag");
+        assert_eq!(rag_hits[0].id, "graph-rag");
+        assert_eq!(expanded_hits[0].id, "graph-rag");
+        assert_eq!(kg_hits[0].id, "graph-rag");
+        assert_eq!(knowledge_graph_hits[0].id, "graph-rag");
+    }
+
+    #[test]
+    fn tokenizer_filters_stopwords_from_text_scoring_and_matched_terms() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "noise".to_string(),
+                title: "The of in".to_string(),
+                content: "and to with".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "graph".to_string(),
+                title: "Graph memory".to_string(),
+                content: "indexed retrieval".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let result = index.search_with_report("the graph of memory", None, SearchMode::Text, 10);
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.hits[0].id, "graph");
+        assert_eq!(
+            result.hits[0].matched_terms,
+            vec!["graph".to_string(), "memory".to_string()]
+        );
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert_eq!(text.candidate_count, 1);
+    }
+
+    #[test]
+    fn search_hits_expose_projection_provenance_and_matched_terms() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert_projection_row(SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "mem_1".to_string(),
+                title: "GraphRAG retrieval".to_string(),
+                body: "Evidence from source chunks".to_string(),
+                embedding: None,
+                source_id: Some("thread_1".to_string()),
+                metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+            })
+            .unwrap();
+
+        let hits = index.search("rag source chunk", None, SearchMode::Text, 10);
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "memory:mem_1");
+        assert_eq!(hits[0].kind.as_deref(), Some("memory"));
+        assert_eq!(hits[0].external_id.as_deref(), Some("mem_1"));
+        assert_eq!(hits[0].source_id.as_deref(), Some("thread_1"));
+        assert!(hits[0].matched_terms.iter().any(|term| term == "rag"));
+        assert!(hits[0].matched_terms.iter().any(|term| term == "source"));
+        assert!(hits[0].matched_terms.iter().any(|term| term == "chunk"));
+    }
+
+    #[test]
+    fn search_hits_expose_projection_freshness() {
+        let path = unique_test_dir("search_projection_freshness");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "text-embedding-3-small".to_string(),
+                version: Some("2026-07-15".to_string()),
+                dimension: 2,
+            })
+            .unwrap();
+        index
+            .upsert_projection_row(SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "mem_1".to_string(),
+                title: "Graph retrieval".to_string(),
+                body: "Freshness aware search projection".to_string(),
+                embedding: Some(vec![1.0, 0.0]),
+                source_id: Some("thread_1".to_string()),
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        index.mark_full_reindex_needed("stale projection").unwrap();
+        index
+            .mark_metadata_repair_needed("missing metadata")
+            .unwrap();
+
+        let freshness = index.projection_freshness();
+        let hits = index.search(
+            "freshness projection",
+            Some(&[1.0, 0.0]),
+            SearchMode::Hybrid,
+            10,
+        );
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].projection_freshness, freshness);
+        assert_eq!(hits[0].projection_freshness.document_count, 1);
+        assert!(hits[0].projection_freshness.full_reindex_needed);
+        assert!(hits[0].projection_freshness.metadata_repair_needed);
+        assert_eq!(
+            hits[0].projection_freshness.embedding_model.as_deref(),
+            Some("text-embedding-3-small")
+        );
+        assert_eq!(
+            hits[0].projection_freshness.embedding_version.as_deref(),
+            Some("2026-07-15")
+        );
+        assert_eq!(hits[0].projection_freshness.embedding_dimension, Some(2));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn search_report_exposes_limit_truncation() {
+        let mut index = SearchIndex::in_memory();
+        for id in ["a", "b", "c"] {
+            index
+                .upsert(SearchDocument {
+                    id: id.to_string(),
+                    title: "Graph retrieval".to_string(),
+                    content: "projection evidence".to_string(),
+                    embedding: None,
+                    metadata: BTreeMap::new(),
+                })
+                .unwrap();
+        }
+
+        let result = index.search_with_report("graph", None, SearchMode::Text, 2);
+
+        assert_eq!(result.hits.len(), 2);
+        assert_eq!(result.total_hits, 3);
+        assert_eq!(result.limit, 2);
+        assert!(result.truncated);
+        assert_eq!(result.truncation_reasons.len(), 1);
+        assert!(result.truncation_reasons[0].contains("limit 2"));
+        assert!(result.truncation_reasons[0].contains("3 matching hits"));
     }
 
     #[test]
@@ -765,6 +2101,126 @@ mod tests {
             assert_eq!(hits[0].id, "a");
         }
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn projection_checkpoint_publishes_snapshot_file() {
+        let path = unique_test_dir("search_snapshot_publish");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "text-embedding-3-small".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+
+        let snapshot_bytes = std::fs::read(path.join(SEARCH_SNAPSHOT_FILE)).unwrap();
+        assert!(snapshot_bytes.starts_with(SEARCH_COMPRESSION_HEADER.as_bytes()));
+        let snapshot = read_search_snapshot_text(&path.join(SEARCH_SNAPSHOT_FILE)).unwrap();
+        assert!(snapshot.contains("SKEIN_SEARCH_PROJECTION_V1\n"));
+        assert!(snapshot.contains("embedding_manifest\t"));
+        assert!(snapshot.contains("doc\t"));
+        assert!(snapshot.contains("checksum\t"));
+
+        let index = SearchIndex::open(&path).unwrap();
+        assert_eq!(
+            index.embedding_manifest(),
+            Some(&SearchEmbeddingManifest {
+                model: "text-embedding-3-small".to_string(),
+                version: None,
+                dimension: 2,
+            })
+        );
+        assert!(index.document("a").is_some());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn embedding_manifest_round_trips_through_snapshot() {
+        let path = unique_test_dir("embedding_manifest_snapshot");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "text-embedding-3-small".to_string(),
+                    version: Some("2026-07-15".to_string()),
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        {
+            let index = SearchIndex::open(&path).unwrap();
+            assert_eq!(
+                index.embedding_manifest(),
+                Some(&SearchEmbeddingManifest {
+                    model: "text-embedding-3-small".to_string(),
+                    version: Some("2026-07-15".to_string()),
+                    dimension: 2,
+                })
+            );
+            let hits = index.search("graph", Some(&[1.0, 0.0]), SearchMode::Hybrid, 10);
+            assert_eq!(hits[0].id, "a");
+        }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn embedding_manifest_change_marks_full_reindex_needed() {
+        let path = unique_test_dir("embedding_manifest_change");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "model-a".to_string(),
+                version: Some("1".to_string()),
+                dimension: 2,
+            })
+            .unwrap();
+        index
+            .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
+            .unwrap();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "model-b".to_string(),
+                version: Some("1".to_string()),
+                dimension: 2,
+            })
+            .unwrap();
+
+        assert!(index.full_reindex_needed());
+        let marker = std::fs::read_to_string(path.join(FULL_REINDEX_MARKER)).unwrap();
+        assert!(marker.contains("embedding manifest changed"));
+        assert!(marker.contains("model-a@1:2"));
+        assert!(marker.contains("model-b@1:2"));
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn embedding_manifest_dimension_rejects_mismatched_rows() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "model-a".to_string(),
+                version: None,
+                dimension: 3,
+            })
+            .unwrap();
+
+        let error = index
+            .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("manifest expects 3"));
     }
 
     #[test]
@@ -953,6 +2409,92 @@ mod tests {
         assert!(!index.full_reindex_needed());
         assert!(!index.metadata_repair_needed());
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn search_derived_artifact_rebuild_reports_projection_refresh() {
+        let path = unique_test_dir("search_derived_artifact_rebuild");
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("mem_1".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Graph storage".to_string()),
+                    ),
+                    (
+                        "body".to_string(),
+                        Value::String("Native adjacency".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .upsert(doc(
+                "old",
+                "Old projection",
+                "Should be replaced",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+        index.mark_full_reindex_needed("stale projection").unwrap();
+        index
+            .mark_metadata_repair_needed("missing metadata")
+            .unwrap();
+
+        let report = index
+            .rebuild_derived_artifacts(&catalog, &store, SearchRebuildOptions::default())
+            .unwrap();
+
+        assert_eq!(report.artifact_type, "search_projection");
+        assert_eq!(report.name, "search_projection");
+        assert_eq!(report.action, "rebuilt");
+        assert_eq!(report.before_document_count, 1);
+        assert_eq!(report.after_document_count, 1);
+        assert_eq!(report.scanned_nodes, 1);
+        assert_eq!(report.indexed_documents, 1);
+        assert!(!report.full_reindex_needed);
+        assert!(!report.metadata_repair_needed);
+        assert!(index.document("old").is_none());
+        assert!(index.document("memory:mem_1").is_some());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn search_derived_artifact_rebuild_limit_failure_keeps_existing_projection() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in ["mem_1", "mem_2"] {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    BTreeMap::from([
+                        ("id".to_string(), Value::String(id.to_string())),
+                        ("title".to_string(), Value::String(id.to_string())),
+                    ]),
+                )
+                .unwrap();
+        }
+
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("old", "Old projection", "Should stay", [1.0, 0.0]))
+            .unwrap();
+
+        let error = index
+            .rebuild_derived_artifacts(&catalog, &store, SearchRebuildOptions { max_rows: Some(1) })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("row limit"));
+        assert_eq!(index.document_count(), 1);
+        assert!(index.document("old").is_some());
     }
 
     #[test]

@@ -1,6 +1,17 @@
-use skein::{Database, Result};
+use skein::{scan_nowledge_query_inventory_to_json, Database, Result, SkeinError};
 
 fn main() -> Result<()> {
+    let mut args = std::env::args().skip(1);
+    if let Some(command) = args.next() {
+        if command == "scan-nowledge-inventory" {
+            let root = args.next().unwrap_or_else(|| ".".to_string());
+            let json = scan_nowledge_query_inventory_to_json(root)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            return Ok(());
+        }
+        return Err(SkeinError::Semantic(format!("unknown command '{command}'")));
+    }
+
     let path = std::env::temp_dir().join("skein-demo");
     let _ = std::fs::remove_dir_all(&path);
     let mut db = Database::open(&path)?;
