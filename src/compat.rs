@@ -5941,6 +5941,92 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest fs source grep single lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.original_name, s.parsed_path, s.mime_type, s.created_at, s.updated_at, s.space_id, s.lifecycle_state, s.chunk_count, s.memory_count, s.size_bytes LIMIT 1",
+                        BTreeMap::from([(
+                            "key".to_string(),
+                            Value::String("rest-fs-source-grep-single-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("rest-fs-source-grep-single-1".to_string()),
+                        ),
+                        (
+                            "s.original_name",
+                            Value::String("Grep Single Source".to_string()),
+                        ),
+                        (
+                            "s.parsed_path",
+                            Value::String("/tmp/rest-fs-source-grep-single.md".to_string()),
+                        ),
+                        ("s.mime_type", Value::String("text/markdown".to_string())),
+                        ("s.created_at", Value::Int(1700000090)),
+                        ("s.updated_at", Value::Int(1700000091)),
+                        ("s.space_id", Value::String("default".to_string())),
+                        ("s.lifecycle_state", Value::String("parsed".to_string())),
+                        ("s.chunk_count", Value::Int(3)),
+                        ("s.memory_count", Value::Int(2)),
+                        ("s.size_bytes", Value::Int(4096)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-fs-source-grep-single-1', original_name: 'Grep Single Source', parsed_path: '/tmp/rest-fs-source-grep-single.md', mime_type: 'text/markdown', created_at: 1700000090, updated_at: 1700000091, space_id: 'default', lifecycle_state: 'parsed', chunk_count: 3, memory_count: 2, size_bytes: 4096})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-fs-source-grep-single-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs source grep page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.id > $after RETURN s.id, s.original_name, s.parsed_path, s.mime_type, s.created_at, s.updated_at, s.space_id, s.lifecycle_state, s.chunk_count, s.memory_count, s.size_bytes ORDER BY s.id ASC LIMIT 200",
+                        BTreeMap::from([(
+                            "after".to_string(),
+                            Value::String("zz-rest-fs-source-grep-page-0".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("zz-rest-fs-source-grep-page-1".to_string()),
+                        ),
+                        (
+                            "s.original_name",
+                            Value::String("Grep Page Source".to_string()),
+                        ),
+                        (
+                            "s.parsed_path",
+                            Value::String("/tmp/rest-fs-source-grep-page.md".to_string()),
+                        ),
+                        ("s.mime_type", Value::String("text/markdown".to_string())),
+                        ("s.created_at", Value::Int(1700000092)),
+                        ("s.updated_at", Value::Int(1700000093)),
+                        ("s.space_id", Value::String("default".to_string())),
+                        ("s.lifecycle_state", Value::String("parsed".to_string())),
+                        ("s.chunk_count", Value::Int(5)),
+                        ("s.memory_count", Value::Int(4)),
+                        ("s.size_bytes", Value::Int(8192)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'zz-rest-fs-source-grep-page-1', original_name: 'Grep Page Source', parsed_path: '/tmp/rest-fs-source-grep-page.md', mime_type: 'text/markdown', created_at: 1700000092, updated_at: 1700000093, space_id: 'default', lifecycle_state: 'parsed', chunk_count: 5, memory_count: 4, size_bytes: 8192})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'zz-rest-fs-source-grep-page-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "rest agent source attachment node read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (s:Source {id: $id}) RETURN s",
@@ -5957,6 +6043,88 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (s:Source {id: 'rest-agent-source-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs source listing page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.id > $after RETURN s.id, s.original_name, s.mime_type, s.updated_at, s.size_bytes, s.summary ORDER BY s.id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "after".to_string(),
+                                Value::String("zz-rest-fs-source-listing-0".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("zz-rest-fs-source-listing-1".to_string()),
+                        ),
+                        (
+                            "s.original_name",
+                            Value::String("Listing Source".to_string()),
+                        ),
+                        ("s.mime_type", Value::String("text/plain".to_string())),
+                        ("s.updated_at", Value::Int(1700000094)),
+                        ("s.size_bytes", Value::Int(2048)),
+                        ("s.summary", Value::String("listing summary".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'zz-rest-fs-source-listing-1', original_name: 'Listing Source', mime_type: 'text/plain', updated_at: 1700000094, size_bytes: 2048, summary: 'listing summary'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'zz-rest-fs-source-listing-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs source detail lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.original_name, s.mime_type, s.parsed_path, s.summary, s.size_bytes, s.chunk_count, s.memory_count, s.created_at, s.updated_at, s.space_id, s.lifecycle_state LIMIT 1",
+                        BTreeMap::from([(
+                            "key".to_string(),
+                            Value::String("rest-fs-source-detail-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "s.id",
+                            Value::String("rest-fs-source-detail-1".to_string()),
+                        ),
+                        (
+                            "s.original_name",
+                            Value::String("Detail Source".to_string()),
+                        ),
+                        ("s.mime_type", Value::String("text/markdown".to_string())),
+                        (
+                            "s.parsed_path",
+                            Value::String("/tmp/rest-fs-source-detail.md".to_string()),
+                        ),
+                        ("s.summary", Value::String("detail summary".to_string())),
+                        ("s.size_bytes", Value::Int(1024)),
+                        ("s.chunk_count", Value::Int(6)),
+                        ("s.memory_count", Value::Int(7)),
+                        ("s.created_at", Value::Int(1700000095)),
+                        ("s.updated_at", Value::Int(1700000096)),
+                        ("s.space_id", Value::String("research".to_string())),
+                        ("s.lifecycle_state", Value::String("indexed".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-fs-source-detail-1', original_name: 'Detail Source', mime_type: 'text/markdown', parsed_path: '/tmp/rest-fs-source-detail.md', summary: 'detail summary', size_bytes: 1024, chunk_count: 6, memory_count: 7, created_at: 1700000095, updated_at: 1700000096, space_id: 'research', lifecycle_state: 'indexed'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-fs-source-detail-1'}) DETACH DELETE s",
                     ),
                     ExpectedRows::RowCount(1),
                 ),
@@ -16364,11 +16532,43 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source {id: $id}) RETURN COALESCE(s.space_id, 'default'), COALESCE(s.source_type, 'file'), COALESCE(s.lifecycle_state, 'indexed'), COALESCE(s.mime_type, '')",
             ),
             CompatibilityQueryCallSite::new(
+                "rest fs source grep single lookup read",
+                "source_read",
+                "nmem-server::rest_fs::grep_sources.single",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.original_name, s.parsed_path, s.mime_type, s.created_at, s.updated_at, s.space_id, s.lifecycle_state, s.chunk_count, s.memory_count, s.size_bytes LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs source grep page read",
+                "source_read",
+                "nmem-server::rest_fs::grep_sources.page",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.id > $after RETURN s.id, s.original_name, s.parsed_path, s.mime_type, s.created_at, s.updated_at, s.space_id, s.lifecycle_state, s.chunk_count, s.memory_count, s.size_bytes ORDER BY s.id ASC LIMIT 200",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest agent source attachment node read",
                 "source_read",
                 "nmem-server::rest_agent::attached_source.library",
             )
             .with_cypher("MATCH (s:Source {id: $id}) RETURN s"),
+            CompatibilityQueryCallSite::new(
+                "rest fs source listing page read",
+                "source_read",
+                "nmem-server::rest_fs::ls_sources",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.id > $after RETURN s.id, s.original_name, s.mime_type, s.updated_at, s.size_bytes, s.summary ORDER BY s.id ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs source detail lookup read",
+                "source_read",
+                "nmem-server::rest_fs::fetch_source_for_kfs",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key RETURN s.id, s.original_name, s.mime_type, s.parsed_path, s.summary, s.size_bytes, s.chunk_count, s.memory_count, s.created_at, s.updated_at, s.space_id, s.lifecycle_state LIMIT 1",
+            ),
             CompatibilityQueryCallSite::new(
                 "source list fallback page read",
                 "source_read",
@@ -20285,7 +20485,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 459);
+        assert_eq!(report.checks.len(), 463);
     }
 
     #[test]
@@ -20301,13 +20501,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 459);
-        assert_eq!(coverage.covered_checks, 459);
+        assert_eq!(coverage.required_checks, 463);
+        assert_eq!(coverage.covered_checks, 463);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 459);
+        assert_eq!(coverage_json["covered_checks"], 463);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -20337,10 +20537,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 459);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 463);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 459);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 463);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -20565,15 +20765,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 459);
-        assert_eq!(report.shadow_checks.len(), 459);
+        assert_eq!(report.primary_checks.len(), 463);
+        assert_eq!(report.shadow_checks.len(), 463);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            459
+            463
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -20582,7 +20782,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 459);
+        assert_eq!(cutover.matched_checks, 463);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
