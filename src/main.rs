@@ -29,6 +29,7 @@ fn main() -> Result<()> {
         if command == "nowledge-cypher-migration-gate" {
             let mut require_ready = false;
             let mut allow_self_shadow = false;
+            let mut shadow_trace = None;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-ready" => {
@@ -38,6 +39,12 @@ fn main() -> Result<()> {
                     "--allow-self-shadow" => {
                         allow_self_shadow = true;
                         args.next();
+                    }
+                    "--shadow-trace" => {
+                        args.next();
+                        shadow_trace = Some(args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
+                        })?);
                     }
                     _ => break,
                 }
@@ -58,10 +65,18 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge migration gate requires a previous-wrapper shadow for --require-ready; pass --allow-self-shadow only for protocol smoke tests"
-                        .to_string(),
+                    .to_string(),
                 ));
             }
-            let mut shadow = ExternalShadowCommand::spawn(shadow_name, program, program_args)?;
+            let mut shadow = match shadow_trace {
+                Some(trace_path) => ExternalShadowCommand::spawn_with_trace_path(
+                    shadow_name,
+                    program,
+                    program_args,
+                    trace_path,
+                )?,
+                None => ExternalShadowCommand::spawn(shadow_name, program, program_args)?,
+            };
             let json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
             let rendered = serde_json::to_string_pretty(&json).unwrap();
@@ -104,7 +119,7 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--allow-self-shadow] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate requires [--require-ready] [--allow-self-shadow] [--shadow-trace <path>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 

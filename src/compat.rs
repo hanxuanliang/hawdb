@@ -4,7 +4,9 @@ use crate::error::{Result, SkeinError};
 use crate::executor::Row;
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Read, Write};
+use std::path::Path;
 use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -247,6 +249,8 @@ pub struct ExternalShadowCommand {
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
     stderr: ExternalShadowStderr,
+    trace: Option<File>,
+    next_trace_sequence: u64,
 }
 
 struct ExternalShadowStderr {
@@ -268,6 +272,24 @@ impl ExternalShadowCommand {
         program: impl AsRef<std::ffi::OsStr>,
         args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
     ) -> Result<Self> {
+        Self::spawn_inner(name, program, args, None::<&Path>)
+    }
+
+    pub fn spawn_with_trace_path(
+        name: impl Into<String>,
+        program: impl AsRef<std::ffi::OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+        trace_path: impl AsRef<Path>,
+    ) -> Result<Self> {
+        Self::spawn_inner(name, program, args, Some(trace_path.as_ref()))
+    }
+
+    fn spawn_inner(
+        name: impl Into<String>,
+        program: impl AsRef<std::ffi::OsStr>,
+        args: impl IntoIterator<Item = impl AsRef<std::ffi::OsStr>>,
+        trace_path: Option<&Path>,
+    ) -> Result<Self> {
         let mut command = Command::new(program);
         command
             .args(args)
@@ -286,12 +308,29 @@ impl ExternalShadowCommand {
         let stderr = child.stderr.take().ok_or_else(|| {
             SkeinError::Execution("external shadow engine did not expose stderr".to_string())
         })?;
+        let trace = trace_path
+            .map(|path| {
+                OpenOptions::new()
+                    .create(true)
+                    .truncate(true)
+                    .write(true)
+                    .open(path)
+                    .map_err(|error| {
+                        SkeinError::Execution(format!(
+                            "failed to open external shadow trace '{}': {error}",
+                            path.display()
+                        ))
+                    })
+            })
+            .transpose()?;
         Ok(Self {
             name: name.into(),
             child,
             stdin,
             stdout: BufReader::new(stdout),
             stderr: ExternalShadowStderr::start(stderr),
+            trace,
+            next_trace_sequence: 1,
         })
     }
 
@@ -303,6 +342,9 @@ impl ExternalShadowCommand {
             "protocol_version".to_string(),
             serde_json::Value::Number(EXTERNAL_SHADOW_PROTOCOL_VERSION.into()),
         );
+        let trace_sequence = self.next_trace_sequence;
+        self.next_trace_sequence += 1;
+        self.trace_event(trace_sequence, "request", &request);
         let line = serde_json::to_string(&request).map_err(|error| {
             SkeinError::Execution(format!("failed to encode shadow request: {error}"))
         })?;
@@ -329,12 +371,14 @@ impl ExternalShadowCommand {
         if bytes == 0 {
             return Err(self.request_error(format!("shadow engine '{}' closed stdout", self.name)));
         }
-        serde_json::from_str(response.trim_end()).map_err(|error| {
+        let response = serde_json::from_str(response.trim_end()).map_err(|error| {
             self.request_error(format!(
                 "shadow engine '{}' returned invalid JSON: {error}",
                 self.name
             ))
-        })
+        })?;
+        self.trace_event(trace_sequence, "response", &response);
+        Ok(response)
     }
 
     fn request_error(&self, message: String) -> SkeinError {
@@ -342,6 +386,19 @@ impl ExternalShadowCommand {
             Some(stderr) => SkeinError::Execution(format!("{message}; stderr tail: {stderr}")),
             None => SkeinError::Execution(message),
         }
+    }
+
+    fn trace_event(&mut self, sequence: u64, event: &str, payload: &serde_json::Value) {
+        let Some(trace) = self.trace.as_mut() else {
+            return;
+        };
+        let record = serde_json::json!({
+            "sequence": sequence,
+            "event": event,
+            "payload": payload,
+        });
+        let _ = writeln!(trace, "{record}");
+        let _ = trace.flush();
     }
 }
 
@@ -27197,6 +27254,58 @@ done
     }
 
     #[test]
+    fn writes_external_shadow_trace_jsonl() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-trace",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *MATCH*) echo '{"ok":{"rows":[{"title":"Graph foundations"}]}}' ;;
+    *) echo '{"ok":{"rows":[]}}' ;;
+  esac
+done
+"#,
+        );
+        let trace_path = unique_test_path("external-shadow-trace.jsonl");
+        let mut shadow = ExternalShadowCommand::spawn_with_trace_path(
+            "external-shadow-trace",
+            "sh",
+            [script],
+            &trace_path,
+        )
+        .unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-trace-fixture".to_string(),
+            setup: vec![CypherFixtureStatement::new(
+                "CREATE (:Memory {id: 1, title: 'Graph foundations'})",
+            )],
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::Exact(vec![row([(
+                    "title",
+                    Value::String("Graph foundations".to_string()),
+                )])]),
+            ))],
+        };
+
+        let report =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
+        drop(shadow);
+
+        assert_eq!(
+            report.shadow_checks[0].status,
+            CompatibilityShadowStatus::Matched
+        );
+        let trace = fs::read_to_string(&trace_path).unwrap();
+        assert!(trace.contains("\"event\":\"request\""));
+        assert!(trace.contains("\"event\":\"response\""));
+        assert!(trace.contains("\"protocol_version\":1"));
+        let _ = fs::remove_file(trace_path);
+    }
+
+    #[test]
     fn reports_row_mismatch_with_fixture_context() {
         let mut db = Database::new();
         let fixture = CompatibilityFixture {
@@ -27504,9 +27613,17 @@ done
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let path = std::env::temp_dir().join(format!("skein-{name}-{nonce}.sh"));
+        let path = unique_test_path(format!("{name}-{nonce}.sh"));
         fs::write(&path, content).unwrap();
         path.to_string_lossy().into_owned()
+    }
+
+    fn unique_test_path(name: impl AsRef<str>) -> std::path::PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein-{}-{nonce}", name.as_ref()))
     }
 
     fn row(items: impl IntoIterator<Item = (&'static str, Value)>) -> BTreeMap<String, Value> {

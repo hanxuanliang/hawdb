@@ -226,7 +226,7 @@ Skein-side error with the shadow engine name.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--allow-self-shadow] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--allow-self-shadow] [--shadow-trace <path>] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -237,3 +237,9 @@ blocked.
 `--require-ready` requires a previous-wrapper shadow by default. `skein-shadow-self`
 is allowed only when `--allow-self-shadow` is passed, and that flag is intended
 for protocol and CI smoke tests, not cutover evidence.
+
+`--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
+conversation. Each line contains `sequence`, `event`, and `payload`; `event` is
+`request` or `response`. The transcript is intended for previous-wrapper parity
+debugging and should be treated as local diagnostic output because Cypher
+parameters may contain graph data.
