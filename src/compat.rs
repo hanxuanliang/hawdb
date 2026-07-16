@@ -8187,6 +8187,62 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(3),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "wiki community crystal source visibility read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id IN $cids RETURN m.id, m.crystal_title, m.title, m.content, m.importance, e.community_id, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state, src.metadata, COALESCE(src.is_latest, true), src.lifecycle_state",
+                        BTreeMap::from([(
+                            "cids".to_string(),
+                            Value::List(vec![Value::Int(9800)]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("community-crystal".to_string())),
+                        (
+                            "m.crystal_title",
+                            Value::String("Community Crystal".to_string()),
+                        ),
+                        ("m.title", Value::String("Crystal Fallback".to_string())),
+                        ("m.content", Value::String("crystal content".to_string())),
+                        ("m.importance", Value::Float(0.88)),
+                        ("e.community_id", Value::Int(9800)),
+                        (
+                            "m.metadata",
+                            Value::String("{\"state\":\"active\"}".to_string()),
+                        ),
+                        ("coalesce", Value::Bool(true)),
+                        ("m.lifecycle_state", Value::String("active".to_string())),
+                        (
+                            "src.metadata",
+                            Value::String("{\"state\":\"active\"}".to_string()),
+                        ),
+                        ("coalesce#2", Value::Bool(true)),
+                        ("src.lifecycle_state", Value::String("active".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'community-crystal', crystal_title: 'Community Crystal', title: 'Crystal Fallback', content: 'crystal content', importance: 0.88, is_crystal: true, metadata: '{\"state\":\"active\"}', is_latest: true, lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'community-crystal-source', metadata: '{\"state\":\"active\"}', is_latest: true, lifecycle_state: 'active'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'community-crystal-entity', community_id: 9800})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'community-crystal'}), (src:Memory {id: 'community-crystal-source'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'community-crystal-source'}), (e:Entity {id: 'community-crystal-entity'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['community-crystal', 'community-crystal-source', 'community-crystal-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "wiki export summary entity count",
                 CypherFixtureStatement::new("MATCH (e:Entity) RETURN COUNT(e)"),
@@ -10700,6 +10756,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE e.community_id IN $cids OPTIONAL MATCH (m:Memory)-[r:MENTIONS]->(e) RETURN e.community_id, e.id, e.name, e.entity_type, m.id, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state ORDER BY e.community_id, e.name ASC",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki community crystal source visibility read",
+                "wiki_export_read",
+                "nmem-server::rest_library::community_crystals",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id IN $cids RETURN m.id, m.crystal_title, m.title, m.content, m.importance, e.community_id, m.metadata, COALESCE(m.is_latest, true), m.lifecycle_state, src.metadata, COALESCE(src.is_latest, true), src.lifecycle_state",
+            ),
+            CompatibilityQueryCallSite::new(
                 "wiki export summary entity count",
                 "wiki_export_read",
                 "nmem-server::wiki_export::wiki_export_summary.entity_count",
@@ -12119,7 +12183,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 259);
+        assert_eq!(report.checks.len(), 260);
     }
 
     #[test]
@@ -12135,13 +12199,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 259);
-        assert_eq!(coverage.covered_checks, 259);
+        assert_eq!(coverage.required_checks, 260);
+        assert_eq!(coverage.covered_checks, 260);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 259);
+        assert_eq!(coverage_json["covered_checks"], 260);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -12171,10 +12235,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 259);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 260);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 259);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 260);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12368,15 +12432,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 259);
-        assert_eq!(report.shadow_checks.len(), 259);
+        assert_eq!(report.primary_checks.len(), 260);
+        assert_eq!(report.shadow_checks.len(), 260);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            259
+            260
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12385,7 +12449,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 259);
+        assert_eq!(cutover.matched_checks, 260);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

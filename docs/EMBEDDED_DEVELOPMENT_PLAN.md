@@ -590,7 +590,8 @@ row fetches, floor-zero engagement `CASE` ordering, and decay scheduler
 EVOLVES/crystal synthesis count reads,
 wiki export summary entity/crystal/community count reads, topic entity/crystal
 ranking reads, community entity anchor visibility reads, entity id-or-name
-lookup and community context reads, and community top memory ranking reads,
+lookup and community context reads, community crystal source visibility reads,
+and community top memory ranking reads,
 OKF export community list, entity list, crystal list, and crystal-source entity
 community reads, shared OKF/wiki entity mention detail reads, and shared OKF/wiki
 related entity reads, plus OKF memory row exports with row-preserving label
