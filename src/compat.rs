@@ -12124,6 +12124,166 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(1),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph node detail memory lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (n:Memory {id: $node_id}) RETURN n",
+                        BTreeMap::from([(
+                            "node_id".to_string(),
+                            Value::String("node-detail-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'node-detail-memory', title: 'Node Detail Memory'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n:Memory {id: 'node-detail-memory'}) DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph node detail entity lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (n:Entity {id: $node_id}) RETURN n",
+                        BTreeMap::from([(
+                            "node_id".to_string(),
+                            Value::String("node-detail-entity".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'node-detail-entity', name: 'Node Detail Entity'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n:Entity {id: 'node-detail-entity'}) DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph node detail source lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (n:Source {id: $node_id}) RETURN n",
+                        BTreeMap::from([(
+                            "node_id".to_string(),
+                            Value::String("node-detail-source".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'node-detail-source', original_name: 'Node Detail Source'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n:Source {id: 'node-detail-source'}) DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph node detail thread lookup",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (n:Thread {id: $node_id}) RETURN n",
+                        BTreeMap::from([(
+                            "node_id".to_string(),
+                            Value::String("node-detail-thread".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'node-detail-thread', title: 'Node Detail Thread'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n:Thread {id: 'node-detail-thread'}) DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph seed memory nodes read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("seed-memory-node".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'seed-memory-node', title: 'Seed Memory Node', content: 'seed content', importance: 0.7})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'seed-memory-node'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph seed memory neighbor read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Memory)-[r]-(b:Memory) WHERE a.id IN $ids RETURN a.id, b.id, COALESCE(b.title, LEFT(COALESCE(b.content, ''), 60)), b.title, LEFT(COALESCE(b.content, ''), 200), COALESCE(b.pagerank_score, b.importance, 0.5), b.community_id, b.space_id, b.created_at, b.updated_at, b.source, b.event_start, b.event_end, b.importance, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "ids".to_string(),
+                                Value::List(vec![Value::String("seed-memory-source".to_string())]),
+                            ),
+                            ("limit".to_string(), Value::Int(5)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'seed-memory-source', title: 'Seed Memory Source'})-[:MEMORY_RELATES_TO {strength: 0.8}]->(:Memory {id: 'seed-memory-target', title: 'Seed Memory Target', importance: 0.6})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['seed-memory-source', 'seed-memory-target'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph seed entity neighbor read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Memory)-[r]-(e:Entity) WHERE a.id IN $ids RETURN a.id, e.id, COALESCE(e.name, e.id), e.entity_type, e.description, COALESCE(e.pagerank_score, e.confidence, 0.5), e.community_id, e.confidence, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "ids".to_string(),
+                                Value::List(vec![Value::String("seed-entity-memory".to_string())]),
+                            ),
+                            ("limit".to_string(), Value::Int(5)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'seed-entity-memory', title: 'Seed Entity Memory'})-[:MENTIONS {confidence: 0.7}]->(:Entity {id: 'seed-entity-target', name: 'Seed Entity Target', entity_type: 'concept'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['seed-entity-memory', 'seed-entity-target'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "pagerank mention edge count",
                 CypherFixtureStatement::new(
@@ -18257,6 +18417,54 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Community) RETURN c.community_id, c.name, c.description, c.member_count, c.algorithm, c.resolution ORDER BY c.member_count DESC",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph node detail memory lookup",
+                "graph_node_detail_read",
+                "nmem-server::rest_graph::node_details_payload",
+            )
+            .with_cypher("MATCH (n:Memory {id: $node_id}) RETURN n"),
+            CompatibilityQueryCallSite::new(
+                "rest graph node detail entity lookup",
+                "graph_node_detail_read",
+                "nmem-server::rest_graph::node_details_payload",
+            )
+            .with_cypher("MATCH (n:Entity {id: $node_id}) RETURN n"),
+            CompatibilityQueryCallSite::new(
+                "rest graph node detail source lookup",
+                "graph_node_detail_read",
+                "nmem-server::rest_graph::node_details_payload",
+            )
+            .with_cypher("MATCH (n:Source {id: $node_id}) RETURN n"),
+            CompatibilityQueryCallSite::new(
+                "rest graph node detail thread lookup",
+                "graph_node_detail_read",
+                "nmem-server::rest_graph::node_details_payload",
+            )
+            .with_cypher("MATCH (n:Thread {id: $node_id}) RETURN n"),
+            CompatibilityQueryCallSite::new(
+                "rest graph seed memory nodes read",
+                "graph_node_detail_read",
+                "nmem-server::rest_graph::query_seed_memory_nodes",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60)), m.title, LEFT(COALESCE(m.content, ''), 200), COALESCE(m.pagerank_score, m.importance, 0.5), m.community_id, m.space_id, m.created_at, m.updated_at, m.source, m.event_start, m.event_end, m.importance",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph seed memory neighbor read",
+                "graph_node_detail_read",
+                "nmem-server::rest_graph::query_seed_neighbors",
+            )
+            .with_cypher(
+                "MATCH (a:Memory)-[r]-(b:Memory) WHERE a.id IN $ids RETURN a.id, b.id, COALESCE(b.title, LEFT(COALESCE(b.content, ''), 60)), b.title, LEFT(COALESCE(b.content, ''), 200), COALESCE(b.pagerank_score, b.importance, 0.5), b.community_id, b.space_id, b.created_at, b.updated_at, b.source, b.event_start, b.event_end, b.importance, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph seed entity neighbor read",
+                "graph_node_detail_read",
+                "nmem-server::rest_graph::query_seed_neighbors",
+            )
+            .with_cypher(
+                "MATCH (a:Memory)-[r]-(e:Entity) WHERE a.id IN $ids RETURN a.id, e.id, COALESCE(e.name, e.id), e.entity_type, e.description, COALESCE(e.pagerank_score, e.confidence, 0.5), e.community_id, e.confidence, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "node detail neighbor counts",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::query_node_detail",
@@ -21494,7 +21702,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 496);
+        assert_eq!(report.checks.len(), 503);
     }
 
     #[test]
@@ -21510,13 +21718,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 496);
-        assert_eq!(coverage.covered_checks, 496);
+        assert_eq!(coverage.required_checks, 503);
+        assert_eq!(coverage.covered_checks, 503);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 496);
+        assert_eq!(coverage_json["covered_checks"], 503);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -21546,10 +21754,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 496);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 503);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 496);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 503);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -21774,15 +21982,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 496);
-        assert_eq!(report.shadow_checks.len(), 496);
+        assert_eq!(report.primary_checks.len(), 503);
+        assert_eq!(report.shadow_checks.len(), 503);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            496
+            503
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -21791,7 +21999,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 496);
+        assert_eq!(cutover.matched_checks, 503);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
