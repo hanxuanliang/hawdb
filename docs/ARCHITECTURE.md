@@ -326,10 +326,13 @@ then compare that inventory against the public compatibility fixture instead of
 relying on an informal checklist. `scan-nowledge-cypher-coverage` scans the same
 source tree and reports fixture coverage by normalized Cypher text, which lets
 scanner-generated `file:line:hash` call-site names map to existing semantic
-fixture names without duplicating fixtures. Gate reports can be exported as JSON through
-the coverage, inventory gate, shadow cutover, and migration gate report helpers;
-their `decision` fields are lowercase `ready` or `blocked` strings so CI does
-not need to parse Rust debug output. `assess_compatibility_migration_gate_bundle`
+fixture names without duplicating fixtures. `scan-nowledge-cypher-coverage-detail`
+adds `covered_items` and `missing_items` with source, query family, and Cypher
+text so fixture gaps can be closed from real Nowledge call sites. Gate reports
+can be exported as JSON through the coverage, inventory gate, shadow cutover,
+and migration gate report helpers; their `decision` fields are lowercase
+`ready` or `blocked` strings so CI does not need to parse Rust debug output.
+`assess_compatibility_migration_gate_bundle`
 packages the four reports into one result, and
 `compatibility_migration_gate_bundle_to_json` preserves the same structure for
 artifact upload.

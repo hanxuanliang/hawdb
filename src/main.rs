@@ -1,4 +1,5 @@
 use skein::{
+    scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json, scan_nowledge_query_inventory_to_json,
     Database, Result, SkeinError,
 };
@@ -15,6 +16,12 @@ fn main() -> Result<()> {
         if command == "scan-nowledge-cypher-coverage" {
             let root = args.next().unwrap_or_else(|| ".".to_string());
             let json = scan_nowledge_query_inventory_cypher_coverage_to_json(root)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            return Ok(());
+        }
+        if command == "scan-nowledge-cypher-coverage-detail" {
+            let root = args.next().unwrap_or_else(|| ".".to_string());
+            let json = scan_nowledge_query_inventory_cypher_coverage_detail_to_json(root)?;
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
         }

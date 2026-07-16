@@ -111,6 +111,70 @@ pub fn scan_nowledge_query_inventory_cypher_coverage_to_json(
     Ok(compatibility_inventory_coverage_report_to_json(&coverage))
 }
 
+pub fn scan_nowledge_query_inventory_cypher_coverage_detail_to_json(
+    root: impl AsRef<Path>,
+) -> Result<serde_json::Value> {
+    let inventory = scan_nowledge_query_inventory(root)?;
+    let fixture = nowledge_memory_core_fixture();
+    let coverage = assess_query_inventory_cypher_coverage(&fixture, &inventory);
+    let fixture_cypher_keys = fixture
+        .checks
+        .iter()
+        .filter_map(fixture_check_cypher)
+        .map(cypher_coverage_key)
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing_items = inventory
+        .required_checks
+        .iter()
+        .filter(|item| {
+            item.cypher
+                .as_deref()
+                .map(cypher_coverage_key)
+                .is_none_or(|key| !fixture_cypher_keys.contains(&key))
+        })
+        .map(inventory_item_detail_to_json)
+        .collect::<Vec<_>>();
+    let covered_items = inventory
+        .required_checks
+        .iter()
+        .filter(|item| {
+            item.cypher
+                .as_deref()
+                .map(cypher_coverage_key)
+                .is_some_and(|key| fixture_cypher_keys.contains(&key))
+        })
+        .map(inventory_item_detail_to_json)
+        .collect::<Vec<_>>();
+
+    Ok(serde_json::json!({
+        "coverage": compatibility_inventory_coverage_report_to_json(&coverage),
+        "covered_items": covered_items,
+        "missing_items": missing_items,
+    }))
+}
+
+fn fixture_check_cypher(check: &crate::compat::CompatibilityCheck) -> Option<&str> {
+    match check {
+        crate::compat::CompatibilityCheck::Cypher(check) => Some(check.statement.cypher.as_str()),
+        crate::compat::CompatibilityCheck::ProjectedGraph(_) => None,
+    }
+}
+
+fn inventory_item_detail_to_json(
+    item: &crate::compat::CompatibilityQueryInventoryItem,
+) -> serde_json::Value {
+    serde_json::json!({
+        "name": item.name,
+        "query_family": item.query_family,
+        "source": item.source,
+        "cypher": item.cypher,
+    })
+}
+
+fn cypher_coverage_key(cypher: &str) -> String {
+    cypher.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
     let metadata = fs::metadata(root).map_err(|error| {
         SkeinError::Execution(format!("failed to stat '{}': {error}", root.display()))
@@ -463,6 +527,7 @@ fn path_to_slash_string(path: &Path) -> String {
 mod tests {
     use super::{
         classify_query_family, extract_rust_string_literals, normalize_cypher_literal,
+        scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
         scan_nowledge_query_inventory_cypher_coverage_to_json, scan_source_file,
     };
     use std::fs;
@@ -598,6 +663,52 @@ mod tests {
         assert_eq!(
             coverage["extra_fixture_checks"].as_array().unwrap().len(),
             273
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_cypher_coverage_detail_reports_missing_item_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-inventory-detail-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn covered() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+
+                pub fn missing() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.uncovered_property"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let detail = scan_nowledge_query_inventory_cypher_coverage_detail_to_json(&root).unwrap();
+        let missing_items = detail["missing_items"].as_array().unwrap();
+        let covered_items = detail["covered_items"].as_array().unwrap();
+
+        assert_eq!(detail["coverage"]["required_checks"], 2);
+        assert_eq!(detail["coverage"]["covered_checks"], 1);
+        assert_eq!(covered_items.len(), 1);
+        assert_eq!(missing_items.len(), 1);
+        assert_eq!(
+            missing_items[0]["cypher"],
+            "MATCH (m:Memory) WHERE m.id = $id RETURN m.uncovered_property"
+        );
+        assert_eq!(missing_items[0]["query_family"], "read");
+        assert_eq!(
+            missing_items[0]["source"],
+            "crates/nmem-graph/src/repo.rs:7"
         );
 
         fs::remove_dir_all(root).unwrap();

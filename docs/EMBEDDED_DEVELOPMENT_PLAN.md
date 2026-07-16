@@ -184,7 +184,9 @@ store SQL, prompt text, tests, benches, and smoke binaries while emitting the
 same audited JSON inventory artifact. `scan-nowledge-cypher-coverage` emits the
 same coverage report shape after matching scanner-generated call sites to
 fixture checks by normalized Cypher text, preserving source metadata without
-requiring duplicate semantic fixture names. Current local scans find 349
+requiring duplicate semantic fixture names. `scan-nowledge-cypher-coverage-detail`
+also emits `covered_items` and `missing_items` with source, query family, and
+Cypher text for fixture work driven by production Nowledge queries. Current local scans find 349
 `nmem-graph/src` call-site entries, 696 `nmem-server/src` entries, and 6
 additional graph-facing harness/scheduler/search entries, including
 AugmentationJob lifecycle, projected graph, relationship-creation queries, and
