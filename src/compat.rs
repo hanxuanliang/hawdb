@@ -10739,7 +10739,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             CompatibilityQueryCallSite::new(
                 "export entity mention detail read",
                 "export_entity_read",
-                "nmem-server::okf_export::entity_mentions_and_related; nmem-server::wiki_export::entity_mentions_and_related_rows",
+                "nmem-server::okf_export::entity_mentions_and_related; nmem-server::wiki_export::entity_mentions_and_related_rows; nmem-server::rest_fs::render_single_entity_page.mentions",
             )
             .with_cypher(
                 "MATCH (m:Memory)-[:MENTIONS]->(e:Entity {id: $id}) RETURN m.id, m.title, m.content, m.is_crystal, COALESCE(m.crystal_title, m.title) AS display_title, m.importance ORDER BY m.is_crystal DESC, m.importance DESC LIMIT $limit",
@@ -10747,7 +10747,7 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             CompatibilityQueryCallSite::new(
                 "export related entity read",
                 "export_entity_read",
-                "nmem-server::okf_export::entity_mentions_and_related; nmem-server::wiki_export::entity_mentions_and_related_rows",
+                "nmem-server::okf_export::entity_mentions_and_related; nmem-server::wiki_export::entity_mentions_and_related_rows; nmem-server::rest_fs::render_single_entity_page.related",
             )
             .with_cypher(
                 "MATCH (e:Entity {id: $id})-[:RELATES_TO]-(other:Entity) WHERE other.id <> $id RETURN DISTINCT other.id, other.name, other.entity_type LIMIT 30",
