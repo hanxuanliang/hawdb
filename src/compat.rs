@@ -2256,6 +2256,28 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ),
                 ExpectedRows::RowCount(1),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest agent memory attachment node read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id}) RETURN m",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-agent-memory-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-agent-memory-1', title: 'Agent Memory', content: 'attached memory content', unit_type: 'fact'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-agent-memory-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "source provenance endpoint existence",
                 CypherFixtureStatement::with_parameters(
@@ -5492,6 +5514,28 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest agent source attachment node read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) RETURN s",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-agent-source-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'rest-agent-source-1', original_name: 'Agent Source', source_type: 'file', chunk_count: 4})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'rest-agent-source-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "source list fallback page read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (s:Source) RETURN s.id, COALESCE(s.original_name, ''), COALESCE(s.summary, ''), COALESCE(s.mime_type, ''), COALESCE(s.source_type, 'file'), COALESCE(s.source_url, ''), COALESCE(s.size_bytes, 0), COALESCE(s.version, 1), COALESCE(s.memory_count, 0), COALESCE(s.chunk_count, 0), COALESCE(s.lifecycle_state, 'indexed'), COALESCE(s.space_id, 'default'), s.created_at, s.updated_at ORDER BY s.id SKIP $offset LIMIT $limit",
@@ -6524,6 +6568,31 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (t:Thread {id: 'rest-thread-node-1'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest agent thread attachment title read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) WHERE t.thread_id = $id OR t.id = $id RETURN t.title LIMIT 1",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-agent-thread-logical-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "t.title",
+                        Value::String("Agent Thread".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-agent-thread-node-1', thread_id: 'rest-agent-thread-logical-1', title: 'Agent Thread'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-agent-thread-node-1'}) DETACH DELETE t",
                     ),
                     ExpectedRows::RowCount(1),
                 ),
@@ -15245,6 +15314,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (m:Memory {id: $memory_id}) RETURN m"),
             CompatibilityQueryCallSite::new(
+                "rest agent memory attachment node read",
+                "memory_read",
+                "nmem-server::rest_agent::attached_source.memory",
+            )
+            .with_cypher("MATCH (m:Memory {id: $id}) RETURN m"),
+            CompatibilityQueryCallSite::new(
                 "source memory count increment",
                 "source_provenance_write",
                 "nmem-graph::source_write::create_sourced_from",
@@ -15647,6 +15722,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source {id: $id}) RETURN COALESCE(s.space_id, 'default'), COALESCE(s.source_type, 'file'), COALESCE(s.lifecycle_state, 'indexed'), COALESCE(s.mime_type, '')",
             ),
             CompatibilityQueryCallSite::new(
+                "rest agent source attachment node read",
+                "source_read",
+                "nmem-server::rest_agent::attached_source.library",
+            )
+            .with_cypher("MATCH (s:Source {id: $id}) RETURN s"),
+            CompatibilityQueryCallSite::new(
                 "source list fallback page read",
                 "source_read",
                 "nmem-server::source_repo::list_sources_page",
@@ -15891,6 +15972,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (t:Thread) WHERE t.thread_id = $sid OR t.id = $sid RETURN t.thread_id, t.title, t.source, t.created_at LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest agent thread attachment title read",
+                "thread_read",
+                "nmem-server::rest_agent::attached_source.thread",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) WHERE t.thread_id = $id OR t.id = $id RETURN t.title LIMIT 1",
             ),
             CompatibilityQueryCallSite::new(
                 "thread identity resolve read",
@@ -19508,7 +19597,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 440);
+        assert_eq!(report.checks.len(), 443);
     }
 
     #[test]
@@ -19524,13 +19613,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 440);
-        assert_eq!(coverage.covered_checks, 440);
+        assert_eq!(coverage.required_checks, 443);
+        assert_eq!(coverage.covered_checks, 443);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 440);
+        assert_eq!(coverage_json["covered_checks"], 443);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -19560,10 +19649,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 440);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 443);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 440);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 443);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -19788,15 +19877,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 440);
-        assert_eq!(report.shadow_checks.len(), 440);
+        assert_eq!(report.primary_checks.len(), 443);
+        assert_eq!(report.shadow_checks.len(), 443);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            440
+            443
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -19805,7 +19894,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 440);
+        assert_eq!(cutover.matched_checks, 443);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
