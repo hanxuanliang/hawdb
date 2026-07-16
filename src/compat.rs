@@ -4682,6 +4682,50 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "feed memory detail bulk read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.content, m.metadata, m.is_latest",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("feed-memory-1".to_string()),
+                                Value::String("feed-memory-2".to_string()),
+                                Value::String("feed-memory-missing".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("feed-memory-1".to_string())),
+                            ("m.title", Value::String("Feed One".to_string())),
+                            ("m.content", Value::String("feed content one".to_string())),
+                            ("m.metadata", Value::String("{\"rank\":1}".to_string())),
+                            ("m.is_latest", Value::Bool(true)),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("feed-memory-2".to_string())),
+                            ("m.title", Value::String("Feed Two".to_string())),
+                            ("m.content", Value::String("feed content two".to_string())),
+                            ("m.metadata", Value::String("{\"rank\":2}".to_string())),
+                            ("m.is_latest", Value::Bool(false)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'feed-memory-1', title: 'Feed One', content: 'feed content one', metadata: '{\"rank\":1}', is_latest: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'feed-memory-2', title: 'Feed Two', content: 'feed content two', metadata: '{\"rank\":2}', is_latest: false})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['feed-memory-1', 'feed-memory-2'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory authority signal read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id, m.importance, m.pagerank_score, m.metadata, m.is_latest, m.lifecycle_state",
@@ -4746,6 +4790,44 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (m:Memory) WHERE m.id IN ['bulk-space-1', 'bulk-space-2'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "feed memory normalized-space bulk read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("feed-space-1".to_string()),
+                                Value::String("feed-space-2".to_string()),
+                                Value::String("feed-space-missing".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("feed-space-1".to_string())),
+                            ("space_id", Value::String("default".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("feed-space-2".to_string())),
+                            ("space_id", Value::String("research".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'feed-space-1', space_id: ''})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'feed-space-2', space_id: 'research'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['feed-space-1', 'feed-space-2'] DETACH DELETE m",
                     ),
                     ExpectedRows::RowCount(2),
                 ),
@@ -15715,11 +15797,27 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.metadata"),
             CompatibilityQueryCallSite::new(
+                "feed memory detail bulk read",
+                "memory_read",
+                "nmem-server::rest_feed::hydrate_memory_events",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.content, m.metadata, m.is_latest",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory bulk space read",
                 "memory_read",
                 "nmem-server::mcp_server::memory_bulk_space; nmem-server::scheduler_service::memory_bulk_space",
             )
             .with_cypher("MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.space_id"),
+            CompatibilityQueryCallSite::new(
+                "feed memory normalized-space bulk read",
+                "memory_read",
+                "nmem-server::rest_feed::event_memory_spaces",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END",
+            ),
             CompatibilityQueryCallSite::new(
                 "memory compact detail fallback read",
                 "memory_read",
@@ -19810,7 +19908,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 448);
+        assert_eq!(report.checks.len(), 450);
     }
 
     #[test]
@@ -19826,13 +19924,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 448);
-        assert_eq!(coverage.covered_checks, 448);
+        assert_eq!(coverage.required_checks, 450);
+        assert_eq!(coverage.covered_checks, 450);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 448);
+        assert_eq!(coverage_json["covered_checks"], 450);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -19862,10 +19960,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 448);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 450);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 448);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 450);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -20090,15 +20188,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 448);
-        assert_eq!(report.shadow_checks.len(), 448);
+        assert_eq!(report.primary_checks.len(), 450);
+        assert_eq!(report.shadow_checks.len(), 450);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            448
+            450
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -20107,7 +20205,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 448);
+        assert_eq!(cutover.matched_checks, 450);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
