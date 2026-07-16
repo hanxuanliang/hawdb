@@ -6890,6 +6890,86 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "decay evolves relation counts",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[e:EVOLVES]->(:Memory) WHERE m.id IN $memory_ids AND e.content_relation IN ['confirms', 'enriches'] RETURN m.id, COUNT(e)",
+                        BTreeMap::from([(
+                            "memory_ids".to_string(),
+                            Value::List(vec![Value::String("decay-source".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("decay-source".to_string())),
+                        ("count(e)", Value::Int(2)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-target-confirm'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-target-enrich'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-target-ignore'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'decay-source'}), (n:Memory {id: 'decay-target-confirm'}) CREATE (m)-[:EVOLVES {content_relation: 'confirms'}]->(n)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'decay-source'}), (n:Memory {id: 'decay-target-enrich'}) CREATE (m)-[:EVOLVES {content_relation: 'enriches'}]->(n)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'decay-source'}), (n:Memory {id: 'decay-target-ignore'}) CREATE (m)-[:EVOLVES {content_relation: 'contradicts'}]->(n)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['decay-source', 'decay-target-confirm', 'decay-target-enrich', 'decay-target-ignore'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "decay crystal synthesis counts",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(m:Memory) WHERE m.id IN $memory_ids AND c.is_crystal = true RETURN m.id, COUNT(c)",
+                        BTreeMap::from([(
+                            "memory_ids".to_string(),
+                            Value::List(vec![Value::String("decay-base".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("decay-base".to_string())),
+                        ("count(c)", Value::Int(1)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-base'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-crystal', is_crystal: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-non-crystal', is_crystal: false})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (c:Memory {id: 'decay-crystal'}), (m:Memory {id: 'decay-base'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (c:Memory {id: 'decay-non-crystal'}), (m:Memory {id: 'decay-base'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['decay-base', 'decay-crystal', 'decay-non-crystal'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "source metadata timestamp update",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (s:Source {id: $id}) SET s.metadata = $metadata, s.updated_at = timestamp($updated_at)",
@@ -9397,6 +9477,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (:Memory)-[r:MEMORY_RELATES_TO]->(:Memory) WHERE r.status = 'active' AND (r.created_at > timestamp($cutoff) OR r.updated_at > timestamp($cutoff)) RETURN COUNT(r)",
             ),
             CompatibilityQueryCallSite::new(
+                "decay evolves relation counts",
+                "decay_scheduler_read",
+                "nmem-server::scheduler_service::Q_DECAY_EVOLVES_COUNTS",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[e:EVOLVES]->(:Memory) WHERE m.id IN $memory_ids AND e.content_relation IN ['confirms', 'enriches'] RETURN m.id, COUNT(e)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "decay crystal synthesis counts",
+                "decay_scheduler_read",
+                "nmem-server::scheduler_service::Q_DECAY_CRYSTAL_COUNTS",
+            )
+            .with_cypher(
+                "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(m:Memory) WHERE m.id IN $memory_ids AND c.is_crystal = true RETURN m.id, COUNT(c)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "label merge node on create seed",
                 "label_write",
                 "nmem-graph::label_write::upsert_label",
@@ -10912,7 +11008,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 239);
+        assert_eq!(report.checks.len(), 241);
     }
 
     #[test]
@@ -10928,13 +11024,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 239);
-        assert_eq!(coverage.covered_checks, 239);
+        assert_eq!(coverage.required_checks, 241);
+        assert_eq!(coverage.covered_checks, 241);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 239);
+        assert_eq!(coverage_json["covered_checks"], 241);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -10964,10 +11060,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 239);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 241);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 239);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 241);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -11161,15 +11257,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 239);
-        assert_eq!(report.shadow_checks.len(), 239);
+        assert_eq!(report.primary_checks.len(), 241);
+        assert_eq!(report.shadow_checks.len(), 241);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            239
+            241
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -11178,7 +11274,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 239);
+        assert_eq!(cutover.matched_checks, 241);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

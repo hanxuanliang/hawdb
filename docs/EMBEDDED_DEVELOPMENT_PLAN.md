@@ -586,7 +586,8 @@ count reads,
 community scheduler GraphMeta, candidate scan, member entity, and summary
 write queries,
 cleanup scheduler seed scans, bounded EVOLVES pair reads, cleanup fingerprint
-row fetches, and floor-zero engagement `CASE` ordering,
+row fetches, floor-zero engagement `CASE` ordering, and decay scheduler
+EVOLVES/crystal synthesis count reads,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label
