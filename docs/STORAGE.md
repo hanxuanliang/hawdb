@@ -143,6 +143,10 @@ artifact instead of separate manifest and verifier commands.
 bootstrap bundle artifacts with atomic file publication and directory sync. The
 catalog is the v1 local checkpoint boundary for offline bootstrap upload/resume;
 it is outside the graph WAL and does not alter the published graph snapshot.
+`skein graph-lightning-verify-staging [--require-ready] <staging-dir>` reopens
+that staging catalog without the source database, verifies artifact byte
+lengths and checksums, recomputes GraphStream validation, and checks agreement
+between the catalog, manifest, bundle, and GraphStream artifact.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a

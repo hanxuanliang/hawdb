@@ -294,6 +294,38 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "graph-lightning-verify-staging" {
+            let mut require_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let staging_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_verify_staging_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(graph_lightning_verify_staging_usage()));
+            }
+            let report = verify_graph_lightning_staging_catalog(staging_dir)?;
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            if require_ready
+                && report
+                    .get("validation_gate")
+                    .and_then(|gate| gate.get("decision"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("ready")
+            {
+                return Err(SkeinError::Execution(
+                    "graph lightning staging verification is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
         if command == "graph-lightning-graph-stream" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
@@ -397,6 +429,10 @@ fn graph_lightning_bootstrap_bundle_usage() -> String {
 fn graph_lightning_stage_bootstrap_usage() -> String {
     "graph-lightning-stage-bootstrap requires [--require-ready] <database-path> <staging-dir>"
         .to_string()
+}
+
+fn graph_lightning_verify_staging_usage() -> String {
+    "graph-lightning-verify-staging requires [--require-ready] <staging-dir>".to_string()
 }
 
 fn graph_lightning_graph_stream_usage() -> String {
@@ -620,6 +656,222 @@ fn stage_graph_lightning_bootstrap_export(
     Ok(catalog)
 }
 
+fn verify_graph_lightning_staging_catalog(
+    staging_dir: impl AsRef<Path>,
+) -> Result<serde_json::Value> {
+    let staging_dir = staging_dir.as_ref();
+    let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+    let catalog = read_json_file(&catalog_path)?;
+    let mut errors = Vec::new();
+    let mut artifact_reports = Vec::new();
+    let mut manifest = None;
+    let mut graph_stream = None;
+    let mut bundle = None;
+
+    let artifacts = catalog
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_else(|| {
+            errors.push("staging catalog missing artifacts array".to_string());
+            Vec::new()
+        });
+    for artifact in &artifacts {
+        let kind = artifact
+            .get("kind")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        let Some(path) = artifact.get("path").and_then(serde_json::Value::as_str) else {
+            errors.push(format!("staging artifact {kind} missing path"));
+            continue;
+        };
+        if path.contains('/') || path.contains('\\') {
+            errors.push(format!(
+                "staging artifact {kind} uses non-local path {path}"
+            ));
+            continue;
+        }
+        let artifact_path = staging_dir.join(path);
+        let expected_byte_len = artifact.get("byte_len").and_then(serde_json::Value::as_u64);
+        let expected_checksum = artifact.get("checksum").and_then(serde_json::Value::as_u64);
+        match fs::read(&artifact_path) {
+            Ok(bytes) => {
+                let actual_byte_len = bytes.len() as u64;
+                let actual_checksum = checksum_bytes(&bytes);
+                let byte_len_matches = expected_byte_len == Some(actual_byte_len);
+                let checksum_matches = expected_checksum == Some(actual_checksum);
+                if !byte_len_matches {
+                    errors.push(format!("staging artifact {kind} byte length mismatch"));
+                }
+                if !checksum_matches {
+                    errors.push(format!("staging artifact {kind} checksum mismatch"));
+                }
+                match kind {
+                    "manifest" => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        Ok(value) => manifest = Some(value),
+                        Err(error) => {
+                            errors.push(format!("invalid manifest artifact JSON: {error}"))
+                        }
+                    },
+                    "graph_stream" => match String::from_utf8(bytes.clone()) {
+                        Ok(value) => graph_stream = Some(value),
+                        Err(error) => errors.push(format!("invalid GraphStream UTF-8: {error}")),
+                    },
+                    "bundle" => match serde_json::from_slice::<serde_json::Value>(&bytes) {
+                        Ok(value) => bundle = Some(value),
+                        Err(error) => errors.push(format!("invalid bundle artifact JSON: {error}")),
+                    },
+                    _ => errors.push(format!("unknown staging artifact kind {kind}")),
+                }
+                artifact_reports.push(serde_json::json!({
+                    "kind": kind,
+                    "path": path,
+                    "expected_byte_len": expected_byte_len,
+                    "actual_byte_len": actual_byte_len,
+                    "byte_len_matches": byte_len_matches,
+                    "expected_checksum": expected_checksum,
+                    "actual_checksum": actual_checksum,
+                    "checksum_matches": checksum_matches,
+                }));
+            }
+            Err(error) => {
+                errors.push(format!(
+                    "missing staging artifact {kind} at {path}: {error}"
+                ));
+                artifact_reports.push(serde_json::json!({
+                    "kind": kind,
+                    "path": path,
+                    "expected_byte_len": expected_byte_len,
+                    "actual_byte_len": serde_json::Value::Null,
+                    "byte_len_matches": false,
+                    "expected_checksum": expected_checksum,
+                    "actual_checksum": serde_json::Value::Null,
+                    "checksum_matches": false,
+                }));
+            }
+        }
+    }
+
+    let graph_stream_validation = graph_stream
+        .as_ref()
+        .map(|encoded| skein::validate_graph_lightning_graph_stream(encoded, None));
+    let graph_stream_validation_json = graph_stream_validation
+        .as_ref()
+        .map(graph_lightning_graph_stream_validation_json);
+    let manifest_matches_graph_stream = match (&manifest, &graph_stream, &graph_stream_validation) {
+        (Some(manifest), Some(graph_stream), Some(validation)) => {
+            let matches = manifest
+                .get("graph_stream_checksum")
+                .and_then(serde_json::Value::as_u64)
+                == validation.expected_stream_checksum
+                && manifest
+                    .get("graph_stream_byte_len")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(graph_stream.len() as u64)
+                && manifest
+                    .get("graph_commit_epoch")
+                    .and_then(serde_json::Value::as_u64)
+                    == validation.graph_commit_epoch
+                && manifest
+                    .get("logical_checksum")
+                    .and_then(serde_json::Value::as_u64)
+                    == validation.logical_checksum
+                && manifest
+                    .get("node_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(validation.node_count as u64)
+                && manifest
+                    .get("relationship_count")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(validation.relationship_count as u64);
+            if !matches {
+                errors.push("manifest does not match GraphStream artifact".to_string());
+            }
+            matches
+        }
+        _ => {
+            errors.push("manifest or GraphStream artifact missing".to_string());
+            false
+        }
+    };
+    let bundle_matches_artifacts = match (&bundle, &manifest, &graph_stream_validation_json) {
+        (Some(bundle), Some(manifest), Some(validation)) => {
+            let matches = bundle.get("manifest") == Some(manifest)
+                && bundle.get("graph_stream_validation") == Some(validation)
+                && bundle.get("export_gate") == catalog.get("export_gate");
+            if !matches {
+                errors.push("bundle does not match staged manifest, GraphStream validation, or catalog gate".to_string());
+            }
+            matches
+        }
+        _ => {
+            errors.push("bundle artifact missing".to_string());
+            false
+        }
+    };
+    let artifact_integrity = artifact_reports.iter().all(|report| {
+        report
+            .get("byte_len_matches")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+            && report
+                .get("checksum_matches")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+    });
+    let catalog_state_ready = catalog
+        .get("stage_state")
+        .and_then(serde_json::Value::as_str)
+        == Some("READY")
+        && catalog
+            .get("export_gate")
+            .and_then(|gate| gate.get("decision"))
+            .and_then(serde_json::Value::as_str)
+            == Some("ready");
+    if !catalog_state_ready {
+        errors.push("staging catalog is not READY".to_string());
+    }
+    let graph_stream_valid = graph_stream_validation
+        .as_ref()
+        .is_some_and(|validation| validation.is_valid);
+    if !graph_stream_valid {
+        errors.push("GraphStream validation failed".to_string());
+    }
+    let decision = if errors.is_empty()
+        && artifact_integrity
+        && manifest_matches_graph_stream
+        && bundle_matches_artifacts
+        && catalog_state_ready
+        && graph_stream_valid
+    {
+        "ready"
+    } else {
+        "blocked"
+    };
+    Ok(serde_json::json!({
+        "protocol": "graph-lightning-staging-verification",
+        "protocol_version": 1,
+        "catalog_path": "graph_lightning_staging_catalog.json",
+        "artifact_integrity": artifact_integrity,
+        "manifest_matches_graph_stream": manifest_matches_graph_stream,
+        "bundle_matches_artifacts": bundle_matches_artifacts,
+        "catalog_state_ready": catalog_state_ready,
+        "graph_stream_validation": graph_stream_validation_json,
+        "artifacts": artifact_reports,
+        "validation_gate": {
+            "decision": decision,
+            "errors": errors,
+        },
+    }))
+}
+
+fn read_json_file(path: &Path) -> Result<serde_json::Value> {
+    let bytes = fs::read(path)?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        SkeinError::Execution(format!("invalid JSON at {}: {error}", path.display()))
+    })
+}
+
 fn write_staging_artifact(
     staging_dir: &Path,
     file_name: &str,
@@ -744,9 +996,10 @@ mod tests {
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
         graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
         graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
-        is_self_shadow_command, parse_shadow_timeout_ms, should_run_shadow_ready,
-        stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
-        validate_canonical_snapshot_usage, value_json,
+        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_shadow_timeout_ms,
+        should_run_shadow_ready, stable_identity_audit_json,
+        stage_graph_lightning_bootstrap_export, validate_canonical_snapshot_usage, value_json,
+        verify_graph_lightning_staging_catalog,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -1078,6 +1331,61 @@ mod tests {
     }
 
     #[test]
+    fn verifies_graph_lightning_staging_catalog() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+
+        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+
+        assert_eq!(report["protocol"], "graph-lightning-staging-verification");
+        assert_eq!(report["validation_gate"]["decision"], "ready");
+        assert_eq!(report["artifact_integrity"], true);
+        assert_eq!(report["manifest_matches_graph_stream"], true);
+        assert_eq!(report["bundle_matches_artifacts"], true);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn staging_verification_reports_tampered_graph_stream() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_tampered");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let graph_stream_path = staging_dir.join("graph_lightning_graph_stream.txt");
+        let tampered = std::fs::read_to_string(&graph_stream_path)
+            .unwrap()
+            .replace("relationship\t0\t0\t1", "relationship\t0\t0\t99");
+        std::fs::write(&graph_stream_path, tampered).unwrap();
+
+        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+
+        assert_eq!(report["validation_gate"]["decision"], "blocked");
+        assert_eq!(report["artifact_integrity"], false);
+        assert_eq!(report["manifest_matches_graph_stream"], false);
+        assert!(report["validation_gate"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("graph_stream checksum mismatch")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
     fn renders_stable_identity_audit_values() {
         let audit = CanonicalSnapshotIdentityAudit {
             requires_stable_id_mapping: true,
@@ -1144,6 +1452,12 @@ mod tests {
         assert!(graph_lightning_stage_bootstrap_usage().contains("<database-path>"));
         assert!(graph_lightning_stage_bootstrap_usage().contains("<staging-dir>"));
         assert!(graph_lightning_stage_bootstrap_usage().contains("--require-ready"));
+    }
+
+    #[test]
+    fn validates_graph_lightning_verify_staging_usage_text() {
+        assert!(graph_lightning_verify_staging_usage().contains("<staging-dir>"));
+        assert!(graph_lightning_verify_staging_usage().contains("--require-ready"));
     }
 
     #[test]
