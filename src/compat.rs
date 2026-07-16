@@ -12525,6 +12525,53 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(1),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest label action label name read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (l:Label {id: $id}) RETURN l.name",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("label-action-name".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-action-name', name: 'Label Action Name'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label {id: 'label-action-name'}) DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest library crystal source memories read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Memory {id: $crystal_id})-[r:SYNTHESIZED_FROM]->(s:Memory) WHERE c.is_crystal = true RETURN s.id, s.title, s.content, s.importance, s.created_at, r.weight ORDER BY r.weight DESC, s.importance DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "crystal_id".to_string(),
+                                Value::String("library-crystal-source-crystal".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(10)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'library-crystal-source-crystal', title: 'Library Crystal', is_crystal: true})-[:SYNTHESIZED_FROM {weight: 0.9}]->(:Memory {id: 'library-crystal-source-memory', title: 'Library Source Memory', content: 'source body', importance: 0.7, created_at: 1700000003})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['library-crystal-source-crystal', 'library-crystal-source-memory'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "pagerank mention edge count",
                 CypherFixtureStatement::new(
@@ -18792,6 +18839,20 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory {id: $id}) RETURN m.title, m.content, m.metadata, m.is_latest, m.lifecycle_state",
             ),
             CompatibilityQueryCallSite::new(
+                "rest label action label name read",
+                "label_action_read",
+                "nmem-server::rest_labels_write::label_name",
+            )
+            .with_cypher("MATCH (l:Label {id: $id}) RETURN l.name"),
+            CompatibilityQueryCallSite::new(
+                "rest library crystal source memories read",
+                "library_crystal_read",
+                "nmem-server::rest_library::crystal_source_memories_handler",
+            )
+            .with_cypher(
+                "MATCH (c:Memory {id: $crystal_id})-[r:SYNTHESIZED_FROM]->(s:Memory) WHERE c.is_crystal = true RETURN s.id, s.title, s.content, s.importance, s.created_at, r.weight ORDER BY r.weight DESC, s.importance DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "node detail neighbor counts",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::query_node_detail",
@@ -22029,7 +22090,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 514);
+        assert_eq!(report.checks.len(), 516);
     }
 
     #[test]
@@ -22045,13 +22106,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 514);
-        assert_eq!(coverage.covered_checks, 514);
+        assert_eq!(coverage.required_checks, 516);
+        assert_eq!(coverage.covered_checks, 516);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 514);
+        assert_eq!(coverage_json["covered_checks"], 516);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -22081,10 +22142,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 514);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 516);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 514);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 516);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -22309,15 +22370,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 514);
-        assert_eq!(report.shadow_checks.len(), 514);
+        assert_eq!(report.primary_checks.len(), 516);
+        assert_eq!(report.shadow_checks.len(), 516);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            514
+            516
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -22326,7 +22387,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 514);
+        assert_eq!(cutover.matched_checks, 516);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
