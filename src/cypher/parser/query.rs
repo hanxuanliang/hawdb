@@ -148,6 +148,15 @@ impl Parser<'_> {
         } else {
             None
         };
+        let inline_post_match_expand = if let Some(expand) = expand.as_ref() {
+            self.parse_post_match_relationship_expand(
+                &expand.target_variable,
+                &expand.target_label,
+                &expand.target_properties,
+            )?
+        } else {
+            None
+        };
         let mut predicate = if self.consume_keyword("WHERE") {
             Some(self.parse_property_predicate()?)
         } else {
@@ -184,61 +193,11 @@ impl Parser<'_> {
         if self.consume_keyword("MATCH") {
             let (matched_target_variable, matched_target_label, matched_target_properties) =
                 self.parse_match_node_pattern()?;
-            let post_match_expand = if self.peek_char() == Some('<') {
-                self.expect_char('<')?;
-                self.expect_char('-')?;
-                let (rel_variable, rel_type, properties, min_hops, max_hops) =
-                    self.parse_match_relationship_pattern()?;
-                self.expect_char('-')?;
-                let (target_variable, target_label, target_properties) =
-                    self.parse_match_node_pattern()?;
-                Some(PostMatchRelationshipExpand {
-                    source_variable: matched_target_variable.clone(),
-                    source_label: matched_target_label.clone(),
-                    source_properties: matched_target_properties.clone(),
-                    expand: RelationshipExpand {
-                        variable: rel_variable,
-                        rel_type,
-                        properties,
-                        direction: RelationshipDirection::Incoming,
-                        target_variable,
-                        target_label,
-                        target_properties,
-                        min_hops,
-                        max_hops,
-                    },
-                })
-            } else if self.peek_char() == Some('-') {
-                self.expect_char('-')?;
-                let (rel_variable, rel_type, properties, min_hops, max_hops) =
-                    self.parse_match_relationship_pattern()?;
-                self.expect_char('-')?;
-                let direction = if self.consume_char('>') {
-                    RelationshipDirection::Outgoing
-                } else {
-                    RelationshipDirection::Undirected
-                };
-                let (target_variable, target_label, target_properties) =
-                    self.parse_match_node_pattern()?;
-                Some(PostMatchRelationshipExpand {
-                    source_variable: matched_target_variable.clone(),
-                    source_label: matched_target_label.clone(),
-                    source_properties: matched_target_properties.clone(),
-                    expand: RelationshipExpand {
-                        variable: rel_variable,
-                        rel_type,
-                        properties,
-                        direction,
-                        target_variable,
-                        target_label,
-                        target_properties,
-                        min_hops,
-                        max_hops,
-                    },
-                })
-            } else {
-                None
-            };
+            let post_match_expand = self.parse_post_match_relationship_expand(
+                &matched_target_variable,
+                &matched_target_label,
+                &matched_target_properties,
+            )?;
             if let Some(post_match_expand) = post_match_expand {
                 if self.consume_keyword("WHERE") {
                     predicate = Some(combine_match_predicates(
@@ -442,7 +401,7 @@ impl Parser<'_> {
             label,
             properties,
             expand,
-            post_match_expand: None,
+            post_match_expand: inline_post_match_expand,
             optional_expand,
             optional_with: with_clause.optional_with,
             collect_with: with_clause.collect_with,
@@ -505,6 +464,69 @@ impl Parser<'_> {
         self.input[index..index + end]
             .to_ascii_uppercase()
             .contains("ALL SHORTEST")
+    }
+
+    fn parse_post_match_relationship_expand(
+        &mut self,
+        source_variable: &str,
+        source_label: &str,
+        source_properties: &std::collections::BTreeMap<String, ValueExpression>,
+    ) -> Result<Option<PostMatchRelationshipExpand>> {
+        if self.peek_char() == Some('<') {
+            self.expect_char('<')?;
+            self.expect_char('-')?;
+            let (rel_variable, rel_type, properties, min_hops, max_hops) =
+                self.parse_match_relationship_pattern()?;
+            self.expect_char('-')?;
+            let (target_variable, target_label, target_properties) =
+                self.parse_match_node_pattern()?;
+            return Ok(Some(PostMatchRelationshipExpand {
+                source_variable: source_variable.to_string(),
+                source_label: source_label.to_string(),
+                source_properties: source_properties.clone(),
+                expand: RelationshipExpand {
+                    variable: rel_variable,
+                    rel_type,
+                    properties,
+                    direction: RelationshipDirection::Incoming,
+                    target_variable,
+                    target_label,
+                    target_properties,
+                    min_hops,
+                    max_hops,
+                },
+            }));
+        }
+        if self.peek_char() == Some('-') {
+            self.expect_char('-')?;
+            let (rel_variable, rel_type, properties, min_hops, max_hops) =
+                self.parse_match_relationship_pattern()?;
+            self.expect_char('-')?;
+            let direction = if self.consume_char('>') {
+                RelationshipDirection::Outgoing
+            } else {
+                RelationshipDirection::Undirected
+            };
+            let (target_variable, target_label, target_properties) =
+                self.parse_match_node_pattern()?;
+            return Ok(Some(PostMatchRelationshipExpand {
+                source_variable: source_variable.to_string(),
+                source_label: source_label.to_string(),
+                source_properties: source_properties.clone(),
+                expand: RelationshipExpand {
+                    variable: rel_variable,
+                    rel_type,
+                    properties,
+                    direction,
+                    target_variable,
+                    target_label,
+                    target_properties,
+                    min_hops,
+                    max_hops,
+                },
+            }));
+        }
+        Ok(None)
     }
 
     fn parse_shortest_path_return(

@@ -589,6 +589,8 @@ cleanup scheduler seed scans, bounded EVOLVES pair reads, cleanup fingerprint
 row fetches, floor-zero engagement `CASE` ordering, and decay scheduler
 EVOLVES/crystal synthesis count reads,
 wiki export summary entity/crystal/community count reads,
+OKF export community list, crystal list, and crystal-source entity community
+reads,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label

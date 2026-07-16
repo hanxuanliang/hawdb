@@ -1044,6 +1044,26 @@ fn parses_consecutive_relationship_match_return() {
 }
 
 #[test]
+fn parses_inline_two_hop_relationship_match_return() {
+    let statement = parse(
+        "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id IS NOT NULL RETURN m.id, e.community_id",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let expand = query.expand.expect("first expand");
+    assert_eq!(expand.rel_type, "SYNTHESIZED_FROM");
+    assert_eq!(expand.target_variable, "src");
+    let post_match = query.post_match_expand.expect("post-match expand");
+    assert_eq!(post_match.source_variable, "src");
+    assert_eq!(post_match.expand.rel_type, "MENTIONS");
+    assert_eq!(post_match.expand.target_variable, "e");
+    assert_eq!(post_match.expand.direction, RelationshipDirection::Outgoing);
+    assert_eq!(query.returns.len(), 2);
+}
+
+#[test]
 fn parses_optional_match_count_after_node_match() {
     let statement = parse(
         "MATCH (t:Thread {id: $thread_uuid}) OPTIONAL MATCH (t)-[:CONTAINS]->(m:Message) RETURN COUNT(m)",

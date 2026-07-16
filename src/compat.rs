@@ -8105,6 +8105,116 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "okf export community list read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("c.community_id", Value::Int(9610)),
+                        ("c.name", Value::String("OKF Community".to_string())),
+                        ("c.ai_summary", Value::String("okf summary".to_string())),
+                        ("c.description", Value::String("okf description".to_string())),
+                        ("c.member_count", Value::Int(20_000)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'okf-community', community_id: 9610, name: 'OKF Community', ai_summary: 'okf summary', description: 'okf description', member_count: 20000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'okf-community-excluded', community_id: 9620, name: 'Small Group', ai_summary: 'ignored', description: 'ignored', member_count: 999})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.id IN ['okf-community', 'okf-community-excluded'] DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "okf export crystal list read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.is_crystal = true RETURN m.id, m.crystal_title, m.title, m.content, m.importance, m.unit_type, m.created_at ORDER BY m.importance DESC, m.created_at DESC",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("okf-crystal".to_string())),
+                            ("m.crystal_title", Value::String("Crystal Title".to_string())),
+                            ("m.title", Value::String("Fallback Title".to_string())),
+                            ("m.content", Value::String("crystal content".to_string())),
+                            ("m.importance", Value::Float(20.0)),
+                            ("m.unit_type", Value::String("fact".to_string())),
+                            ("m.created_at", Value::Int(1000)),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::Int(3)),
+                            ("m.crystal_title", Value::Null),
+                            ("m.title", Value::String("Cloud projection".to_string())),
+                            ("m.content", Value::Null),
+                            ("m.importance", Value::Null),
+                            ("m.unit_type", Value::String("decision".to_string())),
+                            ("m.created_at", Value::Int(200)),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("coverage-c1".to_string())),
+                            (
+                                "m.crystal_title",
+                                Value::String("Coverage Crystal".to_string()),
+                            ),
+                            ("m.title", Value::Null),
+                            ("m.content", Value::Null),
+                            ("m.importance", Value::Null),
+                            ("m.unit_type", Value::Null),
+                            ("m.created_at", Value::Null),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'okf-crystal', crystal_title: 'Crystal Title', title: 'Fallback Title', content: 'crystal content', importance: 20.0, unit_type: 'fact', created_at: 1000, is_crystal: true})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'okf-crystal'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "okf export crystal entity community read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id IS NOT NULL RETURN m.id, e.community_id",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("okf-crystal-community".to_string())),
+                        ("e.community_id", Value::Int(9630)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'okf-crystal-community', is_crystal: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'okf-crystal-source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'okf-crystal-entity', community_id: 9630})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'okf-crystal-community'}), (src:Memory {id: 'okf-crystal-source'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'okf-crystal-source'}), (e:Entity {id: 'okf-crystal-entity'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['okf-crystal-community', 'okf-crystal-source', 'okf-crystal-entity'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "mcp graph all shortest path read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH p = (a)-[e* ALL SHORTEST 1..3]-(b) WHERE a.id = $from_id AND b.id = $to_id RETURN properties(nodes(p), 'id') AS node_ids, properties(nodes(p), 'name') AS names, length(p) AS hops",
@@ -9777,6 +9887,30 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 AND c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN COUNT(c)",
             ),
             CompatibilityQueryCallSite::new(
+                "okf export community list read",
+                "okf_export_read",
+                "nmem-server::okf_export::list_communities",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "okf export crystal list read",
+                "okf_export_read",
+                "nmem-server::okf_export::list_crystals",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.is_crystal = true RETURN m.id, m.crystal_title, m.title, m.content, m.importance, m.unit_type, m.created_at ORDER BY m.importance DESC, m.created_at DESC",
+            ),
+            CompatibilityQueryCallSite::new(
+                "okf export crystal entity community read",
+                "okf_export_read",
+                "nmem-server::okf_export::crystal_entity_communities",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id IS NOT NULL RETURN m.id, e.community_id",
+            ),
+            CompatibilityQueryCallSite::new(
                 "analyzable corpus max updated fingerprint",
                 "scheduler_fingerprint_read",
                 "nmem-server::scheduler_service::analyzable_corpus_fingerprint",
@@ -11072,7 +11206,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 244);
+        assert_eq!(report.checks.len(), 247);
     }
 
     #[test]
@@ -11088,13 +11222,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 244);
-        assert_eq!(coverage.covered_checks, 244);
+        assert_eq!(coverage.required_checks, 247);
+        assert_eq!(coverage.covered_checks, 247);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 244);
+        assert_eq!(coverage_json["covered_checks"], 247);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -11124,10 +11258,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 244);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 247);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 244);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 247);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -11321,15 +11455,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 244);
-        assert_eq!(report.shadow_checks.len(), 244);
+        assert_eq!(report.primary_checks.len(), 247);
+        assert_eq!(report.shadow_checks.len(), 247);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            244
+            247
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -11338,7 +11472,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 244);
+        assert_eq!(cutover.matched_checks, 247);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
