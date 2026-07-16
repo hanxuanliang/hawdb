@@ -178,11 +178,14 @@ stable lowercase `decision` values for CI consumption.
 that packages coverage, inventory gate, cutover, and migration gate evidence.
 `assess_compatibility_migration_gate` combines the inventory gate and shadow
 cutover gate into one migration decision. `scan_nowledge_query_inventory` and
-the `scan-nowledge-inventory` CLI command provide a conservative Rust source
-scanner for Nowledge Cypher string literals and emit the same audited JSON
-inventory artifact. Current local scans find 338 `nmem-graph` call-site entries
-and 729 `nmem-server` entries, including AugmentationJob lifecycle, projected
-graph, relationship-creation queries, and the migration verification shape
+the `scan-nowledge-inventory` CLI command provide a production graph-source
+scanner for Nowledge Cypher string literals, filtering out non-graph content
+store SQL, prompt text, tests, benches, and smoke binaries while emitting the
+same audited JSON inventory artifact. Current local scans find 349
+`nmem-graph/src` call-site entries, 696 `nmem-server/src` entries, and 6
+additional graph-facing harness/scheduler/search entries, including
+AugmentationJob lifecycle, projected graph, relationship-creation queries, and
+the migration verification shape
 `MATCH (c:Memory)-[:CRYSTALLIZED_FROM]->(s:Memory) WHERE NOT EXISTS { MATCH (c)-[:SYNTHESIZED_FROM]->(s) } RETURN count(*)`.
 The remaining work is to attach the previous wrapper through the external
 shadow adapter for migration-gate evidence and keep extending the bounded

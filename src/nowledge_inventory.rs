@@ -48,6 +48,9 @@ pub fn scan_nowledge_query_inventory_with_options(
         })?;
         let relative = file.strip_prefix(root).unwrap_or(&file);
         let source_file = path_to_slash_string(relative);
+        if !scan_source_file(&source_file) {
+            continue;
+        }
         for literal in extract_rust_string_literals(&content)? {
             let Some(cypher) = normalize_cypher_literal(&literal.value) else {
                 continue;
@@ -71,6 +74,23 @@ pub fn scan_nowledge_query_inventory_with_options(
     }
 
     build_compatibility_query_inventory(options.inventory_name, call_sites)
+}
+
+fn scan_source_file(source_file: &str) -> bool {
+    if source_file.starts_with("crates/nmem-content/") {
+        return false;
+    }
+    let parts = source_file.split('/').collect::<Vec<_>>();
+    if parts
+        .iter()
+        .any(|part| *part == "tests" || *part == "benches")
+    {
+        return false;
+    }
+    if source_file.contains("/src/bin/") {
+        return false;
+    }
+    true
 }
 
 pub fn scan_nowledge_query_inventory_to_json(root: impl AsRef<Path>) -> Result<serde_json::Value> {
@@ -318,11 +338,17 @@ fn raw_string_start(bytes: &[u8], start: usize) -> Option<usize> {
 }
 
 fn normalize_cypher_literal(value: &str) -> Option<String> {
-    let normalized = value.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(';')
+        .trim()
+        .to_string();
     if normalized.is_empty() || !looks_like_cypher(&normalized) {
         return None;
     }
-    Some(normalized.trim_end_matches(';').trim().to_string())
+    Some(normalized)
 }
 
 fn looks_like_cypher(query: &str) -> bool {
@@ -331,13 +357,10 @@ fn looks_like_cypher(query: &str) -> bool {
         || upper.starts_with("MERGE (")
         || upper.starts_with("CREATE (")
         || upper.starts_with("CREATE NODE ")
-        || upper.starts_with("CREATE REL ")
-        || upper.starts_with("CREATE TABLE ")
-        || upper.starts_with("CREATE INDEX ")
-        || upper.starts_with("CREATE RANGE INDEX ")
-        || upper.starts_with("CREATE FULLTEXT INDEX ")
-        || upper.starts_with("CALL ")
-        || upper.starts_with("BEGIN ")
+        || upper.starts_with("CREATE RELATIONSHIP ")
+        || graph_index_ddl(&upper)
+        || graph_procedure_call(&upper)
+        || upper == "BEGIN TRANSACTION"
         || upper == "COMMIT"
         || upper == "ROLLBACK"
         || upper == "CHECKPOINT";
@@ -345,24 +368,20 @@ fn looks_like_cypher(query: &str) -> bool {
         return false;
     }
     upper.contains('(')
-        || upper.starts_with("CALL ")
+        || graph_procedure_call(&upper)
         || upper == "COMMIT"
         || upper == "ROLLBACK"
         || upper == "CHECKPOINT"
-        || upper.starts_with("BEGIN ")
+        || upper == "BEGIN TRANSACTION"
 }
 
 fn classify_query_family(query: &str) -> &'static str {
     let upper = query.to_ascii_uppercase();
-    if upper.starts_with("CALL ") {
+    if graph_procedure_call(&upper) {
         "procedure"
     } else if upper.starts_with("CREATE NODE ")
         || upper.starts_with("CREATE RELATIONSHIP ")
-        || upper.starts_with("CREATE REL TABLE ")
-        || upper.starts_with("CREATE TABLE ")
-        || upper.starts_with("CREATE INDEX ")
-        || upper.starts_with("CREATE RANGE INDEX ")
-        || upper.starts_with("CREATE FULLTEXT INDEX ")
+        || graph_index_ddl(&upper)
     {
         "schema"
     } else if upper == "BEGIN TRANSACTION"
@@ -385,6 +404,34 @@ fn classify_query_family(query: &str) -> &'static str {
     }
 }
 
+fn graph_index_ddl(upper: &str) -> bool {
+    (upper.starts_with("CREATE INDEX ")
+        || upper.starts_with("CREATE RANGE INDEX ")
+        || upper.starts_with("CREATE FULLTEXT INDEX "))
+        && upper.contains(" ON :")
+}
+
+fn graph_procedure_call(upper: &str) -> bool {
+    matches!(
+        procedure_name(upper).as_deref(),
+        Some("PROJECT_GRAPH" | "PAGE_RANK" | "PAGERANK" | "LOUVAIN")
+    )
+}
+
+fn procedure_name(upper: &str) -> Option<String> {
+    let rest = upper.strip_prefix("CALL ")?;
+    let name = rest
+        .trim_start()
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+        .collect::<String>();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name)
+    }
+}
+
 fn stable_query_slug(query: &str) -> String {
     let mut hash = 0xcbf29ce484222325_u64;
     for byte in query.as_bytes() {
@@ -403,7 +450,10 @@ fn path_to_slash_string(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_query_family, extract_rust_string_literals, normalize_cypher_literal};
+    use super::{
+        classify_query_family, extract_rust_string_literals, normalize_cypher_literal,
+        scan_source_file,
+    };
 
     #[test]
     fn extracts_cooked_and_raw_rust_cypher_literals() {
@@ -456,5 +506,52 @@ mod tests {
             normalize_cypher_literal("Create a crystal (knowledge synthesis)"),
             None
         );
+    }
+
+    #[test]
+    fn rejects_sql_and_prompt_text_from_inventory() {
+        assert_eq!(
+            normalize_cypher_literal(
+                "CREATE TABLE IF NOT EXISTS content_documents (id TEXT PRIMARY KEY)"
+            ),
+            None
+        );
+        assert_eq!(normalize_cypher_literal("BEGIN IMMEDIATE"), None);
+        assert_eq!(normalize_cypher_literal("Call me Wey"), None);
+        assert_eq!(
+            normalize_cypher_literal("CALL knowledge_search('graph')"),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_graph_inventory_literals() {
+        assert_eq!(
+            normalize_cypher_literal("CREATE INDEX ON :Memory(id)"),
+            Some("CREATE INDEX ON :Memory(id)".to_string())
+        );
+        assert_eq!(
+            normalize_cypher_literal("CALL PROJECT_GRAPH('UnifiedGraph', ['Entity'], ['LINKS'])"),
+            Some("CALL PROJECT_GRAPH('UnifiedGraph', ['Entity'], ['LINKS'])".to_string())
+        );
+        assert_eq!(
+            normalize_cypher_literal("BEGIN TRANSACTION"),
+            Some("BEGIN TRANSACTION".to_string())
+        );
+        assert_eq!(
+            normalize_cypher_literal("CHECKPOINT;"),
+            Some("CHECKPOINT".to_string())
+        );
+    }
+
+    #[test]
+    fn skips_non_production_graph_sources() {
+        assert!(!scan_source_file("crates/nmem-content/src/lib.rs"));
+        assert!(!scan_source_file("crates/nmem-server/tests/okf_smoke.rs"));
+        assert!(!scan_source_file(
+            "crates/nmem-graph/src/bin/community_smoke.rs"
+        ));
+        assert!(scan_source_file("crates/nmem-graph/src/community.rs"));
+        assert!(scan_source_file("crates/nmem-server/src/rest_fs.rs"));
     }
 }
