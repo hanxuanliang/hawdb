@@ -9738,6 +9738,43 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "label canonical backfill read",
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label) WHERE l.canonical_name IS NULL RETURN l.id, l.name",
+                    ),
+                    ExpectedRows::Unordered(vec![
+                        compatibility_row([
+                            ("l.id", Value::String("orphan-blocking-label".to_string())),
+                            ("l.name", Value::String("Blocking Label".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("l.id", Value::String("label-2".to_string())),
+                            ("l.name", Value::String("Merged".to_string())),
+                        ]),
+                        compatibility_row([
+                            (
+                                "l.id",
+                                Value::String("label-canonical-backfill-1".to_string()),
+                            ),
+                            (
+                                "l.name",
+                                Value::String("Canonical Backfill".to_string()),
+                            ),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'label-canonical-backfill-1', name: 'Canonical Backfill', canonical_name: NULL})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (l:Label {id: 'label-canonical-backfill-1'}) DETACH DELETE l",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "label null-canonical bounded scan",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (l:Label) WHERE l.canonical_name IS NULL RETURN l.id, l.name LIMIT $cap",
@@ -14029,6 +14066,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (l:Label) WHERE l.canonical_name = $c RETURN l.id LIMIT 1"),
             CompatibilityQueryCallSite::new(
+                "label canonical backfill read",
+                "schema_migration_read",
+                "nmem-graph::schema::backfill_label_canonical_name",
+            )
+            .with_cypher(
+                "MATCH (l:Label) WHERE l.canonical_name IS NULL RETURN l.id, l.name",
+            ),
+            CompatibilityQueryCallSite::new(
                 "label null-canonical bounded scan",
                 "label_write",
                 "nmem-graph::label_write::resolve_or_create_label",
@@ -16008,7 +16053,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 357);
+        assert_eq!(report.checks.len(), 358);
     }
 
     #[test]
@@ -16024,13 +16069,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 357);
-        assert_eq!(coverage.covered_checks, 357);
+        assert_eq!(coverage.required_checks, 358);
+        assert_eq!(coverage.covered_checks, 358);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 357);
+        assert_eq!(coverage_json["covered_checks"], 358);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16060,10 +16105,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 357);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 358);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 357);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 358);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16288,15 +16333,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 357);
-        assert_eq!(report.shadow_checks.len(), 357);
+        assert_eq!(report.primary_checks.len(), 358);
+        assert_eq!(report.shadow_checks.len(), 358);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            357
+            358
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16305,7 +16350,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 357);
+        assert_eq!(cutover.matched_checks, 358);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
