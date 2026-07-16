@@ -69,6 +69,13 @@ pub enum CypherExecutionMode {
     Session,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShadowStatementRole {
+    Read,
+    Mutation,
+    Statement,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CompatibilityTolerance {
     pub float_abs: f64,
@@ -482,11 +489,11 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
     }
 
     fn execute(&mut self, statement: &CypherFixtureStatement) -> Result<QueryOutput> {
-        let response = self.request(serde_json::json!({
-            "op": "execute",
-            "cypher": statement.cypher,
-            "parameters": json_object_from_parameters(&statement.parameters),
-        }))?;
+        let response = self.request(json_from_statement_with_role(
+            "execute",
+            statement,
+            inferred_shadow_statement_role(statement),
+        ))?;
         decode_external_query_response(&self.name, response)
     }
 
@@ -494,17 +501,22 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         &mut self,
         statements: &[CypherFixtureStatement],
     ) -> Result<Vec<QueryOutput>> {
+        let statement_count = statements.len();
+        let statements = statements
+            .iter()
+            .map(|statement| json_from_statement(statement, ShadowStatementRole::Statement))
+            .collect::<Vec<_>>();
         let response = self.request(serde_json::json!({
             "op": "execute_session",
-            "statements": statements.iter().map(json_from_statement).collect::<Vec<_>>(),
+            "statements": statements,
         }))?;
         let outputs = decode_external_session_response(&self.name, response)?;
-        if outputs.len() != statements.len() {
+        if outputs.len() != statement_count {
             return Err(SkeinError::Execution(format!(
                 "shadow engine '{}' session returned {} outputs for {} statements",
                 self.name,
                 outputs.len(),
-                statements.len()
+                statement_count
             )));
         }
         Ok(outputs)
@@ -956,11 +968,70 @@ fn json_object_from_parameters(parameters: &BTreeMap<String, Value>) -> serde_js
     )
 }
 
-fn json_from_statement(statement: &CypherFixtureStatement) -> serde_json::Value {
+fn json_from_statement_with_role(
+    op: &str,
+    statement: &CypherFixtureStatement,
+    role: ShadowStatementRole,
+) -> serde_json::Value {
     serde_json::json!({
+        "op": op,
+        "role": shadow_statement_role_as_str(role),
+        "access": shadow_statement_access_as_str(statement),
         "cypher": statement.cypher,
         "parameters": json_object_from_parameters(&statement.parameters),
     })
+}
+
+fn json_from_statement(
+    statement: &CypherFixtureStatement,
+    role: ShadowStatementRole,
+) -> serde_json::Value {
+    serde_json::json!({
+        "role": shadow_statement_role_as_str(role),
+        "access": shadow_statement_access_as_str(statement),
+        "cypher": statement.cypher,
+        "parameters": json_object_from_parameters(&statement.parameters),
+    })
+}
+
+fn inferred_shadow_statement_role(statement: &CypherFixtureStatement) -> ShadowStatementRole {
+    if is_mutation_statement(&statement.cypher) {
+        ShadowStatementRole::Mutation
+    } else {
+        ShadowStatementRole::Read
+    }
+}
+
+fn shadow_statement_role_as_str(role: ShadowStatementRole) -> &'static str {
+    match role {
+        ShadowStatementRole::Read => "read",
+        ShadowStatementRole::Mutation => "mutation",
+        ShadowStatementRole::Statement => "statement",
+    }
+}
+
+fn shadow_statement_access_as_str(statement: &CypherFixtureStatement) -> &'static str {
+    if is_mutation_statement(&statement.cypher) {
+        "mutation"
+    } else {
+        "read"
+    }
+}
+
+fn is_mutation_statement(cypher: &str) -> bool {
+    let upper = cypher.to_ascii_uppercase();
+    upper.contains(" CREATE ")
+        || upper.starts_with("CREATE ")
+        || upper.contains(" MERGE ")
+        || upper.starts_with("MERGE ")
+        || upper.contains(" SET ")
+        || upper.starts_with("SET ")
+        || upper.contains(" DELETE ")
+        || upper.starts_with("DELETE ")
+        || upper.contains(" DETACH DELETE ")
+        || upper.contains(" ON CREATE SET ")
+        || upper.contains(" ON MATCH SET ")
+        || upper.contains("DROP ")
 }
 
 fn json_from_value(value: &Value) -> serde_json::Value {
@@ -27332,6 +27403,8 @@ done
         assert!(trace.contains("\"event\":\"request\""));
         assert!(trace.contains("\"event\":\"response\""));
         assert!(trace.contains("\"protocol_version\":1"));
+        assert!(trace.contains("\"access\":\"mutation\""));
+        assert!(trace.contains("\"access\":\"read\""));
         let _ = fs::remove_file(trace_path);
     }
 

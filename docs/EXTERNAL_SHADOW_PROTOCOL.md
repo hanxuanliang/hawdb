@@ -58,6 +58,8 @@ Request:
 {
   "protocol_version": 1,
   "op": "execute",
+  "role": "read",
+  "access": "read",
   "cypher": "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
   "parameters": {
     "id": 1
@@ -98,14 +100,20 @@ Request:
   "statements": [
     {
       "cypher": "CREATE (:Memory {id: 1, title: 'Old'})",
+      "role": "statement",
+      "access": "mutation",
       "parameters": {}
     },
     {
       "cypher": "MATCH (m:Memory) WHERE m.id = 1 SET m.title = 'New'",
+      "role": "statement",
+      "access": "mutation",
       "parameters": {}
     },
     {
       "cypher": "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title",
+      "role": "statement",
+      "access": "read",
       "parameters": {}
     }
   ]
@@ -139,7 +147,9 @@ Success response:
 ```
 
 The `outputs` array must have the same length and order as the request
-`statements` array.
+`statements` array. `access` is advisory but stable: previous-wrapper adapters
+should use `read` for read-only Kuzu/Ladybug APIs and `mutation` for serialized
+write paths. `role` is a compatibility-harness context label.
 
 ## `project_graph`
 
