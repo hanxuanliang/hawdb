@@ -2857,6 +2857,50 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory bulk metadata read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.metadata",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("bulk-metadata-1".to_string()),
+                                Value::String("bulk-metadata-2".to_string()),
+                                Value::String("bulk-metadata-missing".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("bulk-metadata-1".to_string())),
+                            (
+                                "m.metadata",
+                                Value::String("{\"source\":\"one\"}".to_string()),
+                            ),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("bulk-metadata-2".to_string())),
+                            (
+                                "m.metadata",
+                                Value::String("{\"source\":\"two\"}".to_string()),
+                            ),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'bulk-metadata-1', metadata: '{\"source\":\"one\"}'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'bulk-metadata-2', metadata: '{\"source\":\"two\"}'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['bulk-metadata-1', 'bulk-metadata-2'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory compact detail fallback read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory {id: $memory_id}) RETURN m.id, COALESCE(m.title, ''), COALESCE(m.content, ''), COALESCE(m.unit_type, '')",
@@ -9747,6 +9791,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.created_at"),
             CompatibilityQueryCallSite::new(
+                "memory bulk metadata read",
+                "memory_read",
+                "nmem-server::mcp_server::memory_bulk_metadata; nmem-server::reindex::memory_bulk_metadata; nmem-server::scheduler_service::memory_bulk_metadata",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.metadata"),
+            CompatibilityQueryCallSite::new(
                 "memory compact detail fallback read",
                 "memory_read",
                 "nmem-server::memory_repo::compact_detail_fallback",
@@ -12652,7 +12702,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 268);
+        assert_eq!(report.checks.len(), 269);
     }
 
     #[test]
@@ -12668,13 +12718,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 268);
-        assert_eq!(coverage.covered_checks, 268);
+        assert_eq!(coverage.required_checks, 269);
+        assert_eq!(coverage.covered_checks, 269);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 268);
+        assert_eq!(coverage_json["covered_checks"], 269);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -12704,10 +12754,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 268);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 269);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 268);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 269);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12901,15 +12951,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 268);
-        assert_eq!(report.shadow_checks.len(), 268);
+        assert_eq!(report.primary_checks.len(), 269);
+        assert_eq!(report.shadow_checks.len(), 269);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            268
+            269
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12918,7 +12968,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 268);
+        assert_eq!(cutover.matched_checks, 269);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
