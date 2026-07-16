@@ -8028,6 +8028,113 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "search projection community seed entity read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) WHERE e.community_id = $community_id OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, e.confidence, e.community_id, e.pagerank_score, COUNT(m) AS memory_count ORDER BY memory_count DESC, e.pagerank_score DESC, e.confidence DESC LIMIT $limit",
+                        BTreeMap::from([
+                            ("community_id".to_string(), Value::Int(7610)),
+                            ("limit".to_string(), Value::Int(4)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            (
+                                "e.id",
+                                Value::String("search-projection-seed-high".to_string()),
+                            ),
+                            ("e.name", Value::String("Seed High".to_string())),
+                            ("e.entity_type", Value::String("concept".to_string())),
+                            ("e.confidence", Value::Float(0.2)),
+                            ("e.community_id", Value::Int(7610)),
+                            ("e.pagerank_score", Value::Float(0.4)),
+                            ("memory_count", Value::Int(2)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "e.id",
+                                Value::String("search-projection-seed-pagerank".to_string()),
+                            ),
+                            ("e.name", Value::String("Seed Pagerank".to_string())),
+                            ("e.entity_type", Value::String("concept".to_string())),
+                            ("e.confidence", Value::Float(0.1)),
+                            ("e.community_id", Value::Int(7610)),
+                            ("e.pagerank_score", Value::Float(0.9)),
+                            ("memory_count", Value::Int(1)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "e.id",
+                                Value::String("search-projection-seed-confidence".to_string()),
+                            ),
+                            ("e.name", Value::String("Seed Confidence".to_string())),
+                            ("e.entity_type", Value::String("concept".to_string())),
+                            ("e.confidence", Value::Float(0.8)),
+                            ("e.community_id", Value::Int(7610)),
+                            ("e.pagerank_score", Value::Float(0.5)),
+                            ("memory_count", Value::Int(1)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "e.id",
+                                Value::String("search-projection-seed-empty".to_string()),
+                            ),
+                            ("e.name", Value::String("Seed Empty".to_string())),
+                            ("e.entity_type", Value::String("concept".to_string())),
+                            ("e.confidence", Value::Float(0.7)),
+                            ("e.community_id", Value::Int(7610)),
+                            ("e.pagerank_score", Value::Float(0.1)),
+                            ("memory_count", Value::Int(0)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'search-projection-seed-high', name: 'Seed High', entity_type: 'concept', confidence: 0.2, community_id: 7610, pagerank_score: 0.4})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'search-projection-seed-pagerank', name: 'Seed Pagerank', entity_type: 'concept', confidence: 0.1, community_id: 7610, pagerank_score: 0.9})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'search-projection-seed-confidence', name: 'Seed Confidence', entity_type: 'concept', confidence: 0.8, community_id: 7610, pagerank_score: 0.5})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'search-projection-seed-empty', name: 'Seed Empty', entity_type: 'concept', confidence: 0.7, community_id: 7610, pagerank_score: 0.1})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'search-projection-seed-outside', name: 'Seed Outside', entity_type: 'concept', confidence: 1.0, community_id: 7611, pagerank_score: 1.0})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'search-projection-seed-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'search-projection-seed-memory-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'search-projection-seed-memory-3'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'search-projection-seed-memory-4'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'search-projection-seed-memory-1'}), (e:Entity {id: 'search-projection-seed-high'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'search-projection-seed-memory-2'}), (e:Entity {id: 'search-projection-seed-high'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'search-projection-seed-memory-3'}), (e:Entity {id: 'search-projection-seed-pagerank'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'search-projection-seed-memory-4'}), (e:Entity {id: 'search-projection-seed-confidence'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['search-projection-seed-high', 'search-projection-seed-pagerank', 'search-projection-seed-confidence', 'search-projection-seed-empty', 'search-projection-seed-outside', 'search-projection-seed-memory-1', 'search-projection-seed-memory-2', 'search-projection-seed-memory-3', 'search-projection-seed-memory-4'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(9),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "community entity memory-count read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (e:Entity) WHERE e.community_id = $community_id OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, COUNT(m) AS memory_count ORDER BY memory_count DESC LIMIT 10",
@@ -13652,6 +13759,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE lower(e.name) CONTAINS $raw_query OR lower(e.name) CONTAINS $normalized_query OR list_contains(e.aliases, $raw_input) OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, e.aliases, e.description, e.confidence, e.community_id, e.pagerank_score, COUNT(m) AS memory_count ORDER BY CASE WHEN lower(e.name) = $raw_query THEN 0 WHEN lower(e.name) = $normalized_query THEN 0 WHEN list_contains(e.aliases, $raw_input) THEN 1 ELSE 2 END ASC, memory_count DESC, e.pagerank_score DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "search projection community seed entity read",
+                "search_projection_read",
+                "nmem-graph::search_projection::community_seed_entities",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) WHERE e.community_id = $community_id OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, e.confidence, e.community_id, e.pagerank_score, COUNT(m) AS memory_count ORDER BY memory_count DESC, e.pagerank_score DESC, e.confidence DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "community entity memory-count read",
                 "community_read",
                 "nmem-server::context_wiring::community_entity_memory_count",
@@ -16231,7 +16346,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 360);
+        assert_eq!(report.checks.len(), 361);
     }
 
     #[test]
@@ -16247,13 +16362,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 360);
-        assert_eq!(coverage.covered_checks, 360);
+        assert_eq!(coverage.required_checks, 361);
+        assert_eq!(coverage.covered_checks, 361);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 360);
+        assert_eq!(coverage_json["covered_checks"], 361);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16283,10 +16398,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 360);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 361);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 360);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 361);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16511,15 +16626,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 360);
-        assert_eq!(report.shadow_checks.len(), 360);
+        assert_eq!(report.primary_checks.len(), 361);
+        assert_eq!(report.shadow_checks.len(), 361);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            360
+            361
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16528,7 +16643,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 360);
+        assert_eq!(cutover.matched_checks, 361);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
