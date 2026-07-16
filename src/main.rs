@@ -245,6 +245,37 @@ fn main() -> Result<()> {
             print!("{}", export.graph_stream.encoded);
             return Ok(());
         }
+        if command == "graph-lightning-verify-export" {
+            let mut require_valid = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-valid" => {
+                        require_valid = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_verify_export_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(graph_lightning_verify_export_usage()));
+            }
+            let mut db = Database::open(path)?;
+            let export = db.prepare_graph_lightning_bootstrap_export()?;
+            let validation = export
+                .graph_stream
+                .validate_against_manifest(&export.manifest);
+            let rendered = graph_lightning_graph_stream_validation_json(&validation);
+            println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            if require_valid && !validation.is_valid {
+                return Err(SkeinError::Execution(
+                    "graph lightning graph stream validation failed".to_string(),
+                ));
+            }
+            return Ok(());
+        }
         return Err(SkeinError::Semantic(format!("unknown command '{command}'")));
     }
 
@@ -285,6 +316,10 @@ fn graph_lightning_bootstrap_manifest_usage() -> String {
 
 fn graph_lightning_graph_stream_usage() -> String {
     "graph-lightning-graph-stream requires [--require-ready] <database-path>".to_string()
+}
+
+fn graph_lightning_verify_export_usage() -> String {
+    "graph-lightning-verify-export requires [--require-valid] <database-path>".to_string()
 }
 
 fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
@@ -407,6 +442,31 @@ fn graph_lightning_bootstrap_manifest_json(
     })
 }
 
+fn graph_lightning_graph_stream_validation_json(
+    validation: &skein::GraphLightningGraphStreamValidation,
+) -> serde_json::Value {
+    serde_json::json!({
+        "is_valid": validation.is_valid,
+        "checksum_matches": validation.checksum_matches,
+        "format_version_matches": validation.format_version_matches,
+        "count_matches": validation.count_matches,
+        "endpoint_integrity": validation.endpoint_integrity,
+        "manifest_matches": validation.manifest_matches,
+        "expected_stream_checksum": validation.expected_stream_checksum,
+        "actual_stream_checksum": validation.actual_stream_checksum,
+        "format_version": validation.format_version,
+        "graph_commit_epoch": validation.graph_commit_epoch,
+        "logical_checksum": validation.logical_checksum,
+        "node_count": validation.node_count,
+        "relationship_count": validation.relationship_count,
+        "duplicate_node_ids": validation.duplicate_node_ids,
+        "duplicate_relationship_ids": validation.duplicate_relationship_ids,
+        "missing_sources": endpoint_violations_json(&validation.missing_sources),
+        "missing_targets": endpoint_violations_json(&validation.missing_targets),
+        "errors": validation.errors,
+    })
+}
+
 fn stable_identity_audit_json(audit: &CanonicalSnapshotIdentityAudit) -> serde_json::Value {
     serde_json::json!({
         "requires_stable_id_mapping": audit.requires_stable_id_mapping,
@@ -457,14 +517,15 @@ mod tests {
     use super::{
         add_shadow_ready_report, add_shadow_trace_report, canonical_snapshot_validation_json,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
-        graph_lightning_graph_stream_usage, is_self_shadow_command, parse_shadow_timeout_ms,
+        graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
+        graph_lightning_verify_export_usage, is_self_shadow_command, parse_shadow_timeout_ms,
         should_run_shadow_ready, stable_identity_audit_json, validate_canonical_snapshot_usage,
         value_json,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
         CanonicalSnapshotIdentityAudit, ExternalShadowReady, GraphLightningBootstrapManifest,
-        Value,
+        GraphLightningGraphStreamValidation, Value,
     };
     use std::time::Duration;
 
@@ -688,6 +749,49 @@ mod tests {
     }
 
     #[test]
+    fn renders_graph_lightning_graph_stream_validation_json() {
+        let validation = GraphLightningGraphStreamValidation {
+            is_valid: false,
+            checksum_matches: false,
+            format_version_matches: true,
+            count_matches: true,
+            endpoint_integrity: false,
+            manifest_matches: false,
+            expected_stream_checksum: Some(11),
+            actual_stream_checksum: 22,
+            format_version: Some(1),
+            graph_commit_epoch: Some(5),
+            logical_checksum: Some(99),
+            node_count: 3,
+            relationship_count: 2,
+            duplicate_node_ids: vec![7],
+            duplicate_relationship_ids: vec![8],
+            missing_sources: vec![CanonicalSnapshotEndpointViolation {
+                relationship_id: 2,
+                missing_node_id: 10,
+            }],
+            missing_targets: vec![CanonicalSnapshotEndpointViolation {
+                relationship_id: 3,
+                missing_node_id: 11,
+            }],
+            errors: vec!["graph stream checksum mismatch".to_string()],
+        };
+
+        let json = graph_lightning_graph_stream_validation_json(&validation);
+
+        assert_eq!(json["is_valid"], false);
+        assert_eq!(json["checksum_matches"], false);
+        assert_eq!(json["expected_stream_checksum"], 11);
+        assert_eq!(json["actual_stream_checksum"], 22);
+        assert_eq!(json["duplicate_node_ids"], serde_json::json!([7]));
+        assert_eq!(json["missing_targets"][0]["missing_node_id"], 11);
+        assert_eq!(
+            json["errors"],
+            serde_json::json!(["graph stream checksum mismatch"])
+        );
+    }
+
+    #[test]
     fn renders_stable_identity_audit_values() {
         let audit = CanonicalSnapshotIdentityAudit {
             requires_stable_id_mapping: true,
@@ -747,5 +851,11 @@ mod tests {
     fn validates_graph_lightning_graph_stream_usage_text() {
         assert!(graph_lightning_graph_stream_usage().contains("<database-path>"));
         assert!(graph_lightning_graph_stream_usage().contains("--require-ready"));
+    }
+
+    #[test]
+    fn validates_graph_lightning_verify_export_usage_text() {
+        assert!(graph_lightning_verify_export_usage().contains("<database-path>"));
+        assert!(graph_lightning_verify_export_usage().contains("--require-valid"));
     }
 }

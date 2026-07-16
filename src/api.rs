@@ -216,6 +216,15 @@ impl CanonicalGraphSnapshotExport {
     }
 }
 
+impl GraphLightningGraphStream {
+    pub fn validate_against_manifest(
+        &self,
+        manifest: &GraphLightningBootstrapManifest,
+    ) -> GraphLightningGraphStreamValidation {
+        validate_graph_lightning_graph_stream(&self.encoded, Some(manifest))
+    }
+}
+
 pub const GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION: u64 = 1;
 pub const GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION: u64 = 1;
 
@@ -253,6 +262,28 @@ pub struct GraphLightningGraphStream {
     pub node_count: usize,
     pub relationship_count: usize,
     pub encoded: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningGraphStreamValidation {
+    pub is_valid: bool,
+    pub checksum_matches: bool,
+    pub format_version_matches: bool,
+    pub count_matches: bool,
+    pub endpoint_integrity: bool,
+    pub manifest_matches: bool,
+    pub expected_stream_checksum: Option<u64>,
+    pub actual_stream_checksum: u64,
+    pub format_version: Option<u64>,
+    pub graph_commit_epoch: Option<u64>,
+    pub logical_checksum: Option<u64>,
+    pub node_count: usize,
+    pub relationship_count: usize,
+    pub duplicate_node_ids: Vec<u64>,
+    pub duplicate_relationship_ids: Vec<u64>,
+    pub missing_sources: Vec<CanonicalSnapshotEndpointViolation>,
+    pub missing_targets: Vec<CanonicalSnapshotEndpointViolation>,
+    pub errors: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2397,6 +2428,464 @@ fn canonical_stable_key(value: Option<&Value>) -> String {
     key
 }
 
+pub fn validate_graph_lightning_graph_stream(
+    encoded: &str,
+    manifest: Option<&GraphLightningBootstrapManifest>,
+) -> GraphLightningGraphStreamValidation {
+    let (body, expected_stream_checksum, mut errors) = split_graph_stream_checksum(encoded);
+    let actual_stream_checksum = checksum_bytes(body.as_bytes());
+    let checksum_matches = expected_stream_checksum == Some(actual_stream_checksum);
+    if !checksum_matches {
+        errors.push("graph stream checksum mismatch".to_string());
+    }
+
+    let mut parsed = parse_graph_lightning_graph_stream_body(body, &mut errors);
+
+    let duplicate_node_ids = duplicate_u64s(parsed.node_ids.iter().copied());
+    let duplicate_relationship_ids = duplicate_u64s(parsed.relationship_ids.iter().copied());
+    let node_id_set = parsed.node_ids.iter().copied().collect::<BTreeSet<_>>();
+    let missing_sources = parsed
+        .relationships
+        .iter()
+        .filter(|(_, source, _)| !node_id_set.contains(source))
+        .map(
+            |(relationship_id, source, _)| CanonicalSnapshotEndpointViolation {
+                relationship_id: *relationship_id,
+                missing_node_id: *source,
+            },
+        )
+        .collect::<Vec<_>>();
+    let missing_targets = parsed
+        .relationships
+        .iter()
+        .filter(|(_, _, target)| !node_id_set.contains(target))
+        .map(
+            |(relationship_id, _, target)| CanonicalSnapshotEndpointViolation {
+                relationship_id: *relationship_id,
+                missing_node_id: *target,
+            },
+        )
+        .collect::<Vec<_>>();
+    let format_version_matches =
+        parsed.format_version == Some(GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION);
+    let count_matches = parsed.declared_node_count == Some(parsed.node_ids.len() as u64)
+        && parsed.declared_relationship_count == Some(parsed.relationship_ids.len() as u64);
+    let endpoint_integrity = duplicate_node_ids.is_empty()
+        && duplicate_relationship_ids.is_empty()
+        && missing_sources.is_empty()
+        && missing_targets.is_empty();
+    let manifest_matches = manifest.is_none_or(|manifest| {
+        parsed.graph_commit_epoch == Some(manifest.graph_commit_epoch)
+            && parsed.logical_checksum == Some(manifest.logical_checksum)
+            && expected_stream_checksum == Some(manifest.graph_stream_checksum)
+            && encoded.len() == manifest.graph_stream_byte_len
+            && parsed.declared_node_count == Some(manifest.node_count as u64)
+            && parsed.declared_relationship_count == Some(manifest.relationship_count as u64)
+    });
+    if !format_version_matches {
+        errors.push("graph stream format version mismatch".to_string());
+    }
+    if !count_matches {
+        errors.push("graph stream count mismatch".to_string());
+    }
+    if !endpoint_integrity {
+        errors.push("graph stream endpoint integrity failed".to_string());
+    }
+    if !manifest_matches {
+        errors.push("graph stream manifest mismatch".to_string());
+    }
+    let is_valid = checksum_matches
+        && format_version_matches
+        && count_matches
+        && endpoint_integrity
+        && manifest_matches
+        && errors.is_empty();
+
+    GraphLightningGraphStreamValidation {
+        is_valid,
+        checksum_matches,
+        format_version_matches,
+        count_matches,
+        endpoint_integrity,
+        manifest_matches,
+        expected_stream_checksum,
+        actual_stream_checksum,
+        format_version: parsed.format_version.take(),
+        graph_commit_epoch: parsed.graph_commit_epoch.take(),
+        logical_checksum: parsed.logical_checksum.take(),
+        node_count: parsed.node_ids.len(),
+        relationship_count: parsed.relationship_ids.len(),
+        duplicate_node_ids,
+        duplicate_relationship_ids,
+        missing_sources,
+        missing_targets,
+        errors,
+    }
+}
+
+#[derive(Debug, Default)]
+struct ParsedGraphLightningGraphStream {
+    format_version: Option<u64>,
+    graph_commit_epoch: Option<u64>,
+    logical_checksum: Option<u64>,
+    declared_node_count: Option<u64>,
+    declared_relationship_count: Option<u64>,
+    node_ids: Vec<u64>,
+    relationship_ids: Vec<u64>,
+    relationships: Vec<(u64, u64, u64)>,
+}
+
+fn parse_graph_lightning_graph_stream_body(
+    body: &str,
+    errors: &mut Vec<String>,
+) -> ParsedGraphLightningGraphStream {
+    let mut cursor = GraphStreamCursor::new(body);
+    let mut parsed = ParsedGraphLightningGraphStream::default();
+
+    match cursor.read_line() {
+        Some("SKEIN_GRAPH_LIGHTNING_GRAPH_STREAM_V1") => {}
+        Some(line) => {
+            errors.push(format!("invalid graph stream header: {line}"));
+            return parsed;
+        }
+        None => {
+            errors.push("missing graph stream header".to_string());
+            return parsed;
+        }
+    }
+
+    parsed.format_version =
+        cursor.read_tagged_u64("format_version", "graph stream format version", errors);
+    parsed.graph_commit_epoch =
+        cursor.read_tagged_u64("graph_commit_epoch", "graph stream commit epoch", errors);
+    parsed.logical_checksum =
+        cursor.read_tagged_u64("logical_checksum", "graph stream logical checksum", errors);
+    parsed.declared_node_count =
+        cursor.read_tagged_u64("node_count", "graph stream node count", errors);
+
+    let node_count = parsed.declared_node_count.unwrap_or(0);
+    for _ in 0..node_count {
+        if let Some(node_id) = cursor.read_node_id(errors) {
+            parsed.node_ids.push(node_id);
+        }
+        cursor.skip_optional_canonical_value("stable_id", errors);
+        let label_count = cursor
+            .read_tagged_u64("label_count", "graph stream label count", errors)
+            .unwrap_or(0);
+        for _ in 0..label_count {
+            cursor.skip_canonical_string_line("label", errors);
+        }
+        skip_graph_stream_properties(&mut cursor, errors);
+    }
+
+    parsed.declared_relationship_count = cursor.read_tagged_u64(
+        "relationship_count",
+        "graph stream relationship count",
+        errors,
+    );
+    let relationship_count = parsed.declared_relationship_count.unwrap_or(0);
+    for _ in 0..relationship_count {
+        if let Some((relationship_id, source, target)) = cursor.read_relationship(errors) {
+            parsed.relationship_ids.push(relationship_id);
+            parsed.relationships.push((relationship_id, source, target));
+        }
+        cursor.skip_optional_canonical_value("stable_id", errors);
+        cursor.skip_canonical_string_line("relationship_type", errors);
+        skip_graph_stream_properties(&mut cursor, errors);
+    }
+
+    if !cursor.is_finished() {
+        let remaining = cursor.remaining_preview();
+        errors.push(format!("trailing graph stream data: {remaining}"));
+    }
+
+    parsed
+}
+
+fn skip_graph_stream_properties(cursor: &mut GraphStreamCursor<'_>, errors: &mut Vec<String>) {
+    let property_count = cursor
+        .read_tagged_u64("property_count", "graph stream property count", errors)
+        .unwrap_or(0);
+    for _ in 0..property_count {
+        cursor.skip_canonical_string_line("property", errors);
+        cursor.skip_canonical_value(errors);
+        cursor.expect_byte(b'\n', "graph stream property value terminator", errors);
+    }
+}
+
+struct GraphStreamCursor<'a> {
+    input: &'a str,
+    offset: usize,
+}
+
+impl<'a> GraphStreamCursor<'a> {
+    fn new(input: &'a str) -> Self {
+        Self { input, offset: 0 }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.offset >= self.input.len()
+    }
+
+    fn remaining_preview(&self) -> String {
+        self.input[self.offset..]
+            .chars()
+            .take(64)
+            .collect::<String>()
+            .replace('\n', "\\n")
+    }
+
+    fn read_line(&mut self) -> Option<&'a str> {
+        if self.is_finished() {
+            return None;
+        }
+        let remaining = &self.input[self.offset..];
+        if let Some(line_len) = remaining.find('\n') {
+            let start = self.offset;
+            let end = start + line_len;
+            self.offset = end + 1;
+            Some(&self.input[start..end])
+        } else {
+            let start = self.offset;
+            self.offset = self.input.len();
+            Some(&self.input[start..])
+        }
+    }
+
+    fn read_tagged_u64(&mut self, tag: &str, name: &str, errors: &mut Vec<String>) -> Option<u64> {
+        let Some(line) = self.read_line() else {
+            errors.push(format!("missing {name}"));
+            return None;
+        };
+        let Some(raw) = line
+            .strip_prefix(tag)
+            .and_then(|line| line.strip_prefix('\t'))
+        else {
+            errors.push(format!("expected {tag} line, found {line}"));
+            return None;
+        };
+        parse_api_u64(raw, name, errors)
+    }
+
+    fn read_node_id(&mut self, errors: &mut Vec<String>) -> Option<u64> {
+        self.read_tagged_u64("node", "graph stream node id", errors)
+    }
+
+    fn read_relationship(&mut self, errors: &mut Vec<String>) -> Option<(u64, u64, u64)> {
+        let Some(line) = self.read_line() else {
+            errors.push("missing graph stream relationship".to_string());
+            return None;
+        };
+        let fields = line.split('\t').collect::<Vec<_>>();
+        let ["relationship", raw_id, raw_source, raw_target] = fields.as_slice() else {
+            errors.push(format!("invalid graph stream relationship line: {line}"));
+            return None;
+        };
+        let id = parse_api_u64(raw_id, "graph stream relationship id", errors);
+        let source = parse_api_u64(raw_source, "graph stream relationship source", errors);
+        let target = parse_api_u64(raw_target, "graph stream relationship target", errors);
+        match (id, source, target) {
+            (Some(id), Some(source), Some(target)) => Some((id, source, target)),
+            _ => None,
+        }
+    }
+
+    fn skip_optional_canonical_value(&mut self, prefix: &str, errors: &mut Vec<String>) {
+        if !self.expect_str(prefix, errors) {
+            return;
+        }
+        if !self.expect_byte(b'\t', "graph stream optional value separator", errors) {
+            return;
+        }
+        if self.remaining().starts_with("missing") {
+            self.offset += "missing".len();
+        } else {
+            self.skip_canonical_value(errors);
+        }
+        self.expect_byte(b'\n', "graph stream optional value terminator", errors);
+    }
+
+    fn skip_canonical_string_line(&mut self, prefix: &str, errors: &mut Vec<String>) {
+        if !self.expect_str(prefix, errors) {
+            return;
+        }
+        if !self.expect_byte(b'\t', "graph stream canonical string separator", errors) {
+            return;
+        }
+        self.skip_length_prefixed_bytes("graph stream canonical string", errors);
+        self.expect_byte(b'\n', "graph stream canonical string terminator", errors);
+    }
+
+    fn skip_canonical_value(&mut self, errors: &mut Vec<String>) {
+        if self.remaining().starts_with("null") {
+            self.offset += "null".len();
+        } else if self.remaining().starts_with("bool:true") {
+            self.offset += "bool:true".len();
+        } else if self.remaining().starts_with("bool:false") {
+            self.offset += "bool:false".len();
+        } else if self.remaining().starts_with("int:") {
+            self.skip_scalar_value("int:", errors);
+        } else if self.remaining().starts_with("float:") {
+            self.skip_scalar_value("float:", errors);
+        } else if self.remaining().starts_with("string:") {
+            self.offset += "string:".len();
+            self.skip_length_prefixed_bytes("graph stream string value", errors);
+        } else if self.remaining().starts_with("list:") {
+            self.offset += "list:".len();
+            let count = self.parse_decimal("graph stream list item count", errors);
+            if !self.expect_byte(b':', "graph stream list count separator", errors)
+                || !self.expect_byte(b'[', "graph stream list opener", errors)
+            {
+                return;
+            }
+            for _ in 0..count.unwrap_or(0) {
+                self.skip_canonical_value(errors);
+                self.expect_byte(b';', "graph stream list item terminator", errors);
+            }
+            self.expect_byte(b']', "graph stream list closer", errors);
+        } else if self.remaining().starts_with("map:") {
+            self.offset += "map:".len();
+            let count = self.parse_decimal("graph stream map item count", errors);
+            if !self.expect_byte(b':', "graph stream map count separator", errors)
+                || !self.expect_byte(b'{', "graph stream map opener", errors)
+            {
+                return;
+            }
+            for _ in 0..count.unwrap_or(0) {
+                self.skip_length_prefixed_bytes("graph stream map key", errors);
+                if !self.expect_byte(b'=', "graph stream map key separator", errors) {
+                    return;
+                }
+                self.skip_canonical_value(errors);
+                self.expect_byte(b';', "graph stream map item terminator", errors);
+            }
+            self.expect_byte(b'}', "graph stream map closer", errors);
+        } else {
+            errors.push(format!(
+                "invalid graph stream canonical value: {}",
+                self.remaining_preview()
+            ));
+        }
+    }
+
+    fn skip_length_prefixed_bytes(&mut self, name: &str, errors: &mut Vec<String>) {
+        let Some(len) = self.parse_decimal(name, errors) else {
+            return;
+        };
+        if !self.expect_byte(b':', "graph stream length separator", errors) {
+            return;
+        }
+        let end = self.offset.saturating_add(len as usize);
+        if end > self.input.len() {
+            errors.push(format!("{name} exceeds graph stream length"));
+            self.offset = self.input.len();
+            return;
+        }
+        if !self.input.is_char_boundary(end) {
+            errors.push(format!("{name} ends inside a UTF-8 codepoint"));
+            self.offset = self.input.len();
+            return;
+        }
+        self.offset = end;
+    }
+
+    fn skip_scalar_value(&mut self, prefix: &str, errors: &mut Vec<String>) {
+        if !self.expect_str(prefix, errors) {
+            return;
+        }
+        while let Some(byte) = self.current_byte() {
+            if matches!(byte, b';' | b'\n' | b']' | b'}') {
+                break;
+            }
+            self.offset += 1;
+        }
+    }
+
+    fn parse_decimal(&mut self, name: &str, errors: &mut Vec<String>) -> Option<u64> {
+        let start = self.offset;
+        while let Some(byte) = self.current_byte() {
+            if !byte.is_ascii_digit() {
+                break;
+            }
+            self.offset += 1;
+        }
+        if start == self.offset {
+            errors.push(format!("missing {name}"));
+            return None;
+        }
+        match self.input[start..self.offset].parse::<u64>() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                errors.push(format!(
+                    "invalid {name}: {}",
+                    &self.input[start..self.offset]
+                ));
+                None
+            }
+        }
+    }
+
+    fn expect_str(&mut self, expected: &str, errors: &mut Vec<String>) -> bool {
+        if self.remaining().starts_with(expected) {
+            self.offset += expected.len();
+            true
+        } else {
+            errors.push(format!(
+                "expected {expected}, found {}",
+                self.remaining_preview()
+            ));
+            false
+        }
+    }
+
+    fn expect_byte(&mut self, expected: u8, name: &str, errors: &mut Vec<String>) -> bool {
+        if self.current_byte() == Some(expected) {
+            self.offset += 1;
+            true
+        } else {
+            errors.push(format!("expected {name}"));
+            false
+        }
+    }
+
+    fn current_byte(&self) -> Option<u8> {
+        self.input.as_bytes().get(self.offset).copied()
+    }
+
+    fn remaining(&self) -> &'a str {
+        &self.input[self.offset..]
+    }
+}
+
+fn split_graph_stream_checksum(encoded: &str) -> (&str, Option<u64>, Vec<String>) {
+    let Some((body, footer)) = encoded.rsplit_once("checksum\t") else {
+        return (
+            encoded,
+            None,
+            vec!["graph stream missing checksum footer".to_string()],
+        );
+    };
+    let raw = footer.trim();
+    match raw.parse::<u64>() {
+        Ok(checksum) => (body, Some(checksum), Vec::new()),
+        Err(_) => (
+            body,
+            None,
+            vec![format!("invalid graph stream checksum: {raw}")],
+        ),
+    }
+}
+
+fn parse_api_u64(input: &str, name: &str, errors: &mut Vec<String>) -> Option<u64> {
+    match input.parse::<u64>() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            errors.push(format!("invalid {name}: {input}"));
+            None
+        }
+    }
+}
+
 fn append_canonical_properties(body: &mut String, properties: &BTreeMap<String, Value>) {
     body.push_str(&format!("property_count\t{}\n", properties.len()));
     for (property, value) in properties {
@@ -3043,11 +3532,11 @@ impl DatabaseReadTransaction {
 #[cfg(test)]
 mod tests {
     use super::{
-        CanonicalStableIdMapping, Database, DatabaseConfig, DerivedArtifactJobStatus,
-        KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
-        KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-        KnowledgePathRequest, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
-        NowledgeGraphAdapter, NowledgeGraphStatement, RecoveryMode,
+        validate_graph_lightning_graph_stream, CanonicalStableIdMapping, Database, DatabaseConfig,
+        DerivedArtifactJobStatus, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
+        KnowledgeEntityRequest, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
+        KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgeRetrievalRequest,
+        KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, RecoveryMode,
         GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
     };
     use crate::schema::{
@@ -6843,7 +7332,7 @@ mod tests {
             )
             .unwrap();
             let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-            let manifest = export.manifest;
+            let manifest = &export.manifest;
 
             assert_eq!(
                 manifest.protocol_version,
@@ -6870,6 +7359,23 @@ mod tests {
                 .encoded
                 .starts_with("SKEIN_GRAPH_LIGHTNING_GRAPH_STREAM_V1\n"));
             assert!(export.graph_stream.encoded.contains("\nchecksum\t"));
+            let stream_validation = export
+                .graph_stream
+                .validate_against_manifest(&export.manifest);
+            assert!(stream_validation.is_valid);
+            assert!(stream_validation.endpoint_integrity);
+            assert!(stream_validation.manifest_matches);
+
+            let corrupted = export
+                .graph_stream
+                .encoded
+                .replace("relationship\t0\t0\t1", "relationship\t0\t0\t99");
+            let corrupted_validation =
+                validate_graph_lightning_graph_stream(&corrupted, Some(&export.manifest));
+            assert!(!corrupted_validation.is_valid);
+            assert!(!corrupted_validation.checksum_matches);
+            assert!(!corrupted_validation.endpoint_integrity);
+            assert_eq!(corrupted_validation.missing_targets.len(), 1);
         }
 
         {
@@ -6891,6 +7397,74 @@ mod tests {
         }
 
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn graph_lightning_graph_stream_validation_skips_length_coded_metadata() {
+        let mut db = Database::new();
+        let root = db
+            .store
+            .create_node(
+                &mut db.catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("root".to_string())),
+                    (
+                        "content".to_string(),
+                        Value::String("first line\nrelationship\t999\t1\t2".to_string()),
+                    ),
+                    (
+                        "metadata".to_string(),
+                        Value::Map(BTreeMap::from([(
+                            "tags".to_string(),
+                            Value::List(vec![
+                                Value::String("alpha\nbeta".to_string()),
+                                Value::Int(7),
+                            ]),
+                        )])),
+                    ),
+                ]),
+            )
+            .unwrap();
+        let target = db
+            .store
+            .create_node(
+                &mut db.catalog,
+                "Entity",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("target".to_string())),
+                    ("name".to_string(), Value::String("Target".to_string())),
+                ]),
+            )
+            .unwrap();
+        db.store
+            .create_relationship(
+                &mut db.catalog,
+                root,
+                target,
+                "LINKS",
+                BTreeMap::from([
+                    (
+                        "id".to_string(),
+                        Value::String("relationship-id".to_string()),
+                    ),
+                    (
+                        "note".to_string(),
+                        Value::String("edge\nnode\t999".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let validation = export
+            .graph_stream
+            .validate_against_manifest(&export.manifest);
+
+        assert!(validation.is_valid, "{:?}", validation.errors);
+        assert_eq!(validation.node_count, 2);
+        assert_eq!(validation.relationship_count, 1);
+        assert!(validation.endpoint_integrity);
     }
 
     #[test]

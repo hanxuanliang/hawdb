@@ -127,6 +127,12 @@ The CLI command `skein graph-lightning-graph-stream [--require-ready]
 <database-path>` uses the same bootstrap export path and prints the deterministic
 GraphStream text. The final `checksum` line covers the stream body and matches
 the manifest's `graph_stream_checksum`.
+`GraphLightningGraphStream::validate_against_manifest` and the CLI command
+`skein graph-lightning-verify-export [--require-valid] <database-path>` verify
+the local bootstrap artifacts before upload. The report covers GraphStream
+format version, body checksum, manifest checksum and byte-length agreement,
+declared count agreement, duplicate node/relationship IDs, and relationship
+endpoint integrity.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
