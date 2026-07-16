@@ -9615,6 +9615,52 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "entity strategy collect entity nodes read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.id IN $entity_ids WITH m, COLLECT(DISTINCT e) as entity_nodes, COUNT(DISTINCT e) as entity_count RETURN m, entity_nodes, entity_count ORDER BY entity_count DESC, m.importance DESC, COALESCE(m.pagerank_score, 0.0) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "entity_ids".to_string(),
+                                Value::List(vec![
+                                    Value::String("entity-strategy-e1".to_string()),
+                                    Value::String("entity-strategy-e2".to_string()),
+                                ]),
+                            ),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-strategy-e1', name: 'Strategy One'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-strategy-e2', name: 'Strategy Two'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'entity-strategy-m1', title: 'Strategy Memory One', importance: 0.9, pagerank_score: 0.4})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'entity-strategy-m2', title: 'Strategy Memory Two', importance: 0.8, pagerank_score: 0.5})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'entity-strategy-m1'}), (e:Entity {id: 'entity-strategy-e1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'entity-strategy-m1'}), (e:Entity {id: 'entity-strategy-e2'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'entity-strategy-m2'}), (e:Entity {id: 'entity-strategy-e1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['entity-strategy-e1', 'entity-strategy-e2', 'entity-strategy-m1', 'entity-strategy-m2'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "community memory coalesced summary read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (e:Entity {community_id: $community_id})<-[:MENTIONS]-(m:Memory) WHERE COALESCE(m.is_crystal, false) = false WITH m, COUNT(e) AS entity_count RETURN m.id, COALESCE(m.title, ''), COALESCE(m.content, ''), entity_count ORDER BY entity_count DESC, COALESCE(m.importance, 0.5) DESC LIMIT 10",
@@ -13289,6 +13335,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity {community_id: $community_id})<-[:MENTIONS]-(m:Memory) WITH m, COUNT(e) as entity_count, COLLECT(DISTINCT e.id) as entity_ids RETURN m, entity_count, entity_ids ORDER BY entity_count DESC, m.importance DESC, COALESCE(m.pagerank_score, 0.0) DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "entity strategy collect entity nodes read",
+                "community_memory_read",
+                "nmem-graph::repo::memories_mentioning_entities",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.id IN $entity_ids WITH m, COLLECT(DISTINCT e) as entity_nodes, COUNT(DISTINCT e) as entity_count RETURN m, entity_nodes, entity_count ORDER BY entity_count DESC, m.importance DESC, COALESCE(m.pagerank_score, 0.0) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "community memory coalesced summary read",
                 "community_memory_read",
                 "nmem-server::rest_community::community_memory_summaries",
@@ -15070,7 +15124,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 333);
+        assert_eq!(report.checks.len(), 334);
     }
 
     #[test]
@@ -15086,13 +15140,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 333);
-        assert_eq!(coverage.covered_checks, 333);
+        assert_eq!(coverage.required_checks, 334);
+        assert_eq!(coverage.covered_checks, 334);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 333);
+        assert_eq!(coverage_json["covered_checks"], 334);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15122,10 +15176,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 333);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 334);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 333);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 334);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -15350,15 +15404,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 333);
-        assert_eq!(report.shadow_checks.len(), 333);
+        assert_eq!(report.primary_checks.len(), 334);
+        assert_eq!(report.shadow_checks.len(), 334);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            333
+            334
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -15367,7 +15421,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 333);
+        assert_eq!(cutover.matched_checks, 334);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

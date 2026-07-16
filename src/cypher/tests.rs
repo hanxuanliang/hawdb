@@ -1519,6 +1519,39 @@ fn parses_with_collect_distinct_property() {
 }
 
 #[test]
+fn parses_with_collect_distinct_variable_and_count() {
+    let statement = parse(
+        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) WHERE e.id IN $entity_ids WITH m, COLLECT(DISTINCT e) as entity_nodes, COUNT(DISTINCT e) as entity_count RETURN m, entity_nodes, entity_count ORDER BY entity_count DESC LIMIT $limit",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let aggregate_with = query.aggregate_with.expect("aggregate with");
+    assert_eq!(aggregate_with.items.len(), 3);
+    assert!(matches!(
+        aggregate_with.items[1].expression,
+        ReturnExpression::CollectVariable {
+            ref variable,
+            distinct: true
+        } if variable == "e"
+    ));
+    assert!(matches!(
+        aggregate_with.items[2].expression,
+        ReturnExpression::CountVariable {
+            ref variable,
+            distinct: true
+        } if variable == "e"
+    ));
+    assert_eq!(query.returns.len(), 3);
+    assert_eq!(query.order_by.len(), 1);
+    assert_eq!(
+        query.limit,
+        Some(ValueExpression::Parameter("limit".to_string()))
+    );
+}
+
+#[test]
 fn parses_optional_match_return_collect_distinct_property() {
     let statement = parse(
         "MATCH (m:Memory) OPTIONAL MATCH (m)-[:HAS_LABEL]->(l:Label) RETURN m.id, COLLECT(DISTINCT l.name) AS labels",

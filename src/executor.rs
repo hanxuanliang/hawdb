@@ -1893,7 +1893,11 @@ fn execute_aggregate(
     if group_keys.is_empty() {
         let mut values = BTreeMap::new();
         for item in items {
-            insert_projected_value(&mut values, &item.name, aggregate_value(item, input));
+            insert_projected_value(
+                &mut values,
+                &item.name,
+                aggregate_value(catalog, item, input),
+            );
         }
         return vec![Binding {
             values,
@@ -1920,7 +1924,11 @@ fn execute_aggregate(
             }
             let group = bindings.into_iter().cloned().collect::<Vec<_>>();
             for item in items {
-                insert_projected_value(&mut values, &item.name, aggregate_value(item, &group));
+                insert_projected_value(
+                    &mut values,
+                    &item.name,
+                    aggregate_value(catalog, item, &group),
+                );
             }
             Binding {
                 values,
@@ -2682,7 +2690,7 @@ impl<'a> BoundedExpand<'a> {
     }
 }
 
-fn aggregate_value(item: &Aggregation, input: &[Binding]) -> Value {
+fn aggregate_value(catalog: &Catalog, item: &Aggregation, input: &[Binding]) -> Value {
     match item.function {
         AggregateFunction::Count => {
             Value::Int(count_aggregate(&item.target, item.distinct, input) as i64)
@@ -2690,7 +2698,9 @@ fn aggregate_value(item: &Aggregation, input: &[Binding]) -> Value {
         AggregateFunction::Min => min_aggregate(&item.target, input).unwrap_or(Value::Null),
         AggregateFunction::Max => max_aggregate(&item.target, input).unwrap_or(Value::Null),
         AggregateFunction::Avg => avg_aggregate(&item.target, input).unwrap_or(Value::Null),
-        AggregateFunction::Collect => collect_aggregate(&item.target, item.distinct, input),
+        AggregateFunction::Collect => {
+            collect_aggregate(catalog, &item.target, item.distinct, input)
+        }
     }
 }
 
@@ -2782,24 +2792,36 @@ fn avg_aggregate(target: &AggregateTarget, input: &[Binding]) -> Option<Value> {
     (count > 0).then_some(Value::Float(sum / count as f64))
 }
 
-fn collect_aggregate(target: &AggregateTarget, distinct: bool, input: &[Binding]) -> Value {
-    let AggregateTarget::Property { variable, property } = target else {
-        return Value::List(Vec::new());
+fn collect_aggregate(
+    catalog: &Catalog,
+    target: &AggregateTarget,
+    distinct: bool,
+    input: &[Binding],
+) -> Value {
+    let values: Vec<Value> = match target {
+        AggregateTarget::Variable(variable) => input
+            .iter()
+            .filter_map(|binding| binding_value(binding, catalog, variable))
+            .filter(|value| *value != Value::Null)
+            .collect(),
+        AggregateTarget::Property { variable, property } => input
+            .iter()
+            .filter_map(|binding| binding_property(binding, variable, property))
+            .filter(|value| *value != &Value::Null)
+            .cloned()
+            .collect(),
+        AggregateTarget::All => Vec::new(),
     };
-    let values = input
-        .iter()
-        .filter_map(|binding| binding_property(binding, variable, property))
-        .filter(|value| *value != &Value::Null)
-        .cloned();
     if distinct {
         Value::List(
             values
+                .into_iter()
                 .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect(),
         )
     } else {
-        Value::List(values.collect())
+        Value::List(values)
     }
 }
 

@@ -55,13 +55,17 @@ impl Parser<'_> {
                 self.expect_char('(')?;
                 let distinct = self.consume_keyword("DISTINCT");
                 let variable = self.parse_ident()?;
-                self.expect_char('.')?;
-                let property = self.parse_ident()?;
-                self.expect_char(')')?;
-                ReturnExpression::CollectProperty {
-                    variable,
-                    property,
-                    distinct,
+                if self.consume_char('.') {
+                    let property = self.parse_ident()?;
+                    self.expect_char(')')?;
+                    ReturnExpression::CollectProperty {
+                        variable,
+                        property,
+                        distinct,
+                    }
+                } else {
+                    self.expect_char(')')?;
+                    ReturnExpression::CollectVariable { variable, distinct }
                 }
             } else {
                 self.parse_return_projection_expression()?

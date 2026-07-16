@@ -684,6 +684,10 @@ pub enum ReturnExpression {
         property: String,
         distinct: bool,
     },
+    CollectVariable {
+        variable: String,
+        distinct: bool,
+    },
     MinProperty {
         variable: String,
         property: String,

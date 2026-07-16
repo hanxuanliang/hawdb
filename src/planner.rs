@@ -1421,6 +1421,7 @@ pub fn plan_with_params(
                             ReturnExpression::CountAll
                                 | ReturnExpression::CountVariable { .. }
                                 | ReturnExpression::CountProperty { .. }
+                                | ReturnExpression::CollectVariable { .. }
                                 | ReturnExpression::CollectProperty { .. }
                                 | ReturnExpression::MinProperty { .. }
                                 | ReturnExpression::MaxProperty { .. }
@@ -2195,6 +2196,7 @@ fn return_expression_is_scoped(
         | ReturnExpression::CountAll
         | ReturnExpression::CountVariable { .. }
         | ReturnExpression::CountProperty { .. }
+        | ReturnExpression::CollectVariable { .. }
         | ReturnExpression::CollectProperty { .. }
         | ReturnExpression::MinProperty { .. }
         | ReturnExpression::MaxProperty { .. }
@@ -2391,6 +2393,7 @@ fn optional_direct_count_alias(
             }
             ReturnExpression::CountAll
             | ReturnExpression::CountProperty { .. }
+            | ReturnExpression::CollectVariable { .. }
             | ReturnExpression::CollectProperty { .. }
             | ReturnExpression::MinProperty { .. }
             | ReturnExpression::MaxProperty { .. }
@@ -2477,6 +2480,7 @@ fn optional_direct_collect_alias(
             ReturnExpression::CountAll
             | ReturnExpression::CountVariable { .. }
             | ReturnExpression::CountProperty { .. }
+            | ReturnExpression::CollectVariable { .. }
             | ReturnExpression::MinProperty { .. }
             | ReturnExpression::MaxProperty { .. }
             | ReturnExpression::AvgProperty { .. } => return Ok(None),
@@ -2542,6 +2546,7 @@ fn optional_direct_row_projection_expression(
         ReturnExpression::CountAll
         | ReturnExpression::CountVariable { .. }
         | ReturnExpression::CountProperty { .. }
+        | ReturnExpression::CollectVariable { .. }
         | ReturnExpression::CollectProperty { .. }
         | ReturnExpression::MinProperty { .. }
         | ReturnExpression::MaxProperty { .. }
@@ -2752,6 +2757,20 @@ fn aggregate_with_column_names(aggregate_with: &WithAggregateProjection) -> BTre
                     ReturnExpression::CountProperty {
                         variable, property, ..
                     } => format!("count({variable}.{property})"),
+                    ReturnExpression::CollectVariable { variable, distinct } if *distinct => {
+                        format!("collect(DISTINCT {variable})")
+                    }
+                    ReturnExpression::CollectVariable { variable, .. } => {
+                        format!("collect({variable})")
+                    }
+                    ReturnExpression::CollectProperty {
+                        variable,
+                        property,
+                        distinct,
+                    } if *distinct => format!("collect(DISTINCT {variable}.{property})"),
+                    ReturnExpression::CollectProperty {
+                        variable, property, ..
+                    } => format!("collect({variable}.{property})"),
                     _ => String::new(),
                 })
         })
@@ -2764,6 +2783,8 @@ fn is_aggregate_return_expression(expression: &ReturnExpression) -> bool {
         ReturnExpression::CountAll
             | ReturnExpression::CountVariable { .. }
             | ReturnExpression::CountProperty { .. }
+            | ReturnExpression::CollectVariable { .. }
+            | ReturnExpression::CollectProperty { .. }
             | ReturnExpression::MinProperty { .. }
             | ReturnExpression::MaxProperty { .. }
             | ReturnExpression::AvgProperty { .. }
@@ -4169,6 +4190,7 @@ fn plan_return_items(
             ReturnExpression::CountAll
                 | ReturnExpression::CountVariable { .. }
                 | ReturnExpression::CountProperty { .. }
+                | ReturnExpression::CollectVariable { .. }
                 | ReturnExpression::CollectProperty { .. }
                 | ReturnExpression::MinProperty { .. }
                 | ReturnExpression::MaxProperty { .. }
@@ -4198,6 +4220,7 @@ fn plan_return_items(
                 ReturnExpression::CountAll
                 | ReturnExpression::CountVariable { .. }
                 | ReturnExpression::CountProperty { .. }
+                | ReturnExpression::CollectVariable { .. }
                 | ReturnExpression::CollectProperty { .. }
                 | ReturnExpression::MinProperty { .. }
                 | ReturnExpression::MaxProperty { .. }
@@ -4468,6 +4491,7 @@ fn plan_projection_with_columns(
         ReturnExpression::CountAll
         | ReturnExpression::CountVariable { .. }
         | ReturnExpression::CountProperty { .. }
+        | ReturnExpression::CollectVariable { .. }
         | ReturnExpression::CollectProperty { .. }
         | ReturnExpression::MinProperty { .. }
         | ReturnExpression::MaxProperty { .. }
@@ -4646,6 +4670,18 @@ fn plan_aggregation(scope: &BTreeSet<String>, item: &ReturnItem) -> Result<Aggre
                     variable: variable.clone(),
                     property: property.clone(),
                 },
+                *distinct,
+            )
+        }
+        ReturnExpression::CollectVariable { variable, distinct } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in return item"
+                )));
+            }
+            (
+                AggregateFunction::Collect,
+                AggregateTarget::Variable(variable.clone()),
                 *distinct,
             )
         }

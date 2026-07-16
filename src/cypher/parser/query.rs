@@ -650,11 +650,62 @@ impl Parser<'_> {
             self.expect_char('(')?;
             let distinct = self.consume_keyword("DISTINCT");
             let collect_variable = self.parse_ident()?;
-            self.expect_char('.')?;
-            let collect_property = self.parse_ident()?;
+            let collect_property = if self.consume_char('.') {
+                Some(self.parse_ident()?)
+            } else {
+                None
+            };
             self.expect_char(')')?;
             self.expect_keyword("AS")?;
             let alias = self.parse_ident()?;
+            let first_collect = ReturnItem {
+                expression: if let Some(property) = collect_property.clone() {
+                    ReturnExpression::CollectProperty {
+                        variable: collect_variable.clone(),
+                        property,
+                        distinct,
+                    }
+                } else {
+                    ReturnExpression::CollectVariable {
+                        variable: collect_variable.clone(),
+                        distinct,
+                    }
+                },
+                alias: Some(alias.clone()),
+            };
+            if self.consume_char(',') {
+                let mut items = vec![
+                    ReturnItem {
+                        expression: ReturnExpression::Variable(group_variable),
+                        alias: None,
+                    },
+                    first_collect,
+                ];
+                let mut next = self.parse_return_items()?;
+                items.append(&mut next);
+                return Ok(ParsedWithClause {
+                    optional_with: None,
+                    collect_with: None,
+                    distinct_with: None,
+                    aggregate_with: Some(WithAggregateProjection { items }),
+                });
+            }
+            let Some(collect_property) = collect_property else {
+                return Ok(ParsedWithClause {
+                    optional_with: None,
+                    collect_with: None,
+                    distinct_with: None,
+                    aggregate_with: Some(WithAggregateProjection {
+                        items: vec![
+                            ReturnItem {
+                                expression: ReturnExpression::Variable(group_variable),
+                                alias: None,
+                            },
+                            first_collect,
+                        ],
+                    }),
+                });
+            };
             return Ok(ParsedWithClause {
                 optional_with: None,
                 collect_with: Some(WithCollect {
