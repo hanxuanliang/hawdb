@@ -8957,8 +8957,12 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "merge node on create set",
-                    CypherFixtureStatement::new(
-                        "MERGE (m:SchemaMigrationLog {id: 'migration-1'}) ON CREATE SET m.applied_at = CURRENT_TIMESTAMP()",
+                    CypherFixtureStatement::with_parameters(
+                        "MERGE (m:SchemaMigrationLog {id: $id}) ON CREATE SET m.applied_at = CURRENT_TIMESTAMP()",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("migration-1".to_string()),
+                        )]),
                     ),
                     ExpectedRows::RowCount(1),
                 )
