@@ -2,7 +2,8 @@ use skein::{
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_to_json,
-    scan_nowledge_query_inventory_to_json, Database, ExternalShadowCommand, Result, SkeinError,
+    scan_nowledge_query_inventory_to_json, Database, ExternalShadowCommand, ExternalShadowReady,
+    Result, SkeinError,
 };
 use std::time::Duration;
 
@@ -106,11 +107,16 @@ fn main() -> Result<()> {
                 )?,
                 (None, None) => ExternalShadowCommand::spawn(shadow_name, program, program_args)?,
             };
-            if shadow_ready {
-                shadow.require_ready()?;
-            }
-            let json =
+            let shadow_ready_report = if shadow_ready {
+                Some(shadow.require_ready()?)
+            } else {
+                None
+            };
+            let mut json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
+            if let Some(ready) = shadow_ready_report {
+                add_shadow_ready_report(&mut json, &ready)?;
+            }
             let rendered = serde_json::to_string_pretty(&json).unwrap();
             println!("{rendered}");
             if require_ready
@@ -169,6 +175,23 @@ fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
     Ok(Duration::from_millis(timeout_ms))
 }
 
+fn add_shadow_ready_report(
+    bundle: &mut serde_json::Value,
+    ready: &ExternalShadowReady,
+) -> Result<()> {
+    let object = bundle.as_object_mut().ok_or_else(|| {
+        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+    })?;
+    object.insert(
+        "shadow_ready".to_string(),
+        serde_json::json!({
+            "protocol_version": ready.protocol_version,
+            "capabilities": &ready.capabilities,
+        }),
+    );
+    Ok(())
+}
+
 fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[String]) -> bool {
     shadow_name == "self"
         || program.ends_with("skein-shadow-self")
@@ -177,7 +200,8 @@ fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[Stri
 
 #[cfg(test)]
 mod tests {
-    use super::{is_self_shadow_command, parse_shadow_timeout_ms};
+    use super::{add_shadow_ready_report, is_self_shadow_command, parse_shadow_timeout_ms};
+    use skein::ExternalShadowReady;
     use std::time::Duration;
 
     #[test]
@@ -237,5 +261,30 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--shadow-timeout-ms must be greater than zero"));
+    }
+
+    #[test]
+    fn adds_shadow_ready_report_to_migration_gate_bundle() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready"
+            }
+        });
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+        };
+
+        add_shadow_ready_report(&mut bundle, &ready).unwrap();
+
+        assert_eq!(bundle["shadow_ready"]["protocol_version"], 1);
+        assert_eq!(
+            bundle["shadow_ready"]["capabilities"],
+            serde_json::json!(["execute", "execute_session", "project_graph"])
+        );
     }
 }

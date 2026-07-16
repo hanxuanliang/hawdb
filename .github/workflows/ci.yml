@@ -57,6 +57,9 @@ jobs:
             self \
             cargo run --quiet --bin skein-shadow-self -- \
             > "$root/gate.json"
+          grep -q '"decision": "ready"' "$root/gate.json"
+          grep -q '"shadow_ready"' "$root/gate.json"
+          grep -q '"project_graph"' "$root/gate.json"
 
       - name: Migration gate blocked smoke
         run: |

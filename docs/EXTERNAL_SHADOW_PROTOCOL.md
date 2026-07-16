@@ -361,7 +361,9 @@ for protocol and CI smoke tests, not cutover evidence.
 `--shadow-ready` sends the optional `ready` preflight before fixture setup. Use
 it for previous-wrapper adapter integration runs when failing fast on protocol
 version or capability drift is more useful than discovering the same problem
-partway through the fixture.
+partway through the fixture. When the preflight succeeds, the printed migration
+gate bundle includes a top-level `shadow_ready` object with the accepted
+`protocol_version` and advertised `capabilities`.
 
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is
