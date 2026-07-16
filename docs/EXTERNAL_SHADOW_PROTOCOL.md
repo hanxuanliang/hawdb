@@ -55,6 +55,10 @@ backward compatibility, but when present it must match the request `request_id`.
 Skein rejects mismatched response identifiers as an `execution` error because
 they indicate a stale, reordered, or misrouted shadow response.
 
+Every response must use exactly one envelope shape. `execute`, `execute_session`,
+and `ready` responses must contain exactly one of `ok` or `error`; ambiguous
+responses are rejected as protocol errors.
+
 ## Values
 
 Cypher parameters and result rows use JSON values:
@@ -313,10 +317,11 @@ with:
 `primary_only_reasons` object and in the blocker text. The migration gate treats
 primary-only projected graph checks as blockers by default.
 
-Projected graph responses must use exactly one response shape: `ok`, `error`, or
-`primary_only: true`. `primary_only` must be a boolean when present. Ambiguous
-responses are rejected as protocol errors instead of being treated as ordinary
-primary-only coverage gaps.
+Projected graph responses extend the envelope with `primary_only: true`, and
+must contain exactly one of `ok`, `error`, or `primary_only: true`.
+`primary_only` must be a boolean when present. Ambiguous responses are rejected
+as protocol errors instead of being treated as ordinary primary-only coverage
+gaps.
 
 ## Errors
 

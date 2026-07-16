@@ -1394,6 +1394,7 @@ fn decode_external_query_response(
     engine_name: &str,
     response: serde_json::Value,
 ) -> Result<QueryOutput> {
+    validate_external_ok_error_shape(engine_name, &response, "query")?;
     if let Some(error) = response.get("error") {
         return Err(error_from_external_response(engine_name, error));
     }
@@ -1433,10 +1434,31 @@ fn validate_external_response_request_id(
     Ok(())
 }
 
+fn validate_external_ok_error_shape(
+    engine_name: &str,
+    response: &serde_json::Value,
+    response_kind: &str,
+) -> Result<()> {
+    let shape_count =
+        usize::from(response.get("ok").is_some()) + usize::from(response.get("error").is_some());
+    if shape_count > 1 {
+        return Err(SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' {response_kind} response must contain only one of 'ok' or 'error'"
+        )));
+    }
+    if shape_count == 0 {
+        return Err(SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' {response_kind} response missing 'ok' or 'error'"
+        )));
+    }
+    Ok(())
+}
+
 fn decode_external_ready_response(
     engine_name: &str,
     response: serde_json::Value,
 ) -> Result<ExternalShadowReady> {
+    validate_external_ok_error_shape(engine_name, &response, "ready")?;
     if let Some(error) = response.get("error") {
         return Err(error_from_external_response(engine_name, error));
     }
@@ -1484,6 +1506,7 @@ fn decode_external_session_response(
     engine_name: &str,
     response: serde_json::Value,
 ) -> Result<Vec<QueryOutput>> {
+    validate_external_ok_error_shape(engine_name, &response, "session")?;
     if let Some(error) = response.get("error") {
         return Err(error_from_external_response(engine_name, error));
     }
@@ -28058,6 +28081,67 @@ done
         assert!(error
             .to_string()
             .contains("response request_id 99 did not match request_id 1"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_external_query_response_shape() {
+        let error = super::decode_external_query_response(
+            "ambiguous-query-shadow",
+            serde_json::json!({
+                "ok": {
+                    "rows": []
+                },
+                "error": {
+                    "class": "execution",
+                    "message": "query failed"
+                }
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous-query-shadow"));
+        assert!(error.to_string().contains("only one of 'ok' or 'error'"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_external_session_response_shape() {
+        let error = super::decode_external_session_response(
+            "ambiguous-session-shadow",
+            serde_json::json!({
+                "ok": {
+                    "outputs": []
+                },
+                "error": {
+                    "class": "execution",
+                    "message": "session failed"
+                }
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous-session-shadow"));
+        assert!(error.to_string().contains("only one of 'ok' or 'error'"));
+    }
+
+    #[test]
+    fn rejects_ambiguous_external_ready_response_shape() {
+        let error = super::decode_external_ready_response(
+            "ambiguous-ready-shadow",
+            serde_json::json!({
+                "ok": {
+                    "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                    "capabilities": ["execute", "execute_session", "project_graph"]
+                },
+                "error": {
+                    "class": "execution",
+                    "message": "not ready"
+                }
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous-ready-shadow"));
+        assert!(error.to_string().contains("only one of 'ok' or 'error'"));
     }
 
     #[test]
