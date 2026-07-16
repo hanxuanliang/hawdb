@@ -39,6 +39,7 @@ pub struct CypherFixtureCheck {
     pub effect_expected_rows: Option<ExpectedRows>,
     pub expected_plan_contains: Vec<String>,
     pub tolerance: CompatibilityTolerance,
+    pub execution_mode: CypherExecutionMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,6 +55,12 @@ pub enum ExpectedErrorClass {
     Semantic,
     Storage,
     Execution,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CypherExecutionMode {
+    Database,
+    Session,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -201,6 +208,15 @@ pub enum CompatibilityCutoverDecision {
 pub trait CompatibilityShadowEngine {
     fn name(&self) -> &str;
     fn execute(&mut self, statement: &CypherFixtureStatement) -> Result<QueryOutput>;
+    fn execute_session(
+        &mut self,
+        statements: &[CypherFixtureStatement],
+    ) -> Result<Vec<QueryOutput>> {
+        statements
+            .iter()
+            .map(|statement| self.execute(statement))
+            .collect()
+    }
 
     fn project_graph(
         &mut self,
@@ -1124,6 +1140,7 @@ impl CypherFixtureCheck {
             effect_expected_rows: None,
             expected_plan_contains: Vec::new(),
             tolerance: CompatibilityTolerance::default(),
+            execution_mode: CypherExecutionMode::Database,
         }
     }
 
@@ -1142,6 +1159,7 @@ impl CypherFixtureCheck {
             effect_expected_rows: None,
             expected_plan_contains: Vec::new(),
             tolerance: CompatibilityTolerance::default(),
+            execution_mode: CypherExecutionMode::Database,
         }
     }
 
@@ -1152,6 +1170,11 @@ impl CypherFixtureCheck {
 
     pub fn with_tolerance(mut self, tolerance: CompatibilityTolerance) -> Self {
         self.tolerance = tolerance;
+        self
+    }
+
+    pub fn with_session_execution(mut self) -> Self {
+        self.execution_mode = CypherExecutionMode::Session;
         self
     }
 
@@ -1210,6 +1233,38 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 CypherFixtureStatement::new("CHECKPOINT"),
                 ExpectedRows::RowCount(0),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "begin transaction control statement",
+                    CypherFixtureStatement::new("BEGIN TRANSACTION"),
+                    ExpectedRows::RowCount(0),
+                )
+                .with_session_execution(),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "commit transaction control statement",
+                    CypherFixtureStatement::new("COMMIT"),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_session_execution()
+                .with_setup_query(CypherFixtureStatement::new("BEGIN TRANSACTION"))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE NODE LABEL TxProbeCommit",
+                )),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rollback transaction control statement",
+                    CypherFixtureStatement::new("ROLLBACK"),
+                    ExpectedRows::RowCount(0),
+                )
+                .with_session_execution()
+                .with_setup_query(CypherFixtureStatement::new("BEGIN TRANSACTION"))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE NODE LABEL TxProbeRollback",
+                )),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "whole node projection",
                 CypherFixtureStatement::with_parameters(
@@ -9928,6 +9983,24 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("CHECKPOINT"),
             CompatibilityQueryCallSite::new(
+                "begin transaction control statement",
+                "transaction_control",
+                "nmem-graph::client::with_write_transaction",
+            )
+            .with_cypher("BEGIN TRANSACTION"),
+            CompatibilityQueryCallSite::new(
+                "commit transaction control statement",
+                "transaction_control",
+                "nmem-graph::client::with_write_transaction",
+            )
+            .with_cypher("COMMIT"),
+            CompatibilityQueryCallSite::new(
+                "rollback transaction control statement",
+                "transaction_control",
+                "nmem-graph::client::with_write_transaction",
+            )
+            .with_cypher("ROLLBACK"),
+            CompatibilityQueryCallSite::new(
                 "whole node projection",
                 "record_projection_read",
                 "nmem-graph::repo::get_by_id",
@@ -12474,6 +12547,9 @@ fn run_shadow_cypher_check(
     shadow: &mut impl CompatibilityShadowEngine,
     primary: &CypherCheckOutcome,
 ) -> Result<()> {
+    if check.execution_mode == CypherExecutionMode::Session {
+        return run_shadow_cypher_session_check(fixture, check, shadow, primary);
+    }
     for setup_query in &check.setup_queries {
         shadow.execute(setup_query).map_err(|error| {
             SkeinError::Execution(format!(
@@ -12601,11 +12677,112 @@ fn run_shadow_cypher_check(
     Ok(())
 }
 
+fn run_shadow_cypher_session_check(
+    fixture: &CompatibilityFixture,
+    check: &CypherFixtureCheck,
+    shadow: &mut impl CompatibilityShadowEngine,
+    primary: &CypherCheckOutcome,
+) -> Result<()> {
+    let mut statements = check.setup_queries.clone();
+    statements.push(check.statement.clone());
+    if let Some(effect_query) = &check.effect_query {
+        statements.push(effect_query.clone());
+    }
+    let outputs = shadow.execute_session(&statements).map_err(|error| {
+        SkeinError::Execution(format!(
+            "fixture '{}' check '{}' shadow engine '{}' session failed: {error}",
+            fixture.name,
+            check.name,
+            shadow.name()
+        ))
+    })?;
+    let statement_index = check.setup_queries.len();
+    let shadow_output = outputs.get(statement_index).ok_or_else(|| {
+        SkeinError::Execution(format!(
+            "fixture '{}' check '{}' shadow engine '{}' session returned no statement output",
+            fixture.name,
+            check.name,
+            shadow.name()
+        ))
+    })?;
+
+    let CypherCheckOutcome::Rows {
+        output: primary_output,
+        effect: primary_effect,
+    } = primary
+    else {
+        return Err(SkeinError::Execution(format!(
+            "fixture '{}' check '{}' has inconsistent session primary outcome",
+            fixture.name, check.name
+        )));
+    };
+
+    check.expected_rows.assert_matches(
+        &fixture.name,
+        &format!("{} shadow {}", check.name, shadow.name()),
+        &check.statement.cypher,
+        shadow_output,
+        check.tolerance,
+    )?;
+    check.expected_rows.assert_shadow_matches_primary(
+        &fixture.name,
+        &check.name,
+        shadow.name(),
+        primary_output,
+        shadow_output,
+        check.tolerance,
+    )?;
+
+    if let Some(effect_query) = &check.effect_query {
+        let Some(primary_effect) = primary_effect else {
+            return Err(SkeinError::Execution(format!(
+                "fixture '{}' check '{}' missing primary effect output",
+                fixture.name, check.name
+            )));
+        };
+        let effect_index = statements.len() - 1;
+        let shadow_effect = outputs.get(effect_index).ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "fixture '{}' check '{}' shadow engine '{}' session returned no effect output",
+                fixture.name,
+                check.name,
+                shadow.name()
+            ))
+        })?;
+        let expected = check.effect_expected_rows.as_ref().ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "fixture '{}' check '{}' effect query is missing expected rows",
+                fixture.name, check.name
+            ))
+        })?;
+        expected.assert_matches(
+            &fixture.name,
+            &format!("{} effect shadow {}", check.name, shadow.name()),
+            &effect_query.cypher,
+            shadow_effect,
+            check.tolerance,
+        )?;
+        expected.assert_shadow_matches_primary(
+            &fixture.name,
+            &format!("{} effect", check.name),
+            shadow.name(),
+            primary_effect,
+            shadow_effect,
+            check.tolerance,
+        )?;
+    }
+
+    Ok(())
+}
+
 fn run_cypher_check(
     db: &mut Database,
     fixture: &CompatibilityFixture,
     check: &CypherFixtureCheck,
 ) -> Result<CypherCheckOutcome> {
+    if check.execution_mode == CypherExecutionMode::Session {
+        return run_cypher_session_check(db, fixture, check);
+    }
     for setup_query in &check.setup_queries {
         db.query_with_params(&setup_query.cypher, &setup_query.parameters)
             .map_err(|error| {
@@ -12661,6 +12838,55 @@ fn run_cypher_check(
 
     let effect = if let Some(effect_query) = &check.effect_query {
         let effect = db.query_with_params(&effect_query.cypher, &effect_query.parameters)?;
+        let expected = check.effect_expected_rows.as_ref().ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "fixture '{}' check '{}' effect query is missing expected rows",
+                fixture.name, check.name
+            ))
+        })?;
+        expected.assert_matches(
+            &fixture.name,
+            &format!("{} effect", check.name),
+            &effect_query.cypher,
+            &effect,
+            check.tolerance,
+        )?;
+        Some(effect)
+    } else {
+        None
+    };
+
+    Ok(CypherCheckOutcome::Rows { output, effect })
+}
+
+fn run_cypher_session_check(
+    db: &mut Database,
+    fixture: &CompatibilityFixture,
+    check: &CypherFixtureCheck,
+) -> Result<CypherCheckOutcome> {
+    let mut session = db.session();
+    for setup_query in &check.setup_queries {
+        session
+            .query_with_params(&setup_query.cypher, &setup_query.parameters)
+            .map_err(|error| {
+                SkeinError::Execution(format!(
+                    "fixture '{}' check '{}' session setup failed for '{}': {error}",
+                    fixture.name, check.name, setup_query.cypher
+                ))
+            })?;
+    }
+
+    let output = session.query_with_params(&check.statement.cypher, &check.statement.parameters)?;
+    check.expected_rows.assert_matches(
+        &fixture.name,
+        &check.name,
+        &check.statement.cypher,
+        &output,
+        check.tolerance,
+    )?;
+
+    let effect = if let Some(effect_query) = &check.effect_query {
+        let effect = session.query_with_params(&effect_query.cypher, &effect_query.parameters)?;
         let expected = check.effect_expected_rows.as_ref().ok_or_else(|| {
             SkeinError::Execution(format!(
                 "fixture '{}' check '{}' effect query is missing expected rows",
@@ -13122,7 +13348,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 278);
+        assert_eq!(report.checks.len(), 281);
     }
 
     #[test]
@@ -13138,13 +13364,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 278);
-        assert_eq!(coverage.covered_checks, 278);
+        assert_eq!(coverage.required_checks, 281);
+        assert_eq!(coverage.covered_checks, 281);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 278);
+        assert_eq!(coverage_json["covered_checks"], 281);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -13174,10 +13400,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 278);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 281);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 278);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 281);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -13402,15 +13628,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 278);
-        assert_eq!(report.shadow_checks.len(), 278);
+        assert_eq!(report.primary_checks.len(), 281);
+        assert_eq!(report.shadow_checks.len(), 281);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            278
+            281
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -13419,7 +13645,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 278);
+        assert_eq!(cutover.matched_checks, 281);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
@@ -13898,6 +14124,19 @@ done
         fn execute(&mut self, statement: &CypherFixtureStatement) -> Result<QueryOutput> {
             self.db
                 .query_with_params(&statement.cypher, &statement.parameters)
+        }
+
+        fn execute_session(
+            &mut self,
+            statements: &[CypherFixtureStatement],
+        ) -> Result<Vec<QueryOutput>> {
+            let mut session = self.db.session();
+            statements
+                .iter()
+                .map(|statement| {
+                    session.query_with_params(&statement.cypher, &statement.parameters)
+                })
+                .collect()
         }
 
         fn project_graph(

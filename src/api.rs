@@ -342,6 +342,12 @@ pub struct DatabaseTransaction<'a> {
 }
 
 #[derive(Debug)]
+pub struct DatabaseSession<'a> {
+    db: &'a mut Database,
+    transaction_mutations: Option<Vec<GraphMutation>>,
+}
+
+#[derive(Debug)]
 pub struct DatabaseReadTransaction {
     catalog: Catalog,
     store: GraphStore,
@@ -494,6 +500,13 @@ impl Database {
             db: self,
             mutations: Vec::new(),
             committed: false,
+        }
+    }
+
+    pub fn session(&mut self) -> DatabaseSession<'_> {
+        DatabaseSession {
+            db: self,
+            transaction_mutations: None,
         }
     }
 
@@ -2168,6 +2181,105 @@ impl DatabaseTransaction<'_> {
     }
 }
 
+impl DatabaseSession<'_> {
+    pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
+        self.query_with_params(cypher_text, &BTreeMap::new())
+    }
+
+    pub fn query_with_params(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<QueryOutput> {
+        let statement = cypher::parse(cypher_text)?;
+        match statement {
+            cypher::Statement::BeginTransaction => {
+                reject_transaction_control_parameters("BEGIN TRANSACTION", parameters)?;
+                if self.transaction_mutations.is_some() {
+                    return Err(SkeinError::Execution(
+                        "transaction is already active".to_string(),
+                    ));
+                }
+                self.db.ensure_writable()?;
+                self.transaction_mutations = Some(Vec::new());
+                Ok(QueryOutput { rows: Vec::new() })
+            }
+            cypher::Statement::Commit => {
+                reject_transaction_control_parameters("COMMIT", parameters)?;
+                let Some(mut mutations) = self.transaction_mutations.take() else {
+                    return Err(SkeinError::Execution(
+                        "COMMIT requires an active transaction".to_string(),
+                    ));
+                };
+                self.db.ensure_writable()?;
+                let summary = self
+                    .db
+                    .store
+                    .commit_mutations(&mut self.db.catalog, std::mem::take(&mut mutations))?;
+                Ok(QueryOutput { rows: summary.rows })
+            }
+            cypher::Statement::Rollback => {
+                reject_transaction_control_parameters("ROLLBACK", parameters)?;
+                if self.transaction_mutations.take().is_none() {
+                    return Err(SkeinError::Execution(
+                        "ROLLBACK requires an active transaction".to_string(),
+                    ));
+                }
+                Ok(QueryOutput { rows: Vec::new() })
+            }
+            cypher::Statement::Checkpoint if self.transaction_mutations.is_some() => {
+                Err(SkeinError::Execution(
+                    "CHECKPOINT is not allowed inside an active transaction".to_string(),
+                ))
+            }
+            statement if self.transaction_mutations.is_some() => {
+                let mutation = mutation_command_for_statement(self.db, &statement, parameters)?
+                    .ok_or_else(|| {
+                        SkeinError::Execution(
+                            "session transaction query must be a mutation".to_string(),
+                        )
+                    })?;
+                self.db.ensure_writable()?;
+                self.transaction_mutations
+                    .as_mut()
+                    .expect("checked active transaction")
+                    .push(mutation);
+                Ok(QueryOutput { rows: Vec::new() })
+            }
+            _ => self.db.query_with_params(cypher_text, parameters),
+        }
+    }
+}
+
+fn reject_transaction_control_parameters(
+    statement: &str,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<()> {
+    if parameters.is_empty() {
+        Ok(())
+    } else {
+        Err(SkeinError::Semantic(format!(
+            "{statement} does not accept parameters"
+        )))
+    }
+}
+
+fn mutation_command_for_statement(
+    db: &Database,
+    statement: &cypher::Statement,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<Option<GraphMutation>> {
+    let logical = planner::plan_with_params(statement, parameters)?;
+    let physical = db
+        .optimizer
+        .optimize_with_catalog(
+            &logical,
+            &optimizer_catalog(&db.catalog, &db.store.statistics()),
+        )
+        .0;
+    executor::mutation_command(&physical)
+}
+
 impl DatabaseReadTransaction {
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
@@ -2416,6 +2528,62 @@ mod tests {
             .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
             .unwrap();
         assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn database_session_runs_transaction_control_statements() {
+        let mut db = Database::new();
+        {
+            let mut session = db.session();
+            assert!(session.query("BEGIN TRANSACTION").unwrap().rows.is_empty());
+            assert!(session
+                .query("CREATE (:Memory {id: 1, title: 'Committed'})")
+                .unwrap()
+                .rows
+                .is_empty());
+            let commit = session.query("COMMIT;").unwrap();
+            assert_eq!(commit.rows.len(), 1);
+        }
+
+        let output = db
+            .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
+            .unwrap();
+        assert_eq!(
+            output.rows[0].get("title"),
+            Some(&Value::String("Committed".to_string()))
+        );
+    }
+
+    #[test]
+    fn database_session_rolls_back_buffered_transaction() {
+        let mut db = Database::new();
+        {
+            let mut session = db.session();
+            session.query("BEGIN TRANSACTION").unwrap();
+            session
+                .query("CREATE (:Memory {id: 1, title: 'Rolled back'})")
+                .unwrap();
+            assert!(session.query("ROLLBACK").unwrap().rows.is_empty());
+        }
+
+        let output = db
+            .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
+            .unwrap();
+        assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn database_session_rejects_reads_inside_write_transaction() {
+        let mut db = Database::new();
+        let mut session = db.session();
+        session.query("BEGIN TRANSACTION").unwrap();
+        let error = session
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("session transaction query must be a mutation"));
     }
 
     #[test]

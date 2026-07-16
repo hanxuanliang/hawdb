@@ -3,7 +3,9 @@ use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Statement {
+    BeginTransaction,
     Checkpoint,
+    Commit,
     CreateNodeLabel(String),
     CreateRelationshipType(String),
     CreateNodeTable(String),
@@ -35,6 +37,7 @@ pub enum Statement {
     MatchMergeRelationship(MatchMergeRelationship),
     MatchExpandMergeRelationship(MatchExpandMergeRelationship),
     MatchExpandMatchMergeRelationship(MatchExpandMatchMergeRelationship),
+    Rollback,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

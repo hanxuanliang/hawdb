@@ -21,21 +21,27 @@ pub fn parse(input: &str) -> Result<Statement> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StatementDispatch {
+    Begin,
     Create,
     Alter,
     Merge,
     Match,
     Call,
     Checkpoint,
+    Commit,
+    Rollback,
 }
 
 const TOP_LEVEL_STATEMENTS: &[(&str, StatementDispatch)] = &[
+    ("BEGIN", StatementDispatch::Begin),
     ("CREATE", StatementDispatch::Create),
     ("ALTER", StatementDispatch::Alter),
     ("MERGE", StatementDispatch::Merge),
     ("MATCH", StatementDispatch::Match),
     ("CALL", StatementDispatch::Call),
     ("CHECKPOINT", StatementDispatch::Checkpoint),
+    ("COMMIT", StatementDispatch::Commit),
+    ("ROLLBACK", StatementDispatch::Rollback),
 ];
 
 pub(super) struct Parser<'a> {
@@ -55,19 +61,25 @@ impl<'a> Parser<'a> {
 
     pub(super) fn parse_statement(&mut self) -> Result<Statement> {
         match self.parse_statement_dispatch()? {
+            StatementDispatch::Begin => {
+                self.expect_keyword("TRANSACTION")?;
+                Ok(Statement::BeginTransaction)
+            }
             StatementDispatch::Create => self.parse_create_statement(),
             StatementDispatch::Alter => self.parse_alter_statement(),
             StatementDispatch::Merge => self.parse_merge_statement(),
             StatementDispatch::Match => self.parse_match_statement(),
             StatementDispatch::Call => self.parse_call_statement(),
             StatementDispatch::Checkpoint => Ok(Statement::Checkpoint),
+            StatementDispatch::Commit => Ok(Statement::Commit),
+            StatementDispatch::Rollback => Ok(Statement::Rollback),
         }
     }
 
     fn parse_statement_dispatch(&mut self) -> Result<StatementDispatch> {
         self.parse_keyword_choice(
             TOP_LEVEL_STATEMENTS,
-            "expected CREATE, ALTER, MERGE, MATCH, CALL, or CHECKPOINT",
+            "expected BEGIN, CREATE, ALTER, MERGE, MATCH, CALL, CHECKPOINT, COMMIT, or ROLLBACK",
         )
     }
 

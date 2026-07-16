@@ -650,6 +650,11 @@ pub fn plan_with_params(
     parameters: &BTreeMap<String, Value>,
 ) -> Result<LogicalPlan> {
     match statement {
+        Statement::BeginTransaction | Statement::Commit | Statement::Rollback => {
+            Err(SkeinError::Semantic(
+                "transaction control is executed by a database session".to_string(),
+            ))
+        }
         Statement::Checkpoint => Err(SkeinError::Semantic(
             "CHECKPOINT is executed by the database session".to_string(),
         )),

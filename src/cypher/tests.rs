@@ -35,6 +35,16 @@ fn parses_checkpoint_control_statement() {
 }
 
 #[test]
+fn parses_transaction_control_statements() {
+    assert_eq!(
+        parse("BEGIN TRANSACTION").unwrap(),
+        Statement::BeginTransaction
+    );
+    assert_eq!(parse("COMMIT;").unwrap(), Statement::Commit);
+    assert_eq!(parse("ROLLBACK;").unwrap(), Statement::Rollback);
+}
+
+#[test]
 fn parses_unlabeled_node_match() {
     let statement = parse("MATCH (n) WHERE n.id IN $ids RETURN n.id").unwrap();
     let Statement::MatchReturn(query) = statement else {
@@ -78,7 +88,7 @@ fn parses_variable_return_item() {
 #[test]
 fn parser_keeps_keyword_boundaries() {
     let error = parse("CREATEINDEX ON :Memory(id)").unwrap_err();
-    assert!(error.to_string().contains("expected CREATE"));
+    assert!(error.to_string().contains("expected BEGIN"));
 }
 
 #[test]
