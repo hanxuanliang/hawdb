@@ -6,6 +6,9 @@ use skein::{
     CanonicalSnapshotIdentityAudit, Database, DatabaseConfig, ExternalShadowCommand,
     ExternalShadowReady, GraphLightningBootstrapManifest, Result, SkeinError, Value,
 };
+use std::fs::{self, File};
+use std::io::Write;
+use std::path::Path;
 use std::time::Duration;
 
 fn main() -> Result<()> {
@@ -254,6 +257,43 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "graph-lightning-stage-bootstrap" {
+            let mut require_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let database_path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_stage_bootstrap_usage()))?;
+            let staging_dir = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_stage_bootstrap_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(graph_lightning_stage_bootstrap_usage()));
+            }
+            let mut db = Database::open(database_path)?;
+            let export = db.prepare_graph_lightning_bootstrap_export()?;
+            let catalog = stage_graph_lightning_bootstrap_export(&export, staging_dir)?;
+            println!("{}", serde_json::to_string_pretty(&catalog).unwrap());
+            if require_ready
+                && catalog
+                    .get("export_gate")
+                    .and_then(|gate| gate.get("decision"))
+                    .and_then(serde_json::Value::as_str)
+                    != Some("ready")
+            {
+                return Err(SkeinError::Execution(
+                    "graph lightning staged bootstrap is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
         if command == "graph-lightning-graph-stream" {
             let mut require_ready = false;
             while let Some(flag) = args.peek() {
@@ -352,6 +392,11 @@ fn graph_lightning_bootstrap_manifest_usage() -> String {
 
 fn graph_lightning_bootstrap_bundle_usage() -> String {
     "graph-lightning-bootstrap-bundle requires [--require-ready] <database-path>".to_string()
+}
+
+fn graph_lightning_stage_bootstrap_usage() -> String {
+    "graph-lightning-stage-bootstrap requires [--require-ready] <database-path> <staging-dir>"
+        .to_string()
 }
 
 fn graph_lightning_graph_stream_usage() -> String {
@@ -511,6 +556,116 @@ fn graph_lightning_bootstrap_bundle_json(
     })
 }
 
+fn stage_graph_lightning_bootstrap_export(
+    export: &skein::GraphLightningBootstrapExport,
+    staging_dir: impl AsRef<Path>,
+) -> Result<serde_json::Value> {
+    let staging_dir = staging_dir.as_ref();
+    fs::create_dir_all(staging_dir)?;
+    let bundle = graph_lightning_bootstrap_bundle_json(export);
+    let manifest = graph_lightning_bootstrap_manifest_json(&export.manifest);
+    let graph_stream_validation = export
+        .graph_stream
+        .validate_against_manifest(&export.manifest);
+    let stage_state = if bundle
+        .get("export_gate")
+        .and_then(|gate| gate.get("decision"))
+        .and_then(serde_json::Value::as_str)
+        == Some("ready")
+    {
+        "READY"
+    } else {
+        "QUARANTINED"
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest).unwrap();
+    let graph_stream_bytes = export.graph_stream.encoded.as_bytes();
+    let bundle_bytes = serde_json::to_vec_pretty(&bundle).unwrap();
+    let manifest_artifact = write_staging_artifact(
+        staging_dir,
+        "graph_lightning_bootstrap_manifest.json",
+        &manifest_bytes,
+    )?;
+    let graph_stream_artifact = write_staging_artifact(
+        staging_dir,
+        "graph_lightning_graph_stream.txt",
+        graph_stream_bytes,
+    )?;
+    let bundle_artifact = write_staging_artifact(
+        staging_dir,
+        "graph_lightning_bootstrap_bundle.json",
+        &bundle_bytes,
+    )?;
+    let catalog = serde_json::json!({
+        "protocol": "graph-lightning-staging-catalog",
+        "protocol_version": 1,
+        "stage_state": stage_state,
+        "graph_commit_epoch": export.manifest.graph_commit_epoch,
+        "logical_checksum": export.manifest.logical_checksum,
+        "schema_checksum": export.manifest.schema_checksum,
+        "export_gate": bundle["export_gate"].clone(),
+        "artifacts": [
+            manifest_artifact,
+            graph_stream_artifact,
+            bundle_artifact,
+        ],
+        "graph_stream_validation": graph_lightning_graph_stream_validation_json(&graph_stream_validation),
+    });
+    let catalog_bytes = serde_json::to_vec_pretty(&catalog).unwrap();
+    write_staging_artifact(
+        staging_dir,
+        "graph_lightning_staging_catalog.json",
+        &catalog_bytes,
+    )?;
+    sync_directory(staging_dir)?;
+    Ok(catalog)
+}
+
+fn write_staging_artifact(
+    staging_dir: &Path,
+    file_name: &str,
+    bytes: &[u8],
+) -> Result<serde_json::Value> {
+    let path = staging_dir.join(file_name);
+    let tmp_path = staging_dir.join(format!("{file_name}.tmp"));
+    {
+        let mut file = File::create(&tmp_path)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    fs::rename(&tmp_path, &path)?;
+    sync_directory(staging_dir)?;
+    Ok(serde_json::json!({
+        "kind": graph_lightning_artifact_kind(file_name),
+        "path": file_name,
+        "byte_len": bytes.len(),
+        "checksum": checksum_bytes(bytes),
+    }))
+}
+
+fn graph_lightning_artifact_kind(file_name: &str) -> &'static str {
+    match file_name {
+        "graph_lightning_bootstrap_manifest.json" => "manifest",
+        "graph_lightning_graph_stream.txt" => "graph_stream",
+        "graph_lightning_bootstrap_bundle.json" => "bundle",
+        "graph_lightning_staging_catalog.json" => "staging_catalog",
+        _ => "unknown",
+    }
+}
+
+fn checksum_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
 fn graph_lightning_graph_stream_validation_json(
     validation: &skein::GraphLightningGraphStreamValidation,
 ) -> serde_json::Value {
@@ -588,16 +743,17 @@ mod tests {
         graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
         graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
-        graph_lightning_verify_export_usage, is_self_shadow_command, parse_shadow_timeout_ms,
-        should_run_shadow_ready, stable_identity_audit_json, validate_canonical_snapshot_usage,
-        value_json,
+        graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
+        is_self_shadow_command, parse_shadow_timeout_ms, should_run_shadow_ready,
+        stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
+        validate_canonical_snapshot_usage, value_json,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
         CanonicalSnapshotIdentityAudit, Database, ExternalShadowReady,
         GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, Value,
     };
-    use std::time::Duration;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
     fn detects_direct_self_shadow_binary() {
@@ -884,6 +1040,44 @@ mod tests {
     }
 
     #[test]
+    fn stages_graph_lightning_bootstrap_export_artifacts() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_stage_bootstrap");
+
+        let catalog = stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+
+        assert_eq!(catalog["protocol"], "graph-lightning-staging-catalog");
+        assert_eq!(catalog["stage_state"], "READY");
+        assert_eq!(catalog["export_gate"]["decision"], "ready");
+        assert_eq!(catalog["artifacts"].as_array().unwrap().len(), 3);
+        assert!(staging_dir
+            .join("graph_lightning_bootstrap_manifest.json")
+            .exists());
+        assert!(staging_dir
+            .join("graph_lightning_graph_stream.txt")
+            .exists());
+        assert!(staging_dir
+            .join("graph_lightning_bootstrap_bundle.json")
+            .exists());
+        assert!(staging_dir
+            .join("graph_lightning_staging_catalog.json")
+            .exists());
+        let persisted_catalog =
+            std::fs::read_to_string(staging_dir.join("graph_lightning_staging_catalog.json"))
+                .unwrap();
+        let persisted_catalog =
+            serde_json::from_str::<serde_json::Value>(&persisted_catalog).unwrap();
+        assert_eq!(persisted_catalog, catalog);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
     fn renders_stable_identity_audit_values() {
         let audit = CanonicalSnapshotIdentityAudit {
             requires_stable_id_mapping: true,
@@ -946,6 +1140,13 @@ mod tests {
     }
 
     #[test]
+    fn validates_graph_lightning_stage_bootstrap_usage_text() {
+        assert!(graph_lightning_stage_bootstrap_usage().contains("<database-path>"));
+        assert!(graph_lightning_stage_bootstrap_usage().contains("<staging-dir>"));
+        assert!(graph_lightning_stage_bootstrap_usage().contains("--require-ready"));
+    }
+
+    #[test]
     fn validates_graph_lightning_graph_stream_usage_text() {
         assert!(graph_lightning_graph_stream_usage().contains("<database-path>"));
         assert!(graph_lightning_graph_stream_usage().contains("--require-ready"));
@@ -955,5 +1156,13 @@ mod tests {
     fn validates_graph_lightning_verify_export_usage_text() {
         assert!(graph_lightning_verify_export_usage().contains("<database-path>"));
         assert!(graph_lightning_verify_export_usage().contains("--require-valid"));
+    }
+
+    fn unique_main_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein-{name}-{nanos}"))
     }
 }

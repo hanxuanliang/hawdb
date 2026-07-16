@@ -138,6 +138,11 @@ prints one machine-readable bootstrap evidence bundle containing the manifest,
 the GraphStream validation report, and a ready/blocked export gate decision. Use
 this as the CI or upload preflight entry point when the caller needs one JSON
 artifact instead of separate manifest and verifier commands.
+`skein graph-lightning-stage-bootstrap [--require-ready] <database-path>
+<staging-dir>` writes a local staging catalog plus manifest, GraphStream, and
+bootstrap bundle artifacts with atomic file publication and directory sync. The
+catalog is the v1 local checkpoint boundary for offline bootstrap upload/resume;
+it is outside the graph WAL and does not alter the published graph snapshot.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
