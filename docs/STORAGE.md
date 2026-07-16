@@ -81,9 +81,13 @@ canonical node and relationship records with a deterministic logical checksum.
 The export also carries a stable-identity audit: records with an `id` property
 expose that value as their stable ID, while records without one or with duplicate
 stable IDs are reported as requiring an external persisted ID mapping before
-physical import or delta replay. This is the local export boundary for future
-GraphStream encoding; it does not copy local pages, WAL records, adjacency
-pointers, or rebuildable projection artifacts.
+physical import or delta replay. `CanonicalGraphSnapshotExport::validate`
+recomputes the logical checksum and stable-identity audit, checks node and
+relationship ID uniqueness, and reports missing relationship endpoints before an
+export is handed to an importer, shadow gate, or storage-equivalence oracle.
+This is the local export boundary for future GraphStream encoding; it does not
+copy local pages, WAL records, adjacency pointers, or rebuildable projection
+artifacts.
 
 `Database::storage_version` exposes the currently supported storage version.
 `GraphStore::open` also validates the stored version in both the manifest and

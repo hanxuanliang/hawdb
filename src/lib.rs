@@ -27,7 +27,8 @@ pub use analytics::{
     CommunityAssignment, LouvainOptions, PageRankOptions, PageRankScore, ProjectedGraph,
 };
 pub use api::{
-    CanonicalGraphSnapshotExport, CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode,
+    CanonicalGraphSnapshotExport, CanonicalGraphSnapshotValidation,
+    CanonicalSnapshotEndpointViolation, CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode,
     CanonicalSnapshotRelationship, Database, DatabaseConfig, DatabaseReadTransaction,
     DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
     KnowledgeGraphContextPath, KnowledgeGraphPathDirection, KnowledgeRetrievalOutput,

@@ -77,6 +77,82 @@ pub struct CanonicalGraphSnapshotExport {
     pub relationships: Vec<CanonicalSnapshotRelationship>,
 }
 
+impl CanonicalGraphSnapshotExport {
+    pub fn validate(&self) -> CanonicalGraphSnapshotValidation {
+        let expected_logical_checksum =
+            canonical_graph_snapshot_checksum(&self.nodes, &self.relationships);
+        let expected_stable_identity =
+            canonical_snapshot_identity_audit(&self.nodes, &self.relationships);
+        let duplicate_node_ids = duplicate_u64s(self.nodes.iter().map(|node| node.node_id));
+        let duplicate_relationship_ids = duplicate_u64s(
+            self.relationships
+                .iter()
+                .map(|relationship| relationship.relationship_id),
+        );
+        let node_ids = self
+            .nodes
+            .iter()
+            .map(|node| node.node_id)
+            .collect::<BTreeSet<_>>();
+        let missing_sources = self
+            .relationships
+            .iter()
+            .filter(|relationship| !node_ids.contains(&relationship.source_node_id))
+            .map(|relationship| CanonicalSnapshotEndpointViolation {
+                relationship_id: relationship.relationship_id,
+                missing_node_id: relationship.source_node_id,
+            })
+            .collect::<Vec<_>>();
+        let missing_targets = self
+            .relationships
+            .iter()
+            .filter(|relationship| !node_ids.contains(&relationship.target_node_id))
+            .map(|relationship| CanonicalSnapshotEndpointViolation {
+                relationship_id: relationship.relationship_id,
+                missing_node_id: relationship.target_node_id,
+            })
+            .collect::<Vec<_>>();
+        let checksum_matches = self.logical_checksum == expected_logical_checksum;
+        let stable_identity_matches = self.stable_identity == expected_stable_identity;
+        let is_valid = checksum_matches
+            && stable_identity_matches
+            && duplicate_node_ids.is_empty()
+            && duplicate_relationship_ids.is_empty()
+            && missing_sources.is_empty()
+            && missing_targets.is_empty();
+        CanonicalGraphSnapshotValidation {
+            is_valid,
+            checksum_matches,
+            expected_logical_checksum,
+            stable_identity_matches,
+            expected_stable_identity,
+            duplicate_node_ids,
+            duplicate_relationship_ids,
+            missing_sources,
+            missing_targets,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalGraphSnapshotValidation {
+    pub is_valid: bool,
+    pub checksum_matches: bool,
+    pub expected_logical_checksum: u64,
+    pub stable_identity_matches: bool,
+    pub expected_stable_identity: CanonicalSnapshotIdentityAudit,
+    pub duplicate_node_ids: Vec<u64>,
+    pub duplicate_relationship_ids: Vec<u64>,
+    pub missing_sources: Vec<CanonicalSnapshotEndpointViolation>,
+    pub missing_targets: Vec<CanonicalSnapshotEndpointViolation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalSnapshotEndpointViolation {
+    pub relationship_id: u64,
+    pub missing_node_id: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalSnapshotIdentityAudit {
     pub requires_stable_id_mapping: bool,
@@ -1979,6 +2055,17 @@ fn duplicate_stable_ids<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<Valu
     let mut counts = BTreeMap::<Value, usize>::new();
     for value in values {
         *counts.entry(value.clone()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(value, count)| (count > 1).then_some(value))
+        .collect()
+}
+
+fn duplicate_u64s(values: impl Iterator<Item = u64>) -> Vec<u64> {
+    let mut counts = BTreeMap::<u64, usize>::new();
+    for value in values {
+        *counts.entry(value).or_default() += 1;
     }
     counts
         .into_iter()
@@ -6241,6 +6328,67 @@ mod tests {
             vec![Value::String("dup".to_string())]
         );
         assert!(snapshot.stable_identity.nodes_without_stable_id.is_empty());
+    }
+
+    #[test]
+    fn canonical_snapshot_export_validation_accepts_consistent_snapshot() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+
+        let snapshot = db.export_canonical_graph_snapshot();
+        let validation = snapshot.validate();
+
+        assert!(validation.is_valid);
+        assert!(validation.checksum_matches);
+        assert!(validation.stable_identity_matches);
+        assert_eq!(
+            validation.expected_logical_checksum,
+            snapshot.logical_checksum
+        );
+        assert!(validation.duplicate_node_ids.is_empty());
+        assert!(validation.duplicate_relationship_ids.is_empty());
+        assert!(validation.missing_sources.is_empty());
+        assert!(validation.missing_targets.is_empty());
+        assert!(
+            !validation
+                .expected_stable_identity
+                .requires_stable_id_mapping
+        );
+    }
+
+    #[test]
+    fn canonical_snapshot_export_validation_reports_corrupt_snapshot() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+
+        let mut snapshot = db.export_canonical_graph_snapshot();
+        snapshot.nodes[1].node_id = snapshot.nodes[0].node_id;
+        snapshot.relationships[0].target_node_id = 99;
+        snapshot.relationships[0].stable_id = None;
+
+        let validation = snapshot.validate();
+
+        assert!(!validation.is_valid);
+        assert!(!validation.checksum_matches);
+        assert!(!validation.stable_identity_matches);
+        assert_eq!(validation.duplicate_node_ids, vec![0]);
+        assert!(validation.duplicate_relationship_ids.is_empty());
+        assert!(validation.missing_sources.is_empty());
+        assert_eq!(validation.missing_targets.len(), 1);
+        assert_eq!(validation.missing_targets[0].relationship_id, 0);
+        assert_eq!(validation.missing_targets[0].missing_node_id, 99);
+        assert_eq!(
+            validation
+                .expected_stable_identity
+                .relationships_without_stable_id,
+            vec![0]
+        );
     }
 
     #[test]
