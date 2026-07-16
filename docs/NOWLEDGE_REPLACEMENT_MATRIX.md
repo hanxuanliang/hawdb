@@ -49,6 +49,18 @@ entity lookups, and summary writes. Cleanup scheduler coverage includes bounded
 seed scans, EVOLVES pair reads, cleanup fingerprint row fetches, and floor-zero
 engagement `CASE` ordering.
 
+## Current Compatibility Evidence
+
+The current live scanner coverage gate over the local Nowledge graph-source tree
+is complete for the scanned Cypher surface: `nowledge-scanned-inventory`
+requires 694 checks, `nowledge-memory-core` covers all 694, and
+`missing_items` is empty. The refreshed local audit artifact is
+`/private/tmp/skein-cypher-coverage-doc-refresh.json`.
+
+This does not by itself complete migration cutover. The remaining evidence gap
+is external shadow comparison against the previous local graph wrapper when a
+specific migration gate needs oracle-backed parity evidence.
+
 ## LanceDB Replacement Surface
 
 | Capability | Nowledge need | Skein status |

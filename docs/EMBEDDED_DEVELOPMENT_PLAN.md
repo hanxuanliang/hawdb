@@ -190,15 +190,16 @@ Cypher text for fixture work driven by production Nowledge queries. The scanner
 filters unresolved Rust format templates such as `{space_clause}` while
 preserving valid Cypher map literals such as `{id: $id}` and string values such
 as `'{}'`; dynamic query builders should be covered by their concrete
-production shapes. Current local scans find 349
-`nmem-graph/src` call-site entries, 696 `nmem-server/src` entries, and 6
-additional graph-facing harness/scheduler/search entries, including
-AugmentationJob lifecycle, projected graph, relationship-creation queries, and
-the migration verification shape
-`MATCH (c:Memory)-[:CRYSTALLIZED_FROM]->(s:Memory) WHERE NOT EXISTS { MATCH (c)-[:SYNTHESIZED_FROM]->(s) } RETURN count(*)`.
-The remaining work is to attach the previous wrapper through the external
-shadow adapter for migration-gate evidence and keep extending the bounded
-fixture from scanner-reported production gaps.
+production shapes. The current live scanner coverage gate over the local
+Nowledge graph-source tree is complete for the scanned surface:
+`nowledge-scanned-inventory` requires 694 Cypher checks, the
+`nowledge-memory-core` fixture covers all 694, and `missing_items` is empty.
+The refreshed audit artifact used for this status is
+`/private/tmp/skein-cypher-coverage-doc-refresh.json`. The remaining Phase 1
+work is no longer fixture-gap closure for the current scan; it is to attach the
+previous wrapper through the external shadow adapter when migration-gate
+evidence is needed, and to rerun the scanner whenever Nowledge adds new graph
+call sites.
 
 ### Phase 2: Snapshot Transactions and MVCC
 
