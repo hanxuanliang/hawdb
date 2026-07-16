@@ -3484,6 +3484,53 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory evolves parameterized relationship create",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Memory), (b:Memory) WHERE a.id = $older_id AND b.id = $newer_id CREATE (a)-[:EVOLVES { content_relation: $relation, is_progression: $is_progression, confidence: $confidence, detected_by: $detected_by, reviewed: $reviewed, reason: $reason, created_at: timestamp($now) }]->(b)",
+                        BTreeMap::from([
+                            (
+                                "older_id".to_string(),
+                                Value::String("evolves-create-older".to_string()),
+                            ),
+                            (
+                                "newer_id".to_string(),
+                                Value::String("evolves-create-newer".to_string()),
+                            ),
+                            (
+                                "relation".to_string(),
+                                Value::String("replaces".to_string()),
+                            ),
+                            ("is_progression".to_string(), Value::Bool(true)),
+                            ("confidence".to_string(), Value::Float(0.91)),
+                            (
+                                "detected_by".to_string(),
+                                Value::String("rule".to_string()),
+                            ),
+                            ("reviewed".to_string(), Value::Bool(true)),
+                            (
+                                "reason".to_string(),
+                                Value::String("fixture".to_string()),
+                            ),
+                            ("now".to_string(), Value::Int(1_700_000_019)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'evolves-create-older'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'evolves-create-newer'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['evolves-create-older', 'evolves-create-newer'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory latest demotion update",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (older:Memory {id: $older_id}) WHERE older.space_id = $space_id SET older.is_latest = false",
@@ -14243,6 +14290,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (a:Memory), (b:Memory) WHERE a.id = $older_id AND b.id = $newer_id CREATE (a)-[:EVOLVES {content_relation: $content_relation, created_at: timestamp($now)}]->(b)",
             ),
             CompatibilityQueryCallSite::new(
+                "memory evolves parameterized relationship create",
+                "memory_evolution_write",
+                "nmem-graph::repo::add_evolves_edge::create_replacement_relation",
+            )
+            .with_cypher(
+                "MATCH (a:Memory), (b:Memory) WHERE a.id = $older_id AND b.id = $newer_id CREATE (a)-[:EVOLVES { content_relation: $relation, is_progression: $is_progression, confidence: $confidence, detected_by: $detected_by, reviewed: $reviewed, reason: $reason, created_at: timestamp($now) }]->(b)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory latest demotion update",
                 "memory_evolution_write",
                 "nmem-graph::repo::add_evolves_edge::demote_replaced_memory",
@@ -15632,7 +15687,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 346);
+        assert_eq!(report.checks.len(), 347);
     }
 
     #[test]
@@ -15648,13 +15703,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 346);
-        assert_eq!(coverage.covered_checks, 346);
+        assert_eq!(coverage.required_checks, 347);
+        assert_eq!(coverage.covered_checks, 347);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 346);
+        assert_eq!(coverage_json["covered_checks"], 347);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15684,10 +15739,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 346);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 347);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 346);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 347);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -15912,15 +15967,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 346);
-        assert_eq!(report.shadow_checks.len(), 346);
+        assert_eq!(report.primary_checks.len(), 347);
+        assert_eq!(report.shadow_checks.len(), 347);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            346
+            347
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -15929,7 +15984,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 346);
+        assert_eq!(cutover.matched_checks, 347);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
