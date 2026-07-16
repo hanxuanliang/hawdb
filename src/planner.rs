@@ -1587,6 +1587,7 @@ pub fn plan_with_params(
                 &query.variable,
                 &query.properties,
                 query.expand.as_ref(),
+                query.post_match_expand.as_ref(),
                 parameters,
             )?;
             let predicate = combine_pattern_and_optional_cypher_predicate_parts(
@@ -3395,6 +3396,7 @@ fn plan_match_pattern_predicate(
     source_variable: &str,
     source_properties: &BTreeMap<String, ValueExpression>,
     expand: Option<&CypherRelationshipExpand>,
+    post_expand: Option<&crate::cypher::PostMatchRelationshipExpand>,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<Predicate>> {
     let mut predicates =
@@ -3403,6 +3405,18 @@ fn plan_match_pattern_predicate(
         predicates.extend(plan_node_pattern_predicates(
             &expand.target_variable,
             &expand.target_properties,
+            parameters,
+        )?);
+    }
+    if let Some(post_expand) = post_expand {
+        predicates.extend(plan_node_pattern_predicates(
+            &post_expand.source_variable,
+            &post_expand.source_properties,
+            parameters,
+        )?);
+        predicates.extend(plan_node_pattern_predicates(
+            &post_expand.expand.target_variable,
+            &post_expand.expand.target_properties,
             parameters,
         )?);
     }
@@ -3515,7 +3529,8 @@ fn combine_pattern_and_optional_cypher_predicate(
     scope: &BTreeSet<String>,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<Predicate>> {
-    let pattern_predicate = plan_match_pattern_predicate(variable, properties, None, parameters)?;
+    let pattern_predicate =
+        plan_match_pattern_predicate(variable, properties, None, None, parameters)?;
     combine_pattern_and_optional_cypher_predicate_parts(
         pattern_predicate,
         predicate,
@@ -3545,7 +3560,8 @@ fn combine_pattern_and_optional_predicate(
     predicate: Option<Predicate>,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<Predicate>> {
-    let pattern_predicate = plan_match_pattern_predicate(variable, properties, None, parameters)?;
+    let pattern_predicate =
+        plan_match_pattern_predicate(variable, properties, None, None, parameters)?;
     Ok(combine_optional_predicates(pattern_predicate, predicate))
 }
 

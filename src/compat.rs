@@ -4834,6 +4834,93 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest fs memory unit-type count read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.unit_type IS NOT NULL AND m.unit_type <> '' RETURN m.unit_type, COUNT(DISTINCT m) AS memory_count",
+                    ),
+                    ExpectedRows::RowCount(3),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-unit-count-1', unit_type: 'restfs-unit'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-fs-unit-count-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory created-at scan read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.created_at IS NOT NULL RETURN m.created_at, m.metadata, m.is_latest LIMIT 5000",
+                    ),
+                    ExpectedRows::RowCount(4),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-created-at-1', created_at: 1700000080, metadata: '{\"state\":\"active\"}', is_latest: true})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-fs-created-at-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory event-start scan read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.event_start IS NOT NULL RETURN m.event_start, m.metadata, m.is_latest LIMIT 5000",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-event-start-1', event_start: 1700000081, metadata: '{\"state\":\"active\"}', is_latest: true})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-fs-event-start-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory id page read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id > $after RETURN m.id, m.title, m.crystal_title, m.is_crystal, m.updated_at, m.metadata, m.is_latest ORDER BY m.id ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "after".to_string(),
+                                Value::String("rest-fs-page-0".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("rest-fs-page-1".to_string())),
+                        ("m.title", Value::String("Rest FS Page".to_string())),
+                        ("m.crystal_title", Value::String("Rest Crystal".to_string())),
+                        ("m.is_crystal", Value::Bool(true)),
+                        ("m.updated_at", Value::Int(1700000082)),
+                        ("m.metadata", Value::String("{\"state\":\"active\"}".to_string())),
+                        ("m.is_latest", Value::Bool(true)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-page-1', title: 'Rest FS Page', crystal_title: 'Rest Crystal', is_crystal: true, updated_at: 1700000082, metadata: '{\"state\":\"active\"}', is_latest: true})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-fs-page-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory compact detail fallback read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory {id: $memory_id}) RETURN m.id, COALESCE(m.title, ''), COALESCE(m.content, ''), COALESCE(m.unit_type, '')",
@@ -4860,6 +4947,224 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (m:Memory {id: 'compact-detail-memory-1'}) DETACH DELETE m",
                     ),
                     ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory detail token lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $lookup OR m.id STARTS WITH $lookup OR m.id CONTAINS $lookup OR m.id = $token OR m.id STARTS WITH $token OR m.id CONTAINS $token RETURN m.id, m.title, m.content, m.importance, m.confidence, COALESCE(m.is_crystal, false), m.crystal_title, m.created_at, m.updated_at, m.event_start, m.event_end, m.temporal_context, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.unit_type, m.source, m.metadata, m.lifecycle_state LIMIT 1",
+                        BTreeMap::from([
+                            (
+                                "lookup".to_string(),
+                                Value::String("rest-fs-detail-token-1".to_string()),
+                            ),
+                            (
+                                "token".to_string(),
+                                Value::String("detail-token".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "m.id",
+                            Value::String("rest-fs-detail-token-1".to_string()),
+                        ),
+                        ("m.title", Value::String("Detail Token".to_string())),
+                        ("m.content", Value::String("token content".to_string())),
+                        ("m.importance", Value::Float(0.72)),
+                        ("m.confidence", Value::Float(0.82)),
+                        ("coalesce", Value::Bool(false)),
+                        ("m.crystal_title", Value::Null),
+                        ("m.created_at", Value::Int(1700000083)),
+                        ("m.updated_at", Value::Int(1700000084)),
+                        ("m.event_start", Value::Int(1700000085)),
+                        ("m.event_end", Value::Int(1700000086)),
+                        ("m.temporal_context", Value::String("event".to_string())),
+                        ("space_id", Value::String("default".to_string())),
+                        ("m.unit_type", Value::String("fact".to_string())),
+                        ("m.source", Value::String("kfs".to_string())),
+                        ("m.metadata", Value::String("{\"state\":\"active\"}".to_string())),
+                        ("m.lifecycle_state", Value::String("active".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-detail-token-1', title: 'Detail Token', content: 'token content', importance: 0.72, confidence: 0.82, is_crystal: false, created_at: 1700000083, updated_at: 1700000084, event_start: 1700000085, event_end: 1700000086, temporal_context: 'event', space_id: '', unit_type: 'fact', source: 'kfs', metadata: '{\"state\":\"active\"}', lifecycle_state: 'active'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-fs-detail-token-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory detail lookup read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $lookup OR m.id STARTS WITH $lookup OR m.id CONTAINS $lookup RETURN m.id, m.title, m.content, m.importance, m.confidence, COALESCE(m.is_crystal, false), m.crystal_title, m.created_at, m.updated_at, m.event_start, m.event_end, m.temporal_context, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.unit_type, m.source, m.metadata, m.lifecycle_state LIMIT 1",
+                        BTreeMap::from([(
+                            "lookup".to_string(),
+                            Value::String("rest-fs-detail-plain-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "m.id",
+                            Value::String("rest-fs-detail-plain-1".to_string()),
+                        ),
+                        ("m.title", Value::String("Detail Plain".to_string())),
+                        ("m.content", Value::String("plain content".to_string())),
+                        ("m.importance", Value::Float(0.64)),
+                        ("m.confidence", Value::Float(0.74)),
+                        ("coalesce", Value::Bool(true)),
+                        ("m.crystal_title", Value::String("Plain Crystal".to_string())),
+                        ("m.created_at", Value::Int(1700000087)),
+                        ("m.updated_at", Value::Int(1700000088)),
+                        ("m.event_start", Value::Null),
+                        ("m.event_end", Value::Null),
+                        ("m.temporal_context", Value::String("timeless".to_string())),
+                        ("space_id", Value::String("research".to_string())),
+                        ("m.unit_type", Value::String("context".to_string())),
+                        ("m.source", Value::String("kfs".to_string())),
+                        ("m.metadata", Value::String("{\"state\":\"active\"}".to_string())),
+                        ("m.lifecycle_state", Value::String("active".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-detail-plain-1', title: 'Detail Plain', content: 'plain content', importance: 0.64, confidence: 0.74, is_crystal: true, crystal_title: 'Plain Crystal', created_at: 1700000087, updated_at: 1700000088, temporal_context: 'timeless', space_id: 'research', unit_type: 'context', source: 'kfs', metadata: '{\"state\":\"active\"}', lifecycle_state: 'active'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'rest-fs-detail-plain-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory label names read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id})-[:HAS_LABEL]->(l:Label) RETURN l.name ORDER BY l.name",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-fs-label-memory-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([(
+                            "l.name",
+                            Value::String("alpha".to_string()),
+                        )]),
+                        compatibility_row([(
+                            "l.name",
+                            Value::String("beta".to_string()),
+                        )]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-label-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'rest-fs-label-alpha', name: 'alpha'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'rest-fs-label-beta', name: 'beta'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-fs-label-memory-1'}), (l:Label {id: 'rest-fs-label-beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-fs-label-memory-1'}), (l:Label {id: 'rest-fs-label-alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-fs-label-memory-1', 'rest-fs-label-alpha', 'rest-fs-label-beta'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory mention count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id})-[r:MENTIONS]->(:Entity) RETURN COUNT(r)",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-fs-mention-memory-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "count(r)",
+                        Value::Int(2),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-mention-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-fs-mention-entity-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-fs-mention-entity-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-fs-mention-memory-1'}), (e:Entity {id: 'rest-fs-mention-entity-1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-fs-mention-memory-1'}), (e:Entity {id: 'rest-fs-mention-entity-2'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-fs-mention-memory-1', 'rest-fs-mention-entity-1', 'rest-fs-mention-entity-2'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest fs memory back-reference count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (other:Memory)-[r:MENTIONS]->(:Entity)<-[:MENTIONS]-(m:Memory {id: $id}) WHERE other.id <> $id RETURN COUNT(DISTINCT other)",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("rest-fs-backref-memory-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "count(DISTINCT other)",
+                        Value::Int(2),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (n) WHERE n.id IN ['rest-fs-backref-memory-1', 'rest-fs-backref-other-1', 'rest-fs-backref-other-2', 'rest-fs-backref-entity-1'] DETACH DELETE n",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-backref-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-backref-other-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-fs-backref-other-2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-fs-backref-entity-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-fs-backref-memory-1'}), (e:Entity {id: 'rest-fs-backref-entity-1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-fs-backref-other-1'}), (e:Entity {id: 'rest-fs-backref-entity-1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'rest-fs-backref-other-2'}), (e:Entity {id: 'rest-fs-backref-entity-1'}) CREATE (m)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-fs-backref-memory-1', 'rest-fs-backref-other-1', 'rest-fs-backref-other-2', 'rest-fs-backref-entity-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(4),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -15819,6 +16124,54 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END",
             ),
             CompatibilityQueryCallSite::new(
+                "rest fs memory unit-type count read",
+                "memory_read",
+                "nmem-server::rest_fs::ls_memory_unit_types",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.unit_type IS NOT NULL AND m.unit_type <> '' RETURN m.unit_type, COUNT(DISTINCT m) AS memory_count",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory created-at scan read",
+                "memory_read",
+                "nmem-server::rest_fs::ls_memory_dates; nmem-server::rest_fs::ls_time_prefix_days.record",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.created_at IS NOT NULL RETURN m.created_at, m.metadata, m.is_latest LIMIT 5000",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory event-start scan read",
+                "memory_read",
+                "nmem-server::rest_fs::ls_time_prefix_days.event",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.event_start IS NOT NULL RETURN m.event_start, m.metadata, m.is_latest LIMIT 5000",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory id page read",
+                "memory_read",
+                "nmem-server::rest_fs::fetch_visible_memory_rows_page",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id > $after RETURN m.id, m.title, m.crystal_title, m.is_crystal, m.updated_at, m.metadata, m.is_latest ORDER BY m.id ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory detail token lookup read",
+                "memory_read",
+                "nmem-server::rest_fs::fetch_memory_for_kfs.token",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id = $lookup OR m.id STARTS WITH $lookup OR m.id CONTAINS $lookup OR m.id = $token OR m.id STARTS WITH $token OR m.id CONTAINS $token RETURN m.id, m.title, m.content, m.importance, m.confidence, COALESCE(m.is_crystal, false), m.crystal_title, m.created_at, m.updated_at, m.event_start, m.event_end, m.temporal_context, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.unit_type, m.source, m.metadata, m.lifecycle_state LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory detail lookup read",
+                "memory_read",
+                "nmem-server::rest_fs::fetch_memory_for_kfs.lookup",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id = $lookup OR m.id STARTS WITH $lookup OR m.id CONTAINS $lookup RETURN m.id, m.title, m.content, m.importance, m.confidence, COALESCE(m.is_crystal, false), m.crystal_title, m.created_at, m.updated_at, m.event_start, m.event_end, m.temporal_context, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.unit_type, m.source, m.metadata, m.lifecycle_state LIMIT 1",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory compact detail fallback read",
                 "memory_read",
                 "nmem-server::memory_repo::compact_detail_fallback",
@@ -15905,6 +16258,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE m.id IN $ids AND l.name IN $names RETURN m.id, COUNT(DISTINCT l.name)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory label names read",
+                "label_read",
+                "nmem-server::rest_fs::labels_for_memory",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $id})-[:HAS_LABEL]->(l:Label) RETURN l.name ORDER BY l.name",
             ),
             CompatibilityQueryCallSite::new(
                 "source label bulk name read",
@@ -16345,6 +16706,22 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (m:Memory {id: $memory_id})-[:MENTIONS]->(e:Entity) RETURN e.name LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory mention count read",
+                "entity_read",
+                "nmem-server::rest_fs::count_mentions",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $id})-[r:MENTIONS]->(:Entity) RETURN COUNT(r)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest fs memory back-reference count read",
+                "entity_read",
+                "nmem-server::rest_fs::count_back_references",
+            )
+            .with_cypher(
+                "MATCH (other:Memory)-[r:MENTIONS]->(:Entity)<-[:MENTIONS]-(m:Memory {id: $id}) WHERE other.id <> $id RETURN COUNT(DISTINCT other)",
             ),
             CompatibilityQueryCallSite::new(
                 "rest memory related entity metadata read",
@@ -19908,7 +20285,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 450);
+        assert_eq!(report.checks.len(), 459);
     }
 
     #[test]
@@ -19924,13 +20301,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 450);
-        assert_eq!(coverage.covered_checks, 450);
+        assert_eq!(coverage.required_checks, 459);
+        assert_eq!(coverage.covered_checks, 459);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 450);
+        assert_eq!(coverage_json["covered_checks"], 459);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -19960,10 +20337,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 450);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 459);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 450);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 459);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -20188,15 +20565,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 450);
-        assert_eq!(report.shadow_checks.len(), 450);
+        assert_eq!(report.primary_checks.len(), 459);
+        assert_eq!(report.shadow_checks.len(), 459);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            450
+            459
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -20205,7 +20582,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 450);
+        assert_eq!(cutover.matched_checks, 459);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

@@ -7344,6 +7344,57 @@ mod tests {
     }
 
     #[test]
+    fn converging_relationship_pattern_counts_distinct_source_nodes() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'target'})").unwrap();
+        db.query("CREATE (:Memory {id: 'other-1'})").unwrap();
+        db.query("CREATE (:Memory {id: 'other-2'})").unwrap();
+        db.query("CREATE (:Entity {id: 'shared'})").unwrap();
+        db.query(
+            "MATCH (m:Memory {id: 'target'}), (e:Entity {id: 'shared'}) CREATE (m)-[:MENTIONS]->(e)",
+        )
+        .unwrap();
+        db.query(
+            "MATCH (m:Memory {id: 'other-1'}), (e:Entity {id: 'shared'}) CREATE (m)-[:MENTIONS]->(e)",
+        )
+        .unwrap();
+        db.query(
+            "MATCH (m:Memory {id: 'other-2'}), (e:Entity {id: 'shared'}) CREATE (m)-[:MENTIONS]->(e)",
+        )
+        .unwrap();
+
+        let output = db
+            .query(
+                "MATCH (other:Memory)-[:MENTIONS]->(:Entity)<-[:MENTIONS]-(m:Memory {id: 'target'})
+                 WHERE other.id <> 'target'
+                 RETURN other.id AS id
+                 ORDER BY id ASC",
+            )
+            .unwrap();
+
+        assert_eq!(
+            output.rows,
+            vec![
+                BTreeMap::from([("id".to_string(), Value::String("other-1".to_string()))]),
+                BTreeMap::from([("id".to_string(), Value::String("other-2".to_string()))]),
+            ]
+        );
+
+        let output = db
+            .query(
+                "MATCH (other:Memory)-[:MENTIONS]->(:Entity)<-[:MENTIONS]-(m:Memory {id: 'target'})
+                 WHERE other.id <> 'target'
+                 RETURN COUNT(DISTINCT other)",
+            )
+            .unwrap();
+
+        assert_eq!(
+            output.rows[0].get("count(DISTINCT other)"),
+            Some(&Value::Int(2))
+        );
+    }
+
+    #[test]
     fn creates_and_filters_escaped_string_literals() {
         let mut db = Database::new();
         db.query(r#"CREATE (:Memory {id: 1, title: 'It\'s graph\\ready'})"#)

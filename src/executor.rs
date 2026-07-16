@@ -1801,6 +1801,7 @@ fn execute_bindings(
                     || !rel_properties.is_empty()
                     || *direction != RelationshipDirection::Outgoing
                 {
+                    let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
                     for (relationship, target) in one_hop_relationships(
                         store,
                         source.id,
@@ -1809,6 +1810,9 @@ fn execute_bindings(
                         rel_properties,
                         *direction,
                     ) {
+                        if bound_target_id.is_some_and(|node_id| node_id != target.id) {
+                            continue;
+                        }
                         let mut nodes = binding.nodes.clone();
                         nodes.insert(target_variable.clone(), target.clone());
                         let mut relationships = binding.relationships.clone();
@@ -1822,6 +1826,7 @@ fn execute_bindings(
                         });
                     }
                 } else {
+                    let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
                     for target in bounded_expand_targets(
                         store,
                         source.id,
@@ -1830,6 +1835,9 @@ fn execute_bindings(
                         *min_hops,
                         *max_hops,
                     ) {
+                        if bound_target_id.is_some_and(|node_id| node_id != target.id) {
+                            continue;
+                        }
                         let mut nodes = binding.nodes.clone();
                         nodes.insert(target_variable.clone(), target.clone());
                         output.push(Binding {
