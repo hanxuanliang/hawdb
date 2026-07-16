@@ -34,8 +34,8 @@ pub use api::{
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_migration_gate,
     assess_compatibility_migration_gate_bundle, assess_query_inventory_coverage,
-    assess_query_inventory_gate, build_compatibility_query_inventory,
-    build_compatibility_query_inventory_from_json,
+    assess_query_inventory_cypher_coverage, assess_query_inventory_gate,
+    build_compatibility_query_inventory, build_compatibility_query_inventory_from_json,
     build_compatibility_query_inventory_from_json_str, compatibility_cutover_report_to_json,
     compatibility_inventory_coverage_report_to_json, compatibility_inventory_gate_report_to_json,
     compatibility_migration_gate_bundle_to_json, compatibility_migration_gate_report_to_json,

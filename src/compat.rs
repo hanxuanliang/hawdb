@@ -12082,6 +12082,44 @@ pub fn assess_query_inventory_coverage(
     }
 }
 
+pub fn assess_query_inventory_cypher_coverage(
+    fixture: &CompatibilityFixture,
+    inventory: &CompatibilityQueryInventory,
+) -> CompatibilityInventoryCoverageReport {
+    let fixture_keys = fixture
+        .checks
+        .iter()
+        .map(compatibility_check_coverage_key)
+        .collect::<BTreeSet<_>>();
+    let required_keys = inventory
+        .required_checks
+        .iter()
+        .map(inventory_item_coverage_key)
+        .collect::<BTreeSet<_>>();
+    let missing_checks = inventory
+        .required_checks
+        .iter()
+        .filter(|item| !fixture_keys.contains(&inventory_item_coverage_key(item)))
+        .map(|item| item.name.clone())
+        .collect::<Vec<_>>();
+    let extra_fixture_checks = fixture
+        .checks
+        .iter()
+        .filter(|check| !required_keys.contains(&compatibility_check_coverage_key(check)))
+        .map(compatibility_check_name)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+
+    CompatibilityInventoryCoverageReport {
+        inventory: inventory.name.clone(),
+        fixture: fixture.name.clone(),
+        required_checks: inventory.required_checks.len(),
+        covered_checks: inventory.required_checks.len() - missing_checks.len(),
+        missing_checks,
+        extra_fixture_checks,
+    }
+}
+
 pub fn assess_query_inventory_gate(
     coverage: &CompatibilityInventoryCoverageReport,
     policy: CompatibilityInventoryCoveragePolicy,
@@ -12185,6 +12223,24 @@ fn compatibility_check_name(check: &CompatibilityCheck) -> &str {
         CompatibilityCheck::Cypher(check) => &check.name,
         CompatibilityCheck::ProjectedGraph(check) => &check.name,
     }
+}
+
+fn compatibility_check_coverage_key(check: &CompatibilityCheck) -> String {
+    match check {
+        CompatibilityCheck::Cypher(check) => cypher_coverage_key(&check.statement.cypher),
+        CompatibilityCheck::ProjectedGraph(check) => check.name.clone(),
+    }
+}
+
+fn inventory_item_coverage_key(item: &CompatibilityQueryInventoryItem) -> String {
+    item.cypher
+        .as_deref()
+        .map(cypher_coverage_key)
+        .unwrap_or_else(|| item.name.clone())
+}
+
+fn cypher_coverage_key(cypher: &str) -> String {
+    cypher.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn run_primary_setup(db: &mut Database, fixture: &CompatibilityFixture) -> Result<()> {
@@ -12888,8 +12944,9 @@ mod tests {
     use super::{
         assess_compatibility_cutover, assess_compatibility_migration_gate,
         assess_compatibility_migration_gate_bundle, assess_query_inventory_coverage,
-        assess_query_inventory_gate, build_compatibility_query_inventory,
-        nowledge_memory_core_fixture, nowledge_memory_core_inventory, run_compatibility_fixture,
+        assess_query_inventory_cypher_coverage, assess_query_inventory_gate,
+        build_compatibility_query_inventory, nowledge_memory_core_fixture,
+        nowledge_memory_core_inventory, run_compatibility_fixture,
         run_compatibility_fixture_with_shadow, CompatibilityCheck, CompatibilityCheckReport,
         CompatibilityCutoverDecision, CompatibilityCutoverPolicy, CompatibilityCutoverReport,
         CompatibilityFixture, CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite,
@@ -13148,6 +13205,37 @@ mod tests {
         assert_eq!(gate_json["decision"], "blocked");
         assert_eq!(gate_json["missing_checks"][0], "required check");
         assert_eq!(gate_json["extra_fixture_checks"][0], "extra check");
+    }
+
+    #[test]
+    fn query_inventory_can_audit_scanner_names_by_cypher() {
+        let cypher = "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title";
+        let fixture = CompatibilityFixture {
+            name: "partial".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "semantic memory lookup",
+                CypherFixtureStatement::new(cypher),
+                ExpectedRows::RowCount(0),
+            ))],
+        };
+        let inventory = CompatibilityQueryInventory {
+            name: "scanned".to_string(),
+            required_checks: vec![CompatibilityQueryInventoryItem::new(
+                "crates/nmem-graph/src/store.rs:42:abcd",
+                "read",
+            )
+            .with_source("crates/nmem-graph/src/store.rs:42")
+            .with_cypher("MATCH (m:Memory) WHERE m.id = $id\nRETURN m.title AS title")],
+        };
+
+        let name_coverage = assess_query_inventory_coverage(&fixture, &inventory);
+        let cypher_coverage = assess_query_inventory_cypher_coverage(&fixture, &inventory);
+
+        assert_eq!(name_coverage.covered_checks, 0);
+        assert_eq!(cypher_coverage.covered_checks, 1);
+        assert!(cypher_coverage.missing_checks.is_empty());
+        assert!(cypher_coverage.extra_fixture_checks.is_empty());
     }
 
     #[test]
