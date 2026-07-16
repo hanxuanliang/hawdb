@@ -12589,6 +12589,35 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ("hops", Value::Int(2)),
                 ])]),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "decay refresh score and confidence update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id}) SET m.decay_score_cached = $decay, m.confidence = $conf",
+                        BTreeMap::from([
+                            (
+                                "id".to_string(),
+                                Value::String("decay-refresh-memory-1".to_string()),
+                            ),
+                            ("decay".to_string(), Value::Float(0.42)),
+                            ("conf".to_string(), Value::Float(0.77)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'decay-refresh-memory-1', kind: 'fixture', status: 'fixture', is_crystal: false, lifecycle_state: 'archived', decay_score_cached: 1.0, confidence: 0.1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'decay-refresh-memory-1'}) RETURN m.decay_score_cached AS decay, m.confidence AS confidence",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("decay", Value::Float(0.42)),
+                        ("confidence", Value::Float(0.77)),
+                    ])]),
+                ),
+            ),
         ],
     }
 }
@@ -14964,6 +14993,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory) WHERE m.is_crystal = false RETURN count(m), avg(m.decay_score_cached)",
             ),
             CompatibilityQueryCallSite::new(
+                "decay refresh score and confidence update",
+                "decay_refresh_write",
+                "nmem-search::decay_refresh::Q_DECAY_CONF",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $id}) SET m.decay_score_cached = $decay, m.confidence = $conf",
+            ),
+            CompatibilityQueryCallSite::new(
                 "health stale count read",
                 "agent_context_read",
                 "nmem-graph::agent_context::Q_HEALTH_STALE",
@@ -16537,7 +16574,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 363);
+        assert_eq!(report.checks.len(), 364);
     }
 
     #[test]
@@ -16553,13 +16590,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 363);
-        assert_eq!(coverage.covered_checks, 363);
+        assert_eq!(coverage.required_checks, 364);
+        assert_eq!(coverage.covered_checks, 364);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 363);
+        assert_eq!(coverage_json["covered_checks"], 364);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16589,10 +16626,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 363);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 364);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 363);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 364);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16817,15 +16854,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 363);
-        assert_eq!(report.shadow_checks.len(), 363);
+        assert_eq!(report.primary_checks.len(), 364);
+        assert_eq!(report.shadow_checks.len(), 364);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            363
+            364
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16834,7 +16871,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 363);
+        assert_eq!(cutover.matched_checks, 364);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
