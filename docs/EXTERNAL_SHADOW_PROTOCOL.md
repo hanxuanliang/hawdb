@@ -14,6 +14,10 @@ The parent process starts the shadow engine with piped stdin and stdout. Each
 request is one UTF-8 JSON object followed by a newline. Each response must be
 one UTF-8 JSON object followed by a newline.
 
+The child process must not write logs or progress messages to stdout. Diagnostic
+output belongs on stderr; malformed stdout is treated as a protocol error and
+Skein includes a bounded stdout line tail in the error for local debugging.
+
 `request_id` is a monotonically increasing per-process identifier assigned by
 Skein. It matches the external shadow trace `sequence` value for the same
 request.

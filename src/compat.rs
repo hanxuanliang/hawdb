@@ -14,6 +14,7 @@ use std::thread::{self, JoinHandle};
 const DEFAULT_FLOAT_ABS_TOLERANCE: f64 = 1.0e-9;
 pub const EXTERNAL_SHADOW_PROTOCOL_VERSION: u64 = 1;
 const EXTERNAL_SHADOW_STDERR_TAIL_BYTES: usize = 8192;
+const EXTERNAL_SHADOW_STDOUT_TAIL_BYTES: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompatibilityFixture {
@@ -392,10 +393,12 @@ impl ExternalShadowCommand {
             self.trace_error(trace_sequence, &message);
             return Err(self.request_error(message));
         }
-        let response = serde_json::from_str(response.trim_end()).map_err(|error| {
+        let raw_response = response.trim_end();
+        let response = serde_json::from_str(raw_response).map_err(|error| {
+            let raw_tail = external_shadow_stdout_tail(raw_response);
             let message = format!(
-                "shadow engine '{}' returned invalid JSON: {error}",
-                self.name
+                "shadow engine '{}' returned invalid JSON: {error}; stdout line tail: {raw_tail}",
+                self.name,
             );
             self.trace_error(trace_sequence, &message);
             self.request_error(message)
@@ -1121,6 +1124,17 @@ fn validate_external_response_request_id(
         )));
     }
     Ok(())
+}
+
+fn external_shadow_stdout_tail(response: &str) -> &str {
+    if response.len() <= EXTERNAL_SHADOW_STDOUT_TAIL_BYTES {
+        return response;
+    }
+    let mut start = response.len() - EXTERNAL_SHADOW_STDOUT_TAIL_BYTES;
+    while !response.is_char_boundary(start) {
+        start += 1;
+    }
+    &response[start..]
 }
 
 fn decode_external_session_response(
@@ -27533,6 +27547,51 @@ done
         assert!(trace.contains("\"event\":\"request\""));
         assert!(trace.contains("\"event\":\"error\""));
         assert!(trace.contains("wrapper boot failed"));
+        let _ = fs::remove_file(trace_path);
+    }
+
+    #[test]
+    fn includes_external_shadow_stdout_tail_on_invalid_json() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-stdout-tail",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  echo "wrapper log accidentally written to stdout"
+done
+"#,
+        );
+        let trace_path = unique_test_path("external-shadow-stdout-error-trace.jsonl");
+        let mut shadow = ExternalShadowCommand::spawn_with_trace_path(
+            "external-shadow-stdout-tail",
+            "sh",
+            [script],
+            &trace_path,
+        )
+        .unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-stdout-tail-fixture".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::RowCount(0),
+            ))],
+        };
+
+        let error =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("shadow engine 'external-shadow-stdout-tail' returned invalid JSON"));
+        assert!(error
+            .to_string()
+            .contains("stdout line tail: wrapper log accidentally written to stdout"));
+        drop(shadow);
+        let trace = fs::read_to_string(&trace_path).unwrap();
+        assert!(trace.contains("\"event\":\"error\""));
+        assert!(trace.contains("stdout line tail"));
         let _ = fs::remove_file(trace_path);
     }
 
