@@ -4967,6 +4967,7 @@ struct DurableStore {
     safe_reclaim_commit_epoch: u64,
     next_lsn: u64,
     durability: DurabilityPolicy,
+    read_only: bool,
 }
 
 struct CheckpointImage<'a> {
@@ -4988,7 +4989,7 @@ enum DurableOpenMode {
 impl DurableStore {
     fn open(path: &Path, durability: DurabilityPolicy) -> Result<Self> {
         fs::create_dir_all(path)?;
-        Self::open_existing(path, durability)
+        Self::open_existing(path, durability, false)
     }
 
     fn open_existing_only(path: &Path, durability: DurabilityPolicy) -> Result<Self> {
@@ -5004,10 +5005,10 @@ impl DurableStore {
                 path.display()
             )));
         }
-        Self::open_existing(path, durability)
+        Self::open_existing(path, durability, true)
     }
 
-    fn open_existing(path: &Path, durability: DurabilityPolicy) -> Result<Self> {
+    fn open_existing(path: &Path, durability: DurabilityPolicy, read_only: bool) -> Result<Self> {
         let manifest_path = path.join(MANIFEST_FILE);
         let manifest = DurableManifest::load(&manifest_path)?;
         Ok(Self {
@@ -5021,6 +5022,7 @@ impl DurableStore {
             safe_reclaim_commit_epoch: manifest.safe_reclaim_commit_epoch,
             next_lsn: manifest.next_lsn,
             durability,
+            read_only,
         })
     }
 
@@ -5370,8 +5372,10 @@ impl DurableStore {
         match artifacts {
             Ok(artifacts) => Ok(artifacts),
             Err(_) => {
-                fs::remove_file(&self.projected_graphs_path)?;
-                sync_parent_dir(&self.projected_graphs_path)?;
+                if !self.read_only {
+                    fs::remove_file(&self.projected_graphs_path)?;
+                    sync_parent_dir(&self.projected_graphs_path)?;
+                }
                 Ok(BTreeMap::new())
             }
         }

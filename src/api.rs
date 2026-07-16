@@ -5552,6 +5552,46 @@ mod tests {
     }
 
     #[test]
+    fn read_only_open_ignores_corrupt_projected_graph_artifact_without_cleanup() {
+        let path = unique_test_dir("projected_graph_artifact_corrupt_read_only");
+        {
+            let mut db = Database::open(&path).unwrap();
+            db.query(
+                "MERGE (:Memory {id: 1, title: 'Root'})-[:LINKS]->(:Entity {id: 2, name: 'Mid'})",
+            )
+            .unwrap();
+            db.query("CALL project_graph('EntityGraph', ['Memory', 'Entity'], ['LINKS'])")
+                .unwrap();
+            db.checkpoint().unwrap();
+        }
+
+        let artifact_path = path.join("projected_graphs.skein");
+        let artifact = read_test_durable_text(&artifact_path).unwrap();
+        std::fs::write(
+            &artifact_path,
+            artifact.replace("csr_targets", "bad_targets"),
+        )
+        .unwrap();
+
+        {
+            let mut db = Database::open_with_config(
+                &path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )
+            .unwrap();
+            let output = db
+                .query("CALL page_rank('EntityGraph') RETURN node, pagerank_score")
+                .unwrap();
+            assert_eq!(output.rows.len(), 2);
+        }
+        assert!(artifact_path.exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn exposes_property_index_descriptors_and_statistics() {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 1, kind: 'note'})").unwrap();
