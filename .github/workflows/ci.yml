@@ -55,3 +55,26 @@ jobs:
             self \
             cargo run --quiet --bin skein-shadow-self -- \
             > "$root/gate.json"
+
+      - name: Migration gate blocked smoke
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          mkdir -p "$root/crates/nmem-graph/src"
+          cat > "$root/crates/nmem-graph/src/repo.rs" <<'RS'
+          pub fn query() -> &'static str {
+              "MATCH (m:Memory) WHERE m.id = $id RETURN m.uncovered_property"
+          }
+          RS
+          if cargo run --quiet --bin skein -- \
+            nowledge-cypher-migration-gate \
+            --require-ready \
+            "$root" \
+            self \
+            cargo run --quiet --bin skein-shadow-self -- \
+            > "$root/gate.json" 2> "$root/gate.err"; then
+            echo "expected blocked migration gate to fail"
+            exit 1
+          fi
+          grep -q '"decision": "blocked"' "$root/gate.json"
+          grep -q "nowledge migration gate is blocked" "$root/gate.err"
