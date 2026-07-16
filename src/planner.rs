@@ -1364,9 +1364,10 @@ pub fn plan_with_params(
                     && !returns_are_count_only(&query.returns)
                     && optional_direct_count_alias(query, optional)?.is_none()
                     && optional_direct_collect_alias(query, optional)?.is_none()
+                    && !optional_direct_row_projection(query, optional)
                 {
                     return Err(SkeinError::Semantic(
-                        "OPTIONAL MATCH is currently supported only for COUNT returns, source projections plus one COUNT, or source projections plus one COLLECT".to_string(),
+                        "OPTIONAL MATCH is currently supported only for COUNT returns, source projections plus one COUNT, source projections plus one COLLECT, or non-aggregate row projections".to_string(),
                     ));
                 }
                 if !optional.expand.properties.is_empty()
@@ -1605,6 +1606,7 @@ pub fn plan_with_params(
                 }
             }
             if let Some(optional) = &query.optional_expand {
+                let optional_row_projection = optional_direct_row_projection(query, optional);
                 input = LogicalPlan::Expand {
                     source_variable: optional.source_variable.clone(),
                     source_label: optional.source_label.clone(),
@@ -1616,7 +1618,8 @@ pub fn plan_with_params(
                     target_label: optional.expand.target_label.clone(),
                     min_hops: 1,
                     max_hops: 1,
-                    optional: optional_direct_collect_alias(query, optional)?.is_some(),
+                    optional: optional_row_projection
+                        || optional_direct_collect_alias(query, optional)?.is_some(),
                     input: Box::new(input),
                 };
                 if let Some(predicate) = combine_predicates(plan_node_pattern_predicates(
@@ -2400,6 +2403,123 @@ fn optional_direct_collect_alias(
         }
     }
     Ok(if has_projection { collect_alias } else { None })
+}
+
+fn optional_direct_row_projection(
+    query: &MatchReturn,
+    optional: &crate::cypher::OptionalRelationshipExpand,
+) -> bool {
+    query.returns.iter().all(|item| {
+        optional_direct_row_projection_expression(
+            &item.expression,
+            &optional.source_variable,
+            &optional.expand.target_variable,
+            optional.expand.variable.as_deref(),
+        )
+    })
+}
+
+fn optional_direct_row_projection_expression(
+    expression: &ReturnExpression,
+    source_variable: &str,
+    target_variable: &str,
+    rel_variable: Option<&str>,
+) -> bool {
+    match expression {
+        ReturnExpression::Variable(variable)
+        | ReturnExpression::Property { variable, .. }
+        | ReturnExpression::Id(variable)
+        | ReturnExpression::RelationshipType(variable)
+        | ReturnExpression::DatePart { variable, .. }
+        | ReturnExpression::DefaultIfNullOrEq { variable, .. }
+        | ReturnExpression::DefaultIfNull { variable, .. }
+        | ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
+            optional_direct_row_projection_variable(
+                variable,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }
+        ReturnExpression::Value(_) => true,
+        ReturnExpression::Coalesce(expressions) => expressions.iter().all(|expression| {
+            optional_direct_row_projection_value_expression(
+                expression,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }),
+        ReturnExpression::Left { expression, .. } | ReturnExpression::Lower(expression) => {
+            optional_direct_row_projection_value_expression(
+                expression,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }
+        ReturnExpression::CountAll
+        | ReturnExpression::CountVariable { .. }
+        | ReturnExpression::CountProperty { .. }
+        | ReturnExpression::CollectProperty { .. }
+        | ReturnExpression::MinProperty { .. }
+        | ReturnExpression::MaxProperty { .. }
+        | ReturnExpression::AvgProperty { .. } => false,
+    }
+}
+
+fn optional_direct_row_projection_value_expression(
+    expression: &ReturnValueExpression,
+    source_variable: &str,
+    target_variable: &str,
+    rel_variable: Option<&str>,
+) -> bool {
+    match expression {
+        ReturnValueExpression::Variable(variable)
+        | ReturnValueExpression::Property { variable, .. }
+        | ReturnValueExpression::Id(variable)
+        | ReturnValueExpression::RelationshipType(variable)
+        | ReturnValueExpression::DatePart { variable, .. }
+        | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
+        | ReturnValueExpression::DefaultIfNull { variable, .. }
+        | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
+            optional_direct_row_projection_variable(
+                variable,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }
+        ReturnValueExpression::Value(_) => true,
+        ReturnValueExpression::Coalesce(expressions) => expressions.iter().all(|expression| {
+            optional_direct_row_projection_value_expression(
+                expression,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }),
+        ReturnValueExpression::Left { expression, .. }
+        | ReturnValueExpression::Lower(expression) => {
+            optional_direct_row_projection_value_expression(
+                expression,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }
+    }
+}
+
+fn optional_direct_row_projection_variable(
+    variable: &str,
+    source_variable: &str,
+    target_variable: &str,
+    rel_variable: Option<&str>,
+) -> bool {
+    variable == source_variable || variable == target_variable || rel_variable == Some(variable)
 }
 
 fn plan_optional_direct_count_return(
