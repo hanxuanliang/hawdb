@@ -2254,8 +2254,12 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "memory access counter touch",
-                    CypherFixtureStatement::new(
-                        "MATCH (m:Memory) WHERE m.id = 2 SET m.access_count = COALESCE(m.access_count, 0) + 1, m.last_accessed_at = 42",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $id SET m.access_count = COALESCE(m.access_count, 0) + 1, m.last_accessed_at = $now",
+                        BTreeMap::from([
+                            ("id".to_string(), Value::Int(2)),
+                            ("now".to_string(), Value::Int(42)),
+                        ]),
                     ),
                     ExpectedRows::RowCount(1),
                 )
