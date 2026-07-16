@@ -32,12 +32,20 @@ Every request includes:
 {
   "protocol_version": 1,
   "request_id": 1,
-  "op": "execute"
+  "op": "execute",
+  "context": {
+    "fixture": "nowledge-memory-core",
+    "check": "read title",
+    "phase": "statement"
+  }
 }
 ```
 
 Unknown top-level fields must be ignored by compatible shadow engines. A shadow
 engine should reject unsupported protocol versions with an `execution` error.
+`context` is diagnostic metadata for wrapper logs and traces. `phase` is one of
+`fixture_setup`, `check_setup`, `statement`, `session`, `effect`, or
+`project_graph`; `check` is `null` for fixture-wide setup requests.
 
 Responses may include a top-level `request_id` echo. The echo is optional for
 backward compatibility, but when present it must match the request `request_id`.
@@ -75,6 +83,11 @@ Request:
   "op": "execute",
   "role": "read",
   "access": "read",
+  "context": {
+    "fixture": "nowledge-memory-core",
+    "check": "read title",
+    "phase": "statement"
+  },
   "cypher": "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
   "parameters": {
     "id": 1
@@ -114,6 +127,11 @@ Request:
   "request_id": 1,
   "op": "execute_session",
   "access": "mutation",
+  "context": {
+    "fixture": "nowledge-memory-core",
+    "check": "update memory title",
+    "phase": "session"
+  },
   "statements": [
     {
       "cypher": "CREATE (:Memory {id: 1, title: 'Old'})",
@@ -182,6 +200,11 @@ Request:
   "protocol_version": 1,
   "request_id": 1,
   "op": "project_graph",
+  "context": {
+    "fixture": "nowledge-memory-core",
+    "check": "mentions projection",
+    "phase": "project_graph"
+  },
   "rel_type": "MENTIONS",
   "expected_incoming_nodes": [1],
   "include_communities": false,

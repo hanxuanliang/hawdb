@@ -224,6 +224,14 @@ pub enum CompatibilityCutoverDecision {
 pub trait CompatibilityShadowEngine {
     fn name(&self) -> &str;
     fn execute(&mut self, statement: &CypherFixtureStatement) -> Result<QueryOutput>;
+    fn execute_with_context(
+        &mut self,
+        statement: &CypherFixtureStatement,
+        _context: ShadowRequestContext,
+    ) -> Result<QueryOutput> {
+        self.execute(statement)
+    }
+
     fn execute_session(
         &mut self,
         statements: &[CypherFixtureStatement],
@@ -233,6 +241,13 @@ pub trait CompatibilityShadowEngine {
             .map(|statement| self.execute(statement))
             .collect()
     }
+    fn execute_session_with_context(
+        &mut self,
+        statements: &[CypherFixtureStatement],
+        _context: ShadowRequestContext,
+    ) -> Result<Vec<QueryOutput>> {
+        self.execute_session(statements)
+    }
 
     fn project_graph(
         &mut self,
@@ -240,6 +255,30 @@ pub trait CompatibilityShadowEngine {
     ) -> Result<Option<ProjectedGraphShadowOutput>> {
         Ok(None)
     }
+    fn project_graph_with_context(
+        &mut self,
+        check: &ProjectedGraphFixtureCheck,
+        _context: ShadowRequestContext,
+    ) -> Result<Option<ProjectedGraphShadowOutput>> {
+        self.project_graph(check)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ShadowRequestContext<'a> {
+    pub fixture: &'a str,
+    pub check: Option<&'a str>,
+    pub phase: ShadowRequestPhase,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShadowRequestPhase {
+    FixtureSetup,
+    CheckSetup,
+    Statement,
+    Session,
+    Effect,
+    ProjectGraph,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -635,10 +674,19 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
     }
 
     fn execute(&mut self, statement: &CypherFixtureStatement) -> Result<QueryOutput> {
+        self.execute_with_context(statement, ShadowRequestContext::default_execute())
+    }
+
+    fn execute_with_context(
+        &mut self,
+        statement: &CypherFixtureStatement,
+        context: ShadowRequestContext,
+    ) -> Result<QueryOutput> {
         let response = self.request(json_from_statement_with_role(
             "execute",
             statement,
             inferred_shadow_statement_role(statement),
+            context,
         ))?;
         decode_external_query_response(&self.name, response)
     }
@@ -646,6 +694,14 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
     fn execute_session(
         &mut self,
         statements: &[CypherFixtureStatement],
+    ) -> Result<Vec<QueryOutput>> {
+        self.execute_session_with_context(statements, ShadowRequestContext::default_execute())
+    }
+
+    fn execute_session_with_context(
+        &mut self,
+        statements: &[CypherFixtureStatement],
+        context: ShadowRequestContext,
     ) -> Result<Vec<QueryOutput>> {
         let statement_count = statements.len();
         let session_access = shadow_session_access_as_str(statements);
@@ -656,6 +712,7 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         let response = self.request(serde_json::json!({
             "op": "execute_session",
             "access": session_access,
+            "context": json_from_shadow_request_context(context),
             "statements": statements,
         }))?;
         let outputs = decode_external_session_response(&self.name, response)?;
@@ -674,8 +731,17 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         &mut self,
         check: &ProjectedGraphFixtureCheck,
     ) -> Result<Option<ProjectedGraphShadowOutput>> {
+        self.project_graph_with_context(check, ShadowRequestContext::default_project_graph())
+    }
+
+    fn project_graph_with_context(
+        &mut self,
+        check: &ProjectedGraphFixtureCheck,
+        context: ShadowRequestContext,
+    ) -> Result<Option<ProjectedGraphShadowOutput>> {
         let response = self.request(serde_json::json!({
             "op": "project_graph",
+            "context": json_from_shadow_request_context(context),
             "rel_type": check.rel_type,
             "expected_incoming_nodes": check
                 .expected_incoming
@@ -1120,11 +1186,13 @@ fn json_from_statement_with_role(
     op: &str,
     statement: &CypherFixtureStatement,
     role: ShadowStatementRole,
+    context: ShadowRequestContext,
 ) -> serde_json::Value {
     serde_json::json!({
         "op": op,
         "role": shadow_statement_role_as_str(role),
         "access": shadow_statement_access_as_str(statement),
+        "context": json_from_shadow_request_context(context),
         "cypher": statement.cypher,
         "parameters": json_object_from_parameters(&statement.parameters),
     })
@@ -1147,6 +1215,43 @@ fn inferred_shadow_statement_role(statement: &CypherFixtureStatement) -> ShadowS
         ShadowStatementRole::Mutation
     } else {
         ShadowStatementRole::Read
+    }
+}
+
+impl ShadowRequestContext<'_> {
+    fn default_execute() -> Self {
+        Self {
+            fixture: "",
+            check: None,
+            phase: ShadowRequestPhase::Statement,
+        }
+    }
+
+    fn default_project_graph() -> Self {
+        Self {
+            fixture: "",
+            check: None,
+            phase: ShadowRequestPhase::ProjectGraph,
+        }
+    }
+}
+
+fn json_from_shadow_request_context(context: ShadowRequestContext) -> serde_json::Value {
+    serde_json::json!({
+        "fixture": context.fixture,
+        "check": context.check,
+        "phase": shadow_request_phase_as_str(context.phase),
+    })
+}
+
+fn shadow_request_phase_as_str(phase: ShadowRequestPhase) -> &'static str {
+    match phase {
+        ShadowRequestPhase::FixtureSetup => "fixture_setup",
+        ShadowRequestPhase::CheckSetup => "check_setup",
+        ShadowRequestPhase::Statement => "statement",
+        ShadowRequestPhase::Session => "session",
+        ShadowRequestPhase::Effect => "effect",
+        ShadowRequestPhase::ProjectGraph => "project_graph",
     }
 }
 
@@ -25704,7 +25809,14 @@ pub fn run_compatibility_fixture_with_shadow(
                 primary_checks.push(CompatibilityCheckReport {
                     name: check.name.clone(),
                 });
-                let status = match shadow.project_graph(check)? {
+                let status = match shadow.project_graph_with_context(
+                    check,
+                    ShadowRequestContext {
+                        fixture: &fixture.name,
+                        check: Some(&check.name),
+                        phase: ShadowRequestPhase::ProjectGraph,
+                    },
+                )? {
                     Some(shadow_output) => {
                         compare_projected_graph_shadow(
                             fixture,
@@ -26021,14 +26133,23 @@ fn run_shadow_setup(
     shadow: &mut impl CompatibilityShadowEngine,
 ) -> Result<()> {
     for statement in &fixture.setup {
-        shadow.execute(statement).map_err(|error| {
-            SkeinError::Execution(format!(
-                "fixture '{}' shadow engine '{}' setup failed for '{}': {error}",
-                fixture.name,
-                shadow.name(),
-                statement.cypher
-            ))
-        })?;
+        shadow
+            .execute_with_context(
+                statement,
+                ShadowRequestContext {
+                    fixture: &fixture.name,
+                    check: None,
+                    phase: ShadowRequestPhase::FixtureSetup,
+                },
+            )
+            .map_err(|error| {
+                SkeinError::Execution(format!(
+                    "fixture '{}' shadow engine '{}' setup failed for '{}': {error}",
+                    fixture.name,
+                    shadow.name(),
+                    statement.cypher
+                ))
+            })?;
     }
     Ok(())
 }
@@ -26085,17 +26206,33 @@ fn run_shadow_cypher_check(
         return run_shadow_cypher_session_check(fixture, check, shadow, primary);
     }
     for setup_query in &check.setup_queries {
-        shadow.execute(setup_query).map_err(|error| {
-            SkeinError::Execution(format!(
-                "fixture '{}' check '{}' shadow engine '{}' setup failed for '{}': {error}",
-                fixture.name,
-                check.name,
-                shadow.name(),
-                setup_query.cypher
-            ))
-        })?;
+        shadow
+            .execute_with_context(
+                setup_query,
+                ShadowRequestContext {
+                    fixture: &fixture.name,
+                    check: Some(&check.name),
+                    phase: ShadowRequestPhase::CheckSetup,
+                },
+            )
+            .map_err(|error| {
+                SkeinError::Execution(format!(
+                    "fixture '{}' check '{}' shadow engine '{}' setup failed for '{}': {error}",
+                    fixture.name,
+                    check.name,
+                    shadow.name(),
+                    setup_query.cypher
+                ))
+            })?;
     }
-    let shadow_output = shadow.execute(&check.statement);
+    let shadow_output = shadow.execute_with_context(
+        &check.statement,
+        ShadowRequestContext {
+            fixture: &fixture.name,
+            check: Some(&check.name),
+            phase: ShadowRequestPhase::Statement,
+        },
+    );
     match (primary, check.expected_error) {
         (CypherCheckOutcome::Error(expected), Some(_)) => {
             let Err(error) = shadow_output else {
@@ -26169,7 +26306,16 @@ fn run_shadow_cypher_check(
                         fixture.name, check.name
                     )));
                 };
-                let shadow_effect = shadow.execute(effect_query).map_err(|error| {
+                let shadow_effect = shadow
+                    .execute_with_context(
+                        effect_query,
+                        ShadowRequestContext {
+                            fixture: &fixture.name,
+                            check: Some(&check.name),
+                            phase: ShadowRequestPhase::Effect,
+                        },
+                    )
+                    .map_err(|error| {
                     SkeinError::Execution(format!(
                         "fixture '{}' check '{}' shadow engine '{}' failed effect query '{}': {error}",
                         fixture.name,
@@ -26222,14 +26368,23 @@ fn run_shadow_cypher_session_check(
     if let Some(effect_query) = &check.effect_query {
         statements.push(effect_query.clone());
     }
-    let outputs = shadow.execute_session(&statements).map_err(|error| {
-        SkeinError::Execution(format!(
-            "fixture '{}' check '{}' shadow engine '{}' session failed: {error}",
-            fixture.name,
-            check.name,
-            shadow.name()
-        ))
-    })?;
+    let outputs = shadow
+        .execute_session_with_context(
+            &statements,
+            ShadowRequestContext {
+                fixture: &fixture.name,
+                check: Some(&check.name),
+                phase: ShadowRequestPhase::Session,
+            },
+        )
+        .map_err(|error| {
+            SkeinError::Execution(format!(
+                "fixture '{}' check '{}' shadow engine '{}' session failed: {error}",
+                fixture.name,
+                check.name,
+                shadow.name()
+            ))
+        })?;
     let statement_index = check.setup_queries.len();
     let shadow_output = outputs.get(statement_index).ok_or_else(|| {
         SkeinError::Execution(format!(
@@ -27827,6 +27982,10 @@ done
         assert!(trace.contains("\"event\":\"response\""));
         assert!(trace.contains("\"protocol_version\":1"));
         assert!(trace.contains("\"request_id\":1"));
+        assert!(trace.contains("\"fixture\":\"external-shadow-trace-fixture\""));
+        assert!(trace.contains("\"check\":\"read title\""));
+        assert!(trace.contains("\"phase\":\"fixture_setup\""));
+        assert!(trace.contains("\"phase\":\"statement\""));
         assert!(trace.contains("\"access\":\"mutation\""));
         assert!(trace.contains("\"access\":\"read\""));
         let _ = fs::remove_file(trace_path);
