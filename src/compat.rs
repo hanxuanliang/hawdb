@@ -1417,14 +1417,19 @@ fn decode_external_session_response(
         })?;
     outputs
         .iter()
-        .map(|output| {
+        .enumerate()
+        .map(|(index, output)| {
             let rows = output.get("rows").ok_or_else(|| {
                 SkeinError::Execution(format!(
-                    "shadow engine '{engine_name}' session output missing rows"
+                    "shadow engine '{engine_name}' session output {index} missing rows"
                 ))
             })?;
             Ok(QueryOutput {
-                rows: rows_from_json(engine_name, rows)?,
+                rows: rows_from_json(engine_name, rows).map_err(|error| {
+                    SkeinError::Execution(format!(
+                        "shadow engine '{engine_name}' session output {index} row decoding failed: {error}"
+                    ))
+                })?,
             })
         })
         .collect()
@@ -27788,6 +27793,31 @@ done
         assert!(error
             .to_string()
             .contains("session returned 4 outputs for 3 statements"));
+    }
+
+    #[test]
+    fn reports_external_shadow_session_output_index_on_decode_error() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-session-output-index",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *execute_session*) echo '{"ok":{"outputs":[{"rows":[]},{"oops":[]},{"rows":[{"title":"New"}]}]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected execute_session"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-session-output-index", "sh", [script])
+                .unwrap();
+        let fixture = session_effect_fixture("external-shadow-session-output-index-fixture");
+
+        let error =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap_err();
+
+        assert!(error.to_string().contains("session output 1 missing rows"));
     }
 
     #[test]

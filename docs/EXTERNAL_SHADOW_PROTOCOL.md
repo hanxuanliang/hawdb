@@ -209,7 +209,9 @@ The `outputs` array must have the same length and order as the request
 the session may write; otherwise it is `read`. Per-statement `access` is
 advisory but stable: previous-wrapper adapters should use `read` for read-only
 Kuzu/Ladybug APIs and `mutation` for serialized write paths. `role` is a
-compatibility-harness context label.
+compatibility-harness context label. Skein reports malformed session outputs
+with their zero-based output index so wrapper logs can be aligned with
+`statements[*].context.statement_index`.
 
 ## `project_graph`
 
