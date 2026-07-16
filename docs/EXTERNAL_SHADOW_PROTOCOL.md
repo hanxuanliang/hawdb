@@ -279,6 +279,11 @@ with:
 `primary_only_reasons` object and in the blocker text. The migration gate treats
 primary-only projected graph checks as blockers by default.
 
+Projected graph responses must use exactly one response shape: `ok`, `error`, or
+`primary_only: true`. `primary_only` must be a boolean when present. Ambiguous
+responses are rejected as protocol errors instead of being treated as ordinary
+primary-only coverage gaps.
+
 ## Errors
 
 Any operation can return an error:

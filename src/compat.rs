@@ -1469,11 +1469,24 @@ fn decode_external_projected_graph_response(
     engine_name: &str,
     response: serde_json::Value,
 ) -> Result<ProjectedGraphShadowResult> {
-    if response
-        .get("primary_only")
-        .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false)
-    {
+    let primary_only = match response.get("primary_only") {
+        None => false,
+        Some(serde_json::Value::Bool(value)) => *value,
+        Some(_) => {
+            return Err(SkeinError::Execution(format!(
+                "shadow engine '{engine_name}' projected graph response field 'primary_only' must be a boolean"
+            )));
+        }
+    };
+    let shape_count = usize::from(primary_only)
+        + usize::from(response.get("ok").is_some())
+        + usize::from(response.get("error").is_some());
+    if shape_count > 1 {
+        return Err(SkeinError::Execution(format!(
+            "shadow engine '{engine_name}' projected graph response must contain only one of 'ok', 'error', or primary_only"
+        )));
+    }
+    if primary_only {
         return Ok(ProjectedGraphShadowResult::PrimaryOnly {
             reason: optional_external_string(engine_name, &response, "reason")?,
         });
@@ -27128,7 +27141,7 @@ mod tests {
         CompatibilityShadowCheckReport, CompatibilityShadowEngine, CompatibilityShadowReport,
         CompatibilityShadowStatus, CompatibilityTolerance, CypherFixtureCheck,
         CypherFixtureStatement, ExpectedRows, ExternalShadowCommand, ProjectedGraphFixtureCheck,
-        ProjectedGraphShadowOutput,
+        ProjectedGraphShadowOutput, ProjectedGraphShadowResult,
     };
     use crate::{Database, QueryOutput, Result, Value};
     use std::collections::BTreeMap;
@@ -27711,6 +27724,59 @@ done
         assert_eq!(
             cutover_json["primary_only_reasons"]["mentions projection"],
             "projection metadata is not exposed"
+        );
+    }
+
+    #[test]
+    fn rejects_ambiguous_external_projected_graph_response_shape() {
+        let error = super::decode_external_projected_graph_response(
+            "ambiguous-projection-shadow",
+            serde_json::json!({
+                "primary_only": true,
+                "error": {
+                    "class": "execution",
+                    "message": "projection hook failed"
+                }
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("ambiguous-projection-shadow"));
+        assert!(error.to_string().contains("only one of"));
+    }
+
+    #[test]
+    fn rejects_malformed_external_projected_graph_primary_only_flag() {
+        let error = super::decode_external_projected_graph_response(
+            "malformed-projection-shadow",
+            serde_json::json!({
+                "primary_only": "true"
+            }),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("malformed-projection-shadow"));
+        assert!(error
+            .to_string()
+            .contains("field 'primary_only' must be a boolean"));
+    }
+
+    #[test]
+    fn decodes_external_projected_graph_primary_only_reason() {
+        let result = super::decode_external_projected_graph_response(
+            "primary-only-projection-shadow",
+            serde_json::json!({
+                "primary_only": true,
+                "reason": "projection metadata is not exposed"
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(
+            result,
+            ProjectedGraphShadowResult::PrimaryOnly {
+                reason: Some("projection metadata is not exposed".to_string())
+            }
         );
     }
 
