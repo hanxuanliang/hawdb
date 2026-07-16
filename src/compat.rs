@@ -1229,6 +1229,11 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_plan_contains(vec!["IndexNodeSeek".to_string()]),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "graph totals memory count read",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN count(m)"),
+                ExpectedRows::Exact(vec![compatibility_row([("count(m)", Value::Int(3))])]),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "checkpoint control statement",
                 CypherFixtureStatement::new("CHECKPOINT"),
                 ExpectedRows::RowCount(0),
@@ -15021,6 +15026,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory) WHERE m.is_crystal = false RETURN count(m), avg(m.decay_score_cached)",
             ),
             CompatibilityQueryCallSite::new(
+                "graph totals memory count read",
+                "context_wiring_read",
+                "nmem-server::context_wiring::graph_totals",
+            )
+            .with_cypher("MATCH (m:Memory) RETURN count(m)"),
+            CompatibilityQueryCallSite::new(
                 "decay refresh score and confidence update",
                 "decay_refresh_write",
                 "nmem-search::decay_refresh::Q_DECAY_CONF",
@@ -16608,7 +16619,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 365);
+        assert_eq!(report.checks.len(), 366);
     }
 
     #[test]
@@ -16624,13 +16635,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 365);
-        assert_eq!(coverage.covered_checks, 365);
+        assert_eq!(coverage.required_checks, 366);
+        assert_eq!(coverage.covered_checks, 366);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 365);
+        assert_eq!(coverage_json["covered_checks"], 366);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16660,10 +16671,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 365);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 366);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 365);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 366);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16888,15 +16899,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 365);
-        assert_eq!(report.shadow_checks.len(), 365);
+        assert_eq!(report.primary_checks.len(), 366);
+        assert_eq!(report.shadow_checks.len(), 366);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            365
+            366
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16905,7 +16916,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 365);
+        assert_eq!(cutover.matched_checks, 366);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
