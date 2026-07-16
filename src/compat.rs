@@ -1808,11 +1808,11 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "health average read",
                 CypherFixtureStatement::new(
-                    "MATCH (m:Memory) WHERE m.is_crystal = false RETURN count(m) AS total, avg(m.decay_score_cached) AS avg_decay",
+                    "MATCH (m:Memory) WHERE m.is_crystal = false RETURN count(m), avg(m.decay_score_cached)",
                 ),
                 ExpectedRows::Exact(vec![compatibility_row([
-                    ("total", Value::Int(2)),
-                    ("avg_decay", Value::Float(0.5)),
+                    ("count(m)", Value::Int(2)),
+                    ("avg(m.decay_score_cached)", Value::Float(0.5)),
                 ])]),
             )),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
@@ -5819,6 +5819,61 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (n) WHERE n.id IN ['summarized-community-1', 'summarized-community-2', 'summarized-community-empty', 'summarized-community-null'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "agent context summarized community task read",
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' RETURN c.id, c.name, c.ai_summary, c.member_count ORDER BY c.member_count DESC LIMIT 10",
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            (
+                                "c.id",
+                                Value::String("task-summarized-community-2".to_string()),
+                            ),
+                            (
+                                "c.name",
+                                Value::String("Task Summary Community Two".to_string()),
+                            ),
+                            (
+                                "c.ai_summary",
+                                Value::String("higher task summary".to_string()),
+                            ),
+                            ("c.member_count", Value::Int(12)),
+                        ]),
+                        compatibility_row([
+                            (
+                                "c.id",
+                                Value::String("task-summarized-community-1".to_string()),
+                            ),
+                            (
+                                "c.name",
+                                Value::String("Task Summary Community One".to_string()),
+                            ),
+                            (
+                                "c.ai_summary",
+                                Value::String("lower task summary".to_string()),
+                            ),
+                            ("c.member_count", Value::Int(6)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'task-summarized-community-1', name: 'Task Summary Community One', ai_summary: 'lower task summary', member_count: 6})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'task-summarized-community-2', name: 'Task Summary Community Two', ai_summary: 'higher task summary', member_count: 12})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'task-summarized-community-empty', name: 'Task Summary Empty', ai_summary: '', member_count: 100})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['task-summarized-community-1', 'task-summarized-community-2', 'task-summarized-community-empty'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -11725,6 +11780,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Source) WHERE s.lifecycle_state = 'ingested' OR s.lifecycle_state = 'parsed' OR s.lifecycle_state = 'chunked' OR s.lifecycle_state = 'error' RETURN s.id, s.original_name, s.lifecycle_state, s.memory_count, s.created_at ORDER BY s.created_at ASC LIMIT 15",
             ),
             CompatibilityQueryCallSite::new(
+                "agent context summarized community task read",
+                "agent_context_read",
+                "nmem-graph::agent_context_tasks::Q_SUMMARIZED_COMMUNITIES",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' RETURN c.id, c.name, c.ai_summary, c.member_count ORDER BY c.member_count DESC LIMIT 10",
+            ),
+            CompatibilityQueryCallSite::new(
                 "activity task evolves cluster read",
                 "agent_context_read",
                 "nmem-graph::agent_context_tasks::Q_EVOLVES_CLUSTERS",
@@ -12969,7 +13032,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 274);
+        assert_eq!(report.checks.len(), 275);
     }
 
     #[test]
@@ -12985,13 +13048,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 274);
-        assert_eq!(coverage.covered_checks, 274);
+        assert_eq!(coverage.required_checks, 275);
+        assert_eq!(coverage.covered_checks, 275);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 274);
+        assert_eq!(coverage_json["covered_checks"], 275);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -13021,10 +13084,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 274);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 275);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 274);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 275);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -13249,15 +13312,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 274);
-        assert_eq!(report.shadow_checks.len(), 274);
+        assert_eq!(report.primary_checks.len(), 275);
+        assert_eq!(report.shadow_checks.len(), 275);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            274
+            275
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -13266,7 +13329,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 274);
+        assert_eq!(cutover.matched_checks, 275);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
