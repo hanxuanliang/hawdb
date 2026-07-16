@@ -551,6 +551,10 @@ pub enum ProjectionExpression {
         non_empty: Value,
         null_or_empty: Value,
     },
+    CaseCoalesceDifferenceFloorZero {
+        variable: String,
+        terms: Vec<CoalesceDifferenceProjectionTerm>,
+    },
     ColumnDefaultIfNullOrEq {
         column: String,
         property: String,
@@ -562,6 +566,12 @@ pub enum ProjectionExpression {
         column: String,
         property: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoalesceDifferenceProjectionTerm {
+    pub property: String,
+    pub default: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2069,7 +2079,8 @@ fn return_expression_is_scoped(
             return_value_expression_is_scoped(expression, scope, column_names)
         }
         ReturnExpression::DefaultIfNullOrEq { variable, .. }
-        | ReturnExpression::CasePropertyNotNullOrEq { variable, .. } => {
+        | ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
         }
         ReturnExpression::Id(_)
@@ -2093,7 +2104,8 @@ fn return_value_expression_is_scoped(
         ReturnValueExpression::Variable(variable)
         | ReturnValueExpression::Property { variable, .. }
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
-        | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. } => {
+        | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
         }
         ReturnValueExpression::Value(_) => true,
@@ -2258,7 +2270,8 @@ fn optional_direct_count_alias(
                 }
                 has_projection = true;
             }
-            ReturnExpression::CasePropertyNotNullOrEq { variable, .. } => {
+            ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+            | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
                 if variable != &optional.source_variable {
                     return Ok(None);
                 }
@@ -2375,7 +2388,8 @@ fn return_value_expression_is_source_only(
         | ReturnValueExpression::RelationshipType(variable)
         | ReturnValueExpression::DatePart { variable, .. }
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
-        | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. } => {
+        | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             variable == source_variable
         }
         ReturnValueExpression::Value(_) => true,
@@ -3537,6 +3551,9 @@ fn collect_return_value_expression_variables(
         ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. } => {
             variables.insert(variable.clone());
         }
+        ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
+            variables.insert(variable.clone());
+        }
     }
 }
 
@@ -3735,7 +3752,8 @@ fn plan_return_items(
                 | ReturnExpression::Lower(_)
                 | ReturnExpression::DatePart { .. }
                 | ReturnExpression::DefaultIfNullOrEq { .. }
-                | ReturnExpression::CasePropertyNotNullOrEq { .. } => {
+                | ReturnExpression::CasePropertyNotNullOrEq { .. }
+                | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. } => {
                     group_keys.push(plan_projection(scope, item, parameters)?);
                 }
                 ReturnExpression::CountAll
@@ -3970,6 +3988,20 @@ fn plan_projection_with_columns(
                 "case".to_string(),
             )
         }
+        ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in return item"
+                )));
+            }
+            (
+                ProjectionExpression::CaseCoalesceDifferenceFloorZero {
+                    variable: variable.clone(),
+                    terms: bind_coalesce_difference_terms(terms, parameters)?,
+                },
+                "case".to_string(),
+            )
+        }
         ReturnExpression::CountAll
         | ReturnExpression::CountVariable { .. }
         | ReturnExpression::CountProperty { .. }
@@ -4187,7 +4219,8 @@ fn plan_aggregation(scope: &BTreeSet<String>, item: &ReturnItem) -> Result<Aggre
         | ReturnExpression::Lower(_)
         | ReturnExpression::DatePart { .. }
         | ReturnExpression::DefaultIfNullOrEq { .. }
-        | ReturnExpression::CasePropertyNotNullOrEq { .. } => {
+        | ReturnExpression::CasePropertyNotNullOrEq { .. }
+        | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. } => {
             return Err(SkeinError::Semantic(
                 "expected aggregate return item".to_string(),
             ));
@@ -4365,7 +4398,33 @@ fn plan_return_value_expression_with_columns(
                 null_or_empty: bind_value(null_or_empty, parameters)?,
             })
         }
+        ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in expression"
+                )));
+            }
+            Ok(ProjectionExpression::CaseCoalesceDifferenceFloorZero {
+                variable: variable.clone(),
+                terms: bind_coalesce_difference_terms(terms, parameters)?,
+            })
+        }
     }
+}
+
+fn bind_coalesce_difference_terms(
+    terms: &[crate::cypher::CoalesceDifferenceTerm],
+    parameters: &BTreeMap<String, Value>,
+) -> Result<Vec<CoalesceDifferenceProjectionTerm>> {
+    terms
+        .iter()
+        .map(|term| {
+            Ok(CoalesceDifferenceProjectionTerm {
+                property: term.property.clone(),
+                default: bind_value(&term.default, parameters)?,
+            })
+        })
+        .collect()
 }
 
 fn plan_date_part(part: &str) -> Result<DatePart> {

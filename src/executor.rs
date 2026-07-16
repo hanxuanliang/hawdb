@@ -3,10 +3,10 @@ use crate::cypher::RelationshipDirection;
 use crate::error::{Result, SkeinError};
 use crate::optimizer::PhysicalPlan;
 use crate::planner::{
-    AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, DatePart, GraphAlgorithmKind,
-    Predicate, Projection, ProjectionExpression, RelationshipOnCreateValue, SchemaObjectState,
-    SchemaPropertyType, SchemaTableKind, SetValue, ShortestPathProjection,
-    ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
+    AggregateFunction, AggregateTarget, Aggregation, CoalesceDifferenceProjectionTerm,
+    ComparisonOp, DatePart, GraphAlgorithmKind, Predicate, Projection, ProjectionExpression,
+    RelationshipOnCreateValue, SchemaObjectState, SchemaPropertyType, SchemaTableKind, SetValue,
+    ShortestPathProjection, ShortestPathProjectionExpression, SortDirection, SortItem, SortKey,
 };
 use crate::schema::{Catalog, PropertyType, TableKind};
 use crate::store::{
@@ -2058,6 +2058,16 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 Ok(null_or_empty.clone())
             }
         }
+        ProjectionExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
+            if !binding_has_variable(binding, variable) {
+                return Err(SkeinError::Execution(format!(
+                    "missing variable '{variable}' during projection"
+                )));
+            }
+            Ok(Value::Int(
+                coalesce_difference(binding, variable, terms)?.max(0),
+            ))
+        }
         ProjectionExpression::ColumnDefaultIfNullOrEq {
             column,
             property,
@@ -2113,6 +2123,47 @@ fn project_expression_value(
         catalog,
         binding,
     )
+}
+
+fn coalesce_difference(
+    binding: &Binding,
+    variable: &str,
+    terms: &[CoalesceDifferenceProjectionTerm],
+) -> Result<i64> {
+    let Some((first, rest)) = terms.split_first() else {
+        return Err(SkeinError::Execution(
+            "coalesce difference requires at least one term".to_string(),
+        ));
+    };
+    let mut value = coalesce_integer_term(binding, variable, first)?;
+    for term in rest {
+        value -= coalesce_integer_term(binding, variable, term)?;
+    }
+    Ok(value)
+}
+
+fn coalesce_integer_term(
+    binding: &Binding,
+    variable: &str,
+    term: &CoalesceDifferenceProjectionTerm,
+) -> Result<i64> {
+    match binding_property(binding, variable, &term.property) {
+        Some(Value::Int(value)) => Ok(*value),
+        Some(Value::Null) | None => integer_value(&term.default, "COALESCE default"),
+        Some(value) => Err(SkeinError::Execution(format!(
+            "COALESCE difference requires integer property '{}.{}', got {value:?}",
+            variable, term.property
+        ))),
+    }
+}
+
+fn integer_value(value: &Value, context: &str) -> Result<i64> {
+    match value {
+        Value::Int(value) => Ok(*value),
+        value => Err(SkeinError::Execution(format!(
+            "{context} requires an integer value, got {value:?}"
+        ))),
+    }
 }
 
 fn group_key_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Value {

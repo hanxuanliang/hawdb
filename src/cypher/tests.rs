@@ -1311,6 +1311,33 @@ fn parses_case_property_presence_order_item() {
 }
 
 #[test]
+fn parses_cleanup_active_consumption_order_expression() {
+    let statement = parse(
+        "MATCH (m:Memory) RETURN m.id ORDER BY CASE WHEN COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) < 0 THEN 0 ELSE COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) END ASC",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let OrderExpression::Value(ReturnValueExpression::CaseCoalesceDifferenceFloorZero {
+        variable,
+        terms,
+    }) = &query.order_by[0].expression
+    else {
+        panic!("expected cleanup active-consumption CASE order expression");
+    };
+    assert_eq!(variable, "m");
+    assert_eq!(
+        terms
+            .iter()
+            .map(|term| term.property.as_str())
+            .collect::<Vec<_>>(),
+        vec!["access_count", "appearances", "clicks"]
+    );
+    assert_eq!(query.order_by[0].direction, OrderDirection::Asc);
+}
+
+#[test]
 fn parses_optional_match_direct_projection_count() {
     let statement = parse(
         "MATCH (l:Label) OPTIONAL MATCH (m:Memory)-[:HAS_LABEL]->(l) RETURN l.id, l.name, COUNT(m) AS usage_count ORDER BY l.name ASC SKIP $offset LIMIT $limit",
@@ -1633,6 +1660,35 @@ fn parses_coalesce_and_left_predicates() {
             ))),
         }
     );
+}
+
+#[test]
+fn parses_coalesce_float_predicate() {
+    let statement =
+        parse("MATCH (m:Memory) WHERE COALESCE(m.decay_score_cached, 1.0) < 0.55 RETURN m.id")
+            .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let Some(PropertyPredicate::ExpressionCompare {
+        expression, value, ..
+    }) = query.predicate
+    else {
+        panic!("expected expression compare");
+    };
+    assert!(matches!(
+        expression,
+        ReturnValueExpression::Coalesce(expressions)
+            if expressions.len() == 2
+                && matches!(
+                    expressions[1],
+                    ReturnValueExpression::Value(ValueExpression::Literal(Value::Float(1.0)))
+                )
+    ));
+    assert!(matches!(
+        value,
+        ReturnValueExpression::Value(ValueExpression::Literal(Value::Float(0.55)))
+    ));
 }
 
 #[test]

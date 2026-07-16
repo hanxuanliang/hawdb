@@ -599,6 +599,10 @@ pub enum ReturnValueExpression {
         non_empty: ValueExpression,
         null_or_empty: ValueExpression,
     },
+    CaseCoalesceDifferenceFloorZero {
+        variable: String,
+        terms: Vec<CoalesceDifferenceTerm>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -634,6 +638,10 @@ pub enum ReturnExpression {
         non_empty: ValueExpression,
         null_or_empty: ValueExpression,
     },
+    CaseCoalesceDifferenceFloorZero {
+        variable: String,
+        terms: Vec<CoalesceDifferenceTerm>,
+    },
     CountAll,
     CountVariable {
         variable: String,
@@ -656,6 +664,12 @@ pub enum ReturnExpression {
         variable: String,
         property: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoalesceDifferenceTerm {
+    pub property: String,
+    pub default: ValueExpression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

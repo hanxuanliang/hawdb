@@ -45,7 +45,9 @@ memory-count reads. PageRank coverage includes membership/visibility reads,
 score persist/clear writes, central-entity lookup, GraphMeta clear stamps, and
 planner node/relationship totals and changed count reads. Community detection
 scheduler coverage includes GraphMeta state reads, candidate scans, member
-entity lookups, and summary writes.
+entity lookups, and summary writes. Cleanup scheduler coverage includes bounded
+seed scans, EVOLVES pair reads, cleanup fingerprint row fetches, and floor-zero
+engagement `CASE` ordering.
 
 ## LanceDB Replacement Surface
 

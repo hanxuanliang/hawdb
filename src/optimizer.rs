@@ -4550,6 +4550,22 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             write_value(output, null_or_empty);
             output.push(')');
         }
+        ProjectionExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
+            output.push_str("case_coalesce_difference_floor_zero(");
+            for (index, term) in terms.iter().enumerate() {
+                if index > 0 {
+                    output.push('-');
+                }
+                output.push_str("coalesce(");
+                write_identifier(output, variable);
+                output.push('.');
+                write_identifier(output, &term.property);
+                output.push(',');
+                write_value(output, &term.default);
+                output.push(')');
+            }
+            output.push(')');
+        }
         ProjectionExpression::ColumnDefaultIfNullOrEq {
             column,
             property,

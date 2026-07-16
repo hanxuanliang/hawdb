@@ -4832,6 +4832,160 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "cleanup compaction seed scan",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE COALESCE(m.is_crystal, false) = false AND COALESCE(m.is_latest, true) = true AND (m.lifecycle_state = 'active' OR (m.lifecycle_state IS NULL AND (m.metadata IS NULL OR NOT (m.metadata CONTAINS '\"state\"') OR (m.metadata CONTAINS '\"state\":\"active\"')))) AND (COALESCE(m.decay_score_cached, 1.0) < 0.55 OR COALESCE(m.created_at, m.last_accessed_at) <= $stale_cutoff) AND m.space_id = $space_id RETURN m.id ORDER BY COALESCE(m.clicks, 0) ASC, COALESCE(m.total_dwell_time_ms, 0) ASC, CASE WHEN COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) < 0 THEN 0 ELSE COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) END ASC, COALESCE(m.created_at, m.last_accessed_at) ASC, COALESCE(m.decay_score_cached, 1.0) ASC, COALESCE(m.importance, 0.5) ASC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "stale_cutoff".to_string(),
+                                Value::String("2026-06-01T00:00:00".to_string()),
+                            ),
+                            (
+                                "space_id".to_string(),
+                                Value::String("cleanup-fixture".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("cleanup-seed-low".to_string()),
+                        )]),
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("cleanup-seed-high".to_string()),
+                        )]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'cleanup-seed-low', space_id: 'cleanup-fixture', is_crystal: false, is_latest: true, lifecycle_state: 'active', decay_score_cached: 0.4, created_at: '2026-01-01T00:00:00', last_accessed_at: '2026-01-02T00:00:00', access_count: 1, appearances: 0, clicks: 0, total_dwell_time_ms: 0, importance: 0.3})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'cleanup-seed-high', space_id: 'cleanup-fixture', is_crystal: false, is_latest: true, lifecycle_state: 'active', decay_score_cached: 0.3, created_at: '2026-01-03T00:00:00', last_accessed_at: '2026-01-04T00:00:00', access_count: 5, appearances: 1, clicks: 1, total_dwell_time_ms: 20, importance: 0.9})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['cleanup-seed-low', 'cleanup-seed-high'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "cleanup hot duplicate seed scan",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE COALESCE(m.is_crystal, false) = false AND COALESCE(m.is_latest, true) = true AND (m.lifecycle_state = 'active' OR (m.lifecycle_state IS NULL AND (m.metadata IS NULL OR NOT (m.metadata CONTAINS '\"state\"') OR (m.metadata CONTAINS '\"state\":\"active\"')))) AND COALESCE(m.created_at, m.last_accessed_at) >= $recent_cutoff AND m.space_id = $space_id RETURN m.id ORDER BY COALESCE(m.created_at, m.last_accessed_at) DESC, COALESCE(m.importance, 0.5) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "recent_cutoff".to_string(),
+                                Value::String("2026-07-01T00:00:00".to_string()),
+                            ),
+                            (
+                                "space_id".to_string(),
+                                Value::String("cleanup-fixture".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("cleanup-hot-newer".to_string()),
+                        )]),
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("cleanup-hot-older".to_string()),
+                        )]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'cleanup-hot-older', space_id: 'cleanup-fixture', is_crystal: false, is_latest: true, lifecycle_state: 'active', created_at: '2026-07-02T00:00:00', last_accessed_at: '2026-07-02T00:00:00', importance: 0.9})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'cleanup-hot-newer', space_id: 'cleanup-fixture', is_crystal: false, is_latest: true, lifecycle_state: 'active', created_at: '2026-07-03T00:00:00', last_accessed_at: '2026-07-03T00:00:00', importance: 0.1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['cleanup-hot-older', 'cleanup-hot-newer'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "cleanup existing evolves pairs",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Memory)-[:EVOLVES]-(b:Memory) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("cleanup-evolves-a".to_string()),
+                                Value::String("cleanup-evolves-b".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(2),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'cleanup-evolves-a'})-[:EVOLVES]->(:Memory {id: 'cleanup-evolves-b'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['cleanup-evolves-a', 'cleanup-evolves-b'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "cleanup fingerprint row fetch",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.metadata, m.is_latest, m.decay_score_cached, m.created_at, m.last_accessed_at, m.last_clicked_at, m.access_count, m.appearances, m.clicks, m.total_dwell_time_ms, m.importance, m.unit_type, m.semantic_field",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![Value::String("cleanup-fingerprint".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.id", Value::String("cleanup-fingerprint".to_string())),
+                        ("m.title", Value::String("Cleanup Fingerprint".to_string())),
+                        ("m.metadata", Value::String("{\"state\":\"active\"}".to_string())),
+                        ("m.is_latest", Value::Bool(true)),
+                        ("m.decay_score_cached", Value::Float(0.6)),
+                        (
+                            "m.created_at",
+                            Value::String("2026-07-01T00:00:00".to_string()),
+                        ),
+                        (
+                            "m.last_accessed_at",
+                            Value::String("2026-07-02T00:00:00".to_string()),
+                        ),
+                        (
+                            "m.last_clicked_at",
+                            Value::String("2026-07-03T00:00:00".to_string()),
+                        ),
+                        ("m.access_count", Value::Int(4)),
+                        ("m.appearances", Value::Int(1)),
+                        ("m.clicks", Value::Int(2)),
+                        ("m.total_dwell_time_ms", Value::Int(300)),
+                        ("m.importance", Value::Float(0.8)),
+                        ("m.unit_type", Value::String("fact".to_string())),
+                        ("m.semantic_field", Value::String("cleanup text".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'cleanup-fingerprint', title: 'Cleanup Fingerprint', metadata: '{\"state\":\"active\"}', is_latest: true, decay_score_cached: 0.6, created_at: '2026-07-01T00:00:00', last_accessed_at: '2026-07-02T00:00:00', last_clicked_at: '2026-07-03T00:00:00', access_count: 4, appearances: 1, clicks: 2, total_dwell_time_ms: 300, importance: 0.8, unit_type: 'fact', semantic_field: 'cleanup text'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'cleanup-fingerprint'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "crystallized provenance backfill merge",
                     CypherFixtureStatement::new(
                         "MATCH (c:Memory)-[r:CRYSTALLIZED_FROM]->(s:Memory) MERGE (c)-[n:SYNTHESIZED_FROM]->(s) ON CREATE SET n.weight = r.contribution_weight, n.occasion_key = '', n.created_at = r.created_at",
@@ -8599,6 +8753,38 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Community {id: $id}) SET c.name = $name, c.description = $description, c.ai_summary = $ai_summary, c.updated_at = CURRENT_TIMESTAMP()",
             ),
             CompatibilityQueryCallSite::new(
+                "cleanup compaction seed scan",
+                "cleanup_scheduler_read",
+                "nmem-server::scheduler_service::compaction_seed_ids_from_graph",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE COALESCE(m.is_crystal, false) = false AND {visible} AND (COALESCE(m.decay_score_cached, 1.0) < 0.55 OR COALESCE(m.created_at, m.last_accessed_at) <= $stale_cutoff){space_clause} RETURN m.id ORDER BY COALESCE(m.clicks, 0) ASC, COALESCE(m.total_dwell_time_ms, 0) ASC, {active_consumption} ASC, COALESCE(m.created_at, m.last_accessed_at) ASC, COALESCE(m.decay_score_cached, 1.0) ASC, COALESCE(m.importance, 0.5) ASC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "cleanup hot duplicate seed scan",
+                "cleanup_scheduler_read",
+                "nmem-server::scheduler_service::compaction_hot_dup_seed_ids_from_graph",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE COALESCE(m.is_crystal, false) = false AND {visible} AND COALESCE(m.created_at, m.last_accessed_at) >= $recent_cutoff{space_clause} RETURN m.id ORDER BY COALESCE(m.created_at, m.last_accessed_at) DESC, COALESCE(m.importance, 0.5) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "cleanup existing evolves pairs",
+                "cleanup_scheduler_read",
+                "nmem-server::scheduler_service::compaction_existing_evolves_pairs",
+            )
+            .with_cypher(
+                "MATCH (a:Memory)-[:EVOLVES]-(b:Memory) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id",
+            ),
+            CompatibilityQueryCallSite::new(
+                "cleanup fingerprint row fetch",
+                "cleanup_scheduler_read",
+                "nmem-server::scheduler_service::fetch_compaction_cleanup_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.id IN $ids RETURN m.id, m.title, m.metadata, m.is_latest, m.decay_score_cached, m.created_at, m.last_accessed_at, m.last_clicked_at, m.access_count, m.appearances, m.clicks, m.total_dwell_time_ms, m.importance, m.unit_type, m.semantic_field",
+            ),
+            CompatibilityQueryCallSite::new(
                 "crystallized provenance backfill merge",
                 "schema_migration_write",
                 "nmem-graph::schema::m_backfill_crystallized_from",
@@ -10726,7 +10912,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 235);
+        assert_eq!(report.checks.len(), 239);
     }
 
     #[test]
@@ -10742,13 +10928,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 235);
-        assert_eq!(coverage.covered_checks, 235);
+        assert_eq!(coverage.required_checks, 239);
+        assert_eq!(coverage.covered_checks, 239);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 235);
+        assert_eq!(coverage_json["covered_checks"], 239);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -10778,10 +10964,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 235);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 239);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 235);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 239);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -10975,15 +11161,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 235);
-        assert_eq!(report.shadow_checks.len(), 235);
+        assert_eq!(report.primary_checks.len(), 239);
+        assert_eq!(report.shadow_checks.len(), 239);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            235
+            239
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -10992,7 +11178,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 235);
+        assert_eq!(cutover.matched_checks, 239);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

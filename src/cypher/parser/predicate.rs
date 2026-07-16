@@ -295,6 +295,30 @@ impl Parser<'_> {
         ["case", "coalesce", "left", "lower"]
             .iter()
             .any(|keyword| keyword_matches_at(self.input, index, keyword))
+            && self.parenthesized_expression_is_followed_by_comparison(index)
+    }
+
+    fn parenthesized_expression_is_followed_by_comparison(&self, mut index: usize) -> bool {
+        let mut depth = 1usize;
+        while let Some(ch) = self.input[index..].chars().next() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        let after = index + ch.len_utf8();
+                        let rest = self.input[after..].trim_start();
+                        return rest.starts_with('=')
+                            || rest.starts_with('<')
+                            || rest.starts_with('>')
+                            || keyword_matches_at(rest, 0, "CONTAINS");
+                    }
+                }
+                _ => {}
+            }
+            index += ch.len_utf8();
+        }
+        false
     }
 
     fn parse_relationship_exists_predicate(&mut self) -> Result<PropertyPredicate> {
@@ -756,13 +780,12 @@ impl Parser<'_> {
                 let variable = self.parse_ident()?;
                 self.expect_char(')')?;
                 OrderExpression::Id { variable }
-            } else if matches_ignore_ascii_case(&first, &["coalesce", "left", "lower", "case"])
-                && self.peek_char() == Some('(')
+            } else if first.eq_ignore_ascii_case("case")
+                || (matches_ignore_ascii_case(&first, &["coalesce", "left", "lower"])
+                    && self.peek_char() == Some('('))
             {
                 self.pos -= first.len();
                 OrderExpression::Value(self.parse_return_value_expression()?)
-            } else if first.eq_ignore_ascii_case("case") {
-                OrderExpression::Value(self.parse_case_property_not_null_or_eq_expression()?)
             } else if self.consume_char('.') {
                 OrderExpression::Property {
                     variable: first,
@@ -838,6 +861,9 @@ impl Parser<'_> {
                 non_empty,
                 null_or_empty,
             },
+            ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
+                ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, terms }
+            }
             ReturnValueExpression::Value(_) => {
                 return Err(self.error("literal return expressions require an aliasing function"));
             }
@@ -918,6 +944,10 @@ impl Parser<'_> {
                 return Ok(expression);
             }
             self.pos = start;
+            if let Ok(expression) = self.parse_case_coalesce_difference_floor_zero_expression() {
+                return Ok(expression);
+            }
+            self.pos = start;
             return self.parse_case_property_not_null_or_eq_expression();
         }
         if self.consume_char('.') {
@@ -995,6 +1025,76 @@ impl Parser<'_> {
             non_empty,
             null_or_empty,
         })
+    }
+
+    fn parse_case_coalesce_difference_floor_zero_expression(
+        &mut self,
+    ) -> Result<ReturnValueExpression> {
+        self.expect_keyword("WHEN")?;
+        let (variable, when_terms) = self.parse_coalesce_difference_terms()?;
+        self.skip_ws();
+        if !self.consume_char('<') {
+            return Err(self.error("expected CASE floor expression '<'"));
+        }
+        let zero = self.parse_value()?;
+        if zero != ValueExpression::Literal(crate::value::Value::Int(0)) {
+            return Err(self.error("CASE floor expression only supports zero lower bound"));
+        }
+        self.expect_keyword("THEN")?;
+        let then_zero = self.parse_value()?;
+        if then_zero != ValueExpression::Literal(crate::value::Value::Int(0)) {
+            return Err(self.error("CASE floor expression THEN must be zero"));
+        }
+        self.expect_keyword("ELSE")?;
+        let (else_variable, else_terms) = self.parse_coalesce_difference_terms()?;
+        if else_variable != variable || else_terms != when_terms {
+            return Err(self.error("CASE floor expression ELSE must repeat the difference"));
+        }
+        self.expect_keyword("END")?;
+        Ok(ReturnValueExpression::CaseCoalesceDifferenceFloorZero {
+            variable,
+            terms: when_terms,
+        })
+    }
+
+    fn parse_coalesce_difference_terms(
+        &mut self,
+    ) -> Result<(String, Vec<crate::cypher::CoalesceDifferenceTerm>)> {
+        let (variable, first) = self.parse_coalesce_difference_term()?;
+        let mut terms = vec![first];
+        loop {
+            self.skip_ws();
+            if !self.consume_char('-') {
+                break;
+            }
+            let (next_variable, term) = self.parse_coalesce_difference_term()?;
+            if next_variable != variable {
+                return Err(self.error("CASE floor expression supports only one variable"));
+            }
+            terms.push(term);
+        }
+        if terms.len() < 2 {
+            return Err(self.error("CASE floor expression requires a difference"));
+        }
+        Ok((variable, terms))
+    }
+
+    fn parse_coalesce_difference_term(
+        &mut self,
+    ) -> Result<(String, crate::cypher::CoalesceDifferenceTerm)> {
+        self.skip_ws();
+        self.expect_keyword("COALESCE")?;
+        self.expect_char('(')?;
+        let variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let property = self.parse_ident()?;
+        self.expect_char(',')?;
+        let default = self.parse_value()?;
+        self.expect_char(')')?;
+        Ok((
+            variable,
+            crate::cypher::CoalesceDifferenceTerm { property, default },
+        ))
     }
 }
 
