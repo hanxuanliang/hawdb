@@ -8249,6 +8249,129 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "wiki topic crystal ranking read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id = $cid RETURN m.id, m.crystal_title, m.title, m.content, m.importance, COUNT(e) AS hits ORDER BY hits DESC, m.importance DESC LIMIT $limit",
+                        BTreeMap::from([
+                            ("cid".to_string(), Value::Int(9760)),
+                            ("limit".to_string(), Value::Int(2)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("wiki-topic-crystal-alpha".to_string())),
+                            (
+                                "m.crystal_title",
+                                Value::String("Wiki Crystal Alpha".to_string()),
+                            ),
+                            ("m.title", Value::String("Alpha fallback".to_string())),
+                            ("m.content", Value::String("alpha crystal body".to_string())),
+                            ("m.importance", Value::Float(0.8)),
+                            ("hits", Value::Int(3)),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("wiki-topic-crystal-beta".to_string())),
+                            (
+                                "m.crystal_title",
+                                Value::String("Wiki Crystal Beta".to_string()),
+                            ),
+                            ("m.title", Value::String("Beta fallback".to_string())),
+                            ("m.content", Value::String("beta crystal body".to_string())),
+                            ("m.importance", Value::Float(0.9)),
+                            ("hits", Value::Int(2)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-alpha', crystal_title: 'Wiki Crystal Alpha', title: 'Alpha fallback', content: 'alpha crystal body', importance: 0.8, is_crystal: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-beta', crystal_title: 'Wiki Crystal Beta', title: 'Beta fallback', content: 'beta crystal body', importance: 0.9, is_crystal: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-other', crystal_title: 'Wiki Crystal Other', title: 'Other fallback', content: 'other crystal body', importance: 1.0, is_crystal: true})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-src-a1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-src-a2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-src-a3'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-src-b1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-src-b2'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-topic-crystal-src-other'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-crystal-entity-a1', community_id: 9760})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-crystal-entity-a2', community_id: 9760})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-crystal-entity-a3', community_id: 9760})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-crystal-entity-b1', community_id: 9760})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-crystal-entity-b2', community_id: 9760})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'wiki-topic-crystal-entity-other', community_id: 9761})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-crystal-alpha'}), (src:Memory {id: 'wiki-topic-crystal-src-a1'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-crystal-alpha'}), (src:Memory {id: 'wiki-topic-crystal-src-a2'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-crystal-alpha'}), (src:Memory {id: 'wiki-topic-crystal-src-a3'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-crystal-beta'}), (src:Memory {id: 'wiki-topic-crystal-src-b1'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-crystal-beta'}), (src:Memory {id: 'wiki-topic-crystal-src-b2'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'wiki-topic-crystal-other'}), (src:Memory {id: 'wiki-topic-crystal-src-other'}) CREATE (m)-[:SYNTHESIZED_FROM]->(src)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'wiki-topic-crystal-src-a1'}), (e:Entity {id: 'wiki-topic-crystal-entity-a1'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'wiki-topic-crystal-src-a2'}), (e:Entity {id: 'wiki-topic-crystal-entity-a2'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'wiki-topic-crystal-src-a3'}), (e:Entity {id: 'wiki-topic-crystal-entity-a3'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'wiki-topic-crystal-src-b1'}), (e:Entity {id: 'wiki-topic-crystal-entity-b1'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'wiki-topic-crystal-src-b2'}), (e:Entity {id: 'wiki-topic-crystal-entity-b2'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (src:Memory {id: 'wiki-topic-crystal-src-other'}), (e:Entity {id: 'wiki-topic-crystal-entity-other'}) CREATE (src)-[:MENTIONS]->(e)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['wiki-topic-crystal-alpha', 'wiki-topic-crystal-beta', 'wiki-topic-crystal-other', 'wiki-topic-crystal-src-a1', 'wiki-topic-crystal-src-a2', 'wiki-topic-crystal-src-a3', 'wiki-topic-crystal-src-b1', 'wiki-topic-crystal-src-b2', 'wiki-topic-crystal-src-other', 'wiki-topic-crystal-entity-a1', 'wiki-topic-crystal-entity-a2', 'wiki-topic-crystal-entity-a3', 'wiki-topic-crystal-entity-b1', 'wiki-topic-crystal-entity-b2', 'wiki-topic-crystal-entity-other'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(15),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "okf export community list read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (c:Community) WHERE c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count ORDER BY c.member_count DESC LIMIT $limit",
@@ -10492,6 +10615,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE e.community_id = $cid OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, COUNT(r) AS mention_count ORDER BY mention_count DESC, e.name ASC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki topic crystal ranking read",
+                "wiki_export_read",
+                "nmem-server::rest_fs::render_single_topic_page.crystals",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:SYNTHESIZED_FROM]->(src:Memory)-[:MENTIONS]->(e:Entity) WHERE m.is_crystal = true AND e.community_id = $cid RETURN m.id, m.crystal_title, m.title, m.content, m.importance, COUNT(e) AS hits ORDER BY hits DESC, m.importance DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "okf export community list read",
                 "okf_export_read",
                 "nmem-server::okf_export::list_communities",
@@ -11843,7 +11974,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 255);
+        assert_eq!(report.checks.len(), 256);
     }
 
     #[test]
@@ -11859,13 +11990,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 255);
-        assert_eq!(coverage.covered_checks, 255);
+        assert_eq!(coverage.required_checks, 256);
+        assert_eq!(coverage.covered_checks, 256);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 255);
+        assert_eq!(coverage_json["covered_checks"], 256);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -11895,10 +12026,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 255);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 256);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 255);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 256);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12092,15 +12223,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 255);
-        assert_eq!(report.shadow_checks.len(), 255);
+        assert_eq!(report.primary_checks.len(), 256);
+        assert_eq!(report.shadow_checks.len(), 256);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            255
+            256
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12109,7 +12240,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 255);
+        assert_eq!(cutover.matched_checks, 256);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
