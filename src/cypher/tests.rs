@@ -1476,6 +1476,28 @@ fn parses_case_property_presence_order_item() {
 }
 
 #[test]
+fn parses_entity_search_rank_order_item() {
+    let statement = parse(
+        "MATCH (e:Entity) WHERE lower(e.name) CONTAINS $raw_query OR lower(e.name) CONTAINS $normalized_query OR list_contains(e.aliases, $raw_input) OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, COUNT(m) AS memory_count ORDER BY CASE WHEN lower(e.name) = $raw_query THEN 0 WHEN lower(e.name) = $normalized_query THEN 0 WHEN list_contains(e.aliases, $raw_input) THEN 1 ELSE 2 END ASC, memory_count DESC LIMIT $limit",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    assert_eq!(query.order_by.len(), 2);
+    let OrderExpression::Value(ReturnValueExpression::CaseEntitySearchRank(expression)) =
+        &query.order_by[0].expression
+    else {
+        panic!("expected entity search rank order expression");
+    };
+    assert_eq!(expression.variable, "e");
+    assert_eq!(expression.name_property, "name");
+    assert_eq!(expression.aliases_property, "aliases");
+    assert_eq!(query.order_by[0].direction, OrderDirection::Asc);
+    assert_eq!(query.order_by[1].direction, OrderDirection::Desc);
+}
+
+#[test]
 fn parses_cleanup_active_consumption_order_expression() {
     let statement = parse(
         "MATCH (m:Memory) RETURN m.id ORDER BY CASE WHEN COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) < 0 THEN 0 ELSE COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) END ASC",

@@ -600,6 +600,7 @@ pub enum ProjectionExpression {
         variable: String,
         terms: Vec<CoalesceDifferenceProjectionTerm>,
     },
+    CaseEntitySearchRank(Box<CaseEntitySearchRankProjection>),
     ColumnDefaultIfNullOrEq {
         column: String,
         property: String,
@@ -621,6 +622,19 @@ pub enum ProjectionExpression {
         column: String,
         property: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseEntitySearchRankProjection {
+    pub variable: String,
+    pub name_property: String,
+    pub aliases_property: String,
+    pub raw_query: Value,
+    pub normalized_query: Value,
+    pub raw_input: Value,
+    pub exact_rank: Value,
+    pub alias_rank: Value,
+    pub fallback_rank: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2250,6 +2264,9 @@ fn return_expression_is_scoped(
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
         }
+        ReturnExpression::CaseEntitySearchRank(expression) => {
+            column_names.contains(&expression.variable) || scope.contains(&expression.variable)
+        }
         ReturnExpression::Id(_)
         | ReturnExpression::RelationshipType(_)
         | ReturnExpression::DatePart { .. }
@@ -2277,6 +2294,9 @@ fn return_value_expression_is_scoped(
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
+        }
+        ReturnValueExpression::CaseEntitySearchRank(expression) => {
+            column_names.contains(&expression.variable) || scope.contains(&expression.variable)
         }
         ReturnValueExpression::Value(_) => true,
         ReturnValueExpression::Coalesce(expressions) => expressions
@@ -2451,6 +2471,12 @@ fn optional_direct_count_alias(
                 }
                 has_projection = true;
             }
+            ReturnExpression::CaseEntitySearchRank(expression) => {
+                if expression.variable != optional.source_variable {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
             ReturnExpression::CountAll
             | ReturnExpression::CountProperty { .. }
             | ReturnExpression::CollectVariable { .. }
@@ -2537,6 +2563,12 @@ fn optional_direct_collect_alias(
                 }
                 has_projection = true;
             }
+            ReturnExpression::CaseEntitySearchRank(expression) => {
+                if expression.variable != optional.source_variable {
+                    return Ok(None);
+                }
+                has_projection = true;
+            }
             ReturnExpression::CountAll
             | ReturnExpression::CountVariable { .. }
             | ReturnExpression::CountProperty { .. }
@@ -2581,6 +2613,14 @@ fn optional_direct_row_projection_expression(
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             optional_direct_row_projection_variable(
                 variable,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }
+        ReturnExpression::CaseEntitySearchRank(expression) => {
+            optional_direct_row_projection_variable(
+                &expression.variable,
                 source_variable,
                 target_variable,
                 rel_variable,
@@ -2632,6 +2672,14 @@ fn optional_direct_row_projection_value_expression(
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             optional_direct_row_projection_variable(
                 variable,
+                source_variable,
+                target_variable,
+                rel_variable,
+            )
+        }
+        ReturnValueExpression::CaseEntitySearchRank(expression) => {
+            optional_direct_row_projection_variable(
+                &expression.variable,
                 source_variable,
                 target_variable,
                 rel_variable,
@@ -2772,6 +2820,9 @@ fn return_value_expression_is_source_only(
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             variable == source_variable
+        }
+        ReturnValueExpression::CaseEntitySearchRank(expression) => {
+            expression.variable == source_variable
         }
         ReturnValueExpression::Value(_) => true,
         ReturnValueExpression::Coalesce(expressions) => {
@@ -4077,6 +4128,9 @@ fn collect_return_value_expression_variables(
         ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             variables.insert(variable.clone());
         }
+        ReturnValueExpression::CaseEntitySearchRank(expression) => {
+            variables.insert(expression.variable.clone());
+        }
     }
 }
 
@@ -4364,7 +4418,8 @@ fn plan_return_items(
                 | ReturnExpression::DefaultIfNullOrEq { .. }
                 | ReturnExpression::DefaultIfNull { .. }
                 | ReturnExpression::CasePropertyNotNullOrEq { .. }
-                | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. } => {
+                | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. }
+                | ReturnExpression::CaseEntitySearchRank(_) => {
                     group_keys.push(plan_projection(scope, item, parameters)?);
                 }
                 ReturnExpression::CountAll
@@ -4635,6 +4690,30 @@ fn plan_projection_with_columns(
                     variable: variable.clone(),
                     terms: bind_coalesce_difference_terms(terms, parameters)?,
                 },
+                "case".to_string(),
+            )
+        }
+        ReturnExpression::CaseEntitySearchRank(expression) => {
+            if !scope.contains(&expression.variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{}' in return item",
+                    expression.variable
+                )));
+            }
+            (
+                ProjectionExpression::CaseEntitySearchRank(Box::new(
+                    CaseEntitySearchRankProjection {
+                        variable: expression.variable.clone(),
+                        name_property: expression.name_property.clone(),
+                        aliases_property: expression.aliases_property.clone(),
+                        raw_query: bind_value(&expression.raw_query, parameters)?,
+                        normalized_query: bind_value(&expression.normalized_query, parameters)?,
+                        raw_input: bind_value(&expression.raw_input, parameters)?,
+                        exact_rank: bind_value(&expression.exact_rank, parameters)?,
+                        alias_rank: bind_value(&expression.alias_rank, parameters)?,
+                        fallback_rank: bind_value(&expression.fallback_rank, parameters)?,
+                    },
+                )),
                 "case".to_string(),
             )
         }
@@ -4915,7 +4994,8 @@ fn plan_aggregation(scope: &BTreeSet<String>, item: &ReturnItem) -> Result<Aggre
         | ReturnExpression::DefaultIfNullOrEq { .. }
         | ReturnExpression::DefaultIfNull { .. }
         | ReturnExpression::CasePropertyNotNullOrEq { .. }
-        | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. } => {
+        | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. }
+        | ReturnExpression::CaseEntitySearchRank(_) => {
             return Err(SkeinError::Semantic(
                 "expected aggregate return item".to_string(),
             ));
@@ -5119,6 +5199,27 @@ fn plan_return_value_expression_with_columns(
                 variable: variable.clone(),
                 terms: bind_coalesce_difference_terms(terms, parameters)?,
             })
+        }
+        ReturnValueExpression::CaseEntitySearchRank(expression) => {
+            if !scope.contains(&expression.variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{}' in expression",
+                    expression.variable
+                )));
+            }
+            Ok(ProjectionExpression::CaseEntitySearchRank(Box::new(
+                CaseEntitySearchRankProjection {
+                    variable: expression.variable.clone(),
+                    name_property: expression.name_property.clone(),
+                    aliases_property: expression.aliases_property.clone(),
+                    raw_query: bind_value(&expression.raw_query, parameters)?,
+                    normalized_query: bind_value(&expression.normalized_query, parameters)?,
+                    raw_input: bind_value(&expression.raw_input, parameters)?,
+                    exact_rank: bind_value(&expression.exact_rank, parameters)?,
+                    alias_rank: bind_value(&expression.alias_rank, parameters)?,
+                    fallback_rank: bind_value(&expression.fallback_rank, parameters)?,
+                },
+            )))
         }
     }
 }

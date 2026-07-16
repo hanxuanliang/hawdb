@@ -210,6 +210,9 @@ impl Parser<'_> {
             ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, terms } => {
                 ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, terms }
             }
+            ReturnValueExpression::CaseEntitySearchRank(expression) => {
+                ReturnExpression::CaseEntitySearchRank(expression)
+            }
             ReturnValueExpression::Value(value) => ReturnExpression::Value(value),
         })
     }
@@ -284,6 +287,10 @@ impl Parser<'_> {
         }
         if variable.eq_ignore_ascii_case("case") {
             let start = self.pos;
+            if let Ok(expression) = self.parse_case_entity_search_rank_expression() {
+                return Ok(expression);
+            }
+            self.pos = start;
             if let Ok(expression) = self.parse_default_if_null_or_eq_expression() {
                 return Ok(expression);
             }
@@ -302,6 +309,81 @@ impl Parser<'_> {
         } else {
             Ok(ReturnValueExpression::Variable(variable))
         }
+    }
+
+    fn parse_case_entity_search_rank_expression(&mut self) -> Result<ReturnValueExpression> {
+        self.expect_keyword("WHEN")?;
+        let (variable, name_property, raw_query) = self.parse_lower_property_equals_value()?;
+        self.expect_keyword("THEN")?;
+        let exact_rank = self.parse_value()?;
+
+        self.expect_keyword("WHEN")?;
+        let (normalized_variable, normalized_name_property, normalized_query) =
+            self.parse_lower_property_equals_value()?;
+        if normalized_variable != variable || normalized_name_property != name_property {
+            return Err(self.error("CASE entity search rank must compare one name property"));
+        }
+        self.expect_keyword("THEN")?;
+        let normalized_rank = self.parse_value()?;
+        if normalized_rank != exact_rank {
+            return Err(self.error("CASE entity search rank exact branches must share a rank"));
+        }
+
+        self.expect_keyword("WHEN")?;
+        let (aliases_variable, aliases_property, raw_input) =
+            self.parse_list_contains_property_value()?;
+        if aliases_variable != variable {
+            return Err(self.error("CASE entity search rank must compare one variable"));
+        }
+        self.expect_keyword("THEN")?;
+        let alias_rank = self.parse_value()?;
+        self.expect_keyword("ELSE")?;
+        let fallback_rank = self.parse_value()?;
+        self.expect_keyword("END")?;
+
+        Ok(ReturnValueExpression::CaseEntitySearchRank(Box::new(
+            CaseEntitySearchRankExpression {
+                variable,
+                name_property,
+                aliases_property,
+                raw_query,
+                normalized_query,
+                raw_input,
+                exact_rank,
+                alias_rank,
+                fallback_rank,
+            },
+        )))
+    }
+
+    fn parse_lower_property_equals_value(&mut self) -> Result<(String, String, ValueExpression)> {
+        let function = self.parse_ident()?;
+        if !function.eq_ignore_ascii_case("lower") {
+            return Err(self.error("expected LOWER in CASE entity search rank"));
+        }
+        self.expect_char('(')?;
+        let variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let property = self.parse_ident()?;
+        self.expect_char(')')?;
+        self.expect_char('=')?;
+        let value = self.parse_value()?;
+        Ok((variable, property, value))
+    }
+
+    fn parse_list_contains_property_value(&mut self) -> Result<(String, String, ValueExpression)> {
+        let function = self.parse_ident()?;
+        if !function.eq_ignore_ascii_case("list_contains") {
+            return Err(self.error("expected list_contains in CASE entity search rank"));
+        }
+        self.expect_char('(')?;
+        let variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let property = self.parse_ident()?;
+        self.expect_char(',')?;
+        let value = self.parse_value()?;
+        self.expect_char(')')?;
+        Ok((variable, property, value))
     }
 
     fn parse_default_if_null_or_eq_expression(&mut self) -> Result<ReturnValueExpression> {

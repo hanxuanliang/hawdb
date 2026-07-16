@@ -4761,6 +4761,29 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             }
             output.push(')');
         }
+        ProjectionExpression::CaseEntitySearchRank(expression) => {
+            output.push_str("case_entity_search_rank(");
+            write_identifier(output, &expression.variable);
+            output.push('.');
+            write_identifier(output, &expression.name_property);
+            output.push(',');
+            write_identifier(output, &expression.variable);
+            output.push('.');
+            write_identifier(output, &expression.aliases_property);
+            output.push(',');
+            write_value(output, &expression.raw_query);
+            output.push(',');
+            write_value(output, &expression.normalized_query);
+            output.push(',');
+            write_value(output, &expression.raw_input);
+            output.push(',');
+            write_value(output, &expression.exact_rank);
+            output.push(',');
+            write_value(output, &expression.alias_rank);
+            output.push(',');
+            write_value(output, &expression.fallback_rank);
+            output.push(')');
+        }
         ProjectionExpression::ColumnDefaultIfNullOrEq {
             column,
             property,

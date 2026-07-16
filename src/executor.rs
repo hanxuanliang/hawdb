@@ -2219,6 +2219,42 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 coalesce_difference(binding, variable, terms)?.max(0),
             ))
         }
+        ProjectionExpression::CaseEntitySearchRank(expression) => {
+            if !binding_has_variable(binding, &expression.variable) {
+                return Err(SkeinError::Execution(format!(
+                    "missing variable '{}' during projection",
+                    expression.variable
+                )));
+            }
+            let name_matches = match binding_property(
+                binding,
+                &expression.variable,
+                &expression.name_property,
+            ) {
+                Some(Value::String(name)) => {
+                    let lowered = name.to_lowercase();
+                    matches!(&expression.raw_query, Value::String(query) if lowered == *query)
+                        || matches!(&expression.normalized_query, Value::String(query) if lowered == *query)
+                }
+                _ => false,
+            };
+            if name_matches {
+                return Ok(expression.exact_rank.clone());
+            }
+            let alias_matches =
+                match binding_property(binding, &expression.variable, &expression.aliases_property)
+                {
+                    Some(Value::List(values)) => {
+                        values.iter().any(|alias| alias == &expression.raw_input)
+                    }
+                    _ => false,
+                };
+            if alias_matches {
+                Ok(expression.alias_rank.clone())
+            } else {
+                Ok(expression.fallback_rank.clone())
+            }
+        }
         ProjectionExpression::ColumnDefaultIfNullOrEq {
             column,
             property,

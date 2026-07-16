@@ -636,6 +636,7 @@ pub enum ReturnValueExpression {
         variable: String,
         terms: Vec<CoalesceDifferenceTerm>,
     },
+    CaseEntitySearchRank(Box<CaseEntitySearchRankExpression>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -681,6 +682,7 @@ pub enum ReturnExpression {
         variable: String,
         terms: Vec<CoalesceDifferenceTerm>,
     },
+    CaseEntitySearchRank(Box<CaseEntitySearchRankExpression>),
     CountAll,
     CountVariable {
         variable: String,
@@ -712,6 +714,19 @@ pub enum ReturnExpression {
         variable: String,
         property: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaseEntitySearchRankExpression {
+    pub variable: String,
+    pub name_property: String,
+    pub aliases_property: String,
+    pub raw_query: ValueExpression,
+    pub normalized_query: ValueExpression,
+    pub raw_input: ValueExpression,
+    pub exact_rank: ValueExpression,
+    pub alias_rank: ValueExpression,
+    pub fallback_rank: ValueExpression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
