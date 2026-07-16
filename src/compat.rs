@@ -4,11 +4,14 @@ use crate::error::{Result, SkeinError};
 use crate::executor::Row;
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::process::{Child, ChildStderr, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::thread::{self, JoinHandle};
 
 const DEFAULT_FLOAT_ABS_TOLERANCE: f64 = 1.0e-9;
 pub const EXTERNAL_SHADOW_PROTOCOL_VERSION: u64 = 1;
+const EXTERNAL_SHADOW_STDERR_TAIL_BYTES: usize = 8192;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompatibilityFixture {
@@ -243,6 +246,12 @@ pub struct ExternalShadowCommand {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
+    stderr: ExternalShadowStderr,
+}
+
+struct ExternalShadowStderr {
+    tail: Arc<Mutex<String>>,
+    join: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -274,11 +283,15 @@ impl ExternalShadowCommand {
         let stdout = child.stdout.take().ok_or_else(|| {
             SkeinError::Execution("external shadow engine did not expose stdout".to_string())
         })?;
+        let stderr = child.stderr.take().ok_or_else(|| {
+            SkeinError::Execution("external shadow engine did not expose stderr".to_string())
+        })?;
         Ok(Self {
             name: name.into(),
             child,
             stdin,
             stdout: BufReader::new(stdout),
+            stderr: ExternalShadowStderr::start(stderr),
         })
     }
 
@@ -294,13 +307,13 @@ impl ExternalShadowCommand {
             SkeinError::Execution(format!("failed to encode shadow request: {error}"))
         })?;
         writeln!(self.stdin, "{line}").map_err(|error| {
-            SkeinError::Execution(format!(
+            self.request_error(format!(
                 "failed to write request to shadow engine '{}': {error}",
                 self.name
             ))
         })?;
         self.stdin.flush().map_err(|error| {
-            SkeinError::Execution(format!(
+            self.request_error(format!(
                 "failed to flush request to shadow engine '{}': {error}",
                 self.name
             ))
@@ -308,23 +321,27 @@ impl ExternalShadowCommand {
 
         let mut response = String::new();
         let bytes = self.stdout.read_line(&mut response).map_err(|error| {
-            SkeinError::Execution(format!(
+            self.request_error(format!(
                 "failed to read response from shadow engine '{}': {error}",
                 self.name
             ))
         })?;
         if bytes == 0 {
-            return Err(SkeinError::Execution(format!(
-                "shadow engine '{}' closed stdout",
-                self.name
-            )));
+            return Err(self.request_error(format!("shadow engine '{}' closed stdout", self.name)));
         }
         serde_json::from_str(response.trim_end()).map_err(|error| {
-            SkeinError::Execution(format!(
+            self.request_error(format!(
                 "shadow engine '{}' returned invalid JSON: {error}",
                 self.name
             ))
         })
+    }
+
+    fn request_error(&self, message: String) -> SkeinError {
+        match self.stderr.tail() {
+            Some(stderr) => SkeinError::Execution(format!("{message}; stderr tail: {stderr}")),
+            None => SkeinError::Execution(message),
+        }
     }
 }
 
@@ -332,6 +349,55 @@ impl Drop for ExternalShadowCommand {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+impl ExternalShadowStderr {
+    fn start(mut stderr: ChildStderr) -> Self {
+        let tail = Arc::new(Mutex::new(String::new()));
+        let thread_tail = Arc::clone(&tail);
+        let join = thread::spawn(move || {
+            let mut chunk = [0_u8; 1024];
+            loop {
+                match stderr.read(&mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(bytes) => {
+                        let text = String::from_utf8_lossy(&chunk[..bytes]);
+                        let mut tail = thread_tail.lock().unwrap();
+                        tail.push_str(&text);
+                        if tail.len() > EXTERNAL_SHADOW_STDERR_TAIL_BYTES {
+                            let mut drain_to = tail.len() - EXTERNAL_SHADOW_STDERR_TAIL_BYTES;
+                            while !tail.is_char_boundary(drain_to) {
+                                drain_to += 1;
+                            }
+                            tail.drain(..drain_to);
+                        }
+                    }
+                }
+            }
+        });
+        Self {
+            tail,
+            join: Some(join),
+        }
+    }
+
+    fn tail(&self) -> Option<String> {
+        let tail = self.tail.lock().unwrap();
+        let tail = tail.trim();
+        if tail.is_empty() {
+            None
+        } else {
+            Some(tail.to_string())
+        }
+    }
+}
+
+impl Drop for ExternalShadowStderr {
+    fn drop(&mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
+        }
     }
 }
 
@@ -27093,6 +27159,41 @@ done
         assert!(error
             .to_string()
             .contains("session returned 4 outputs for 3 statements"));
+    }
+
+    #[test]
+    fn includes_external_shadow_stderr_tail_on_stdout_close() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-stderr-tail",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  echo "wrapper boot failed" >&2
+  exit 7
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-stderr-tail", "sh", [script]).unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-stderr-tail-fixture".to_string(),
+            setup: Vec::new(),
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::RowCount(0),
+            ))],
+        };
+
+        let error =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("shadow engine 'external-shadow-stderr-tail' closed stdout"));
+        assert!(error
+            .to_string()
+            .contains("stderr tail: wrapper boot failed"));
     }
 
     #[test]
