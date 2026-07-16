@@ -97,6 +97,7 @@ Request:
 {
   "protocol_version": 1,
   "op": "execute_session",
+  "access": "mutation",
   "statements": [
     {
       "cypher": "CREATE (:Memory {id: 1, title: 'Old'})",
@@ -147,9 +148,11 @@ Success response:
 ```
 
 The `outputs` array must have the same length and order as the request
-`statements` array. `access` is advisory but stable: previous-wrapper adapters
-should use `read` for read-only Kuzu/Ladybug APIs and `mutation` for serialized
-write paths. `role` is a compatibility-harness context label.
+`statements` array. The top-level `access` is `mutation` if any statement in
+the session may write; otherwise it is `read`. Per-statement `access` is
+advisory but stable: previous-wrapper adapters should use `read` for read-only
+Kuzu/Ladybug APIs and `mutation` for serialized write paths. `role` is a
+compatibility-harness context label.
 
 ## `project_graph`
 

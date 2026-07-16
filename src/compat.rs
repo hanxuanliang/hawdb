@@ -502,12 +502,14 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         statements: &[CypherFixtureStatement],
     ) -> Result<Vec<QueryOutput>> {
         let statement_count = statements.len();
+        let session_access = shadow_session_access_as_str(statements);
         let statements = statements
             .iter()
             .map(|statement| json_from_statement(statement, ShadowStatementRole::Statement))
             .collect::<Vec<_>>();
         let response = self.request(serde_json::json!({
             "op": "execute_session",
+            "access": session_access,
             "statements": statements,
         }))?;
         let outputs = decode_external_session_response(&self.name, response)?;
@@ -1012,6 +1014,17 @@ fn shadow_statement_role_as_str(role: ShadowStatementRole) -> &'static str {
 
 fn shadow_statement_access_as_str(statement: &CypherFixtureStatement) -> &'static str {
     if is_mutation_statement(&statement.cypher) {
+        "mutation"
+    } else {
+        "read"
+    }
+}
+
+fn shadow_session_access_as_str(statements: &[CypherFixtureStatement]) -> &'static str {
+    if statements
+        .iter()
+        .any(|statement| is_mutation_statement(&statement.cypher))
+    {
         "mutation"
     } else {
         "read"
@@ -27305,6 +27318,33 @@ done
         assert!(error
             .to_string()
             .contains("session returned 4 outputs for 3 statements"));
+    }
+
+    #[test]
+    fn sends_external_shadow_session_access() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-session-access",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"op":"execute_session"'*'"access":"mutation"'*) echo '{"ok":{"outputs":[{"rows":[]},{"rows":[{}]},{"rows":[{"title":"New"}]}]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected mutation session access"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-session-access", "sh", [script]).unwrap();
+        let fixture = session_effect_fixture("external-shadow-session-access-fixture");
+
+        let report =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
+
+        assert_eq!(
+            report.shadow_checks[0].status,
+            CompatibilityShadowStatus::Matched
+        );
     }
 
     #[test]
