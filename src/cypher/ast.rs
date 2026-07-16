@@ -393,6 +393,10 @@ pub enum SetValueExpression {
         property: String,
         value: ValueExpression,
     },
+    DecrementFloorZero {
+        variable: String,
+        property: String,
+    },
     CoalescePropertyAdd {
         variable: String,
         property: String,

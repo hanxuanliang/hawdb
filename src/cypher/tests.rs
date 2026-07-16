@@ -530,6 +530,26 @@ fn parses_property_increment_set() {
 }
 
 #[test]
+fn parses_case_decrement_floor_zero_set() {
+    let statement = parse(
+        "MATCH (s:Source {id: $id}) SET s.memory_count = CASE WHEN s.memory_count > 0 THEN s.memory_count - 1 ELSE 0 END",
+    )
+    .unwrap();
+    let Statement::MatchSet(update) = statement else {
+        panic!("expected match set");
+    };
+    assert_eq!(update.sets[0].variable, "s");
+    assert_eq!(update.sets[0].property, "memory_count");
+    assert_eq!(
+        update.sets[0].value,
+        SetValueExpression::DecrementFloorZero {
+            variable: "s".to_string(),
+            property: "memory_count".to_string(),
+        }
+    );
+}
+
+#[test]
 fn parses_coalesce_property_increment_set() {
     let statement = parse(
         "MATCH (m:Memory) WHERE m.id = $id

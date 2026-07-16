@@ -336,6 +336,7 @@ pub enum NodeSetValue {
     Value(Value),
     Coalesce { default: Value },
     AddInt { amount: i64 },
+    DecrementFloorZero,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7183,6 +7184,18 @@ fn evaluate_node_set_value(
             Ok(Value::Int(current.checked_add(*amount).ok_or_else(
                 || SkeinError::Execution("property increment overflowed i64".to_string()),
             )?))
+        }
+        NodeSetValue::DecrementFloorZero => {
+            let current = match properties.get(&assignment.property) {
+                None | Some(Value::Null) => 0,
+                Some(Value::Int(value)) => *value,
+                Some(value) => {
+                    return Err(SkeinError::Execution(format!(
+                        "property decrement requires an integer or null value, got {value:?}"
+                    )));
+                }
+            };
+            Ok(Value::Int(if current > 0 { current - 1 } else { 0 }))
         }
     }
 }

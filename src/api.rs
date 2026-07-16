@@ -8293,6 +8293,26 @@ mod tests {
             .unwrap_err();
         assert!(error.to_string().contains("requires an integer or null"));
 
+        db.query(
+            "MATCH (s:Source {id: 's1'})
+             SET s.memory_count = CASE WHEN s.memory_count > 0 THEN s.memory_count - 1 ELSE 0 END",
+        )
+        .unwrap();
+        let output = db
+            .query("MATCH (s:Source {id: 's1'}) RETURN s.memory_count AS count")
+            .unwrap();
+        assert_eq!(output.rows[0].get("count"), Some(&Value::Int(0)));
+
+        db.query(
+            "MATCH (s:Source {id: 's1'})
+             SET s.memory_count = CASE WHEN s.memory_count > 0 THEN s.memory_count - 1 ELSE 0 END",
+        )
+        .unwrap();
+        let output = db
+            .query("MATCH (s:Source {id: 's1'}) RETURN s.memory_count AS count")
+            .unwrap();
+        assert_eq!(output.rows[0].get("count"), Some(&Value::Int(0)));
+
         db.query("CREATE (:Memory {id: 'm1'})").unwrap();
         db.query(
             "MATCH (m:Memory) WHERE m.id = 'm1'

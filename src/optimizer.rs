@@ -4088,6 +4088,11 @@ fn write_set_value(output: &mut String, value: &SetValue) {
             output.push_str(&amount.to_string());
             output.push(')');
         }
+        SetValue::DecrementFloorZero { property } => {
+            output.push_str("dec_floor_zero(");
+            write_identifier(output, property);
+            output.push(')');
+        }
     }
 }
 
@@ -4109,6 +4114,7 @@ fn set_value_summary(value: &SetValue) -> String {
         SetValue::Value(value) => format!("{value:?}"),
         SetValue::Coalesce { property, default } => format!("coalesce({property},{default:?})"),
         SetValue::AddInt { property, amount } => format!("{property}+{amount}"),
+        SetValue::DecrementFloorZero { property } => format!("max({property}-1,0)"),
     }
 }
 

@@ -300,6 +300,14 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
                     property: property.clone(),
                     amount: *amount,
                 })),
+                SetValue::DecrementFloorZero { .. } => Ok(Some(GraphMutation::SetNodeProperties {
+                    label: label.clone(),
+                    filter,
+                    assignments: vec![NodeSetAssignment {
+                        property: property.clone(),
+                        value: NodeSetValue::DecrementFloorZero,
+                    }],
+                })),
             }
         }
         PhysicalPlan::SetNodeProperties {
@@ -508,6 +516,7 @@ fn node_set_assignment(assignment: &crate::planner::SetAssignment) -> NodeSetAss
                 default: default.clone(),
             },
             SetValue::AddInt { amount, .. } => NodeSetValue::AddInt { amount: *amount },
+            SetValue::DecrementFloorZero { .. } => NodeSetValue::DecrementFloorZero,
         },
     }
 }
@@ -1149,6 +1158,15 @@ fn execute_bindings(
                     filter.as_ref(),
                     property,
                     *amount,
+                )?,
+                SetValue::DecrementFloorZero { .. } => store.set_node_properties(
+                    catalog,
+                    label,
+                    filter.as_ref(),
+                    &[NodeSetAssignment {
+                        property: property.clone(),
+                        value: NodeSetValue::DecrementFloorZero,
+                    }],
                 )?,
             };
             Ok(ids

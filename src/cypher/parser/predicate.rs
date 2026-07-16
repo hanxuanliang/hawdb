@@ -614,7 +614,12 @@ impl Parser<'_> {
         self.expect_char('=')?;
         self.skip_ws();
         let value_start = self.pos;
-        let value = if self.consume_keyword("COALESCE") {
+        let case_start = self.pos;
+        let starts_case = self.consume_keyword("CASE");
+        self.pos = case_start;
+        let value = if starts_case {
+            self.parse_case_decrement_floor_zero_set_value()?
+        } else if self.consume_keyword("COALESCE") {
             self.expect_char('(')?;
             let expression_variable = self.parse_ident()?;
             self.expect_char('.')?;
@@ -664,6 +669,41 @@ impl Parser<'_> {
             variable,
             property,
             value,
+        })
+    }
+
+    fn parse_case_decrement_floor_zero_set_value(&mut self) -> Result<SetValueExpression> {
+        self.expect_keyword("CASE")?;
+        self.expect_keyword("WHEN")?;
+        let condition_variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let condition_property = self.parse_ident()?;
+        self.expect_char('>')?;
+        let threshold = self.parse_value()?;
+        if threshold != ValueExpression::Literal(crate::value::Value::Int(0)) {
+            return Err(self.error("CASE decrement SET only supports a zero threshold"));
+        }
+        self.expect_keyword("THEN")?;
+        let then_variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let then_property = self.parse_ident()?;
+        if then_variable != condition_variable || then_property != condition_property {
+            return Err(self.error("CASE decrement SET must decrement the tested property"));
+        }
+        self.expect_char('-')?;
+        let decrement = self.parse_value()?;
+        if decrement != ValueExpression::Literal(crate::value::Value::Int(1)) {
+            return Err(self.error("CASE decrement SET only supports decrement by one"));
+        }
+        self.expect_keyword("ELSE")?;
+        let floor = self.parse_value()?;
+        if floor != ValueExpression::Literal(crate::value::Value::Int(0)) {
+            return Err(self.error("CASE decrement SET only supports a zero floor"));
+        }
+        self.expect_keyword("END")?;
+        Ok(SetValueExpression::DecrementFloorZero {
+            variable: condition_variable,
+            property: condition_property,
         })
     }
 

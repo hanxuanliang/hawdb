@@ -484,6 +484,7 @@ pub enum SetValue {
     Value(Value),
     Coalesce { property: String, default: Value },
     AddInt { property: String, amount: i64 },
+    DecrementFloorZero { property: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2642,6 +2643,7 @@ fn bind_relationship_copy_on_create_set_properties(
             }
             SetValueExpression::PropertyAdd { .. }
             | SetValueExpression::CoalesceProperty { .. }
+            | SetValueExpression::DecrementFloorZero { .. }
             | SetValueExpression::CoalescePropertyAdd { .. } => {
                 return Err(SkeinError::Semantic(
                     "relationship-copy MERGE ON CREATE SET supports only values and matched relationship properties"
@@ -3942,6 +3944,7 @@ fn bind_relationship_set_value(
         )),
         crate::cypher::SetValueExpression::PropertyAdd { .. }
         | crate::cypher::SetValueExpression::CoalesceProperty { .. }
+        | crate::cypher::SetValueExpression::DecrementFloorZero { .. }
         | crate::cypher::SetValueExpression::CoalescePropertyAdd { .. } => {
             Err(SkeinError::Semantic(
                 "relationship property increment SET is not supported".to_string(),
@@ -3997,6 +4000,16 @@ fn plan_set_value(
             Ok(SetValue::AddInt {
                 property: property.clone(),
                 amount,
+            })
+        }
+        crate::cypher::SetValueExpression::DecrementFloorZero { variable, property } => {
+            if variable != &set.variable || property != &set.property {
+                return Err(SkeinError::Semantic(
+                    "CASE decrement SET must read the same variable property it writes".to_string(),
+                ));
+            }
+            Ok(SetValue::DecrementFloorZero {
+                property: property.clone(),
             })
         }
         crate::cypher::SetValueExpression::CoalescePropertyAdd {

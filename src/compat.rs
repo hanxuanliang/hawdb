@@ -1651,6 +1651,59 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory source provenance id read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $id})-[:SOURCED_FROM]->(s:Source) RETURN s.id",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("memory-source-provenance-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "s.id",
+                        Value::String("source-provenance-single-1".to_string()),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'memory-source-provenance-1', title: 'Source provenance memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-provenance-single-1', original_name: 'Single provenance source'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'memory-source-provenance-1'}), (s:Source {id: 'source-provenance-single-1'}) CREATE (m)-[:SOURCED_FROM]->(s)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['memory-source-provenance-1', 'source-provenance-single-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source memory-count decrement floor write",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) SET s.memory_count = CASE WHEN s.memory_count > 0 THEN s.memory_count - 1 ELSE 0 END",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("source-memory-count-decrement-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-memory-count-decrement-1', memory_count: 2})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'source-memory-count-decrement-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "thread compaction attribution read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory) WHERE m.id IN $ids RETURN m.id, t.thread_id",
@@ -4413,6 +4466,74 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ),
                 ExpectedRows::Exact(vec![compatibility_row([("count(r)", Value::Int(1))])]),
             )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source relationship source-reference count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE r.source_reference = $id RETURN count(r)",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("source-ref-count".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([("count(r)", Value::Int(1))])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'source-ref-count-e1', name: 'Source Ref Count One'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'source-ref-count-e2', name: 'Source Ref Count Two'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'source-ref-count-e3', name: 'Source Ref Count Three'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'source-ref-count-e1'}), (b:Entity {id: 'source-ref-count-e2'}) CREATE (a)-[:RELATES_TO {source_reference: 'source-ref-count'}]->(b)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'source-ref-count-e1'}), (b:Entity {id: 'source-ref-count-e3'}) CREATE (a)-[:RELATES_TO {source_reference: 'other-source'}]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['source-ref-count-e1', 'source-ref-count-e2', 'source-ref-count-e3'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source relationship source-reference delete",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE r.source_reference = $id DELETE r",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("source-ref-delete".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'source-ref-delete-e1', name: 'Source Ref Delete One'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'source-ref-delete-e2', name: 'Source Ref Delete Two'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'source-ref-delete-e3', name: 'Source Ref Delete Three'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'source-ref-delete-e1'}), (b:Entity {id: 'source-ref-delete-e2'}) CREATE (a)-[:RELATES_TO {source_reference: 'source-ref-delete'}]->(b)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Entity {id: 'source-ref-delete-e1'}), (b:Entity {id: 'source-ref-delete-e3'}) CREATE (a)-[:RELATES_TO {source_reference: 'other-source'}]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['source-ref-delete-e1', 'source-ref-delete-e2', 'source-ref-delete-e3'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "entity outgoing relation preview",
                 CypherFixtureStatement::with_parameters(
@@ -6123,6 +6244,38 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (m:Memory)-[:SOURCED_FROM]->(s:Source {id: $sid}) RETURN m.id LIMIT 24",
+            ),
+            CompatibilityQueryCallSite::new(
+                "memory source provenance id read",
+                "source_read",
+                "nmem-server::memory_delete::source_ids_for_memory",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $id})-[:SOURCED_FROM]->(s:Source) RETURN s.id",
+            ),
+            CompatibilityQueryCallSite::new(
+                "source memory-count decrement floor write",
+                "source_write",
+                "nmem-server::memory_delete::decrement_source_memory_count",
+            )
+            .with_cypher(
+                "MATCH (s:Source {id: $id}) SET s.memory_count = CASE WHEN s.memory_count > 0 THEN s.memory_count - 1 ELSE 0 END",
+            ),
+            CompatibilityQueryCallSite::new(
+                "source relationship source-reference count read",
+                "relationship_read",
+                "nmem-server::memory_delete::source_reference_relationship_count",
+            )
+            .with_cypher(
+                "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE r.source_reference = $id RETURN count(r)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "source relationship source-reference delete",
+                "relationship_write",
+                "nmem-server::memory_delete::delete_source_reference_relationships",
+            )
+            .with_cypher(
+                "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE r.source_reference = $id DELETE r",
             ),
             CompatibilityQueryCallSite::new(
                 "thread compaction attribution read",
@@ -8414,7 +8567,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 173);
+        assert_eq!(report.checks.len(), 177);
     }
 
     #[test]
@@ -8430,13 +8583,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 173);
-        assert_eq!(coverage.covered_checks, 173);
+        assert_eq!(coverage.required_checks, 177);
+        assert_eq!(coverage.covered_checks, 177);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 173);
+        assert_eq!(coverage_json["covered_checks"], 177);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -8466,10 +8619,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 173);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 177);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 173);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 177);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -8663,15 +8816,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 173);
-        assert_eq!(report.shadow_checks.len(), 173);
+        assert_eq!(report.primary_checks.len(), 177);
+        assert_eq!(report.shadow_checks.len(), 177);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            173
+            177
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -8680,7 +8833,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 173);
+        assert_eq!(cutover.matched_checks, 177);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
