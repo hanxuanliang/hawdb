@@ -5619,6 +5619,47 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "thread identity cascade delete",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (ti:ThreadIdentity) WHERE ti.id = $public_thread_id OR ti.id = $input_thread_id OR ti.thread_node_id = $thread_uuid DETACH DELETE ti",
+                        BTreeMap::from([
+                            (
+                                "public_thread_id".to_string(),
+                                Value::String("identity-cascade-public".to_string()),
+                            ),
+                            (
+                                "input_thread_id".to_string(),
+                                Value::String("identity-cascade-input".to_string()),
+                            ),
+                            (
+                                "thread_uuid".to_string(),
+                                Value::String("identity-cascade-node".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(3),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:ThreadIdentity {id: 'identity-cascade-public', thread_node_id: 'identity-cascade-other-1', thread_id: 'identity-cascade-logical-public'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:ThreadIdentity {id: 'identity-cascade-input', thread_node_id: 'identity-cascade-other-2', thread_id: 'identity-cascade-logical-input'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:ThreadIdentity {id: 'identity-cascade-by-node', thread_node_id: 'identity-cascade-node', thread_id: 'identity-cascade-logical-node'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:ThreadIdentity {id: 'identity-cascade-survivor', thread_node_id: 'identity-cascade-survivor-node', thread_id: 'identity-cascade-logical-survivor'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (ti:ThreadIdentity {id: 'identity-cascade-survivor'}) DETACH DELETE ti",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "thread compensation delete",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (t:Thread {id: $thread_uuid}) DETACH DELETE t",
@@ -12334,6 +12375,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (ti:ThreadIdentity {id: $identity_key}) DETACH DELETE ti"),
             CompatibilityQueryCallSite::new(
+                "thread identity cascade delete",
+                "thread_write",
+                "nmem-graph::repo::delete_thread_cascade::identities",
+            )
+            .with_cypher(
+                "MATCH (ti:ThreadIdentity) WHERE ti.id = $public_thread_id OR ti.id = $input_thread_id OR ti.thread_node_id = $thread_uuid DETACH DELETE ti",
+            ),
+            CompatibilityQueryCallSite::new(
                 "thread compensation delete",
                 "thread_write",
                 "nmem-graph::repo::delete_thread_compensation::thread",
@@ -15309,7 +15358,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 339);
+        assert_eq!(report.checks.len(), 340);
     }
 
     #[test]
@@ -15325,13 +15374,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 339);
-        assert_eq!(coverage.covered_checks, 339);
+        assert_eq!(coverage.required_checks, 340);
+        assert_eq!(coverage.covered_checks, 340);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 339);
+        assert_eq!(coverage_json["covered_checks"], 340);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15361,10 +15410,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 339);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 340);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 339);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 340);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -15589,15 +15638,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 339);
-        assert_eq!(report.shadow_checks.len(), 339);
+        assert_eq!(report.primary_checks.len(), 340);
+        assert_eq!(report.shadow_checks.len(), 340);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            339
+            340
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -15606,7 +15655,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 339);
+        assert_eq!(cutover.matched_checks, 340);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
