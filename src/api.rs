@@ -2587,6 +2587,27 @@ mod tests {
     }
 
     #[test]
+    fn returns_relationship_endpoint_properties() {
+        let mut db = Database::new();
+        db.query("CREATE (:Entity {id: 'left'})-[:RELATES_TO]->(:Entity {id: 'right'})")
+            .unwrap();
+
+        let output = db
+            .query("MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) RETURN e1.id, e2.id")
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].get("e1.id"),
+            Some(&Value::String("left".to_string()))
+        );
+        assert_eq!(
+            output.rows[0].get("e2.id"),
+            Some(&Value::String("right".to_string()))
+        );
+    }
+
+    #[test]
     fn retrieves_knowledge_through_database_facade() {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'mem_1', title: 'Graph retrieval', content: 'Projection freshness and truncation diagnostics', source_id: 'thread_1'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Skein'})")
