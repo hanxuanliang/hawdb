@@ -53,7 +53,8 @@ pub fn scan_nowledge_query_inventory_with_options(
         if !scan_source_file(&source_file) {
             continue;
         }
-        for literal in extract_rust_string_literals(&content)? {
+        let production_content = strip_cfg_test_modules(&content);
+        for literal in extract_rust_string_literals(&production_content)? {
             let Some(cypher) = normalize_cypher_literal(&literal.value) else {
                 continue;
             };
@@ -307,6 +308,137 @@ fn extract_rust_string_literals(content: &str) -> Result<Vec<RustStringLiteral>>
     Ok(literals)
 }
 
+fn strip_cfg_test_modules(content: &str) -> String {
+    let mut output = content.as_bytes().to_vec();
+    let mut search_start = 0;
+    while let Some(relative_start) = content[search_start..].find("#[cfg(test)]") {
+        let attribute_start = search_start + relative_start;
+        let after_attribute = attribute_start + "#[cfg(test)]".len();
+        let Some(module_start) = cfg_test_module_start(content, after_attribute) else {
+            search_start = after_attribute;
+            continue;
+        };
+        let Some(module_end) = find_matching_rust_brace(content, module_start) else {
+            break;
+        };
+        for byte in &mut output[attribute_start..=module_end] {
+            if *byte != b'\n' {
+                *byte = b' ';
+            }
+        }
+        search_start = module_end + 1;
+    }
+    String::from_utf8(output).expect("ASCII masking preserves valid UTF-8")
+}
+
+fn cfg_test_module_start(content: &str, after_attribute: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut index = skip_ascii_whitespace(bytes, after_attribute);
+    if !bytes.get(index..)?.starts_with(b"mod") {
+        return None;
+    }
+    index += b"mod".len();
+    if !bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        return None;
+    }
+    index = skip_ascii_whitespace(bytes, index);
+    let ident_start = index;
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+    {
+        index += 1;
+    }
+    if index == ident_start {
+        return None;
+    }
+    index = skip_ascii_whitespace(bytes, index);
+    if bytes.get(index) == Some(&b'{') {
+        Some(index)
+    } else {
+        None
+    }
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes
+        .get(index)
+        .is_some_and(|byte| byte.is_ascii_whitespace())
+    {
+        index += 1;
+    }
+    index
+}
+
+fn find_matching_rust_brace(content: &str, open_brace: usize) -> Option<usize> {
+    let bytes = content.as_bytes();
+    let mut index = open_brace;
+    let mut depth = 0_usize;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() {
+                    if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+                        index += 2;
+                        break;
+                    }
+                    index += 1;
+                }
+            }
+            b'\'' if looks_like_char_literal(bytes, index) => {
+                let (next, _) = skip_char_literal(content, index).ok()?;
+                index = next;
+            }
+            b'\'' => {
+                index += 1;
+            }
+            b'b' if bytes.get(index + 1) == Some(&b'"') => {
+                let (_, next, _) = parse_cooked_string(content, index + 1).ok()?;
+                index = next;
+            }
+            b'b' if bytes.get(index + 1) == Some(&b'r')
+                && raw_string_start(bytes, index + 1).is_some() =>
+            {
+                let (_, next, _) = parse_raw_string(content, index + 1).ok()?;
+                index = next;
+            }
+            b'"' => {
+                let (_, next, _) = parse_cooked_string(content, index).ok()?;
+                index = next;
+            }
+            b'r' if raw_string_start(bytes, index).is_some() => {
+                let (_, next, _) = parse_raw_string(content, index).ok()?;
+                index = next;
+            }
+            b'{' => {
+                depth += 1;
+                index += 1;
+            }
+            b'}' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    None
+}
+
 fn skip_char_literal(content: &str, start: usize) -> Result<(usize, usize)> {
     let bytes = content.as_bytes();
     let mut index = start + 1;
@@ -507,19 +639,11 @@ fn looks_like_cypher(query: &str) -> bool {
         || upper.starts_with("CREATE RELATIONSHIP ")
         || graph_index_ddl(&upper)
         || graph_procedure_call(&upper)
-        || upper == "BEGIN TRANSACTION"
-        || upper == "COMMIT"
-        || upper == "ROLLBACK"
-        || upper == "CHECKPOINT";
+        || is_transaction_control(query);
     if !starts_like_cypher {
         return false;
     }
-    upper.contains('(')
-        || graph_procedure_call(&upper)
-        || upper == "COMMIT"
-        || upper == "ROLLBACK"
-        || upper == "CHECKPOINT"
-        || upper == "BEGIN TRANSACTION"
+    upper.contains('(') || graph_procedure_call(&upper) || is_transaction_control(query)
 }
 
 fn classify_query_family(query: &str) -> &'static str {
@@ -531,11 +655,7 @@ fn classify_query_family(query: &str) -> &'static str {
         || graph_index_ddl(&upper)
     {
         "schema"
-    } else if upper == "BEGIN TRANSACTION"
-        || upper == "COMMIT"
-        || upper == "ROLLBACK"
-        || upper == "CHECKPOINT"
-    {
+    } else if is_transaction_control(query) {
         "transaction_control"
     } else if upper.starts_with("CREATE ")
         || upper.starts_with("MERGE ")
@@ -549,6 +669,13 @@ fn classify_query_family(query: &str) -> &'static str {
     } else {
         "read"
     }
+}
+
+fn is_transaction_control(query: &str) -> bool {
+    matches!(
+        query,
+        "BEGIN TRANSACTION" | "COMMIT" | "ROLLBACK" | "CHECKPOINT"
+    )
 }
 
 fn graph_index_ddl(upper: &str) -> bool {
@@ -599,8 +726,10 @@ fn path_to_slash_string(path: &Path) -> String {
 mod tests {
     use super::{
         classify_query_family, extract_rust_string_literals, normalize_cypher_literal,
+        scan_nowledge_query_inventory,
         scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
         scan_nowledge_query_inventory_cypher_coverage_to_json, scan_source_file,
+        strip_cfg_test_modules,
     };
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -691,6 +820,44 @@ mod tests {
         assert_eq!(
             normalize_cypher_literal("CHECKPOINT;"),
             Some("CHECKPOINT".to_string())
+        );
+        assert_eq!(normalize_cypher_literal("checkpoint"), None);
+    }
+
+    #[test]
+    fn strips_cfg_test_modules_before_scanning_literals() {
+        let source = r#"
+            pub fn before() -> &'static str {
+                "MATCH (m:Memory) RETURN m.id"
+            }
+
+            #[cfg(test)]
+            mod tests {
+                #[test]
+                fn ignored() {
+                    let query = "MATCH (t:TestOnly {shape: '{not a brace}'}) RETURN t.id";
+                    assert_eq!(query.len(), 1);
+                }
+            }
+
+            pub fn after() -> &'static str {
+                "MATCH (e:Entity) RETURN e.id"
+            }
+        "#;
+
+        let stripped = strip_cfg_test_modules(source);
+        let queries = extract_rust_string_literals(&stripped)
+            .unwrap()
+            .into_iter()
+            .filter_map(|literal| normalize_cypher_literal(&literal.value))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            queries,
+            vec![
+                "MATCH (m:Memory) RETURN m.id".to_string(),
+                "MATCH (e:Entity) RETURN e.id".to_string()
+            ]
         );
     }
 
@@ -811,6 +978,46 @@ mod tests {
         assert_eq!(
             missing_items[0]["source"],
             "crates/nmem-graph/src/repo.rs:7"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_inventory_skips_cfg_test_module_literals() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-inventory-cfg-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("client.rs"),
+            r#"
+                pub fn production() -> &'static str {
+                    "MATCH (m:Memory) RETURN m.id"
+                }
+
+                #[cfg(test)]
+                mod tests {
+                    #[test]
+                    fn ignored() {
+                        let query = "CREATE NODE TABLE T(id INT64, PRIMARY KEY(id));";
+                    }
+                }
+            "#,
+        )
+        .unwrap();
+
+        let inventory = scan_nowledge_query_inventory(&root).unwrap();
+
+        assert_eq!(inventory.required_checks.len(), 1);
+        assert_eq!(
+            inventory.required_checks[0].cypher.as_deref(),
+            Some("MATCH (m:Memory) RETURN m.id")
         );
 
         fs::remove_dir_all(root).unwrap();
