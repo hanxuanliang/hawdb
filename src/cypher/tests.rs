@@ -626,6 +626,28 @@ fn parses_coalesce_property_increment_set() {
 }
 
 #[test]
+fn parses_case_preserve_newer_existing_set() {
+    let statement = parse(
+        "MATCH (t:Thread {id: $thread_uuid}) SET t.message_count = $message_count, t.updated_at = CASE WHEN $updated_at IS NULL THEN t.updated_at WHEN $preserve_newer_existing_updated_at = true AND t.updated_at IS NOT NULL AND t.updated_at > $updated_at THEN t.updated_at ELSE $updated_at END",
+    )
+    .unwrap();
+    let Statement::MatchSet(update) = statement else {
+        panic!("expected match set");
+    };
+    assert_eq!(update.sets.len(), 2);
+    assert_eq!(update.sets[1].property, "updated_at");
+    assert_eq!(
+        update.sets[1].value,
+        SetValueExpression::PreserveNewerExisting {
+            variable: "t".to_string(),
+            property: "updated_at".to_string(),
+            incoming: ValueExpression::Parameter("updated_at".to_string()),
+            preserve: ValueExpression::Parameter("preserve_newer_existing_updated_at".to_string()),
+        }
+    );
+}
+
+#[test]
 fn parses_relationship_variable_set() {
     let statement =
         parse("MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id = 1 SET r.weight = 2").unwrap();

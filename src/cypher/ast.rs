@@ -422,6 +422,12 @@ pub enum SetValueExpression {
         variable: String,
         property: String,
     },
+    PreserveNewerExisting {
+        variable: String,
+        property: String,
+        incoming: ValueExpression,
+        preserve: ValueExpression,
+    },
     CoalescePropertyAdd {
         variable: String,
         property: String,

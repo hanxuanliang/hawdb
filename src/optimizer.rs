@@ -4111,6 +4111,19 @@ fn write_set_value(output: &mut String, value: &SetValue) {
             write_identifier(output, property);
             output.push(')');
         }
+        SetValue::PreserveNewerExisting {
+            property,
+            incoming,
+            preserve,
+        } => {
+            output.push_str("preserve_newer(");
+            write_identifier(output, property);
+            output.push(',');
+            write_value(output, incoming);
+            output.push(',');
+            output.push_str(&preserve.to_string());
+            output.push(')');
+        }
     }
 }
 
@@ -4133,6 +4146,11 @@ fn set_value_summary(value: &SetValue) -> String {
         SetValue::Coalesce { property, default } => format!("coalesce({property},{default:?})"),
         SetValue::AddInt { property, amount } => format!("{property}+{amount}"),
         SetValue::DecrementFloorZero { property } => format!("max({property}-1,0)"),
+        SetValue::PreserveNewerExisting {
+            property,
+            incoming,
+            preserve,
+        } => format!("preserve_newer({property},{incoming:?},{preserve})"),
     }
 }
 

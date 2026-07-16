@@ -601,7 +601,7 @@ impl Parser<'_> {
         let starts_case = self.consume_keyword("CASE");
         self.pos = case_start;
         let value = if starts_case {
-            self.parse_case_decrement_floor_zero_set_value()?
+            self.parse_case_set_value()?
         } else if self.consume_keyword("COALESCE") {
             self.expect_char('(')?;
             let expression_variable = self.parse_ident()?;
@@ -655,9 +655,77 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_case_decrement_floor_zero_set_value(&mut self) -> Result<SetValueExpression> {
+    fn parse_case_set_value(&mut self) -> Result<SetValueExpression> {
         self.expect_keyword("CASE")?;
         self.expect_keyword("WHEN")?;
+        self.skip_ws();
+        if self.peek_char() == Some('$') {
+            return self.parse_case_preserve_newer_existing_set_value();
+        }
+        self.parse_case_decrement_floor_zero_set_value_after_when()
+    }
+
+    fn parse_case_preserve_newer_existing_set_value(&mut self) -> Result<SetValueExpression> {
+        let incoming = self.parse_value()?;
+        self.expect_keyword("IS")?;
+        self.expect_keyword("NULL")?;
+        self.expect_keyword("THEN")?;
+        let then_variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let then_property = self.parse_ident()?;
+        self.expect_keyword("WHEN")?;
+        let preserve = self.parse_value()?;
+        self.expect_char('=')?;
+        let preserve_true = self.parse_value()?;
+        if preserve_true != ValueExpression::Literal(crate::value::Value::Bool(true)) {
+            return Err(self.error("CASE preserve SET only supports comparison to true"));
+        }
+        self.expect_keyword("AND")?;
+        let checked_variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let checked_property = self.parse_ident()?;
+        if checked_variable != then_variable || checked_property != then_property {
+            return Err(self.error("CASE preserve SET must check the preserved property"));
+        }
+        self.expect_keyword("IS")?;
+        self.expect_keyword("NOT")?;
+        self.expect_keyword("NULL")?;
+        self.expect_keyword("AND")?;
+        let compared_variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let compared_property = self.parse_ident()?;
+        if compared_variable != then_variable || compared_property != then_property {
+            return Err(self.error("CASE preserve SET must compare the preserved property"));
+        }
+        self.expect_char('>')?;
+        let compared_incoming = self.parse_value()?;
+        if compared_incoming != incoming {
+            return Err(self.error("CASE preserve SET must compare against the incoming value"));
+        }
+        self.expect_keyword("THEN")?;
+        let preserve_variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let preserve_property = self.parse_ident()?;
+        if preserve_variable != then_variable || preserve_property != then_property {
+            return Err(self.error("CASE preserve SET must return the preserved property"));
+        }
+        self.expect_keyword("ELSE")?;
+        let else_value = self.parse_value()?;
+        if else_value != incoming {
+            return Err(self.error("CASE preserve SET ELSE must return the incoming value"));
+        }
+        self.expect_keyword("END")?;
+        Ok(SetValueExpression::PreserveNewerExisting {
+            variable: then_variable,
+            property: then_property,
+            incoming,
+            preserve,
+        })
+    }
+
+    fn parse_case_decrement_floor_zero_set_value_after_when(
+        &mut self,
+    ) -> Result<SetValueExpression> {
         let condition_variable = self.parse_ident()?;
         self.expect_char('.')?;
         let condition_property = self.parse_ident()?;

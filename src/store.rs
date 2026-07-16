@@ -337,6 +337,7 @@ pub enum NodeSetValue {
     Coalesce { default: Value },
     AddInt { amount: i64 },
     DecrementFloorZero,
+    PreserveNewerExisting { incoming: Value, preserve: bool },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7208,6 +7209,33 @@ fn evaluate_node_set_value(
             };
             Ok(Value::Int(if current > 0 { current - 1 } else { 0 }))
         }
+        NodeSetValue::PreserveNewerExisting { incoming, preserve } => {
+            let current = properties
+                .get(&assignment.property)
+                .cloned()
+                .unwrap_or(Value::Null);
+            if incoming == &Value::Null {
+                return Ok(current);
+            }
+            if *preserve
+                && current != Value::Null
+                && value_gt_for_preserve_newer_existing(&current, incoming)
+            {
+                return Ok(current);
+            }
+            Ok(incoming.clone())
+        }
+    }
+}
+
+fn value_gt_for_preserve_newer_existing(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => left > right,
+        (Value::Float(left), Value::Float(right)) => left > right,
+        (Value::Int(left), Value::Float(right)) => (*left as f64) > *right,
+        (Value::Float(left), Value::Int(right)) => *left > (*right as f64),
+        (Value::String(left), Value::String(right)) => left > right,
+        _ => false,
     }
 }
 

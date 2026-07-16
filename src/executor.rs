@@ -309,6 +309,19 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
                         value: NodeSetValue::DecrementFloorZero,
                     }],
                 })),
+                SetValue::PreserveNewerExisting {
+                    incoming, preserve, ..
+                } => Ok(Some(GraphMutation::SetNodeProperties {
+                    label: label.clone(),
+                    filter,
+                    assignments: vec![NodeSetAssignment {
+                        property: property.clone(),
+                        value: NodeSetValue::PreserveNewerExisting {
+                            incoming: incoming.clone(),
+                            preserve: *preserve,
+                        },
+                    }],
+                })),
             }
         }
         PhysicalPlan::SetNodeProperties {
@@ -518,6 +531,12 @@ fn node_set_assignment(assignment: &crate::planner::SetAssignment) -> NodeSetAss
             },
             SetValue::AddInt { amount, .. } => NodeSetValue::AddInt { amount: *amount },
             SetValue::DecrementFloorZero { .. } => NodeSetValue::DecrementFloorZero,
+            SetValue::PreserveNewerExisting {
+                incoming, preserve, ..
+            } => NodeSetValue::PreserveNewerExisting {
+                incoming: incoming.clone(),
+                preserve: *preserve,
+            },
         },
     }
 }
@@ -1168,6 +1187,20 @@ fn execute_bindings(
                     &[NodeSetAssignment {
                         property: property.clone(),
                         value: NodeSetValue::DecrementFloorZero,
+                    }],
+                )?,
+                SetValue::PreserveNewerExisting {
+                    incoming, preserve, ..
+                } => store.set_node_properties(
+                    catalog,
+                    label,
+                    filter.as_ref(),
+                    &[NodeSetAssignment {
+                        property: property.clone(),
+                        value: NodeSetValue::PreserveNewerExisting {
+                            incoming: incoming.clone(),
+                            preserve: *preserve,
+                        },
                     }],
                 )?,
             };
