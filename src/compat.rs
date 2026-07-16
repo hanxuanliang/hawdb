@@ -1645,6 +1645,35 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(1),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph augmentation state graph meta read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.community_detection_applied, m.pagerank_applied, m.community_algorithm, m.community_resolution, m.community_count, m.pagerank_algorithm, m.pagerank_damping, m.pagerank_iterations, m.last_augmentation_at, m.schema_version, m.community_detection_computed_at, m.pagerank_computed_at",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.community_detection_applied", Value::Bool(true)),
+                        ("m.pagerank_applied", Value::Bool(true)),
+                        ("m.community_algorithm", Value::String("louvain".to_string())),
+                        ("m.community_resolution", Value::Float(0.8)),
+                        ("m.community_count", Value::Int(3)),
+                        ("m.pagerank_algorithm", Value::String("pagerank".to_string())),
+                        ("m.pagerank_damping", Value::Float(0.85)),
+                        ("m.pagerank_iterations", Value::Int(20)),
+                        ("m.last_augmentation_at", Value::Int(300)),
+                        ("m.schema_version", Value::Int(2)),
+                        ("m.community_detection_computed_at", Value::Int(301)),
+                        ("m.pagerank_computed_at", Value::Int(302)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.community_detection_applied = true, m.pagerank_applied = true, m.community_algorithm = 'louvain', m.community_resolution = 0.8, m.community_count = 3, m.pagerank_algorithm = 'pagerank', m.pagerank_damping = 0.85, m.pagerank_iterations = 20, m.last_augmentation_at = 300, m.schema_version = 2, m.community_detection_computed_at = 301, m.pagerank_computed_at = 302",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new("MATCH (m:GraphMeta {meta_id: 'main'}) DELETE m"),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "entity lifecycle mention memory id read",
                 CypherFixtureStatement::with_parameters(
@@ -11219,6 +11248,98 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ]),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph augmentation jobs filtered list read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (j:AugmentationJob) WHERE j.status = $status_filter RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.created_at ORDER BY j.created_at DESC LIMIT $job_limit",
+                        BTreeMap::from([
+                            (
+                                "status_filter".to_string(),
+                                Value::String("rest_graph_done".to_string()),
+                            ),
+                            ("job_limit".to_string(), Value::Int(1)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        (
+                            "j.job_id",
+                            Value::String("rest-graph-job-filtered-new".to_string()),
+                        ),
+                        ("j.job_type", Value::String("pagerank".to_string())),
+                        ("j.status", Value::String("rest_graph_done".to_string())),
+                        ("j.progress", Value::Float(100.0)),
+                        ("j.message", Value::String("new done".to_string())),
+                        ("j.created_at", Value::Int(920)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:AugmentationJob {job_id: 'rest-graph-job-filtered-old', job_type: 'pagerank', status: 'rest_graph_done', progress: 10.0, message: 'old done', created_at: 910})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:AugmentationJob {job_id: 'rest-graph-job-filtered-new', job_type: 'pagerank', status: 'rest_graph_done', progress: 100.0, message: 'new done', created_at: 920})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (j:AugmentationJob) WHERE j.job_id IN ['rest-graph-job-filtered-old', 'rest-graph-job-filtered-new'] DETACH DELETE j",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph augmentation jobs list read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (j:AugmentationJob) RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.created_at ORDER BY j.created_at DESC LIMIT $job_limit",
+                        BTreeMap::from([("job_limit".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:AugmentationJob {job_id: 'rest-graph-job-list-old', job_type: 'community', status: 'queued', progress: 0.0, message: 'queued old', created_at: 930})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:AugmentationJob {job_id: 'rest-graph-job-list-new', job_type: 'community', status: 'queued', progress: 0.0, message: 'queued new', created_at: 940})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (j:AugmentationJob) WHERE j.job_id IN ['rest-graph-job-list-old', 'rest-graph-job-list-new'] DETACH DELETE j",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph augmentation job status read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (j:AugmentationJob {job_id: $job_id}) RETURN j.job_type, j.status, j.progress, j.message, j.result, j.error_message, j.started_at, j.completed_at, j.created_at",
+                        BTreeMap::from([(
+                            "job_id".to_string(),
+                            Value::String("rest-graph-job-status".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("j.job_type", Value::String("pagerank".to_string())),
+                        ("j.status", Value::String("completed".to_string())),
+                        ("j.progress", Value::Float(100.0)),
+                        ("j.message", Value::String("done".to_string())),
+                        ("j.result", Value::String("{\"ok\":true}".to_string())),
+                        ("j.error_message", Value::String(String::new())),
+                        ("j.started_at", Value::Int(950)),
+                        ("j.completed_at", Value::Int(960)),
+                        ("j.created_at", Value::Int(945)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:AugmentationJob {job_id: 'rest-graph-job-status', job_type: 'pagerank', status: 'completed', progress: 100.0, message: 'done', result: '{\"ok\":true}', error_message: '', started_at: 950, completed_at: 960, created_at: 945})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (j:AugmentationJob {job_id: 'rest-graph-job-status'}) DETACH DELETE j",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "thread move source space selection",
                 CypherFixtureStatement::with_parameters(
@@ -11898,6 +12019,25 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         ("applied", Value::Bool(false)),
                         ("computed", Value::Int(0)),
                     ])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph pagerank plan graph meta read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.pagerank_applied, m.pagerank_computed_at",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.pagerank_applied", Value::Bool(true)),
+                        ("m.pagerank_computed_at", Value::Int(404)),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = true, m.pagerank_computed_at = 404",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new("MATCH (m:GraphMeta {meta_id: 'main'}) DELETE m"),
+                    ExpectedRows::RowCount(1),
                 ),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
@@ -17989,6 +18129,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.status = 'active' RETURN source.id, COALESCE(source.title, LEFT(source.content, 60)), COALESCE(source.importance, 0.5), source.community_id, source.title, LEFT(COALESCE(source.content, ''), 200), source.space_id, target.id, COALESCE(target.title, LEFT(target.content, 60)), COALESCE(target.importance, 0.5), target.community_id, target.title, LEFT(COALESCE(target.content, ''), 200), target.space_id, r.id, r.relation_type, r.strength, r.confidence, r.reason, r.status, r.source ORDER BY r.updated_at DESC, r.created_at DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph augmentation state graph meta read",
+                "graph_state_read",
+                "nmem-server::rest_graph::augmentation_state",
+            )
+            .with_cypher(
+                "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.community_detection_applied, m.pagerank_applied, m.community_algorithm, m.community_resolution, m.community_count, m.pagerank_algorithm, m.pagerank_damping, m.pagerank_iterations, m.last_augmentation_at, m.schema_version, m.community_detection_computed_at, m.pagerank_computed_at",
+            ),
+            CompatibilityQueryCallSite::new(
                 "node detail neighbor counts",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::query_node_detail",
@@ -18803,6 +18951,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (j:AugmentationJob {job_id: $job_id}) RETURN j.job_type, j.status, j.progress, j.message, j.result, j.error_message, j.started_at, j.completed_at",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph augmentation job status read",
+                "augmentation_job_read",
+                "nmem-server::rest_graph::augmentation_job_status",
+            )
+            .with_cypher(
+                "MATCH (j:AugmentationJob {job_id: $job_id}) RETURN j.job_type, j.status, j.progress, j.message, j.result, j.error_message, j.started_at, j.completed_at, j.created_at",
+            ),
+            CompatibilityQueryCallSite::new(
                 "augmentation job filtered list read",
                 "augmentation_job_read",
                 "nmem-graph::augmentation::list_jobs::filtered",
@@ -18811,12 +18967,28 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (j:AugmentationJob) WHERE j.status = $status RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.started_at, j.completed_at ORDER BY j.started_at DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph augmentation jobs filtered list read",
+                "augmentation_job_read",
+                "nmem-server::rest_graph::augmentation_jobs_filtered",
+            )
+            .with_cypher(
+                "MATCH (j:AugmentationJob) WHERE j.status = $status_filter RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.created_at ORDER BY j.created_at DESC LIMIT $job_limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "augmentation job list read",
                 "augmentation_job_read",
                 "nmem-graph::augmentation::list_jobs::all",
             )
             .with_cypher(
                 "MATCH (j:AugmentationJob) RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.started_at, j.completed_at ORDER BY j.started_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph augmentation jobs list read",
+                "augmentation_job_read",
+                "nmem-server::rest_graph::augmentation_jobs_all",
+            )
+            .with_cypher(
+                "MATCH (j:AugmentationJob) RETURN j.job_id, j.job_type, j.status, j.progress, j.message, j.created_at ORDER BY j.created_at DESC LIMIT $job_limit",
             ),
             CompatibilityQueryCallSite::new(
                 "augmentation stale interrupt write",
@@ -18847,6 +19019,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MERGE (m:GraphMeta {meta_id: 'main'}) SET m.pagerank_applied = true, m.pagerank_algorithm = 'pagerank', m.pagerank_damping = 0.85, m.pagerank_iterations = 20, m.pagerank_computed_at = CURRENT_TIMESTAMP(), m.updated_at = CURRENT_TIMESTAMP()",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph pagerank plan graph meta read",
+                "graph_state_read",
+                "nmem-server::rest_graph::pagerank_plan",
+            )
+            .with_cypher(
+                "MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.pagerank_applied, m.pagerank_computed_at",
             ),
             CompatibilityQueryCallSite::new(
                 "pagerank entity membership read",
@@ -21194,7 +21374,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 481);
+        assert_eq!(report.checks.len(), 486);
     }
 
     #[test]
@@ -21210,13 +21390,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 481);
-        assert_eq!(coverage.covered_checks, 481);
+        assert_eq!(coverage.required_checks, 486);
+        assert_eq!(coverage.covered_checks, 486);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 481);
+        assert_eq!(coverage_json["covered_checks"], 486);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -21246,10 +21426,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 481);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 486);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 481);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 486);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -21474,15 +21654,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 481);
-        assert_eq!(report.shadow_checks.len(), 481);
+        assert_eq!(report.primary_checks.len(), 486);
+        assert_eq!(report.shadow_checks.len(), 486);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            481
+            486
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -21491,7 +21671,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 481);
+        assert_eq!(cutover.matched_checks, 486);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
