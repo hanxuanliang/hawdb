@@ -4745,6 +4745,26 @@ fn write_projection_expression(output: &mut String, expression: &ProjectionExpre
             write_value(output, null_or_empty);
             output.push(')');
         }
+        ProjectionExpression::CasePropertyEqualsRank {
+            variable,
+            property,
+            branches,
+            default,
+        } => {
+            output.push_str("case_property_equals_rank(");
+            write_identifier(output, variable);
+            output.push('.');
+            write_identifier(output, property);
+            for (candidate, rank) in branches {
+                output.push(',');
+                write_value(output, candidate);
+                output.push_str("=>");
+                write_value(output, rank);
+            }
+            output.push_str(",default=>");
+            write_value(output, default);
+            output.push(')');
+        }
         ProjectionExpression::CaseLowerPropertyDefault {
             variable,
             property,

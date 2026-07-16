@@ -596,6 +596,12 @@ pub enum ProjectionExpression {
         non_empty: Value,
         null_or_empty: Value,
     },
+    CasePropertyEqualsRank {
+        variable: String,
+        property: String,
+        branches: Vec<(Value, Value)>,
+        default: Value,
+    },
     CaseLowerPropertyDefault {
         variable: String,
         property: String,
@@ -1632,6 +1638,35 @@ pub fn plan_with_params(
                         input: Box::new(input),
                     };
                 }
+                if !query.with_order_by.is_empty() {
+                    input = LogicalPlan::Sort {
+                        items: plan_sort_items(
+                            &scope,
+                            &column_names,
+                            &query.with_order_by,
+                            parameters,
+                        )?,
+                        input: Box::new(input),
+                    };
+                }
+                let with_offset = query
+                    .with_offset
+                    .as_ref()
+                    .map(|offset| bind_pagination_value(offset, parameters, "offset"))
+                    .transpose()?
+                    .unwrap_or(0);
+                let with_limit = query
+                    .with_limit
+                    .as_ref()
+                    .map(|limit| bind_pagination_value(limit, parameters, "limit"))
+                    .transpose()?;
+                if with_offset > 0 || with_limit.is_some() {
+                    input = LogicalPlan::Limit {
+                        offset: with_offset,
+                        limit: with_limit,
+                        input: Box::new(input),
+                    };
+                }
                 let projections = query
                     .returns
                     .iter()
@@ -2425,6 +2460,7 @@ fn return_expression_is_scoped(
         ReturnExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnExpression::DefaultIfNull { variable, .. }
         | ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnExpression::CasePropertyEqualsRank { variable, .. }
         | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
@@ -2460,6 +2496,7 @@ fn return_value_expression_is_scoped(
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CasePropertyEqualsRank { variable, .. }
         | ReturnValueExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             column_names.contains(variable) || scope.contains(variable)
@@ -2637,6 +2674,7 @@ fn optional_direct_count_alias(
                 has_projection = true;
             }
             ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+            | ReturnExpression::CasePropertyEqualsRank { variable, .. }
             | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
             | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
                 if variable != &optional.source_variable {
@@ -2731,6 +2769,7 @@ fn optional_direct_collect_alias(
                 has_projection = true;
             }
             ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+            | ReturnExpression::CasePropertyEqualsRank { variable, .. }
             | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
             | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
                 if variable != &optional.source_variable {
@@ -2786,6 +2825,7 @@ fn optional_direct_row_projection_expression(
         | ReturnExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnExpression::DefaultIfNull { variable, .. }
         | ReturnExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnExpression::CasePropertyEqualsRank { variable, .. }
         | ReturnExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             optional_direct_row_projection_variable(
@@ -2847,6 +2887,7 @@ fn optional_direct_row_projection_value_expression(
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CasePropertyEqualsRank { variable, .. }
         | ReturnValueExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             optional_direct_row_projection_variable(
@@ -2998,6 +3039,7 @@ fn return_value_expression_is_source_only(
         | ReturnValueExpression::DefaultIfNullOrEq { variable, .. }
         | ReturnValueExpression::DefaultIfNull { variable, .. }
         | ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. }
+        | ReturnValueExpression::CasePropertyEqualsRank { variable, .. }
         | ReturnValueExpression::CaseLowerPropertyDefault { variable, .. }
         | ReturnValueExpression::CaseCoalesceDifferenceFloorZero { variable, .. } => {
             variable == source_variable
@@ -4323,6 +4365,9 @@ fn collect_return_value_expression_variables(
         ReturnValueExpression::CasePropertyNotNullOrEq { variable, .. } => {
             variables.insert(variable.clone());
         }
+        ReturnValueExpression::CasePropertyEqualsRank { variable, .. } => {
+            variables.insert(variable.clone());
+        }
         ReturnValueExpression::CaseLowerPropertyDefault { variable, .. } => {
             variables.insert(variable.clone());
         }
@@ -4620,6 +4665,7 @@ fn plan_return_items(
                 | ReturnExpression::DefaultIfNullOrEq { .. }
                 | ReturnExpression::DefaultIfNull { .. }
                 | ReturnExpression::CasePropertyNotNullOrEq { .. }
+                | ReturnExpression::CasePropertyEqualsRank { .. }
                 | ReturnExpression::CaseLowerPropertyDefault { .. }
                 | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. }
                 | ReturnExpression::CaseEntitySearchRank(_)
@@ -4879,6 +4925,27 @@ fn plan_projection_with_columns(
                     empty: bind_value(empty, parameters)?,
                     non_empty: bind_value(non_empty, parameters)?,
                     null_or_empty: bind_value(null_or_empty, parameters)?,
+                },
+                "case".to_string(),
+            )
+        }
+        ReturnExpression::CasePropertyEqualsRank {
+            variable,
+            property,
+            branches,
+            default,
+        } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in return item"
+                )));
+            }
+            (
+                ProjectionExpression::CasePropertyEqualsRank {
+                    variable: variable.clone(),
+                    property: property.clone(),
+                    branches: bind_value_pairs(branches, parameters)?,
+                    default: bind_value(default, parameters)?,
                 },
                 "case".to_string(),
             )
@@ -5228,6 +5295,7 @@ fn plan_aggregation(scope: &BTreeSet<String>, item: &ReturnItem) -> Result<Aggre
         | ReturnExpression::DefaultIfNullOrEq { .. }
         | ReturnExpression::DefaultIfNull { .. }
         | ReturnExpression::CasePropertyNotNullOrEq { .. }
+        | ReturnExpression::CasePropertyEqualsRank { .. }
         | ReturnExpression::CaseLowerPropertyDefault { .. }
         | ReturnExpression::CaseCoalesceDifferenceFloorZero { .. }
         | ReturnExpression::CaseEntitySearchRank(_)
@@ -5425,6 +5493,24 @@ fn plan_return_value_expression_with_columns(
                 null_or_empty: bind_value(null_or_empty, parameters)?,
             })
         }
+        ReturnValueExpression::CasePropertyEqualsRank {
+            variable,
+            property,
+            branches,
+            default,
+        } => {
+            if !scope.contains(variable) {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown variable '{variable}' in expression"
+                )));
+            }
+            Ok(ProjectionExpression::CasePropertyEqualsRank {
+                variable: variable.clone(),
+                property: property.clone(),
+                branches: bind_value_pairs(branches, parameters)?,
+                default: bind_value(default, parameters)?,
+            })
+        }
         ReturnValueExpression::CaseLowerPropertyDefault {
             variable,
             property,
@@ -5505,6 +5591,21 @@ fn bind_coalesce_difference_terms(
                 property: term.property.clone(),
                 default: bind_value(&term.default, parameters)?,
             })
+        })
+        .collect()
+}
+
+fn bind_value_pairs(
+    pairs: &[(ValueExpression, ValueExpression)],
+    parameters: &BTreeMap<String, Value>,
+) -> Result<Vec<(Value, Value)>> {
+    pairs
+        .iter()
+        .map(|(left, right)| {
+            Ok((
+                bind_value(left, parameters)?,
+                bind_value(right, parameters)?,
+            ))
         })
         .collect()
 }

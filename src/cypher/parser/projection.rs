@@ -207,6 +207,17 @@ impl Parser<'_> {
                 non_empty,
                 null_or_empty,
             },
+            ReturnValueExpression::CasePropertyEqualsRank {
+                variable,
+                property,
+                branches,
+                default,
+            } => ReturnExpression::CasePropertyEqualsRank {
+                variable,
+                property,
+                branches,
+                default,
+            },
             ReturnValueExpression::CaseLowerPropertyDefault {
                 variable,
                 property,
@@ -316,6 +327,10 @@ impl Parser<'_> {
             }
             self.pos = start;
             if let Ok(expression) = self.parse_case_coalesce_difference_floor_zero_expression() {
+                return Ok(expression);
+            }
+            self.pos = start;
+            if let Ok(expression) = self.parse_case_property_equals_rank_expression() {
                 return Ok(expression);
             }
             self.pos = start;
@@ -585,6 +600,42 @@ impl Parser<'_> {
             empty,
             non_empty,
             null_or_empty,
+        })
+    }
+
+    fn parse_case_property_equals_rank_expression(&mut self) -> Result<ReturnValueExpression> {
+        self.expect_keyword("WHEN")?;
+        let variable = self.parse_ident()?;
+        self.expect_char('.')?;
+        let property = self.parse_ident()?;
+        self.expect_char('=')?;
+        let first_match = self.parse_value()?;
+        self.expect_keyword("THEN")?;
+        let first_rank = self.parse_value()?;
+        let mut branches = vec![(first_match, first_rank)];
+
+        while self.consume_keyword("WHEN") {
+            let branch_variable = self.parse_ident()?;
+            self.expect_char('.')?;
+            let branch_property = self.parse_ident()?;
+            if branch_variable != variable || branch_property != property {
+                return Err(self.error("CASE rank expression supports only one property"));
+            }
+            self.expect_char('=')?;
+            let branch_match = self.parse_value()?;
+            self.expect_keyword("THEN")?;
+            let branch_rank = self.parse_value()?;
+            branches.push((branch_match, branch_rank));
+        }
+
+        self.expect_keyword("ELSE")?;
+        let default = self.parse_value()?;
+        self.expect_keyword("END")?;
+        Ok(ReturnValueExpression::CasePropertyEqualsRank {
+            variable,
+            property,
+            branches,
+            default,
         })
     }
 

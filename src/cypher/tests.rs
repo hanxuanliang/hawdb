@@ -1476,6 +1476,44 @@ fn parses_case_property_presence_order_item() {
 }
 
 #[test]
+fn parses_case_property_equals_rank_with_projection() {
+    let statement = parse(
+        "MATCH (s:Skill) WHERE s.stage IS NULL OR (s.stage <> 'archived' AND s.stage <> 'rejected' AND s.stage <> 'deprecated') WITH s, CASE WHEN s.stage = 'active' THEN 4 WHEN s.stage = 'promotable' THEN 3 WHEN s.stage = 'candidate' THEN 2 WHEN s.stage = 'draft' THEN 1 ELSE 0 END AS stage_rank, COALESCE(s.evidence_count, 0) AS evidence_score ORDER BY stage_rank DESC, evidence_score DESC, s.updated_at DESC LIMIT $limit RETURN s.id, COALESCE(s.name, s.title, 'Skill')",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let with_projection = query
+        .with_projection
+        .as_ref()
+        .expect("expected WITH projection");
+    assert_eq!(with_projection.items.len(), 3);
+    let ReturnExpression::CasePropertyEqualsRank {
+        variable,
+        property,
+        branches,
+        ..
+    } = &with_projection.items[1].expression
+    else {
+        panic!("expected property equality rank expression");
+    };
+    assert_eq!(variable, "s");
+    assert_eq!(property, "stage");
+    assert_eq!(branches.len(), 4);
+    assert_eq!(
+        with_projection.items[1].alias.as_deref(),
+        Some("stage_rank")
+    );
+    assert!(query.order_by.is_empty());
+    assert_eq!(query.with_order_by.len(), 3);
+    assert_eq!(
+        query.with_order_by[0].expression,
+        OrderExpression::Column("stage_rank".to_string())
+    );
+}
+
+#[test]
 fn parses_entity_search_rank_order_item() {
     let statement = parse(
         "MATCH (e:Entity) WHERE lower(e.name) CONTAINS $raw_query OR lower(e.name) CONTAINS $normalized_query OR list_contains(e.aliases, $raw_input) OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, COUNT(m) AS memory_count ORDER BY CASE WHEN lower(e.name) = $raw_query THEN 0 WHEN lower(e.name) = $normalized_query THEN 0 WHEN list_contains(e.aliases, $raw_input) THEN 1 ELSE 2 END ASC, memory_count DESC LIMIT $limit",

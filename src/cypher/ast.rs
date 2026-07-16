@@ -166,6 +166,9 @@ pub struct MatchReturn {
     pub collect_with: Option<WithCollect>,
     pub distinct_with: Option<WithDistinctProjection>,
     pub with_projection: Option<WithProjection>,
+    pub with_order_by: Vec<OrderItem>,
+    pub with_offset: Option<ValueExpression>,
+    pub with_limit: Option<ValueExpression>,
     pub aggregate_with: Option<WithAggregateProjection>,
     pub aggregate_with_filter: Option<WithAliasFilter>,
     pub post_with_match: Option<PostWithNodeLookup>,
@@ -639,6 +642,12 @@ pub enum ReturnValueExpression {
         non_empty: ValueExpression,
         null_or_empty: ValueExpression,
     },
+    CasePropertyEqualsRank {
+        variable: String,
+        property: String,
+        branches: Vec<(ValueExpression, ValueExpression)>,
+        default: ValueExpression,
+    },
     CaseLowerPropertyDefault {
         variable: String,
         property: String,
@@ -690,6 +699,12 @@ pub enum ReturnExpression {
         empty: ValueExpression,
         non_empty: ValueExpression,
         null_or_empty: ValueExpression,
+    },
+    CasePropertyEqualsRank {
+        variable: String,
+        property: String,
+        branches: Vec<(ValueExpression, ValueExpression)>,
+        default: ValueExpression,
     },
     CaseLowerPropertyDefault {
         variable: String,

@@ -1348,6 +1348,25 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             )),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest graph entity overview ranking read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (e:Entity) RETURN e.id, COALESCE(e.name, e.id), e.entity_type, e.description, COALESCE(e.pagerank_score, e.confidence, 0.5), e.community_id, e.confidence ORDER BY COALESCE(e.pagerank_score, e.confidence, 0.5) DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-graph-entity-overview', name: 'Rest Graph Entity Overview', entity_type: 'concept', description: 'overview fixture', pagerank_score: 99.0, community_id: 42, confidence: 0.91})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (e:Entity {id: 'rest-graph-entity-overview'}) DETACH DELETE e",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "community entity relation edge detail read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (e1:Entity)-[r:RELATES_TO]->(e2:Entity) WHERE e1.id IN $entity_ids AND e2.id IN $entity_ids RETURN e1.name, e2.name, r.relation_type, r.strength, r.context, r.confidence ORDER BY r.strength DESC, r.confidence DESC LIMIT 20",
@@ -1374,6 +1393,56 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (n) WHERE n.id IN ['community-edge-a', 'community-edge-b'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph overview edge list read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a)-[r]->(b) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id, label(r), COALESCE(r.strength, r.confidence, 0.5)",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("rest-graph-edge-a".to_string()),
+                                Value::String("rest-graph-edge-b".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-graph-edge-a'})-[:RELATES_TO {strength: 0.87, confidence: 0.76}]->(:Entity {id: 'rest-graph-edge-b'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-graph-edge-a', 'rest-graph-edge-b'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph overview edge limited list read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a)-[r]->(b) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT 200",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("rest-graph-edge-limited-a".to_string()),
+                                Value::String("rest-graph-edge-limited-b".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'rest-graph-edge-limited-a'})-[:RELATES_TO {strength: 0.81, confidence: 0.71}]->(:Entity {id: 'rest-graph-edge-limited-b'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['rest-graph-edge-limited-a', 'rest-graph-edge-limited-b'] DETACH DELETE n",
                     ),
                     ExpectedRows::RowCount(2),
                 ),
@@ -7372,6 +7441,25 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "rest graph thread overview ranking read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread) RETURN t.id, COALESCE(t.title, t.source, 'Thread'), t.source, COALESCE(t.message_count, 0), t.space_id, t.summary, t.created_at, t.updated_at ORDER BY t.message_count DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'rest-graph-thread-overview', title: 'Rest Graph Thread Overview', source: 'fixture', message_count: 999999, space_id: 'default', summary: 'overview fixture', created_at: 1, updated_at: 2})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (t:Thread {id: 'rest-graph-thread-overview'}) DETACH DELETE t",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "rest fs thread source page read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (t:Thread) WHERE t.source = $source AND t.id > $after RETURN t.id, t.title, t.updated_at ORDER BY t.id ASC LIMIT $limit",
@@ -9131,6 +9219,25 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (s:Skill) WHERE s.id IN ['mcp-skill-active-newer', 'mcp-skill-active-draft'] DETACH DELETE s",
                     ),
                     ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph skill overview ranking read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Skill) WHERE s.stage IS NULL OR (s.stage <> 'archived' AND s.stage <> 'rejected' AND s.stage <> 'deprecated') WITH s, CASE WHEN s.stage = 'active' THEN 4 WHEN s.stage = 'promotable' THEN 3 WHEN s.stage = 'candidate' THEN 2 WHEN s.stage = 'draft' THEN 1 ELSE 0 END AS stage_rank, COALESCE(s.evidence_count, 0) AS evidence_score ORDER BY stage_rank DESC, evidence_score DESC, s.updated_at DESC LIMIT $limit RETURN s.id, COALESCE(s.name, s.title, 'Skill'), s.stage, s.kind, COALESCE(s.evidence_count, 0), s.confidence, COALESCE(s.use_count, 0), s.space_id, s.description, s.bundle_path, s.updated_at",
+                        BTreeMap::from([("limit".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'rest-graph-skill-overview', name: 'Rest Graph Skill Overview', title: 'Rest Graph Skill Overview', stage: 'active', kind: 'skill', evidence_count: 999999, confidence: 0.97, use_count: 7, space_id: 'default', description: 'overview fixture', bundle_path: '/tmp/rest-graph-skill-overview', updated_at: 999999})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Skill {id: 'rest-graph-skill-overview'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -11958,6 +12065,25 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 .with_effect_query(
                     CypherFixtureStatement::new(
                         "MATCH (m:Memory) WHERE m.id IN ['pagerank-changed-memory-rel-source', 'pagerank-changed-memory-rel-target'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest graph active memory relation overview read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.status = 'active' RETURN source.id, COALESCE(source.title, LEFT(source.content, 60)), COALESCE(source.importance, 0.5), source.community_id, source.title, LEFT(COALESCE(source.content, ''), 200), source.space_id, target.id, COALESCE(target.title, LEFT(target.content, 60)), COALESCE(target.importance, 0.5), target.community_id, target.title, LEFT(COALESCE(target.content, ''), 200), target.space_id, r.id, r.relation_type, r.strength, r.confidence, r.reason, r.status, r.source ORDER BY r.updated_at DESC, r.created_at DESC LIMIT $limit",
+                        BTreeMap::from([("limit".to_string(), Value::Int(1))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-graph-memory-rel-source', title: 'Rest Graph Relation Source', content: 'source content', importance: 0.8, community_id: 501, space_id: 'default'})-[:MEMORY_RELATES_TO {id: 'rest-graph-memory-rel-1', relation_type: 'supports', strength: 0.82, confidence: 0.83, reason: 'fixture', status: 'active', source: 'compat', created_at: 999998, updated_at: 999999}]->(:Memory {id: 'rest-graph-memory-rel-target', title: 'Rest Graph Relation Target', content: 'target content', importance: 0.7, community_id: 502, space_id: 'default'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['rest-graph-memory-rel-source', 'rest-graph-memory-rel-target'] DETACH DELETE m",
                     ),
                     ExpectedRows::RowCount(2),
                 ),
@@ -17815,6 +17941,54 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) OPTIONAL MATCH (e)-[r]-() WITH e, COUNT(r) as degree RETURN e.id, e.name, degree ORDER BY degree DESC LIMIT 10",
             ),
             CompatibilityQueryCallSite::new(
+                "rest graph entity overview ranking read",
+                "graph_overview_read",
+                "nmem-server::rest_graph::overview_entities",
+            )
+            .with_cypher(
+                "MATCH (e:Entity) RETURN e.id, COALESCE(e.name, e.id), e.entity_type, e.description, COALESCE(e.pagerank_score, e.confidence, 0.5), e.community_id, e.confidence ORDER BY COALESCE(e.pagerank_score, e.confidence, 0.5) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph thread overview ranking read",
+                "graph_overview_read",
+                "nmem-server::rest_graph::overview_threads",
+            )
+            .with_cypher(
+                "MATCH (t:Thread) RETURN t.id, COALESCE(t.title, t.source, 'Thread'), t.source, COALESCE(t.message_count, 0), t.space_id, t.summary, t.created_at, t.updated_at ORDER BY t.message_count DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph skill overview ranking read",
+                "graph_overview_read",
+                "nmem-server::rest_graph::overview_skills",
+            )
+            .with_cypher(
+                "MATCH (s:Skill) WHERE s.stage IS NULL OR (s.stage <> 'archived' AND s.stage <> 'rejected' AND s.stage <> 'deprecated') WITH s, CASE WHEN s.stage = 'active' THEN 4 WHEN s.stage = 'promotable' THEN 3 WHEN s.stage = 'candidate' THEN 2 WHEN s.stage = 'draft' THEN 1 ELSE 0 END AS stage_rank, COALESCE(s.evidence_count, 0) AS evidence_score ORDER BY stage_rank DESC, evidence_score DESC, s.updated_at DESC LIMIT $limit RETURN s.id, COALESCE(s.name, s.title, 'Skill'), s.stage, s.kind, COALESCE(s.evidence_count, 0), s.confidence, COALESCE(s.use_count, 0), s.space_id, s.description, s.bundle_path, s.updated_at",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph overview edge list read",
+                "graph_overview_read",
+                "nmem-server::rest_graph::overview_edges",
+            )
+            .with_cypher(
+                "MATCH (a)-[r]->(b) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id, label(r), COALESCE(r.strength, r.confidence, 0.5)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph overview edge limited list read",
+                "graph_overview_read",
+                "nmem-server::rest_graph::overview_edges_limited",
+            )
+            .with_cypher(
+                "MATCH (a)-[r]->(b) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id, label(r), COALESCE(r.strength, r.confidence, 0.5) LIMIT 200",
+            ),
+            CompatibilityQueryCallSite::new(
+                "rest graph active memory relation overview read",
+                "graph_overview_read",
+                "nmem-server::rest_graph::overview_memory_relations",
+            )
+            .with_cypher(
+                "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) WHERE r.status = 'active' RETURN source.id, COALESCE(source.title, LEFT(source.content, 60)), COALESCE(source.importance, 0.5), source.community_id, source.title, LEFT(COALESCE(source.content, ''), 200), source.space_id, target.id, COALESCE(target.title, LEFT(target.content, 60)), COALESCE(target.importance, 0.5), target.community_id, target.title, LEFT(COALESCE(target.content, ''), 200), target.space_id, r.id, r.relation_type, r.strength, r.confidence, r.reason, r.status, r.source ORDER BY r.updated_at DESC, r.created_at DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "node detail neighbor counts",
                 "graph_node_detail_read",
                 "nmem-server::rest_graph::query_node_detail",
@@ -21020,7 +21194,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 475);
+        assert_eq!(report.checks.len(), 481);
     }
 
     #[test]
@@ -21036,13 +21210,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 475);
-        assert_eq!(coverage.covered_checks, 475);
+        assert_eq!(coverage.required_checks, 481);
+        assert_eq!(coverage.covered_checks, 481);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 475);
+        assert_eq!(coverage_json["covered_checks"], 481);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -21072,10 +21246,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 475);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 481);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 475);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 481);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -21300,15 +21474,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 475);
-        assert_eq!(report.shadow_checks.len(), 475);
+        assert_eq!(report.primary_checks.len(), 481);
+        assert_eq!(report.shadow_checks.len(), 481);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            475
+            481
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -21317,7 +21491,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 475);
+        assert_eq!(cutover.matched_checks, 481);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

@@ -2217,6 +2217,27 @@ fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Res
                 Ok(null_or_empty.clone())
             }
         }
+        ProjectionExpression::CasePropertyEqualsRank {
+            variable,
+            property,
+            branches,
+            default,
+        } => {
+            if !binding_has_variable(binding, variable) {
+                return Err(SkeinError::Execution(format!(
+                    "missing variable '{variable}' during projection"
+                )));
+            }
+            let value = binding_property(binding, variable, property)
+                .cloned()
+                .unwrap_or(Value::Null);
+            for (candidate, rank) in branches {
+                if value == *candidate {
+                    return Ok(rank.clone());
+                }
+            }
+            Ok(default.clone())
+        }
         ProjectionExpression::CaseLowerPropertyDefault {
             variable,
             property,

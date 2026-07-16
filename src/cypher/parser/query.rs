@@ -230,6 +230,9 @@ impl Parser<'_> {
                     collect_with: None,
                     distinct_with: None,
                     with_projection: None,
+                    with_order_by: Vec::new(),
+                    with_offset: None,
+                    with_limit: None,
                     aggregate_with: None,
                     aggregate_with_filter: None,
                     post_with_match: None,
@@ -314,7 +317,10 @@ impl Parser<'_> {
         let mut with_order_by = Vec::new();
         let mut with_offset = None;
         let mut with_limit = None;
-        if with_clause.aggregate_with.is_some() || with_clause.optional_with.is_some() {
+        if with_clause.aggregate_with.is_some()
+            || with_clause.optional_with.is_some()
+            || with_clause.with_projection.is_some()
+        {
             if self.consume_keyword("ORDER") {
                 self.expect_keyword("BY")?;
                 with_order_by = self.parse_order_items()?;
@@ -376,30 +382,52 @@ impl Parser<'_> {
         }
         let distinct = self.consume_keyword("DISTINCT");
         let returns = self.parse_return_items()?;
+        let with_projection_has_window = with_clause.with_projection.is_some();
         let order_by = if self.consume_keyword("ORDER") {
             if !with_order_by.is_empty() {
                 return Err(self.error("ORDER BY is already attached to WITH"));
             }
             self.expect_keyword("BY")?;
             self.parse_order_items()?
+        } else if with_projection_has_window {
+            Vec::new()
         } else {
-            with_order_by
+            with_order_by.clone()
         };
         let offset = if self.consume_keyword("SKIP") || self.consume_keyword("OFFSET") {
             if with_offset.is_some() {
                 return Err(self.error("offset is already attached to WITH"));
             }
             Some(self.parse_value()?)
+        } else if with_projection_has_window {
+            None
         } else {
-            with_offset
+            with_offset.clone()
         };
         let limit = if self.consume_keyword("LIMIT") {
             if with_limit.is_some() {
                 return Err(self.error("LIMIT is already attached to WITH"));
             }
             Some(self.parse_value()?)
+        } else if with_projection_has_window {
+            None
         } else {
+            with_limit.clone()
+        };
+        let with_order_by = if with_projection_has_window {
+            with_order_by
+        } else {
+            Vec::new()
+        };
+        let with_offset = if with_projection_has_window {
+            with_offset
+        } else {
+            None
+        };
+        let with_limit = if with_projection_has_window {
             with_limit
+        } else {
+            None
         };
         Ok(Statement::MatchReturn(Box::new(MatchReturn {
             variable,
@@ -412,6 +440,9 @@ impl Parser<'_> {
             collect_with: with_clause.collect_with,
             distinct_with: with_clause.distinct_with,
             with_projection: with_clause.with_projection,
+            with_order_by,
+            with_offset,
+            with_limit,
             aggregate_with: with_clause.aggregate_with,
             aggregate_with_filter,
             post_with_match,
