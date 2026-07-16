@@ -10990,6 +10990,93 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "search projection source candidate read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source) WITH s, CASE WHEN s.original_name IS NOT NULL THEN lower(s.original_name) ELSE '' END AS s_name, CASE WHEN s.summary IS NOT NULL THEN lower(s.summary) ELSE '' END AS s_summary, CASE WHEN s.file_path IS NOT NULL THEN lower(s.file_path) ELSE '' END AS s_path, CASE WHEN s.source_type IS NOT NULL THEN lower(s.source_type) ELSE '' END AS s_type WHERE s_name CONTAINS $raw_query OR s_name CONTAINS $normalized_query OR s_summary CONTAINS $raw_query OR s_summary CONTAINS $normalized_query OR s_path CONTAINS $raw_query OR s_path CONTAINS $normalized_query OR s_type CONTAINS $raw_query OR s_type CONTAINS $normalized_query RETURN s.id, COALESCE(s.original_name, s.file_path, s.source_type, 'Source'), s.source_type, s.summary, s.file_path, s.memory_count, s.chunk_count, CASE WHEN s_name = $raw_query THEN 3 WHEN s_name = $normalized_query THEN 3 WHEN s_name CONTAINS $raw_query THEN 2 WHEN s_name CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, COALESCE(s.memory_count, 0) DESC, COALESCE(s.chunk_count, 0) DESC LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "raw_query".to_string(),
+                                Value::String("graph source".to_string()),
+                            ),
+                            (
+                                "normalized_query".to_string(),
+                                Value::String("graph source".to_string()),
+                            ),
+                            ("limit".to_string(), Value::Int(3)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("s.id", Value::String("search-source-exact".to_string())),
+                            ("coalesce", Value::String("graph source".to_string())),
+                            ("s.source_type", Value::String("document".to_string())),
+                            ("s.summary", Value::String("exact summary".to_string())),
+                            (
+                                "s.file_path",
+                                Value::String("/tmp/exact-source.md".to_string()),
+                            ),
+                            ("s.memory_count", Value::Int(1)),
+                            ("s.chunk_count", Value::Int(1)),
+                            ("match_level", Value::Int(3)),
+                        ]),
+                        compatibility_row([
+                            ("s.id", Value::String("search-source-summary".to_string())),
+                            (
+                                "coalesce",
+                                Value::String("/tmp/summary-source.md".to_string()),
+                            ),
+                            ("s.source_type", Value::String("file".to_string())),
+                            (
+                                "s.summary",
+                                Value::String("contains graph source context".to_string()),
+                            ),
+                            (
+                                "s.file_path",
+                                Value::String("/tmp/summary-source.md".to_string()),
+                            ),
+                            ("s.memory_count", Value::Int(8)),
+                            ("s.chunk_count", Value::Int(2)),
+                            ("match_level", Value::Int(1)),
+                        ]),
+                        compatibility_row([
+                            ("s.id", Value::String("search-source-path".to_string())),
+                            (
+                                "coalesce",
+                                Value::String("/tmp/graph source path.md".to_string()),
+                            ),
+                            ("s.source_type", Value::String("file".to_string())),
+                            ("s.summary", Value::Null),
+                            (
+                                "s.file_path",
+                                Value::String("/tmp/graph source path.md".to_string()),
+                            ),
+                            ("s.memory_count", Value::Null),
+                            ("s.chunk_count", Value::Int(7)),
+                            ("match_level", Value::Int(1)),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'search-source-exact', original_name: 'graph source', source_type: 'document', summary: 'exact summary', file_path: '/tmp/exact-source.md', memory_count: 1, chunk_count: 1})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'search-source-summary', original_name: NULL, source_type: 'file', summary: 'contains graph source context', file_path: '/tmp/summary-source.md', memory_count: 8, chunk_count: 2})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'search-source-path', original_name: NULL, source_type: 'file', summary: NULL, file_path: '/tmp/graph source path.md', memory_count: NULL, chunk_count: 7})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'search-source-outside', original_name: 'unrelated', source_type: 'file', summary: 'outside', file_path: '/tmp/outside.md', memory_count: 99, chunk_count: 99})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source) WHERE s.id IN ['search-source-exact', 'search-source-summary', 'search-source-path', 'search-source-outside'] DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(4),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "community bridge lookup after aggregate read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (e1:Entity)-[:RELATES_TO]-(e2:Entity) WHERE e1.community_id = $cid AND e2.community_id IS NOT NULL AND e2.community_id <> $cid WITH e2.community_id AS other_cid, COUNT(*) AS shared_edge_count ORDER BY shared_edge_count DESC LIMIT $limit MATCH (c:Community) WHERE c.community_id = other_cid RETURN c.community_id, c.name, c.ai_summary, c.description, c.member_count, shared_edge_count",
@@ -13759,6 +13846,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (e:Entity) WHERE lower(e.name) CONTAINS $raw_query OR lower(e.name) CONTAINS $normalized_query OR list_contains(e.aliases, $raw_input) OPTIONAL MATCH (m:Memory)-[:MENTIONS]->(e) RETURN e.id, e.name, e.entity_type, e.aliases, e.description, e.confidence, e.community_id, e.pagerank_score, COUNT(m) AS memory_count ORDER BY CASE WHEN lower(e.name) = $raw_query THEN 0 WHEN lower(e.name) = $normalized_query THEN 0 WHEN list_contains(e.aliases, $raw_input) THEN 1 ELSE 2 END ASC, memory_count DESC, e.pagerank_score DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "search projection source candidate read",
+                "search_projection_read",
+                "nmem-graph::search_projection::search_source_candidate_rows",
+            )
+            .with_cypher(
+                "MATCH (s:Source) WITH s, CASE WHEN s.original_name IS NOT NULL THEN lower(s.original_name) ELSE '' END AS s_name, CASE WHEN s.summary IS NOT NULL THEN lower(s.summary) ELSE '' END AS s_summary, CASE WHEN s.file_path IS NOT NULL THEN lower(s.file_path) ELSE '' END AS s_path, CASE WHEN s.source_type IS NOT NULL THEN lower(s.source_type) ELSE '' END AS s_type WHERE s_name CONTAINS $raw_query OR s_name CONTAINS $normalized_query OR s_summary CONTAINS $raw_query OR s_summary CONTAINS $normalized_query OR s_path CONTAINS $raw_query OR s_path CONTAINS $normalized_query OR s_type CONTAINS $raw_query OR s_type CONTAINS $normalized_query RETURN s.id, COALESCE(s.original_name, s.file_path, s.source_type, 'Source'), s.source_type, s.summary, s.file_path, s.memory_count, s.chunk_count, CASE WHEN s_name = $raw_query THEN 3 WHEN s_name = $normalized_query THEN 3 WHEN s_name CONTAINS $raw_query THEN 2 WHEN s_name CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, COALESCE(s.memory_count, 0) DESC, COALESCE(s.chunk_count, 0) DESC LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
                 "search projection community seed entity read",
                 "search_projection_read",
                 "nmem-graph::search_projection::community_seed_entities",
@@ -16346,7 +16441,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 361);
+        assert_eq!(report.checks.len(), 362);
     }
 
     #[test]
@@ -16362,13 +16457,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 361);
-        assert_eq!(coverage.covered_checks, 361);
+        assert_eq!(coverage.required_checks, 362);
+        assert_eq!(coverage.covered_checks, 362);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 361);
+        assert_eq!(coverage_json["covered_checks"], 362);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16398,10 +16493,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 361);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 362);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 361);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 362);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16626,15 +16721,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 361);
-        assert_eq!(report.shadow_checks.len(), 361);
+        assert_eq!(report.primary_checks.len(), 362);
+        assert_eq!(report.shadow_checks.len(), 362);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            361
+            362
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16643,7 +16738,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 361);
+        assert_eq!(cutover.matched_checks, 362);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

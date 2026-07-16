@@ -1523,6 +1523,31 @@ fn parses_community_search_projection_with_case_aliases() {
 }
 
 #[test]
+fn parses_source_search_projection_with_coalesce_ordering() {
+    let statement = parse(
+        "MATCH (s:Source) WITH s, CASE WHEN s.original_name IS NOT NULL THEN lower(s.original_name) ELSE '' END AS s_name, CASE WHEN s.summary IS NOT NULL THEN lower(s.summary) ELSE '' END AS s_summary, CASE WHEN s.file_path IS NOT NULL THEN lower(s.file_path) ELSE '' END AS s_path, CASE WHEN s.source_type IS NOT NULL THEN lower(s.source_type) ELSE '' END AS s_type WHERE s_name CONTAINS $raw_query OR s_summary CONTAINS $normalized_query RETURN s.id, COALESCE(s.original_name, s.file_path, s.source_type, 'Source'), CASE WHEN s_name = $raw_query THEN 3 WHEN s_name = $normalized_query THEN 3 WHEN s_name CONTAINS $raw_query THEN 2 WHEN s_name CONTAINS $normalized_query THEN 2 ELSE 1 END AS match_level ORDER BY match_level DESC, COALESCE(s.memory_count, 0) DESC, COALESCE(s.chunk_count, 0) DESC LIMIT $limit",
+    )
+    .unwrap();
+    let Statement::MatchReturn(query) = statement else {
+        panic!("expected match return");
+    };
+    let with_projection = query
+        .with_projection
+        .as_ref()
+        .expect("expected WITH projection");
+    assert_eq!(with_projection.items.len(), 5);
+    assert!(query.aggregate_with_filter.is_some());
+    assert!(matches!(
+        query.returns[1].expression,
+        ReturnExpression::Coalesce(_)
+    ));
+    assert!(matches!(
+        query.order_by[1].expression,
+        OrderExpression::Value(ReturnValueExpression::Coalesce(_))
+    ));
+}
+
+#[test]
 fn parses_cleanup_active_consumption_order_expression() {
     let statement = parse(
         "MATCH (m:Memory) RETURN m.id ORDER BY CASE WHEN COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) < 0 THEN 0 ELSE COALESCE(m.access_count, 0) - COALESCE(m.appearances, 0) - COALESCE(m.clicks, 0) END ASC",
