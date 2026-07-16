@@ -119,7 +119,7 @@ fn main() -> Result<()> {
                 add_shadow_ready_report(&mut json, &ready)?;
             }
             if let Some(trace_path) = shadow_trace_report {
-                add_shadow_trace_report(&mut json, &trace_path)?;
+                add_shadow_trace_report(&mut json, &trace_path, shadow.request_count())?;
             }
             let rendered = serde_json::to_string_pretty(&json).unwrap();
             println!("{rendered}");
@@ -196,7 +196,11 @@ fn add_shadow_ready_report(
     Ok(())
 }
 
-fn add_shadow_trace_report(bundle: &mut serde_json::Value, trace_path: &str) -> Result<()> {
+fn add_shadow_trace_report(
+    bundle: &mut serde_json::Value,
+    trace_path: &str,
+    request_count: u64,
+) -> Result<()> {
     let object = bundle.as_object_mut().ok_or_else(|| {
         SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
     })?;
@@ -204,6 +208,7 @@ fn add_shadow_trace_report(bundle: &mut serde_json::Value, trace_path: &str) -> 
         "shadow_trace".to_string(),
         serde_json::json!({
             "path": trace_path,
+            "request_count": request_count,
         }),
     );
     Ok(())
@@ -316,11 +321,12 @@ mod tests {
             }
         });
 
-        add_shadow_trace_report(&mut bundle, "/tmp/skein-shadow.jsonl").unwrap();
+        add_shadow_trace_report(&mut bundle, "/tmp/skein-shadow.jsonl", 42).unwrap();
 
         assert_eq!(
             bundle["shadow_trace"]["path"],
             serde_json::json!("/tmp/skein-shadow.jsonl")
         );
+        assert_eq!(bundle["shadow_trace"]["request_count"], 42);
     }
 }

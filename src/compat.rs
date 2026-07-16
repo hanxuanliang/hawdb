@@ -473,6 +473,10 @@ impl ExternalShadowCommand {
         decode_external_ready_response(&self.name, response)
     }
 
+    pub fn request_count(&self) -> u64 {
+        self.next_trace_sequence.saturating_sub(1)
+    }
+
     fn request(&mut self, mut request: serde_json::Value) -> Result<serde_json::Value> {
         let trace_sequence = self.next_trace_sequence;
         self.next_trace_sequence += 1;
@@ -27745,6 +27749,7 @@ done
         let ready = shadow.require_ready().unwrap();
 
         assert_eq!(ready.protocol_version, EXTERNAL_SHADOW_PROTOCOL_VERSION);
+        assert_eq!(shadow.request_count(), 1);
         assert_eq!(
             ready.capabilities,
             vec![

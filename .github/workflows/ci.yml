@@ -61,6 +61,7 @@ jobs:
           grep -q '"decision": "ready"' "$root/gate.json"
           grep -q '"shadow_ready"' "$root/gate.json"
           grep -q '"shadow_trace"' "$root/gate.json"
+          grep -q '"request_count"' "$root/gate.json"
           grep -q '"project_graph"' "$root/gate.json"
           test -s "$root/shadow.jsonl"
 
