@@ -5340,6 +5340,35 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory metadata update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}) SET m.metadata = $metadata, m.updated_at = $updated_at",
+                        BTreeMap::from([
+                            (
+                                "memory_id".to_string(),
+                                Value::String("memory-metadata-update-1".to_string()),
+                            ),
+                            (
+                                "metadata".to_string(),
+                                Value::String("{\"stage\":\"synced\"}".to_string()),
+                            ),
+                            ("updated_at".to_string(), Value::Int(900)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'memory-metadata-update-1', metadata: '{}', updated_at: 100})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'memory-metadata-update-1'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "learning memory latest read",
                     CypherFixtureStatement::new(
                         "MATCH (m:Memory) WHERE m.unit_type = 'learning' AND m.is_crystal = false AND m.is_latest = true RETURN m.id, m.title, m.content ORDER BY m.created_at DESC LIMIT 40",
@@ -10276,6 +10305,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (s:Skill {id: $id}) SET s.metadata = $metadata, s.updated_at = $updated_at",
             ),
             CompatibilityQueryCallSite::new(
+                "memory metadata update",
+                "memory_write",
+                "nmem-server::rest_graph::memory_metadata_update; nmem-server::rest_write::memory_metadata_update; nmem-server::scheduler_service::memory_metadata_update",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id}) SET m.metadata = $metadata, m.updated_at = $updated_at",
+            ),
+            CompatibilityQueryCallSite::new(
                 "learning memory latest read",
                 "memory_retrieval_read",
                 "nmem-server::context_wiring::learning_memory_latest",
@@ -12505,7 +12542,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 264);
+        assert_eq!(report.checks.len(), 265);
     }
 
     #[test]
@@ -12521,13 +12558,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 264);
-        assert_eq!(coverage.covered_checks, 264);
+        assert_eq!(coverage.required_checks, 265);
+        assert_eq!(coverage.covered_checks, 265);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 264);
+        assert_eq!(coverage_json["covered_checks"], 265);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -12557,10 +12594,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 264);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 265);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 264);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 265);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -12754,15 +12791,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 264);
-        assert_eq!(report.shadow_checks.len(), 264);
+        assert_eq!(report.primary_checks.len(), 265);
+        assert_eq!(report.shadow_checks.len(), 265);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            264
+            265
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -12771,7 +12808,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 264);
+        assert_eq!(cutover.matched_checks, 265);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
