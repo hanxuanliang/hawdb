@@ -68,6 +68,30 @@ pub struct NowledgeGraphTransactionOutput {
     pub commit_output: QueryOutput,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalGraphSnapshotExport {
+    pub graph_commit_epoch: u64,
+    pub logical_checksum: u64,
+    pub nodes: Vec<CanonicalSnapshotNode>,
+    pub relationships: Vec<CanonicalSnapshotRelationship>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalSnapshotNode {
+    pub node_id: u64,
+    pub labels: Vec<String>,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalSnapshotRelationship {
+    pub relationship_id: u64,
+    pub source_node_id: u64,
+    pub target_node_id: u64,
+    pub rel_type: String,
+    pub properties: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeRetrievalRequest {
     pub query_text: String,
@@ -559,6 +583,10 @@ impl Database {
         let oldest_reader_epoch = self.reader_pins.borrow().oldest_epoch();
         self.store
             .storage_reclamation_watermark(oldest_reader_epoch)
+    }
+
+    pub fn export_canonical_graph_snapshot(&self) -> CanonicalGraphSnapshotExport {
+        export_canonical_graph_snapshot_for(&self.catalog, &self.store)
     }
 
     pub fn storage_version(&self) -> &'static str {
@@ -1853,6 +1881,134 @@ fn knowledge_entity_from_node(catalog: &Catalog, node: &NodeRecord) -> Knowledge
     }
 }
 
+fn export_canonical_graph_snapshot_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+) -> CanonicalGraphSnapshotExport {
+    let nodes = store
+        .scan_nodes(None)
+        .map(|node| CanonicalSnapshotNode {
+            node_id: node.id.0,
+            labels: node
+                .labels
+                .iter()
+                .filter_map(|label_id| catalog.label_name(*label_id))
+                .map(str::to_string)
+                .collect(),
+            properties: node.properties.clone(),
+        })
+        .collect::<Vec<_>>();
+    let relationships = store
+        .scan_relationships(None)
+        .map(|relationship| CanonicalSnapshotRelationship {
+            relationship_id: relationship.id.0,
+            source_node_id: relationship.source.0,
+            target_node_id: relationship.target.0,
+            rel_type: catalog
+                .rel_type_name(relationship.rel_type)
+                .unwrap_or_default()
+                .to_string(),
+            properties: relationship.properties.clone(),
+        })
+        .collect::<Vec<_>>();
+    let graph_commit_epoch = store.commit_epoch();
+    let logical_checksum = canonical_graph_snapshot_checksum(&nodes, &relationships);
+    CanonicalGraphSnapshotExport {
+        graph_commit_epoch,
+        logical_checksum,
+        nodes,
+        relationships,
+    }
+}
+
+fn canonical_graph_snapshot_checksum(
+    nodes: &[CanonicalSnapshotNode],
+    relationships: &[CanonicalSnapshotRelationship],
+) -> u64 {
+    let mut body = String::new();
+    body.push_str("SKEIN_CANONICAL_GRAPH_SNAPSHOT_V1\n");
+    body.push_str(&format!("node_count\t{}\n", nodes.len()));
+    for node in nodes {
+        body.push_str(&format!("node\t{}\n", node.node_id));
+        for label in &node.labels {
+            append_canonical_string(&mut body, "label", label);
+        }
+        append_canonical_properties(&mut body, &node.properties);
+    }
+    body.push_str(&format!("relationship_count\t{}\n", relationships.len()));
+    for relationship in relationships {
+        body.push_str(&format!(
+            "rel\t{}\t{}\t{}\n",
+            relationship.relationship_id, relationship.source_node_id, relationship.target_node_id
+        ));
+        append_canonical_string(&mut body, "type", &relationship.rel_type);
+        append_canonical_properties(&mut body, &relationship.properties);
+    }
+    checksum_bytes(body.as_bytes())
+}
+
+fn append_canonical_properties(body: &mut String, properties: &BTreeMap<String, Value>) {
+    body.push_str(&format!("property_count\t{}\n", properties.len()));
+    for (property, value) in properties {
+        append_canonical_string(body, "property", property);
+        append_canonical_value(body, value);
+        body.push('\n');
+    }
+}
+
+fn append_canonical_string(body: &mut String, prefix: &str, value: &str) {
+    body.push_str(prefix);
+    body.push('\t');
+    body.push_str(&value.len().to_string());
+    body.push(':');
+    body.push_str(value);
+    body.push('\n');
+}
+
+fn append_canonical_value(body: &mut String, value: &Value) {
+    match value {
+        Value::Null => body.push_str("null"),
+        Value::Bool(value) => body.push_str(if *value { "bool:true" } else { "bool:false" }),
+        Value::Int(value) => body.push_str(&format!("int:{value}")),
+        Value::Float(value) => body.push_str(&format!("float:{:016x}", value.to_bits())),
+        Value::String(value) => {
+            body.push_str("string:");
+            body.push_str(&value.len().to_string());
+            body.push(':');
+            body.push_str(value);
+        }
+        Value::List(values) => {
+            body.push_str(&format!("list:{}:[", values.len()));
+            for value in values {
+                append_canonical_value(body, value);
+                body.push(';');
+            }
+            body.push(']');
+        }
+        Value::Map(values) => {
+            body.push_str(&format!("map:{}:{{", values.len()));
+            for (key, value) in values {
+                body.push_str(&key.len().to_string());
+                body.push(':');
+                body.push_str(key);
+                body.push('=');
+                append_canonical_value(body, value);
+                body.push(';');
+            }
+            body.push('}');
+        }
+    }
+}
+
+fn checksum_bytes(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
+}
+
 impl ReaderPins {
     fn oldest_epoch(&self) -> Option<u64> {
         self.active_epochs.values().min().copied()
@@ -2350,6 +2506,10 @@ impl DatabaseReadTransaction {
                 .unwrap_or_else(|| ProjectedGraph::from_store_without_edges(&self.store)),
             None => ProjectedGraph::from_store(&self.store, None),
         }
+    }
+
+    pub fn export_canonical_graph_snapshot(&self) -> CanonicalGraphSnapshotExport {
+        export_canonical_graph_snapshot_for(&self.catalog, &self.store)
     }
 
     pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
@@ -5935,6 +6095,43 @@ mod tests {
             latest.rows[0].get("title"),
             Some(&Value::String("After snapshot".to_string()))
         );
+    }
+
+    #[test]
+    fn canonical_snapshot_export_uses_pinned_read_transaction_state() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+
+        let read_tx = db.begin_read_transaction();
+        db.query("CREATE (:Memory {id: 'later', title: 'Later'})")
+            .unwrap();
+
+        let snapshot = read_tx.export_canonical_graph_snapshot();
+        assert_eq!(snapshot.graph_commit_epoch, 1);
+        assert_eq!(snapshot.nodes.len(), 2);
+        assert_eq!(snapshot.relationships.len(), 1);
+        assert_eq!(snapshot.relationships[0].rel_type, "LINKS");
+        assert_eq!(snapshot.relationships[0].source_node_id, 0);
+        assert_eq!(snapshot.relationships[0].target_node_id, 1);
+        assert_eq!(
+            snapshot.relationships[0].properties.get("weight"),
+            Some(&Value::Int(7))
+        );
+        assert!(snapshot.nodes.iter().any(|node| {
+            node.labels == vec!["Memory".to_string()]
+                && node.properties.get("id") == Some(&Value::String("root".to_string()))
+        }));
+        assert!(!snapshot.nodes.iter().any(|node| {
+            node.properties.get("id") == Some(&Value::String("later".to_string()))
+        }));
+
+        let latest = db.export_canonical_graph_snapshot();
+        assert_eq!(latest.graph_commit_epoch, 2);
+        assert_eq!(latest.nodes.len(), 3);
+        assert_ne!(snapshot.logical_checksum, latest.logical_checksum);
     }
 
     #[test]

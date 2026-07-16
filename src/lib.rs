@@ -27,7 +27,8 @@ pub use analytics::{
     CommunityAssignment, LouvainOptions, PageRankOptions, PageRankScore, ProjectedGraph,
 };
 pub use api::{
-    Database, DatabaseConfig, DatabaseReadTransaction, DatabaseTransaction, DerivedArtifactJob,
+    CanonicalGraphSnapshotExport, CanonicalSnapshotNode, CanonicalSnapshotRelationship, Database,
+    DatabaseConfig, DatabaseReadTransaction, DatabaseTransaction, DerivedArtifactJob,
     DerivedArtifactJobReport, DerivedArtifactJobStatus, KnowledgeGraphContextPath,
     KnowledgeGraphPathDirection, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
     NowledgeGraphAdapter, NowledgeGraphExplainOutput, NowledgeGraphStatement,

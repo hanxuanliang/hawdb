@@ -73,6 +73,12 @@ boundary in structured form for future page/segment garbage collection: current
 commit epoch, optional checkpoint epoch and checkpoint commit epoch, active
 oldest reader epoch, computed safe reclaim commit epoch, and whether the store
 is durable.
+`Database::export_canonical_graph_snapshot` and the same method on
+`DatabaseReadTransaction` expose the current or pinned graph snapshot as
+canonical node and relationship records with a deterministic logical checksum.
+This is the local export boundary for future GraphStream encoding; it does not
+copy local pages, WAL records, adjacency pointers, or rebuildable projection
+artifacts.
 
 `Database::storage_version` exposes the currently supported storage version.
 `GraphStore::open` also validates the stored version in both the manifest and
