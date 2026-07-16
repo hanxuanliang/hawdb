@@ -36,7 +36,8 @@ Every request includes:
   "context": {
     "fixture": "nowledge-memory-core",
     "check": "read title",
-    "phase": "statement"
+    "phase": "statement",
+    "statement_index": null
   }
 }
 ```
@@ -46,6 +47,8 @@ engine should reject unsupported protocol versions with an `execution` error.
 `context` is diagnostic metadata for wrapper logs and traces. `phase` is one of
 `fixture_setup`, `check_setup`, `statement`, `session`, `effect`, or
 `project_graph`; `check` is `null` for fixture-wide setup requests.
+`statement_index` is `null` for single-statement requests and zero-based for
+statements nested inside `execute_session`.
 
 Responses may include a top-level `request_id` echo. The echo is optional for
 backward compatibility, but when present it must match the request `request_id`.
@@ -86,7 +89,8 @@ Request:
   "context": {
     "fixture": "nowledge-memory-core",
     "check": "read title",
-    "phase": "statement"
+    "phase": "statement",
+    "statement_index": null
   },
   "cypher": "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title",
   "parameters": {
@@ -130,25 +134,44 @@ Request:
   "context": {
     "fixture": "nowledge-memory-core",
     "check": "update memory title",
-    "phase": "session"
+    "phase": "session",
+    "statement_index": null
   },
   "statements": [
     {
       "cypher": "CREATE (:Memory {id: 1, title: 'Old'})",
       "role": "statement",
       "access": "mutation",
+      "context": {
+        "fixture": "nowledge-memory-core",
+        "check": "update memory title",
+        "phase": "statement",
+        "statement_index": 0
+      },
       "parameters": {}
     },
     {
       "cypher": "MATCH (m:Memory) WHERE m.id = 1 SET m.title = 'New'",
       "role": "statement",
       "access": "mutation",
+      "context": {
+        "fixture": "nowledge-memory-core",
+        "check": "update memory title",
+        "phase": "statement",
+        "statement_index": 1
+      },
       "parameters": {}
     },
     {
       "cypher": "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title",
       "role": "statement",
       "access": "read",
+      "context": {
+        "fixture": "nowledge-memory-core",
+        "check": "update memory title",
+        "phase": "statement",
+        "statement_index": 2
+      },
       "parameters": {}
     }
   ]
@@ -203,7 +226,8 @@ Request:
   "context": {
     "fixture": "nowledge-memory-core",
     "check": "mentions projection",
-    "phase": "project_graph"
+    "phase": "project_graph",
+    "statement_index": null
   },
   "rel_type": "MENTIONS",
   "expected_incoming_nodes": [1],

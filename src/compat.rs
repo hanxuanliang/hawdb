@@ -269,6 +269,7 @@ pub struct ShadowRequestContext<'a> {
     pub fixture: &'a str,
     pub check: Option<&'a str>,
     pub phase: ShadowRequestPhase,
+    pub statement_index: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -707,7 +708,19 @@ impl CompatibilityShadowEngine for ExternalShadowCommand {
         let session_access = shadow_session_access_as_str(statements);
         let statements = statements
             .iter()
-            .map(|statement| json_from_statement(statement, ShadowStatementRole::Statement))
+            .enumerate()
+            .map(|(index, statement)| {
+                json_from_statement(
+                    statement,
+                    ShadowStatementRole::Statement,
+                    ShadowRequestContext {
+                        fixture: context.fixture,
+                        check: context.check,
+                        phase: ShadowRequestPhase::Statement,
+                        statement_index: Some(index),
+                    },
+                )
+            })
             .collect::<Vec<_>>();
         let response = self.request(serde_json::json!({
             "op": "execute_session",
@@ -1201,10 +1214,12 @@ fn json_from_statement_with_role(
 fn json_from_statement(
     statement: &CypherFixtureStatement,
     role: ShadowStatementRole,
+    context: ShadowRequestContext,
 ) -> serde_json::Value {
     serde_json::json!({
         "role": shadow_statement_role_as_str(role),
         "access": shadow_statement_access_as_str(statement),
+        "context": json_from_shadow_request_context(context),
         "cypher": statement.cypher,
         "parameters": json_object_from_parameters(&statement.parameters),
     })
@@ -1224,6 +1239,7 @@ impl ShadowRequestContext<'_> {
             fixture: "",
             check: None,
             phase: ShadowRequestPhase::Statement,
+            statement_index: None,
         }
     }
 
@@ -1232,6 +1248,7 @@ impl ShadowRequestContext<'_> {
             fixture: "",
             check: None,
             phase: ShadowRequestPhase::ProjectGraph,
+            statement_index: None,
         }
     }
 }
@@ -1241,6 +1258,7 @@ fn json_from_shadow_request_context(context: ShadowRequestContext) -> serde_json
         "fixture": context.fixture,
         "check": context.check,
         "phase": shadow_request_phase_as_str(context.phase),
+        "statement_index": context.statement_index,
     })
 }
 
@@ -25815,6 +25833,7 @@ pub fn run_compatibility_fixture_with_shadow(
                         fixture: &fixture.name,
                         check: Some(&check.name),
                         phase: ShadowRequestPhase::ProjectGraph,
+                        statement_index: None,
                     },
                 )? {
                     Some(shadow_output) => {
@@ -26140,6 +26159,7 @@ fn run_shadow_setup(
                     fixture: &fixture.name,
                     check: None,
                     phase: ShadowRequestPhase::FixtureSetup,
+                    statement_index: None,
                 },
             )
             .map_err(|error| {
@@ -26213,6 +26233,7 @@ fn run_shadow_cypher_check(
                     fixture: &fixture.name,
                     check: Some(&check.name),
                     phase: ShadowRequestPhase::CheckSetup,
+                    statement_index: None,
                 },
             )
             .map_err(|error| {
@@ -26231,6 +26252,7 @@ fn run_shadow_cypher_check(
             fixture: &fixture.name,
             check: Some(&check.name),
             phase: ShadowRequestPhase::Statement,
+            statement_index: None,
         },
     );
     match (primary, check.expected_error) {
@@ -26313,6 +26335,7 @@ fn run_shadow_cypher_check(
                             fixture: &fixture.name,
                             check: Some(&check.name),
                             phase: ShadowRequestPhase::Effect,
+                            statement_index: None,
                         },
                     )
                     .map_err(|error| {
@@ -26375,6 +26398,7 @@ fn run_shadow_cypher_session_check(
                 fixture: &fixture.name,
                 check: Some(&check.name),
                 phase: ShadowRequestPhase::Session,
+                statement_index: None,
             },
         )
         .map_err(|error| {
@@ -27774,7 +27798,7 @@ done
             r#"#!/bin/sh
 while IFS= read -r line; do
   case "$line" in
-    *'"op":"execute_session"'*'"access":"mutation"'*) echo '{"ok":{"outputs":[{"rows":[]},{"rows":[{}]},{"rows":[{"title":"New"}]}]}}' ;;
+    *'"op":"execute_session"'*'"access":"mutation"'*'"statement_index":0'*'"statement_index":1'*'"statement_index":2'*) echo '{"ok":{"outputs":[{"rows":[]},{"rows":[{}]},{"rows":[{"title":"New"}]}]}}' ;;
     *) echo '{"error":{"class":"execution","message":"expected mutation session access"}}' ;;
   esac
 done
