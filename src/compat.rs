@@ -1531,6 +1531,27 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     ExpectedRows::RowCount(1),
                 ),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "graph meta pagerank sentinel read",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:GraphMeta) RETURN m.pagerank_computed_at LIMIT 1",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "m.pagerank_computed_at",
+                        Value::Int(123),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:GraphMeta {meta_id: 'schema-sentinel', pagerank_computed_at: 123})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:GraphMeta {meta_id: 'schema-sentinel'}) DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "entity lifecycle mention memory id read",
                 CypherFixtureStatement::with_parameters(
@@ -12184,6 +12205,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (m:GraphMeta {meta_id: 'main'}) SET m.community_detection_applied = true, m.community_algorithm = 'louvain', m.community_resolution = $resolution, m.community_count = $count, m.community_detection_computed_at = CURRENT_TIMESTAMP(), m.last_augmentation_at = CURRENT_TIMESTAMP(), m.updated_at = CURRENT_TIMESTAMP()"),
             CompatibilityQueryCallSite::new(
+                "graph meta pagerank sentinel read",
+                "schema_read",
+                "nmem-graph::schema::SCHEMA_SENTINEL",
+            )
+            .with_cypher("MATCH (m:GraphMeta) RETURN m.pagerank_computed_at LIMIT 1"),
+            CompatibilityQueryCallSite::new(
                 "community latest updated read",
                 "community_read",
                 "nmem-graph::community_plan::latest_community_update",
@@ -15937,7 +15964,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 353);
+        assert_eq!(report.checks.len(), 354);
     }
 
     #[test]
@@ -15953,13 +15980,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 353);
-        assert_eq!(coverage.covered_checks, 353);
+        assert_eq!(coverage.required_checks, 354);
+        assert_eq!(coverage.covered_checks, 354);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 353);
+        assert_eq!(coverage_json["covered_checks"], 354);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -15989,10 +16016,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 353);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 354);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 353);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 354);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16217,15 +16244,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 353);
-        assert_eq!(report.shadow_checks.len(), 353);
+        assert_eq!(report.primary_checks.len(), 354);
+        assert_eq!(report.shadow_checks.len(), 354);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            353
+            354
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16234,7 +16261,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 353);
+        assert_eq!(cutover.matched_checks, 354);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
