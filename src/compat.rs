@@ -1246,6 +1246,13 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ExpectedRows::Exact(vec![compatibility_row([("count(m)", Value::Int(1))])]),
             )),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "mcp crystal count read",
+                CypherFixtureStatement::new(
+                    "MATCH (c:Memory) WHERE c.is_crystal = true RETURN count(c)",
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([("count(c)", Value::Int(1))])]),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "checkpoint control statement",
                 CypherFixtureStatement::new("CHECKPOINT"),
                 ExpectedRows::RowCount(0),
@@ -3519,6 +3526,99 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     "MATCH (older:Memory {id: 2})-[e:EVOLVES]->(newer:Memory {id: 3}) SET e.content_relation = 'supersedes', e.is_progression = true",
                 )),
             ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "context memory title preview read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.unit_type IN $types AND (m.is_latest IS NULL OR m.is_latest = true) AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.id, m.title ORDER BY m.created_at DESC LIMIT 400",
+                        BTreeMap::from([(
+                            "types".to_string(),
+                            Value::List(vec![Value::String("context-preview".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("context-preview-newer".to_string())),
+                            ("m.title", Value::String("Context Preview Newer".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("context-preview-older".to_string())),
+                            ("m.title", Value::String("Context Preview Older".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'context-preview-older', title: 'Context Preview Older', unit_type: 'context-preview', is_crystal: false, created_at: 1000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'context-preview-newer', title: 'Context Preview Newer', unit_type: 'context-preview', is_latest: true, is_crystal: false, created_at: 2000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'context-preview-stale', title: 'Context Preview Stale', unit_type: 'context-preview', is_latest: false, is_crystal: false, created_at: 3000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'context-preview-crystal', title: 'Context Preview Crystal', unit_type: 'context-preview', is_latest: true, is_crystal: true, created_at: 4000})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Label {id: 'context-preview-label', name: 'Context Preview', canonical_name: 'context-preview'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'context-preview-newer'}), (l:Label {id: 'context-preview-label'}) CREATE (m)-[:HAS_LABEL]->(l)",
+                )),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "context memory label preview read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE m.unit_type IN $types AND m.is_latest = true AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN l.id, l.canonical_name, l.name, m.id, m.title ORDER BY m.created_at DESC LIMIT 2000",
+                    BTreeMap::from([(
+                        "types".to_string(),
+                        Value::List(vec![Value::String("context-preview".to_string())]),
+                    )]),
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([
+                    (
+                        "l.id",
+                        Value::String("context-preview-label".to_string()),
+                    ),
+                    (
+                        "l.canonical_name",
+                        Value::String("context-preview".to_string()),
+                    ),
+                    ("l.name", Value::String("Context Preview".to_string())),
+                    ("m.id", Value::String("context-preview-newer".to_string())),
+                    ("m.title", Value::String("Context Preview Newer".to_string())),
+                ])]),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "context memory typed preview read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.unit_type IN $types AND (m.is_latest IS NULL OR m.is_latest = true) AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.id, m.title, m.unit_type ORDER BY m.created_at DESC LIMIT 800",
+                        BTreeMap::from([(
+                            "types".to_string(),
+                            Value::List(vec![Value::String("context-preview".to_string())]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("m.id", Value::String("context-preview-newer".to_string())),
+                            ("m.title", Value::String("Context Preview Newer".to_string())),
+                            ("m.unit_type", Value::String("context-preview".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("m.id", Value::String("context-preview-older".to_string())),
+                            ("m.title", Value::String("Context Preview Older".to_string())),
+                            ("m.unit_type", Value::String("context-preview".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['context-preview-older', 'context-preview-newer', 'context-preview-stale', 'context-preview-crystal', 'context-preview-label'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(5),
+                ),
+            ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "incoming mentions read",
                 CypherFixtureStatement::new(
@@ -4121,6 +4221,43 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (t:Thread {id: 'compact-thread-node-1'}) DETACH DELETE t",
                     ),
                     ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "context skill thread source read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory)<-[:SYNTHESIZED_FROM]-(sk:Skill {id: $id}) RETURN t.title, t.source",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("context-skill-source".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("t.title", Value::String("Context Source Thread".to_string())),
+                        ("t.source", Value::String("codex".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Thread {id: 'context-source-thread', title: 'Context Source Thread', source: 'codex'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'context-source-memory', title: 'Context Source Memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Skill {id: 'context-skill-source', title: 'Context Source Skill'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (t:Thread {id: 'context-source-thread'}), (m:Memory {id: 'context-source-memory'}) CREATE (t)-[:COMPACTS_TO]->(m)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (sk:Skill {id: 'context-skill-source'}), (m:Memory {id: 'context-source-memory'}) CREATE (sk)-[:SYNTHESIZED_FROM]->(m)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['context-source-thread', 'context-source-memory', 'context-skill-source'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -13102,6 +13239,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory) WHERE m.id IN $ids RETURN m.id, t.thread_id",
             ),
             CompatibilityQueryCallSite::new(
+                "context skill thread source read",
+                "context_wiring_read",
+                "nmem-server::context_wiring::skill_thread_sources",
+            )
+            .with_cypher(
+                "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory)<-[:SYNTHESIZED_FROM]-(sk:Skill {id: $id}) RETURN t.title, t.source",
+            ),
+            CompatibilityQueryCallSite::new(
                 "memory metadata bulk read",
                 "memory_read",
                 "nmem-graph::repo::memory_metadata_for_ids",
@@ -13656,6 +13801,30 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (older:Memory)-[e:EVOLVES]->(newer:Memory) WHERE (older.unit_type IN $types OR newer.unit_type IN $types) RETURN older.id, newer.id, e.content_relation, e.is_progression, older.unit_type, newer.unit_type, older.title, newer.title, older.created_at, newer.created_at, older.is_latest, newer.is_latest, older.space_id, newer.space_id ORDER BY newer.created_at DESC LIMIT 500",
+            ),
+            CompatibilityQueryCallSite::new(
+                "context memory title preview read",
+                "context_wiring_read",
+                "nmem-server::context_wiring::semantic_unit_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.unit_type IN $types AND (m.is_latest IS NULL OR m.is_latest = true) AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.id, m.title ORDER BY m.created_at DESC LIMIT 400",
+            ),
+            CompatibilityQueryCallSite::new(
+                "context memory label preview read",
+                "context_wiring_read",
+                "nmem-server::context_wiring::semantic_unit_label_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) WHERE m.unit_type IN $types AND m.is_latest = true AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN l.id, l.canonical_name, l.name, m.id, m.title ORDER BY m.created_at DESC LIMIT 2000",
+            ),
+            CompatibilityQueryCallSite::new(
+                "context memory typed preview read",
+                "context_wiring_read",
+                "nmem-server::context_wiring::semantic_unit_typed_rows",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE m.unit_type IN $types AND (m.is_latest IS NULL OR m.is_latest = true) AND (m.is_crystal IS NULL OR m.is_crystal = false) RETURN m.id, m.title, m.unit_type ORDER BY m.created_at DESC LIMIT 800",
             ),
             CompatibilityQueryCallSite::new(
                 "mcp graph all shortest path read",
@@ -15079,6 +15248,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "nmem-server::context_wiring::graph_totals",
             )
             .with_cypher("MATCH (m:Memory) WHERE m.is_crystal = true RETURN count(m)"),
+            CompatibilityQueryCallSite::new(
+                "mcp crystal count read",
+                "mcp_read",
+                "nmem-server::mcp_server::list_crystals.count",
+            )
+            .with_cypher("MATCH (c:Memory) WHERE c.is_crystal = true RETURN count(c)"),
             CompatibilityQueryCallSite::new(
                 "decay refresh score and confidence update",
                 "decay_refresh_write",
@@ -16667,7 +16842,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 369);
+        assert_eq!(report.checks.len(), 374);
     }
 
     #[test]
@@ -16683,13 +16858,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 369);
-        assert_eq!(coverage.covered_checks, 369);
+        assert_eq!(coverage.required_checks, 374);
+        assert_eq!(coverage.covered_checks, 374);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 369);
+        assert_eq!(coverage_json["covered_checks"], 374);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -16719,10 +16894,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 369);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 374);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 369);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 374);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -16947,15 +17122,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 369);
-        assert_eq!(report.shadow_checks.len(), 369);
+        assert_eq!(report.primary_checks.len(), 374);
+        assert_eq!(report.shadow_checks.len(), 374);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            369
+            374
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -16964,7 +17139,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 369);
+        assert_eq!(cutover.matched_checks, 374);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
