@@ -7,6 +7,7 @@ mod mutation;
 mod pattern;
 mod predicate;
 mod procedure;
+mod projection;
 mod query;
 mod scalar;
 
