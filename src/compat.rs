@@ -8059,6 +8059,50 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                     "CREATE (:Community {id: 'summary-ranked-empty', community_id: 9430, name: 'Summary Ranked Empty', description: 'ranked empty', ai_summary: '', member_count: 1000, updated_at: 300})",
                 )),
             ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "wiki export summary entity count",
+                CypherFixtureStatement::new("MATCH (e:Entity) RETURN COUNT(e)"),
+                ExpectedRows::RowCount(1),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "wiki export summary crystal count",
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.is_crystal = true RETURN COUNT(m)",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'wiki-summary-crystal', is_crystal: true})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 'wiki-summary-crystal'}) DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "wiki export summary community count",
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 AND c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN COUNT(c)",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'wiki-summary-community', community_id: 9510, name: 'Wiki Summary Community', ai_summary: 'summary'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Community {id: 'wiki-summary-community-excluded', community_id: 9520, name: 'Knowledge Network', ai_summary: 'summary'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Community) WHERE c.id IN ['wiki-summary-community', 'wiki-summary-community-excluded'] DETACH DELETE c",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "mcp graph all shortest path read",
@@ -9713,6 +9757,26 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 RETURN c.community_id, c.name, c.description, c.ai_summary, c.member_count, c.updated_at ORDER BY CASE WHEN c.ai_summary IS NOT NULL AND c.ai_summary <> '' THEN 0 ELSE 1 END, c.member_count DESC LIMIT $limit",
             ),
             CompatibilityQueryCallSite::new(
+                "wiki export summary entity count",
+                "wiki_export_read",
+                "nmem-server::wiki_export::wiki_export_summary.entity_count",
+            )
+            .with_cypher("MATCH (e:Entity) RETURN COUNT(e)"),
+            CompatibilityQueryCallSite::new(
+                "wiki export summary crystal count",
+                "wiki_export_read",
+                "nmem-server::wiki_export::wiki_export_summary.crystal_count",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.is_crystal = true RETURN COUNT(m)"),
+            CompatibilityQueryCallSite::new(
+                "wiki export summary community count",
+                "wiki_export_read",
+                "nmem-server::wiki_export::wiki_export_summary.community_count",
+            )
+            .with_cypher(
+                "MATCH (c:Community) WHERE c.community_id IS NOT NULL AND c.community_id >= 0 AND c.ai_summary IS NOT NULL AND c.ai_summary <> '' AND c.name <> 'Knowledge Network' AND c.name <> 'Concept Cluster' AND c.name <> 'Small Group' RETURN COUNT(c)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "analyzable corpus max updated fingerprint",
                 "scheduler_fingerprint_read",
                 "nmem-server::scheduler_service::analyzable_corpus_fingerprint",
@@ -11008,7 +11072,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 241);
+        assert_eq!(report.checks.len(), 244);
     }
 
     #[test]
@@ -11024,13 +11088,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 241);
-        assert_eq!(coverage.covered_checks, 241);
+        assert_eq!(coverage.required_checks, 244);
+        assert_eq!(coverage.covered_checks, 244);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 241);
+        assert_eq!(coverage_json["covered_checks"], 244);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -11060,10 +11124,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 241);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 244);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 241);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 244);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -11257,15 +11321,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 241);
-        assert_eq!(report.shadow_checks.len(), 241);
+        assert_eq!(report.primary_checks.len(), 244);
+        assert_eq!(report.shadow_checks.len(), 244);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            241
+            244
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -11274,7 +11338,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 241);
+        assert_eq!(cutover.matched_checks, 244);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
