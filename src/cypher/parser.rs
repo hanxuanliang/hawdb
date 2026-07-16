@@ -4,6 +4,7 @@ use crate::error::Result;
 mod cursor;
 mod ddl;
 mod mutation;
+mod pattern;
 mod predicate;
 mod procedure;
 mod query;
