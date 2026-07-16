@@ -1766,6 +1766,127 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 ),
             ),
             CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "entity lifecycle endpoint metadata read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (source:Entity {id: $source_id}), (target:Entity {id: $target_id}) RETURN source.metadata, target.metadata",
+                    BTreeMap::from([
+                        ("source_id".to_string(), Value::String("entity-life-meta-source".to_string())),
+                        ("target_id".to_string(), Value::String("entity-life-meta-target".to_string())),
+                    ]),
+                ),
+                ExpectedRows::Exact(vec![compatibility_row([
+                    (
+                        "source.metadata",
+                        Value::String("{\"role\":\"source\"}".to_string()),
+                    ),
+                    (
+                        "target.metadata",
+                        Value::String("{\"role\":\"target\"}".to_string()),
+                    ),
+                ])]),
+            )
+            .with_setup_query(CypherFixtureStatement::new(
+                "CREATE (:Entity {id: 'entity-life-meta-source', metadata: '{\"role\":\"source\"}'})",
+            ))
+            .with_setup_query(CypherFixtureStatement::new(
+                "CREATE (:Entity {id: 'entity-life-meta-target', metadata: '{\"role\":\"target\"}'})",
+            ))
+            .with_effect_query(
+                CypherFixtureStatement::new(
+                    "MATCH (n) WHERE n.id IN ['entity-life-meta-source', 'entity-life-meta-target'] DETACH DELETE n",
+                ),
+                ExpectedRows::RowCount(2),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "entity lifecycle mention relationship read",
+                CypherFixtureStatement::with_parameters(
+                    "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity {id: $id}) RETURN m.id, r",
+                    BTreeMap::from([("id".to_string(), Value::String("entity-life-mention-target".to_string()))]),
+                ),
+                ExpectedRows::RowCount(1),
+            )
+            .with_setup_query(CypherFixtureStatement::new(
+                "CREATE (:Memory {id: 'entity-life-mention-memory'})-[:MENTIONS {confidence: 0.88, mention_count: 2, created_at: 14, properties: '{}'}]->(:Entity {id: 'entity-life-mention-target'})",
+            ))
+            .with_effect_query(
+                CypherFixtureStatement::new(
+                    "MATCH (n) WHERE n.id IN ['entity-life-mention-memory', 'entity-life-mention-target'] DETACH DELETE n",
+                ),
+                ExpectedRows::RowCount(2),
+            )),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity lifecycle mention relationship create",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}), (e:Entity {id: $target_id}) CREATE (m)-[:MENTIONS {confidence: $confidence, mention_count: $mention_count, created_at: $created_at, properties: $properties}]->(e)",
+                        BTreeMap::from([
+                            ("memory_id".to_string(), Value::String("entity-life-create-mention-memory".to_string())),
+                            ("target_id".to_string(), Value::String("entity-life-create-mention-target".to_string())),
+                            ("confidence".to_string(), Value::Float(0.91)),
+                            ("mention_count".to_string(), Value::Int(3)),
+                            ("created_at".to_string(), Value::Int(15)),
+                            ("properties".to_string(), Value::String("{}".to_string())),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'entity-life-create-mention-memory'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-life-create-mention-target'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['entity-life-create-mention-memory', 'entity-life-create-mention-target'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity lifecycle target metadata update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (target:Entity {id: $target_id}) SET target.aliases = $aliases, target.metadata = $metadata, target.updated_at = $updated_at, target.pagerank_score = 0.0, target.topic_graph_eligible = false, target.topic_signal_score = 0.0",
+                        BTreeMap::from([
+                            ("target_id".to_string(), Value::String("entity-life-update-target".to_string())),
+                            (
+                                "aliases".to_string(),
+                                Value::List(vec![Value::String("updated alias".to_string())]),
+                            ),
+                            ("metadata".to_string(), Value::String("{\"updated\":true}".to_string())),
+                            ("updated_at".to_string(), Value::Int(16)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-life-update-target', aliases: [], metadata: '{}', updated_at: 1})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (target:Entity {id: 'entity-life-update-target'}) DETACH DELETE target",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "entity lifecycle source detach delete",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (source:Entity {id: $source_id}) DETACH DELETE source",
+                        BTreeMap::from([(
+                            "source_id".to_string(),
+                            Value::String("entity-life-delete-source".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Entity {id: 'entity-life-delete-source'})",
+                )),
+            ),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
                 "whole node projection",
                 CypherFixtureStatement::with_parameters(
                     "MATCH (m:Memory {id: $memory_id}) RETURN m",
@@ -10639,6 +10760,36 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher("MATCH (e:Entity {id: $target_id}), (n:Community {id: $community_id}) CREATE (e)-[:BELONGS_TO { strength: $strength, created_at: $created_at, properties: $properties }]->(n)"),
             CompatibilityQueryCallSite::new(
+                "entity lifecycle endpoint metadata read",
+                "entity_lifecycle_read",
+                "nmem-graph::entity_lifecycle::endpoint_metadata",
+            )
+            .with_cypher("MATCH (source:Entity {id: $source_id}), (target:Entity {id: $target_id}) RETURN source.metadata, target.metadata"),
+            CompatibilityQueryCallSite::new(
+                "entity lifecycle mention relationship read",
+                "entity_lifecycle_read",
+                "nmem-graph::entity_lifecycle::mention_relationships_for_entity",
+            )
+            .with_cypher("MATCH (m:Memory)-[r:MENTIONS]->(e:Entity {id: $id}) RETURN m.id, r"),
+            CompatibilityQueryCallSite::new(
+                "entity lifecycle mention relationship create",
+                "entity_lifecycle_write",
+                "nmem-graph::entity_lifecycle::create_mention_edge",
+            )
+            .with_cypher("MATCH (m:Memory {id: $memory_id}), (e:Entity {id: $target_id}) CREATE (m)-[:MENTIONS {confidence: $confidence, mention_count: $mention_count, created_at: $created_at, properties: $properties}]->(e)"),
+            CompatibilityQueryCallSite::new(
+                "entity lifecycle target metadata update",
+                "entity_lifecycle_write",
+                "nmem-graph::entity_lifecycle::merge_target_metadata",
+            )
+            .with_cypher("MATCH (target:Entity {id: $target_id}) SET target.aliases = $aliases, target.metadata = $metadata, target.updated_at = $updated_at, target.pagerank_score = 0.0, target.topic_graph_eligible = false, target.topic_signal_score = 0.0"),
+            CompatibilityQueryCallSite::new(
+                "entity lifecycle source detach delete",
+                "entity_lifecycle_write",
+                "nmem-graph::entity_lifecycle::delete_source_entity",
+            )
+            .with_cypher("MATCH (source:Entity {id: $source_id}) DETACH DELETE source"),
+            CompatibilityQueryCallSite::new(
                 "whole node projection",
                 "record_projection_read",
                 "nmem-graph::repo::get_by_id",
@@ -13986,7 +14137,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 304);
+        assert_eq!(report.checks.len(), 309);
     }
 
     #[test]
@@ -14002,13 +14153,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 304);
-        assert_eq!(coverage.covered_checks, 304);
+        assert_eq!(coverage.required_checks, 309);
+        assert_eq!(coverage.covered_checks, 309);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 304);
+        assert_eq!(coverage_json["covered_checks"], 309);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -14038,10 +14189,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 304);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 309);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 304);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 309);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -14266,15 +14417,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 304);
-        assert_eq!(report.shadow_checks.len(), 304);
+        assert_eq!(report.primary_checks.len(), 309);
+        assert_eq!(report.shadow_checks.len(), 309);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            304
+            309
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -14283,7 +14434,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 304);
+        assert_eq!(cutover.matched_checks, 309);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
