@@ -2134,6 +2134,54 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "activity task compaction evolves read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (a:Memory)-[e:EVOLVES]-(b:Memory) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id, e.content_relation",
+                        BTreeMap::from([(
+                            "ids".to_string(),
+                            Value::List(vec![
+                                Value::String("compaction-evolves-a".to_string()),
+                                Value::String("compaction-evolves-b".to_string()),
+                            ]),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([
+                            ("a.id", Value::String("compaction-evolves-a".to_string())),
+                            ("b.id", Value::String("compaction-evolves-b".to_string())),
+                            ("e.content_relation", Value::String("updates".to_string())),
+                        ]),
+                        compatibility_row([
+                            ("a.id", Value::String("compaction-evolves-b".to_string())),
+                            ("b.id", Value::String("compaction-evolves-a".to_string())),
+                            ("e.content_relation", Value::String("updates".to_string())),
+                        ]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'compaction-evolves-a', title: 'Compaction A'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'compaction-evolves-b', title: 'Compaction B'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'compaction-evolves-outside', title: 'Compaction Outside'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Memory {id: 'compaction-evolves-a'}), (b:Memory {id: 'compaction-evolves-b'}) CREATE (a)-[:EVOLVES {content_relation: 'updates'}]->(b)",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (a:Memory {id: 'compaction-evolves-a'}), (b:Memory {id: 'compaction-evolves-outside'}) CREATE (a)-[:EVOLVES {content_relation: 'outside'}]->(b)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['compaction-evolves-a', 'compaction-evolves-b', 'compaction-evolves-outside'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "activity task oldest crystal read",
                     CypherFixtureStatement::new(
                         "MATCH (c:Memory) WHERE c.is_crystal = true RETURN c.id, c.title, c.created_at, c.last_evaluated_at, c.review_status ORDER BY c.created_at ASC LIMIT 10",
@@ -11796,6 +11844,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory)-[:EVOLVES]-(other:Memory) WHERE (m.is_crystal IS NULL OR m.is_crystal = false) AND (other.is_crystal IS NULL OR other.is_crystal = false) RETURN m.id, m.title, m.unit_type, count(DISTINCT other) as neighbor_count ORDER BY neighbor_count DESC LIMIT 30",
             ),
             CompatibilityQueryCallSite::new(
+                "activity task compaction evolves read",
+                "agent_context_read",
+                "nmem-graph::agent_context_tasks::Q_COMPACTION_EVOLVES",
+            )
+            .with_cypher(
+                "MATCH (a:Memory)-[e:EVOLVES]-(b:Memory) WHERE a.id IN $ids AND b.id IN $ids RETURN a.id, b.id, e.content_relation",
+            ),
+            CompatibilityQueryCallSite::new(
                 "activity task oldest crystal read",
                 "agent_context_read",
                 "nmem-graph::agent_context_tasks::Q_OLDEST_CRYSTALS",
@@ -13032,7 +13088,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 275);
+        assert_eq!(report.checks.len(), 276);
     }
 
     #[test]
@@ -13048,13 +13104,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 275);
-        assert_eq!(coverage.covered_checks, 275);
+        assert_eq!(coverage.required_checks, 276);
+        assert_eq!(coverage.covered_checks, 276);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 275);
+        assert_eq!(coverage_json["covered_checks"], 276);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -13084,10 +13140,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 275);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 276);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 275);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 276);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -13312,15 +13368,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 275);
-        assert_eq!(report.shadow_checks.len(), 275);
+        assert_eq!(report.primary_checks.len(), 276);
+        assert_eq!(report.shadow_checks.len(), 276);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            275
+            276
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -13329,7 +13385,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 275);
+        assert_eq!(cutover.matched_checks, 276);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

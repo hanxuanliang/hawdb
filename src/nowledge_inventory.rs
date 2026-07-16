@@ -423,7 +423,79 @@ fn normalize_cypher_literal(value: &str) -> Option<String> {
     if normalized.is_empty() || !looks_like_cypher(&normalized) {
         return None;
     }
+    if contains_unresolved_rust_format_placeholder(&normalized) {
+        return None;
+    }
     Some(normalized)
+}
+
+fn contains_unresolved_rust_format_placeholder(query: &str) -> bool {
+    let bytes = query.as_bytes();
+    let mut index = 0;
+    let mut in_single_quote = false;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'\'' => {
+                if in_single_quote && bytes.get(index + 1) == Some(&b'\'') {
+                    index += 2;
+                } else {
+                    in_single_quote = !in_single_quote;
+                    index += 1;
+                }
+            }
+            b'{' if bytes.get(index + 1) == Some(&b'{') => {
+                index += 2;
+            }
+            b'}' if bytes.get(index + 1) == Some(&b'}') => {
+                index += 2;
+            }
+            b'{' => {
+                let content_start = index + 1;
+                let Some(close_offset) = query[content_start..].find('}') else {
+                    return true;
+                };
+                let content = query[content_start..content_start + close_offset].trim();
+                if in_single_quote && content.is_empty() {
+                    index = content_start + close_offset + 1;
+                    continue;
+                }
+                if looks_like_rust_format_placeholder(content) {
+                    return true;
+                }
+                index = content_start + close_offset + 1;
+            }
+            _ => {
+                index += 1;
+            }
+        }
+    }
+    false
+}
+
+fn looks_like_rust_format_placeholder(content: &str) -> bool {
+    if content.is_empty() {
+        return true;
+    }
+    let (head, format_spec) = content
+        .split_once(':')
+        .map(|(head, spec)| (head.trim(), Some(spec.trim_start())))
+        .unwrap_or((content, None));
+    let mut chars = head.chars();
+    let Some(first) = chars.next() else {
+        return true;
+    };
+    if !(first == '_' || first.is_ascii_alphabetic())
+        || !chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+    {
+        return false;
+    }
+    let Some(format_spec) = format_spec else {
+        return true;
+    };
+    format_spec
+        .chars()
+        .next()
+        .is_some_and(|ch| matches!(ch, '?' | '#' | '<' | '>' | '^' | '0' | '.' | '1'..='9'))
 }
 
 fn looks_like_cypher(query: &str) -> bool {
@@ -623,6 +695,36 @@ mod tests {
     }
 
     #[test]
+    fn accepts_cypher_maps_but_skips_rust_format_templates() {
+        assert_eq!(
+            normalize_cypher_literal("MATCH (m:Memory {id: $id}) RETURN m.id"),
+            Some("MATCH (m:Memory {id: $id}) RETURN m.id".to_string())
+        );
+        assert_eq!(
+            normalize_cypher_literal("MATCH (m:Memory) WHERE m.id = $id{space_clause} RETURN m.id"),
+            None
+        );
+        assert_eq!(
+            normalize_cypher_literal(
+                "MATCH p = (a)-[e* ALL SHORTEST 1..{max_depth}]-(b) RETURN length(p)"
+            ),
+            None
+        );
+        assert_eq!(
+            normalize_cypher_literal(
+                "CREATE (j:AugmentationJob {result: '{}', error_message: ''})"
+            ),
+            Some("CREATE (j:AugmentationJob {result: '{}', error_message: ''})".to_string())
+        );
+        assert_eq!(
+            normalize_cypher_literal(
+                "CALL PROJECT_GRAPH('{name}', {'Entity': ''}, {'RELATES_TO': ''})"
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn skips_non_production_graph_sources() {
         assert!(!scan_source_file("crates/nmem-content/src/lib.rs"));
         assert!(!scan_source_file("crates/nmem-server/tests/okf_smoke.rs"));
@@ -662,7 +764,7 @@ mod tests {
         assert_eq!(coverage["missing_checks"].as_array().unwrap().len(), 0);
         assert_eq!(
             coverage["extra_fixture_checks"].as_array().unwrap().len(),
-            274
+            275
         );
 
         fs::remove_dir_all(root).unwrap();
