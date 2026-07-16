@@ -72,13 +72,24 @@ pub struct NowledgeGraphTransactionOutput {
 pub struct CanonicalGraphSnapshotExport {
     pub graph_commit_epoch: u64,
     pub logical_checksum: u64,
+    pub stable_identity: CanonicalSnapshotIdentityAudit,
     pub nodes: Vec<CanonicalSnapshotNode>,
     pub relationships: Vec<CanonicalSnapshotRelationship>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalSnapshotIdentityAudit {
+    pub requires_stable_id_mapping: bool,
+    pub nodes_without_stable_id: Vec<u64>,
+    pub relationships_without_stable_id: Vec<u64>,
+    pub duplicate_node_stable_ids: Vec<Value>,
+    pub duplicate_relationship_stable_ids: Vec<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalSnapshotNode {
     pub node_id: u64,
+    pub stable_id: Option<Value>,
     pub labels: Vec<String>,
     pub properties: BTreeMap<String, Value>,
 }
@@ -86,6 +97,7 @@ pub struct CanonicalSnapshotNode {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalSnapshotRelationship {
     pub relationship_id: u64,
+    pub stable_id: Option<Value>,
     pub source_node_id: u64,
     pub target_node_id: u64,
     pub rel_type: String,
@@ -1889,6 +1901,7 @@ fn export_canonical_graph_snapshot_for(
         .scan_nodes(None)
         .map(|node| CanonicalSnapshotNode {
             node_id: node.id.0,
+            stable_id: canonical_stable_id(&node.properties),
             labels: node
                 .labels
                 .iter()
@@ -1902,6 +1915,7 @@ fn export_canonical_graph_snapshot_for(
         .scan_relationships(None)
         .map(|relationship| CanonicalSnapshotRelationship {
             relationship_id: relationship.id.0,
+            stable_id: canonical_stable_id(&relationship.properties),
             source_node_id: relationship.source.0,
             target_node_id: relationship.target.0,
             rel_type: catalog
@@ -1912,13 +1926,64 @@ fn export_canonical_graph_snapshot_for(
         })
         .collect::<Vec<_>>();
     let graph_commit_epoch = store.commit_epoch();
+    let stable_identity = canonical_snapshot_identity_audit(&nodes, &relationships);
     let logical_checksum = canonical_graph_snapshot_checksum(&nodes, &relationships);
     CanonicalGraphSnapshotExport {
         graph_commit_epoch,
         logical_checksum,
+        stable_identity,
         nodes,
         relationships,
     }
+}
+
+fn canonical_stable_id(properties: &BTreeMap<String, Value>) -> Option<Value> {
+    properties.get("id").cloned()
+}
+
+fn canonical_snapshot_identity_audit(
+    nodes: &[CanonicalSnapshotNode],
+    relationships: &[CanonicalSnapshotRelationship],
+) -> CanonicalSnapshotIdentityAudit {
+    let nodes_without_stable_id = nodes
+        .iter()
+        .filter(|node| node.stable_id.is_none())
+        .map(|node| node.node_id)
+        .collect::<Vec<_>>();
+    let relationships_without_stable_id = relationships
+        .iter()
+        .filter(|relationship| relationship.stable_id.is_none())
+        .map(|relationship| relationship.relationship_id)
+        .collect::<Vec<_>>();
+    let duplicate_node_stable_ids =
+        duplicate_stable_ids(nodes.iter().filter_map(|node| node.stable_id.as_ref()));
+    let duplicate_relationship_stable_ids = duplicate_stable_ids(
+        relationships
+            .iter()
+            .filter_map(|relationship| relationship.stable_id.as_ref()),
+    );
+    let requires_stable_id_mapping = !nodes_without_stable_id.is_empty()
+        || !relationships_without_stable_id.is_empty()
+        || !duplicate_node_stable_ids.is_empty()
+        || !duplicate_relationship_stable_ids.is_empty();
+    CanonicalSnapshotIdentityAudit {
+        requires_stable_id_mapping,
+        nodes_without_stable_id,
+        relationships_without_stable_id,
+        duplicate_node_stable_ids,
+        duplicate_relationship_stable_ids,
+    }
+}
+
+fn duplicate_stable_ids<'a>(values: impl Iterator<Item = &'a Value>) -> Vec<Value> {
+    let mut counts = BTreeMap::<Value, usize>::new();
+    for value in values {
+        *counts.entry(value.clone()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter_map(|(value, count)| (count > 1).then_some(value))
+        .collect()
 }
 
 fn canonical_graph_snapshot_checksum(
@@ -1930,6 +1995,7 @@ fn canonical_graph_snapshot_checksum(
     body.push_str(&format!("node_count\t{}\n", nodes.len()));
     for node in nodes {
         body.push_str(&format!("node\t{}\n", node.node_id));
+        append_optional_canonical_value(&mut body, "stable_id", node.stable_id.as_ref());
         for label in &node.labels {
             append_canonical_string(&mut body, "label", label);
         }
@@ -1941,6 +2007,7 @@ fn canonical_graph_snapshot_checksum(
             "rel\t{}\t{}\t{}\n",
             relationship.relationship_id, relationship.source_node_id, relationship.target_node_id
         ));
+        append_optional_canonical_value(&mut body, "stable_id", relationship.stable_id.as_ref());
         append_canonical_string(&mut body, "type", &relationship.rel_type);
         append_canonical_properties(&mut body, &relationship.properties);
     }
@@ -1962,6 +2029,16 @@ fn append_canonical_string(body: &mut String, prefix: &str, value: &str) {
     body.push_str(&value.len().to_string());
     body.push(':');
     body.push_str(value);
+    body.push('\n');
+}
+
+fn append_optional_canonical_value(body: &mut String, prefix: &str, value: Option<&Value>) {
+    body.push_str(prefix);
+    body.push('\t');
+    match value {
+        Some(value) => append_canonical_value(body, value),
+        None => body.push_str("missing"),
+    }
     body.push('\n');
 }
 
@@ -6113,6 +6190,20 @@ mod tests {
         assert_eq!(snapshot.graph_commit_epoch, 1);
         assert_eq!(snapshot.nodes.len(), 2);
         assert_eq!(snapshot.relationships.len(), 1);
+        assert!(snapshot.stable_identity.requires_stable_id_mapping);
+        assert!(snapshot.stable_identity.nodes_without_stable_id.is_empty());
+        assert_eq!(
+            snapshot.stable_identity.relationships_without_stable_id,
+            vec![0]
+        );
+        assert!(snapshot
+            .stable_identity
+            .duplicate_node_stable_ids
+            .is_empty());
+        assert_eq!(
+            snapshot.nodes[0].stable_id,
+            Some(Value::String("root".to_string()))
+        );
         assert_eq!(snapshot.relationships[0].rel_type, "LINKS");
         assert_eq!(snapshot.relationships[0].source_node_id, 0);
         assert_eq!(snapshot.relationships[0].target_node_id, 1);
@@ -6132,6 +6223,24 @@ mod tests {
         assert_eq!(latest.graph_commit_epoch, 2);
         assert_eq!(latest.nodes.len(), 3);
         assert_ne!(snapshot.logical_checksum, latest.logical_checksum);
+    }
+
+    #[test]
+    fn canonical_snapshot_export_reports_duplicate_stable_ids() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'dup', title: 'First'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'dup', title: 'Second'})")
+            .unwrap();
+
+        let snapshot = db.export_canonical_graph_snapshot();
+
+        assert!(snapshot.stable_identity.requires_stable_id_mapping);
+        assert_eq!(
+            snapshot.stable_identity.duplicate_node_stable_ids,
+            vec![Value::String("dup".to_string())]
+        );
+        assert!(snapshot.stable_identity.nodes_without_stable_id.is_empty());
     }
 
     #[test]

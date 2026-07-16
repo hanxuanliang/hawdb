@@ -27,12 +27,12 @@ pub use analytics::{
     CommunityAssignment, LouvainOptions, PageRankOptions, PageRankScore, ProjectedGraph,
 };
 pub use api::{
-    CanonicalGraphSnapshotExport, CanonicalSnapshotNode, CanonicalSnapshotRelationship, Database,
-    DatabaseConfig, DatabaseReadTransaction, DatabaseTransaction, DerivedArtifactJob,
-    DerivedArtifactJobReport, DerivedArtifactJobStatus, KnowledgeGraphContextPath,
-    KnowledgeGraphPathDirection, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
-    NowledgeGraphAdapter, NowledgeGraphExplainOutput, NowledgeGraphStatement,
-    NowledgeGraphTransactionOutput, QueryOutput,
+    CanonicalGraphSnapshotExport, CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode,
+    CanonicalSnapshotRelationship, Database, DatabaseConfig, DatabaseReadTransaction,
+    DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
+    KnowledgeGraphContextPath, KnowledgeGraphPathDirection, KnowledgeRetrievalOutput,
+    KnowledgeRetrievalRequest, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
+    NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,

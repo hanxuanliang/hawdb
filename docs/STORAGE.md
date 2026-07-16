@@ -76,9 +76,12 @@ is durable.
 `Database::export_canonical_graph_snapshot` and the same method on
 `DatabaseReadTransaction` expose the current or pinned graph snapshot as
 canonical node and relationship records with a deterministic logical checksum.
-This is the local export boundary for future GraphStream encoding; it does not
-copy local pages, WAL records, adjacency pointers, or rebuildable projection
-artifacts.
+The export also carries a stable-identity audit: records with an `id` property
+expose that value as their stable ID, while records without one or with duplicate
+stable IDs are reported as requiring an external persisted ID mapping before
+physical import or delta replay. This is the local export boundary for future
+GraphStream encoding; it does not copy local pages, WAL records, adjacency
+pointers, or rebuildable projection artifacts.
 
 `Database::storage_version` exposes the currently supported storage version.
 `GraphStore::open` also validates the stored version in both the manifest and
