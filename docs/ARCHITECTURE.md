@@ -60,7 +60,7 @@ root crate until their contracts are ready to freeze.
 ```text
 crates/
   core/                errors, values, ids, catalog names, schema descriptors
-  cypher/              lexer, parser, AST, parameter model
+  cypher/              token cursor, parser, AST, parameter model
   catalog/             labels, relationship types, property schema, stats
   planner/             semantic analysis, logical plan, physical plan
   optimizer/           Cascades memo, rules, costing, properties, trace
@@ -139,10 +139,27 @@ expectations, delimiter handling, whitespace movement, and end-of-input checks.
 Statement parsers should compose those helpers rather than open-coding byte
 movement or separator loops. This keeps syntax changes reviewable and avoids
 leaking semantic validation into parsing.
-This mirrors the `parser_yacc` practice in Chryso: grammar recognition, AST
-construction, and semantic validation remain separate concerns. The current
-hand-written parser should preserve that boundary until the Cypher grammar is
-large enough to justify a generated lexer/parser crate.
+
+The parser technology choice is deliberately conservative. Skein should not add
+a yacc-style generated grammar for the current Nowledge replacement slice. The
+supported Cypher surface is production-query-driven, narrow, and tied to
+planner/executor semantics that are still changing. A generated grammar would
+make it easier to accept syntax that the semantic graph model cannot execute,
+and would add another build-time boundary before the subset has stabilized.
+
+The preferred direction is closer to RisingWave's newer parser organization:
+keep the top-level statement flow explicit in Rust, keep token/cursor ownership
+separate from AST construction, and use small parser helpers or combinators only
+where they reduce local ambiguity for expressions, lists, and delimited forms.
+Skein can adopt a real lexer or parser-combinator layer later, but only after a
+Nowledge scanner hit proves that the current cursor helpers are becoming the
+main source of complexity.
+
+This still preserves the useful `parser_yacc` practice from Chryso: grammar
+recognition, AST construction, and semantic validation remain separate
+concerns. The current hand-written parser should keep that boundary while
+avoiding a generated grammar until the Cypher subset is large and stable enough
+to justify it.
 
 ## Logical Plan
 
