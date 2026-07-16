@@ -2259,21 +2259,6 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             )),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
-                    "source memory count increment",
-                    CypherFixtureStatement::new(
-                        "MATCH (m:Memory {id: 1}) SET m.memory_count = m.memory_count + 1",
-                    ),
-                    ExpectedRows::RowCount(1),
-                )
-                .with_effect_query(
-                    CypherFixtureStatement::new(
-                        "MATCH (m:Memory {id: 1}) RETURN m.memory_count AS count",
-                    ),
-                    ExpectedRows::Exact(vec![compatibility_row([("count", Value::Int(1))])]),
-                ),
-            ),
-            CompatibilityCheck::Cypher(
-                CypherFixtureCheck::expect_rows(
                     "memory access counter touch",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory) WHERE m.id = $id SET m.access_count = COALESCE(m.access_count, 0) + 1, m.last_accessed_at = $now",
@@ -6670,6 +6655,28 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                 page_rank_top_node: Some(1),
                 tolerance: CompatibilityTolerance { float_abs: 1.0e-6 },
             }),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source memory count increment",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) SET s.memory_count = s.memory_count + 1",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("source-count-increment-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-count-increment-1', memory_count: 0, space_id: 'source-write'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'source-count-increment-1'}) RETURN s.memory_count AS count",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([("count", Value::Int(1))])]),
+                ),
+            ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
                     "undo community delete nodes",
