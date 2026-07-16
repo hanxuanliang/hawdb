@@ -4,7 +4,7 @@ use skein::{
     scan_nowledge_query_inventory_cypher_migration_gate_to_json,
     scan_nowledge_query_inventory_to_json, CanonicalGraphSnapshotValidation,
     CanonicalSnapshotIdentityAudit, Database, DatabaseConfig, ExternalShadowCommand,
-    ExternalShadowReady, Result, SkeinError, Value,
+    ExternalShadowReady, GraphLightningBootstrapManifest, Result, SkeinError, Value,
 };
 use std::time::Duration;
 
@@ -188,6 +188,36 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "graph-lightning-bootstrap-manifest" {
+            let mut require_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(graph_lightning_bootstrap_manifest_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(
+                    graph_lightning_bootstrap_manifest_usage(),
+                ));
+            }
+            let mut db = Database::open(path)?;
+            let export = db.prepare_graph_lightning_bootstrap_export()?;
+            let rendered = graph_lightning_bootstrap_manifest_json(&export.manifest);
+            println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            if require_ready && !export.manifest.validation.is_import_ready {
+                return Err(SkeinError::Execution(
+                    "graph lightning bootstrap manifest is not import ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
         return Err(SkeinError::Semantic(format!("unknown command '{command}'")));
     }
 
@@ -220,6 +250,10 @@ fn nowledge_cypher_migration_gate_usage() -> String {
 fn validate_canonical_snapshot_usage() -> String {
     "validate-canonical-snapshot requires [--require-valid] [--require-import-ready] <database-path>"
         .to_string()
+}
+
+fn graph_lightning_bootstrap_manifest_usage() -> String {
+    "graph-lightning-bootstrap-manifest requires [--require-ready] <database-path>".to_string()
 }
 
 fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
@@ -309,6 +343,37 @@ fn canonical_snapshot_validation_json(
     })
 }
 
+fn graph_lightning_bootstrap_manifest_json(
+    manifest: &GraphLightningBootstrapManifest,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "graph-lightning-bootstrap",
+        "protocol_version": manifest.protocol_version,
+        "graph_commit_epoch": manifest.graph_commit_epoch,
+        "logical_checksum": manifest.logical_checksum,
+        "schema_checksum": manifest.schema_checksum,
+        "node_count": manifest.node_count,
+        "relationship_count": manifest.relationship_count,
+        "label_count": manifest.label_count,
+        "relationship_type_count": manifest.relationship_type_count,
+        "node_property_count": manifest.node_property_count,
+        "relationship_property_count": manifest.relationship_property_count,
+        "validation": {
+            "is_valid": manifest.validation.is_valid,
+            "is_import_ready": manifest.validation.is_import_ready,
+            "checksum_matches": manifest.validation.checksum_matches,
+            "expected_logical_checksum": manifest.validation.expected_logical_checksum,
+            "stable_identity_matches": manifest.validation.stable_identity_matches,
+            "stable_identity_ready": manifest.validation.stable_identity_ready,
+            "expected_stable_identity": stable_identity_audit_json(&manifest.validation.expected_stable_identity),
+            "duplicate_node_ids": manifest.validation.duplicate_node_ids,
+            "duplicate_relationship_ids": manifest.validation.duplicate_relationship_ids,
+            "missing_sources": endpoint_violations_json(&manifest.validation.missing_sources),
+            "missing_targets": endpoint_violations_json(&manifest.validation.missing_targets),
+        }
+    })
+}
+
 fn stable_identity_audit_json(audit: &CanonicalSnapshotIdentityAudit) -> serde_json::Value {
     serde_json::json!({
         "requires_stable_id_mapping": audit.requires_stable_id_mapping,
@@ -358,12 +423,14 @@ fn value_json(value: &Value) -> serde_json::Value {
 mod tests {
     use super::{
         add_shadow_ready_report, add_shadow_trace_report, canonical_snapshot_validation_json,
+        graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
         is_self_shadow_command, parse_shadow_timeout_ms, should_run_shadow_ready,
         stable_identity_audit_json, validate_canonical_snapshot_usage, value_json,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
-        CanonicalSnapshotIdentityAudit, ExternalShadowReady, Value,
+        CanonicalSnapshotIdentityAudit, ExternalShadowReady, GraphLightningBootstrapManifest,
+        Value,
     };
     use std::time::Duration;
 
@@ -536,6 +603,53 @@ mod tests {
     }
 
     #[test]
+    fn renders_graph_lightning_bootstrap_manifest_json() {
+        let validation = CanonicalGraphSnapshotValidation {
+            is_valid: true,
+            is_import_ready: true,
+            checksum_matches: true,
+            expected_logical_checksum: 99,
+            stable_identity_matches: true,
+            stable_identity_ready: true,
+            expected_stable_identity: CanonicalSnapshotIdentityAudit {
+                requires_stable_id_mapping: false,
+                nodes_without_stable_id: Vec::new(),
+                relationships_without_stable_id: Vec::new(),
+                duplicate_node_stable_ids: Vec::new(),
+                duplicate_relationship_stable_ids: Vec::new(),
+            },
+            duplicate_node_ids: Vec::new(),
+            duplicate_relationship_ids: Vec::new(),
+            missing_sources: Vec::new(),
+            missing_targets: Vec::new(),
+        };
+        let manifest = GraphLightningBootstrapManifest {
+            protocol_version: 1,
+            graph_commit_epoch: 5,
+            logical_checksum: 99,
+            schema_checksum: 77,
+            node_count: 3,
+            relationship_count: 2,
+            label_count: 2,
+            relationship_type_count: 1,
+            node_property_count: 6,
+            relationship_property_count: 2,
+            validation,
+        };
+
+        let json = graph_lightning_bootstrap_manifest_json(&manifest);
+
+        assert_eq!(json["protocol"], "graph-lightning-bootstrap");
+        assert_eq!(json["protocol_version"], 1);
+        assert_eq!(json["graph_commit_epoch"], 5);
+        assert_eq!(json["logical_checksum"], 99);
+        assert_eq!(json["schema_checksum"], 77);
+        assert_eq!(json["node_count"], 3);
+        assert_eq!(json["relationship_count"], 2);
+        assert_eq!(json["validation"]["is_import_ready"], true);
+    }
+
+    #[test]
     fn renders_stable_identity_audit_values() {
         let audit = CanonicalSnapshotIdentityAudit {
             requires_stable_id_mapping: true,
@@ -583,5 +697,11 @@ mod tests {
     fn validates_canonical_snapshot_usage_text() {
         assert!(validate_canonical_snapshot_usage().contains("<database-path>"));
         assert!(validate_canonical_snapshot_usage().contains("--require-import-ready"));
+    }
+
+    #[test]
+    fn validates_graph_lightning_bootstrap_manifest_usage_text() {
+        assert!(graph_lightning_bootstrap_manifest_usage().contains("<database-path>"));
+        assert!(graph_lightning_bootstrap_manifest_usage().contains("--require-ready"));
     }
 }

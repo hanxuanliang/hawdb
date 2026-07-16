@@ -100,6 +100,40 @@ impl CanonicalGraphSnapshotExport {
         export
     }
 
+    pub fn graph_lightning_bootstrap_manifest(&self) -> GraphLightningBootstrapManifest {
+        let validation = self.validate();
+        GraphLightningBootstrapManifest {
+            protocol_version: GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+            graph_commit_epoch: self.graph_commit_epoch,
+            logical_checksum: self.logical_checksum,
+            schema_checksum: canonical_graph_snapshot_schema_checksum(
+                &self.nodes,
+                &self.relationships,
+            ),
+            node_count: self.nodes.len(),
+            relationship_count: self.relationships.len(),
+            label_count: self
+                .nodes
+                .iter()
+                .flat_map(|node| node.labels.iter().cloned())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            relationship_type_count: self
+                .relationships
+                .iter()
+                .map(|relationship| relationship.rel_type.clone())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            node_property_count: self.nodes.iter().map(|node| node.properties.len()).sum(),
+            relationship_property_count: self
+                .relationships
+                .iter()
+                .map(|relationship| relationship.properties.len())
+                .sum(),
+            validation,
+        }
+    }
+
     pub fn validate(&self) -> CanonicalGraphSnapshotValidation {
         let expected_logical_checksum =
             canonical_graph_snapshot_checksum(&self.nodes, &self.relationships);
@@ -158,6 +192,29 @@ impl CanonicalGraphSnapshotExport {
             missing_targets,
         }
     }
+}
+
+pub const GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION: u64 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningBootstrapExport {
+    pub snapshot: CanonicalGraphSnapshotExport,
+    pub manifest: GraphLightningBootstrapManifest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphLightningBootstrapManifest {
+    pub protocol_version: u64,
+    pub graph_commit_epoch: u64,
+    pub logical_checksum: u64,
+    pub schema_checksum: u64,
+    pub node_count: usize,
+    pub relationship_count: usize,
+    pub label_count: usize,
+    pub relationship_type_count: usize,
+    pub node_property_count: usize,
+    pub relationship_property_count: usize,
+    pub validation: CanonicalGraphSnapshotValidation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -736,6 +793,14 @@ impl Database {
         Ok(self
             .export_canonical_graph_snapshot()
             .with_stable_id_mapping(&mapping))
+    }
+
+    pub fn prepare_graph_lightning_bootstrap_export(
+        &mut self,
+    ) -> Result<GraphLightningBootstrapExport> {
+        let snapshot = self.export_canonical_graph_snapshot_with_persisted_stable_ids()?;
+        let manifest = snapshot.graph_lightning_bootstrap_manifest();
+        Ok(GraphLightningBootstrapExport { snapshot, manifest })
     }
 
     pub fn storage_version(&self) -> &'static str {
@@ -2162,6 +2227,59 @@ fn canonical_graph_snapshot_checksum(
     checksum_bytes(body.as_bytes())
 }
 
+fn canonical_graph_snapshot_schema_checksum(
+    nodes: &[CanonicalSnapshotNode],
+    relationships: &[CanonicalSnapshotRelationship],
+) -> u64 {
+    let labels = nodes
+        .iter()
+        .flat_map(|node| node.labels.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let relationship_types = relationships
+        .iter()
+        .map(|relationship| relationship.rel_type.clone())
+        .collect::<BTreeSet<_>>();
+    let node_properties = nodes
+        .iter()
+        .flat_map(|node| node.properties.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let relationship_properties = relationships
+        .iter()
+        .flat_map(|relationship| relationship.properties.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut body = String::new();
+    body.push_str("SKEIN_GRAPH_LIGHTNING_BOOTSTRAP_SCHEMA_V1\n");
+    body.push_str(&format!("label_count\t{}\n", labels.len()));
+    for label in labels {
+        append_canonical_string(&mut body, "label", &label);
+    }
+    body.push_str(&format!(
+        "relationship_type_count\t{}\n",
+        relationship_types.len()
+    ));
+    for relationship_type in relationship_types {
+        append_canonical_string(&mut body, "relationship_type", &relationship_type);
+    }
+    body.push_str(&format!(
+        "node_property_key_count\t{}\n",
+        node_properties.len()
+    ));
+    for property in node_properties {
+        append_canonical_string(&mut body, "node_property", &property);
+    }
+    body.push_str(&format!(
+        "relationship_property_key_count\t{}\n",
+        relationship_properties.len()
+    ));
+    for property in relationship_properties {
+        append_canonical_string(&mut body, "relationship_property", &property);
+    }
+    checksum_bytes(body.as_bytes())
+}
+
 fn append_canonical_properties(body: &mut String, properties: &BTreeMap<String, Value>) {
     body.push_str(&format!("property_count\t{}\n", properties.len()));
     for (property, value) in properties {
@@ -2813,6 +2931,7 @@ mod tests {
         KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
         KnowledgePathRequest, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
         NowledgeGraphAdapter, NowledgeGraphStatement, RecoveryMode,
+        GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
     };
     use crate::schema::{
         ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
@@ -6592,6 +6711,56 @@ mod tests {
 
             assert!(error.to_string().contains("read-only mode"));
             assert!(!path.join("stable_ids.skein").exists());
+        }
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn graph_lightning_bootstrap_manifest_reports_ready_physical_export() {
+        let path = unique_test_dir("graph_lightning_bootstrap_manifest");
+        {
+            let mut db = Database::open(&path).unwrap();
+            db.query(
+                "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {weight: 7}]->(:Entity {id: 'mid', name: 'Mid'})",
+            )
+            .unwrap();
+            let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+            let manifest = export.manifest;
+
+            assert_eq!(
+                manifest.protocol_version,
+                GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION
+            );
+            assert_eq!(manifest.graph_commit_epoch, 1);
+            assert_eq!(manifest.logical_checksum, export.snapshot.logical_checksum);
+            assert_eq!(manifest.node_count, 2);
+            assert_eq!(manifest.relationship_count, 1);
+            assert_eq!(manifest.label_count, 2);
+            assert_eq!(manifest.relationship_type_count, 1);
+            assert_eq!(manifest.node_property_count, 4);
+            assert_eq!(manifest.relationship_property_count, 1);
+            assert!(manifest.validation.is_import_ready);
+            assert!(manifest.validation.stable_identity_ready);
+            assert!(export.snapshot.relationships[0].stable_id.is_some());
+        }
+
+        {
+            let mut db = Database::open(&path).unwrap();
+            let first = db.prepare_graph_lightning_bootstrap_export().unwrap();
+            db.query("CREATE (:Source {id: 'source-1', path: '/tmp/source.md'})")
+                .unwrap();
+            let second = db.prepare_graph_lightning_bootstrap_export().unwrap();
+
+            assert_ne!(
+                first.manifest.logical_checksum,
+                second.manifest.logical_checksum
+            );
+            assert_ne!(
+                first.manifest.schema_checksum,
+                second.manifest.schema_checksum
+            );
+            assert!(second.manifest.validation.is_import_ready);
         }
 
         std::fs::remove_dir_all(path).unwrap();

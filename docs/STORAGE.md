@@ -102,6 +102,12 @@ local physical-export entry point for this path. It generates missing stable IDs
 once, writes them to `stable_ids.skein`, and reuses the same mapping after
 reopen. The default `export_canonical_graph_snapshot` remains read-only and does
 not create persistent export metadata.
+`Database::prepare_graph_lightning_bootstrap_export` wraps the same persisted
+stable-ID snapshot in a Graph Lightning bootstrap manifest. The manifest records
+protocol version, graph commit epoch, logical checksum, schema checksum,
+node/relationship counts, label/type counts, property counts, and the canonical
+snapshot validation result. It is the local v1 gate before a GraphStream encoder
+or row-staging adapter consumes the snapshot.
 The CLI command `skein validate-canonical-snapshot [--require-valid]
 [--require-import-ready] <database-path>` opens the database read-only, exports
 the current canonical snapshot, and prints the validation report as JSON.
@@ -109,6 +115,11 @@ the current canonical snapshot, and prints the validation report as JSON.
 inconsistent. `--require-import-ready` additionally requires every node and
 relationship to have unique stable identity, so the export can enter a physical
 import path without first creating an external ID mapping.
+The CLI command `skein graph-lightning-bootstrap-manifest [--require-ready]
+<database-path>` opens the database read-write, creates or reuses
+`stable_ids.skein`, and prints the bootstrap manifest as JSON. `--require-ready`
+returns a non-zero status if the manifest's embedded validation is not
+import-ready.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
