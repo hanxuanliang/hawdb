@@ -2476,6 +2476,32 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory click dwell access touch",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}) SET m.clicks = COALESCE(m.clicks, 0) + 1, m.last_clicked_at = $now, m.total_dwell_time_ms = COALESCE(m.total_dwell_time_ms, 0) + $dwell, m.access_count = COALESCE(m.access_count, 0) + 1, m.last_accessed_at = $now",
+                        BTreeMap::from([
+                            ("memory_id".to_string(), Value::Int(2)),
+                            ("now".to_string(), Value::Int(84)),
+                            ("dwell".to_string(), Value::Int(250)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory {id: 2}) RETURN m.clicks AS clicks, m.last_clicked_at AS last_clicked_at, m.total_dwell_time_ms AS total_dwell_time_ms, m.access_count AS access_count, m.last_accessed_at AS last_accessed_at",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("clicks", Value::Int(1)),
+                        ("last_clicked_at", Value::Int(84)),
+                        ("total_dwell_time_ms", Value::Int(250)),
+                        ("access_count", Value::Int(2)),
+                        ("last_accessed_at", Value::Int(84)),
+                    ])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory full content update",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory {id: $id}) SET m.content = $content, m.title = $title, m.semantic_field = $semantic_field, m.importance = $importance, m.confidence = $confidence, m.unit_type = $unit_type, m.source = $source, m.source_range = $source_range, m.space_id = $space_id, m.updated_at = $updated_at, m.reindex_needed = $reindex_needed, m.review_status = $review_status, m.extraction_method = $extraction_method",
@@ -11571,6 +11597,31 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
                         "MATCH (m:Memory) WHERE m.id IN ['rest-write-crystal-memory', 'rest-write-source-memory'] DETACH DELETE m",
                     ),
                     ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "rest write crystal source count decrement",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (c:Memory {id: $cid}) SET c.source_unit_count = CASE WHEN c.source_unit_count > 0 THEN c.source_unit_count - 1 ELSE 0 END, c.updated_at = CURRENT_TIMESTAMP()",
+                        BTreeMap::from([(
+                            "cid".to_string(),
+                            Value::String("rest-write-crystal-decrement".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'rest-write-crystal-decrement', source_unit_count: 2})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (c:Memory {id: 'rest-write-crystal-decrement'}) RETURN c.source_unit_count AS source_unit_count",
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "source_unit_count",
+                        Value::Int(1),
+                    )])]),
                 ),
             ),
             CompatibilityCheck::Cypher(
@@ -22982,6 +23033,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(m:Memory {id: $id}) RETURN c.id, COALESCE(c.source_unit_count, 0)",
             ),
             CompatibilityQueryCallSite::new(
+                "rest write crystal source count decrement",
+                "rest_write",
+                "nmem-server::rest_write::decrement_crystal_source_unit_count",
+            )
+            .with_cypher(
+                "MATCH (c:Memory {id: $cid}) SET c.source_unit_count = CASE WHEN c.source_unit_count > 0 THEN c.source_unit_count - 1 ELSE 0 END, c.updated_at = CURRENT_TIMESTAMP()",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest write memory mentions read",
                 "rest_write_read",
                 "nmem-server::rest_write::memory_mentions_for_delete",
@@ -23464,6 +23523,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             )
             .with_cypher(
                 "MATCH (m:Memory) WHERE m.id = $id SET m.access_count = COALESCE(m.access_count, 0) + 1, m.last_accessed_at = $now",
+            ),
+            CompatibilityQueryCallSite::new(
+                "memory click dwell access touch",
+                "memory_access_write",
+                "nmem-server::memory_access::record_click_dwell",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id}) SET m.clicks = COALESCE(m.clicks, 0) + 1, m.last_clicked_at = $now, m.total_dwell_time_ms = COALESCE(m.total_dwell_time_ms, 0) + $dwell, m.access_count = COALESCE(m.access_count, 0) + 1, m.last_accessed_at = $now",
             ),
             CompatibilityQueryCallSite::new(
                 "memory full content update",
@@ -26147,7 +26214,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 637);
+        assert_eq!(report.checks.len(), 639);
     }
 
     #[test]
@@ -26163,13 +26230,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 637);
-        assert_eq!(coverage.covered_checks, 637);
+        assert_eq!(coverage.required_checks, 639);
+        assert_eq!(coverage.covered_checks, 639);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 637);
+        assert_eq!(coverage_json["covered_checks"], 639);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -26199,10 +26266,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 637);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 639);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 637);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 639);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -26427,15 +26494,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 637);
-        assert_eq!(report.shadow_checks.len(), 637);
+        assert_eq!(report.primary_checks.len(), 639);
+        assert_eq!(report.shadow_checks.len(), 639);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            637
+            639
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -26444,7 +26511,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 637);
+        assert_eq!(cutover.matched_checks, 639);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 
