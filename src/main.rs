@@ -27,29 +27,40 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if command == "nowledge-cypher-migration-gate" {
-            let require_ready = args.peek().is_some_and(|arg| arg == "--require-ready");
-            if require_ready {
-                args.next();
+            let mut require_ready = false;
+            let mut allow_self_shadow = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-ready" => {
+                        require_ready = true;
+                        args.next();
+                    }
+                    "--allow-self-shadow" => {
+                        allow_self_shadow = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
             }
-            let root = args.next().ok_or_else(|| {
-                SkeinError::Semantic(
-                    "nowledge-cypher-migration-gate requires [--require-ready] <root> <shadow-name> <program> [args...]"
-                        .to_string(),
-                )
-            })?;
-            let shadow_name = args.next().ok_or_else(|| {
-                SkeinError::Semantic(
-                    "nowledge-cypher-migration-gate requires [--require-ready] <root> <shadow-name> <program> [args...]"
-                        .to_string(),
-                )
-            })?;
-            let program = args.next().ok_or_else(|| {
-                SkeinError::Semantic(
-                    "nowledge-cypher-migration-gate requires [--require-ready] <root> <shadow-name> <program> [args...]"
-                        .to_string(),
-                )
-            })?;
+            let root = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(nowledge_cypher_migration_gate_usage()))?;
+            let shadow_name = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(nowledge_cypher_migration_gate_usage()))?;
+            let program = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(nowledge_cypher_migration_gate_usage()))?;
             let program_args = args.collect::<Vec<_>>();
+            if require_ready
+                && !allow_self_shadow
+                && is_self_shadow_command(&shadow_name, &program, &program_args)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge migration gate requires a previous-wrapper shadow for --require-ready; pass --allow-self-shadow only for protocol smoke tests"
+                        .to_string(),
+                ));
+            }
             let mut shadow = ExternalShadowCommand::spawn(shadow_name, program, program_args)?;
             let json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
@@ -90,4 +101,62 @@ fn main() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn nowledge_cypher_migration_gate_usage() -> String {
+    "nowledge-cypher-migration-gate requires [--require-ready] [--allow-self-shadow] <root> <shadow-name> <program> [args...]"
+        .to_string()
+}
+
+fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[String]) -> bool {
+    shadow_name == "self"
+        || program.ends_with("skein-shadow-self")
+        || program_args.iter().any(|arg| arg == "skein-shadow-self")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_self_shadow_command;
+
+    #[test]
+    fn detects_direct_self_shadow_binary() {
+        assert!(is_self_shadow_command(
+            "oracle",
+            "target/debug/skein-shadow-self",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn detects_cargo_run_self_shadow() {
+        assert!(is_self_shadow_command(
+            "oracle",
+            "cargo",
+            &[
+                "run".to_string(),
+                "--quiet".to_string(),
+                "--bin".to_string(),
+                "skein-shadow-self".to_string(),
+                "--".to_string(),
+            ],
+        ));
+    }
+
+    #[test]
+    fn detects_self_shadow_name() {
+        assert!(is_self_shadow_command(
+            "self",
+            "/usr/bin/legacy-wrapper",
+            &[]
+        ));
+    }
+
+    #[test]
+    fn does_not_reject_named_external_shadow() {
+        assert!(!is_self_shadow_command(
+            "legacy-wrapper",
+            "/usr/bin/nmem-graph-shadow",
+            &[]
+        ));
+    }
 }

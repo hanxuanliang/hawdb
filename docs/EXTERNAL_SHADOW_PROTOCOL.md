@@ -226,10 +226,14 @@ Skein-side error with the shadow engine name.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--allow-self-shadow] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
 fixture through the external shadow process, prints a JSON migration-gate bundle,
 and exits with an error when `--require-ready` is set and the final gate is
 blocked.
+
+`--require-ready` requires a previous-wrapper shadow by default. `skein-shadow-self`
+is allowed only when `--allow-self-shadow` is passed, and that flag is intended
+for protocol and CI smoke tests, not cutover evidence.
