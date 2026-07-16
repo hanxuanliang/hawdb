@@ -2291,6 +2291,12 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
+        if matches!(statement, cypher::Statement::Checkpoint) {
+            reject_transaction_control_parameters("CHECKPOINT", parameters)?;
+            return Err(SkeinError::Execution(
+                "CHECKPOINT is not allowed inside a read transaction".to_string(),
+            ));
+        }
         let logical = planner::plan_with_params(&statement, parameters)?;
         let physical = self
             .optimizer
@@ -6085,6 +6091,17 @@ mod tests {
             .query("CREATE (:Memory {id: 1, title: 'No writes'})")
             .unwrap_err();
         assert!(error.to_string().contains("must not be a mutation"));
+    }
+
+    #[test]
+    fn read_transaction_rejects_checkpoint_control() {
+        let db = Database::new();
+        let mut read_tx = db.begin_read_transaction();
+        let error = read_tx.query("CHECKPOINT").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("CHECKPOINT is not allowed inside a read transaction"));
     }
 
     #[test]
