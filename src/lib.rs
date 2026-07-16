@@ -34,10 +34,11 @@ pub use api::{
     NowledgeGraphTransactionOutput, QueryOutput,
 };
 pub use compat::{
-    assess_compatibility_cutover, assess_compatibility_migration_gate,
-    assess_compatibility_migration_gate_bundle, assess_query_inventory_coverage,
-    assess_query_inventory_cypher_coverage, assess_query_inventory_gate,
-    build_compatibility_query_inventory, build_compatibility_query_inventory_from_json,
+    assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
+    assess_compatibility_migration_gate, assess_compatibility_migration_gate_bundle,
+    assess_query_inventory_coverage, assess_query_inventory_cypher_coverage,
+    assess_query_inventory_gate, build_compatibility_query_inventory,
+    build_compatibility_query_inventory_from_json,
     build_compatibility_query_inventory_from_json_str, compatibility_cutover_report_to_json,
     compatibility_inventory_coverage_report_to_json, compatibility_inventory_gate_report_to_json,
     compatibility_migration_gate_bundle_to_json, compatibility_migration_gate_report_to_json,
@@ -57,8 +58,10 @@ pub use cypher::RelationshipDirection;
 pub use error::{Result, SkeinError};
 pub use nowledge_inventory::{
     scan_nowledge_query_inventory, scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
-    scan_nowledge_query_inventory_cypher_coverage_to_json, scan_nowledge_query_inventory_to_json,
-    scan_nowledge_query_inventory_with_options, NowledgeInventoryScanOptions,
+    scan_nowledge_query_inventory_cypher_coverage_to_json,
+    scan_nowledge_query_inventory_cypher_migration_gate_to_json,
+    scan_nowledge_query_inventory_to_json, scan_nowledge_query_inventory_with_options,
+    NowledgeInventoryScanOptions,
 };
 pub use schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,

@@ -1,7 +1,11 @@
+use crate::api::Database;
 use crate::compat::{
-    assess_query_inventory_cypher_coverage, build_compatibility_query_inventory,
-    compatibility_inventory_coverage_report_to_json, nowledge_memory_core_fixture,
-    CompatibilityQueryCallSite, CompatibilityQueryInventory,
+    assess_compatibility_cypher_migration_gate_bundle, assess_query_inventory_cypher_coverage,
+    build_compatibility_query_inventory, compatibility_inventory_coverage_report_to_json,
+    compatibility_migration_gate_bundle_to_json, nowledge_memory_core_fixture,
+    run_compatibility_fixture_with_shadow, CompatibilityCutoverPolicy,
+    CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite, CompatibilityQueryInventory,
+    CompatibilityShadowEngine,
 };
 use crate::error::{Result, SkeinError};
 use std::fs;
@@ -152,6 +156,24 @@ pub fn scan_nowledge_query_inventory_cypher_coverage_detail_to_json(
         "covered_items": covered_items,
         "missing_items": missing_items,
     }))
+}
+
+pub fn scan_nowledge_query_inventory_cypher_migration_gate_to_json(
+    root: impl AsRef<Path>,
+    shadow: &mut impl CompatibilityShadowEngine,
+) -> Result<serde_json::Value> {
+    let inventory = scan_nowledge_query_inventory(root)?;
+    let fixture = nowledge_memory_core_fixture();
+    let mut primary = Database::new();
+    let shadow_report = run_compatibility_fixture_with_shadow(&mut primary, &fixture, shadow)?;
+    let bundle = assess_compatibility_cypher_migration_gate_bundle(
+        &fixture,
+        &inventory,
+        &shadow_report,
+        CompatibilityInventoryCoveragePolicy::default(),
+        CompatibilityCutoverPolicy::default(),
+    );
+    Ok(compatibility_migration_gate_bundle_to_json(&bundle))
 }
 
 fn fixture_check_cypher(check: &crate::compat::CompatibilityCheck) -> Option<&str> {

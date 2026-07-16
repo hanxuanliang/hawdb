@@ -25528,6 +25528,25 @@ pub fn assess_compatibility_migration_gate_bundle(
     }
 }
 
+pub fn assess_compatibility_cypher_migration_gate_bundle(
+    fixture: &CompatibilityFixture,
+    inventory: &CompatibilityQueryInventory,
+    shadow: &CompatibilityShadowReport,
+    inventory_policy: CompatibilityInventoryCoveragePolicy,
+    cutover_policy: CompatibilityCutoverPolicy,
+) -> CompatibilityMigrationGateBundle {
+    let coverage = assess_query_inventory_cypher_coverage(fixture, inventory);
+    let inventory_gate = assess_query_inventory_gate(&coverage, inventory_policy);
+    let cutover = assess_compatibility_cutover(shadow, cutover_policy);
+    let migration_gate = assess_compatibility_migration_gate(&inventory_gate, &cutover);
+    CompatibilityMigrationGateBundle {
+        coverage,
+        inventory_gate,
+        cutover,
+        migration_gate,
+    }
+}
+
 fn compatibility_check_name(check: &CompatibilityCheck) -> &str {
     match check {
         CompatibilityCheck::Cypher(check) => &check.name,
@@ -26405,11 +26424,11 @@ fn shadow_mismatch_error(
 #[cfg(test)]
 mod tests {
     use super::{
-        assess_compatibility_cutover, assess_compatibility_migration_gate,
-        assess_compatibility_migration_gate_bundle, assess_query_inventory_coverage,
-        assess_query_inventory_cypher_coverage, assess_query_inventory_gate,
-        build_compatibility_query_inventory, nowledge_memory_core_fixture,
-        nowledge_memory_core_inventory, run_compatibility_fixture,
+        assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
+        assess_compatibility_migration_gate, assess_compatibility_migration_gate_bundle,
+        assess_query_inventory_coverage, assess_query_inventory_cypher_coverage,
+        assess_query_inventory_gate, build_compatibility_query_inventory,
+        nowledge_memory_core_fixture, nowledge_memory_core_inventory, run_compatibility_fixture,
         run_compatibility_fixture_with_shadow, CompatibilityCheck, CompatibilityCheckReport,
         CompatibilityCutoverDecision, CompatibilityCutoverPolicy, CompatibilityCutoverReport,
         CompatibilityFixture, CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite,
@@ -26699,6 +26718,34 @@ mod tests {
         assert_eq!(cypher_coverage.covered_checks, 1);
         assert!(cypher_coverage.missing_checks.is_empty());
         assert!(cypher_coverage.extra_fixture_checks.is_empty());
+
+        let shadow = CompatibilityShadowReport {
+            fixture: "partial".to_string(),
+            shadow_engine: "scanner-shadow".to_string(),
+            primary_checks: vec![CompatibilityCheckReport {
+                name: "semantic memory lookup".to_string(),
+            }],
+            shadow_checks: vec![CompatibilityShadowCheckReport {
+                name: "semantic memory lookup".to_string(),
+                status: CompatibilityShadowStatus::Matched,
+            }],
+        };
+        let bundle = assess_compatibility_cypher_migration_gate_bundle(
+            &fixture,
+            &inventory,
+            &shadow,
+            CompatibilityInventoryCoveragePolicy {
+                require_all_required_checks: true,
+                allow_extra_fixture_checks: false,
+            },
+            CompatibilityCutoverPolicy::default(),
+        );
+
+        assert_eq!(
+            bundle.migration_gate.decision,
+            CompatibilityCutoverDecision::Ready
+        );
+        assert!(bundle.migration_gate.blockers.is_empty());
     }
 
     #[test]
