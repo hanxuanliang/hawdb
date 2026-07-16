@@ -2338,6 +2338,207 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "source provenance source endpoint existence",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)",
+                        BTreeMap::from([
+                            (
+                                "memory_id".to_string(),
+                                Value::String("source-write-memory-1".to_string()),
+                            ),
+                            (
+                                "source_id".to_string(),
+                                Value::String("source-write-source-1".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([("count(m)", Value::Int(1))])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'source-write-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-write-source-1', memory_count: 0})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['source-write-memory-1', 'source-write-source-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source provenance full relationship create",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) CREATE (m)-[:SOURCED_FROM { chunk_index: $chunk_index, chunk_range: $chunk_range, source_version: $source_version, created_at: $created_at }]->(s)",
+                        BTreeMap::from([
+                            (
+                                "memory_id".to_string(),
+                                Value::String("source-full-memory-1".to_string()),
+                            ),
+                            (
+                                "source_id".to_string(),
+                                Value::String("source-full-source-1".to_string()),
+                            ),
+                            ("chunk_index".to_string(), Value::Int(4)),
+                            (
+                                "chunk_range".to_string(),
+                                Value::String("40..80".to_string()),
+                            ),
+                            ("source_version".to_string(), Value::Int(2)),
+                            ("created_at".to_string(), Value::Int(80)),
+                        ]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'source-full-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-full-source-1', memory_count: 0})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['source-full-memory-1', 'source-full-source-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source provenance edge existence count",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id})-[r:SOURCED_FROM]->(s:Source {id: $source_id}) RETURN count(r)",
+                        BTreeMap::from([
+                            (
+                                "memory_id".to_string(),
+                                Value::String("source-edge-memory-1".to_string()),
+                            ),
+                            (
+                                "source_id".to_string(),
+                                Value::String("source-edge-source-1".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([("count(r)", Value::Int(1))])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'source-edge-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-edge-source-1', memory_count: 1})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'source-edge-memory-1'}), (s:Source {id: 'source-edge-source-1'}) CREATE (m)-[:SOURCED_FROM]->(s)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['source-edge-memory-1', 'source-edge-source-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source repair exact provenance candidate scan",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE ( m.source = $source_value OR m.metadata CONTAINS $compact_fragment OR m.metadata CONTAINS $spaced_fragment ) RETURN m.id ORDER BY m.created_at ASC, m.id ASC SKIP $offset LIMIT $limit",
+                        BTreeMap::from([
+                            (
+                                "source_value".to_string(),
+                                Value::String("library:source-repair-1".to_string()),
+                            ),
+                            (
+                                "compact_fragment".to_string(),
+                                Value::String("\"source_id\":\"source-repair-1\"".to_string()),
+                            ),
+                            (
+                                "spaced_fragment".to_string(),
+                                Value::String("\"source_id\": \"source-repair-1\"".to_string()),
+                            ),
+                            ("offset".to_string(), Value::Int(0)),
+                            ("limit".to_string(), Value::Int(10)),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("source-repair-memory-a".to_string()),
+                        )]),
+                        compatibility_row([(
+                            "m.id",
+                            Value::String("source-repair-memory-b".to_string()),
+                        )]),
+                    ]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'source-repair-memory-a', source: 'library:source-repair-1', metadata: '{}', created_at: 10})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'source-repair-memory-b', source: 'mcp', metadata: '{\"source_id\":\"source-repair-1\"}', created_at: 20})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'source-repair-memory-c', source: 'manual', metadata: '{\"file\":\"source-repair-1.pdf\"}', created_at: 30})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (m:Memory) WHERE m.id IN ['source-repair-memory-a', 'source-repair-memory-b', 'source-repair-memory-c'] DETACH DELETE m",
+                    ),
+                    ExpectedRows::RowCount(3),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source memory count read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (s:Source {id: $id}) RETURN s.memory_count",
+                        BTreeMap::from([(
+                            "id".to_string(),
+                            Value::String("source-memory-count-read-1".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "s.memory_count",
+                        Value::Int(7),
+                    )])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-memory-count-read-1', memory_count: 7})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (s:Source {id: 'source-memory-count-read-1'}) DETACH DELETE s",
+                    ),
+                    ExpectedRows::RowCount(1),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "source provenance global edge count",
+                    CypherFixtureStatement::new(
+                        "MATCH (:Memory)-[r:SOURCED_FROM]->(:Source) RETURN count(r)",
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'source-global-memory-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'source-global-source-1'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 'source-global-memory-1'}), (s:Source {id: 'source-global-source-1'}) CREATE (m)-[:SOURCED_FROM]->(s)",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['source-global-memory-1', 'source-global-source-1'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "source attribution read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory)-[:SOURCED_FROM]->(s:Source) WHERE m.id IN $ids RETURN m.id, s.id",
@@ -7202,6 +7403,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)",
             ),
             CompatibilityQueryCallSite::new(
+                "source provenance source endpoint existence",
+                "source_provenance_write",
+                "nmem-graph::source_write::create_sourced_from",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)",
+            ),
+            CompatibilityQueryCallSite::new(
                 "entity relationship endpoint existence",
                 "entity_relationship_write",
                 "nmem-graph::entity_write::create_entity_relationship",
@@ -7217,6 +7426,42 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             .with_cypher(
                 "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) CREATE (m)-[:SOURCED_FROM {chunk_index: $chunk_index}]->(s)",
             ),
+            CompatibilityQueryCallSite::new(
+                "source provenance full relationship create",
+                "source_provenance_write",
+                "nmem-graph::source_write::create_sourced_from",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) CREATE (m)-[:SOURCED_FROM { chunk_index: $chunk_index, chunk_range: $chunk_range, source_version: $source_version, created_at: $created_at }]->(s)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "source provenance edge existence count",
+                "source_provenance_write",
+                "nmem-graph::source_write::edge_exists",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id})-[r:SOURCED_FROM]->(s:Source {id: $source_id}) RETURN count(r)",
+            ),
+            CompatibilityQueryCallSite::new(
+                "source repair exact provenance candidate scan",
+                "source_provenance_repair",
+                "nmem-graph::source_write::repair_sourced_from_for_source",
+            )
+            .with_cypher(
+                "MATCH (m:Memory) WHERE ( m.source = $source_value OR m.metadata CONTAINS $compact_fragment OR m.metadata CONTAINS $spaced_fragment ) RETURN m.id ORDER BY m.created_at ASC, m.id ASC SKIP $offset LIMIT $limit",
+            ),
+            CompatibilityQueryCallSite::new(
+                "source memory count read",
+                "source_provenance_read",
+                "nmem-graph::source_write::memory_count",
+            )
+            .with_cypher("MATCH (s:Source {id: $id}) RETURN s.memory_count"),
+            CompatibilityQueryCallSite::new(
+                "source provenance global edge count",
+                "source_provenance_read",
+                "nmem-graph::source_write::edge_count",
+            )
+            .with_cypher("MATCH (:Memory)-[r:SOURCED_FROM]->(:Source) RETURN count(r)"),
             CompatibilityQueryCallSite::new(
                 "source attribution read",
                 "source_attribution_read",
@@ -9785,7 +10030,7 @@ mod tests {
         let report = run_compatibility_fixture(&mut db, &fixture).unwrap();
 
         assert_eq!(report.fixture, "nowledge-memory-core");
-        assert_eq!(report.checks.len(), 206);
+        assert_eq!(report.checks.len(), 212);
     }
 
     #[test]
@@ -9801,13 +10046,13 @@ mod tests {
 
         assert_eq!(coverage.inventory, "nowledge-memory-core-inventory");
         assert_eq!(coverage.fixture, "nowledge-memory-core");
-        assert_eq!(coverage.required_checks, 206);
-        assert_eq!(coverage.covered_checks, 206);
+        assert_eq!(coverage.required_checks, 212);
+        assert_eq!(coverage.covered_checks, 212);
         assert!(coverage.missing_checks.is_empty());
         assert!(coverage.extra_fixture_checks.is_empty());
         assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
         assert!(gate.blockers.is_empty());
-        assert_eq!(coverage_json["covered_checks"], 206);
+        assert_eq!(coverage_json["covered_checks"], 212);
         assert_eq!(gate_json["decision"], "ready");
         assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 0);
     }
@@ -9837,10 +10082,10 @@ mod tests {
             CompatibilityCutoverDecision::Ready
         );
         assert!(bundle.migration_gate.blockers.is_empty());
-        assert_eq!(bundle_json["coverage"]["covered_checks"], 206);
+        assert_eq!(bundle_json["coverage"]["covered_checks"], 212);
         assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
         assert_eq!(bundle_json["cutover"]["decision"], "ready");
-        assert_eq!(bundle_json["cutover"]["matched_checks"], 206);
+        assert_eq!(bundle_json["cutover"]["matched_checks"], 212);
         assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
         assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
@@ -10034,15 +10279,15 @@ mod tests {
 
         assert_eq!(report.fixture, "nowledge-memory-core");
         assert_eq!(report.shadow_engine, "skein-shadow");
-        assert_eq!(report.primary_checks.len(), 206);
-        assert_eq!(report.shadow_checks.len(), 206);
+        assert_eq!(report.primary_checks.len(), 212);
+        assert_eq!(report.shadow_checks.len(), 212);
         assert_eq!(
             report
                 .shadow_checks
                 .iter()
                 .filter(|check| check.status == CompatibilityShadowStatus::Matched)
                 .count(),
-            206
+            212
         );
         assert_eq!(
             report.shadow_checks.last().map(|check| check.status),
@@ -10051,7 +10296,7 @@ mod tests {
 
         let cutover = assess_compatibility_cutover(&report, CompatibilityCutoverPolicy::default());
         assert_eq!(cutover.decision, CompatibilityCutoverDecision::Ready);
-        assert_eq!(cutover.matched_checks, 206);
+        assert_eq!(cutover.matched_checks, 212);
         assert!(cutover.primary_only_checks.is_empty());
         assert!(cutover.blockers.is_empty());
 

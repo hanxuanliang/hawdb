@@ -38,7 +38,10 @@ exact, case-insensitive, alias-containment, same-type bounded scan reads, and
 entity temporal metadata create/update writes, entity total count reads, and
 entity `MENTIONS`/`RELATES_TO` creation writes. It also covers Nowledge-used
 label resolver null-canonical scans/backfills, rename collision guards,
-existence reads, and remove-all count/delete writes.
+existence reads, and remove-all count/delete writes. Source provenance coverage
+includes Source endpoint checks, full `SOURCED_FROM` creation writes,
+edge-existence/global counts, exact repair candidate scans, and source
+memory-count reads.
 
 ## LanceDB Replacement Surface
 

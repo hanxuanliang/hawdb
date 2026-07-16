@@ -577,6 +577,9 @@ entity temporal metadata create/update writes, current timestamp writes,
 entity `MENTIONS` and temporal `RELATES_TO` creation writes, entity count reads,
 label resolver null-canonical scans/backfills, label rename collision guards,
 label existence reads, label remove-all count/delete writes,
+source provenance Source endpoint checks, full `SOURCED_FROM` creation writes,
+edge-existence/global counts, exact repair candidate scans, source memory-count
+reads,
 schema migration and label node `MERGE ON CREATE SET ... ON MATCH SET`,
 GraphMeta `MERGE SET`, matched HAS_LABEL relationship `MERGE ON CREATE SET`,
 label canonical lookup, dynamic label updates, label-edge removal, and label
