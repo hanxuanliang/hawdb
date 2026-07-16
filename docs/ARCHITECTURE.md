@@ -347,7 +347,9 @@ JSON. With `--require-ready`, the command exits with an error when the migration
 gate decision is blocked, making it suitable as a CI cutover gate.
 `skein-shadow-self` is a JSON-lines self-shadow process for protocol and CLI
 smoke testing; it exercises the process boundary but does not replace the
-required previous-wrapper parity run.
+required previous-wrapper parity run. The process protocol is specified in
+`docs/EXTERNAL_SHADOW_PROTOCOL.md` so previous-wrapper adapters can be
+implemented without depending on internal fixture code.
 
 Cloud integration should not embed Skein as canonical storage. Cloud can reuse
 Cypher parsing, logical planning, and graph projection semantics if useful, but

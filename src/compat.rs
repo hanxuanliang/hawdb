@@ -8,6 +8,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 
 const DEFAULT_FLOAT_ABS_TOLERANCE: f64 = 1.0e-9;
+pub const EXTERNAL_SHADOW_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompatibilityFixture {
@@ -281,7 +282,14 @@ impl ExternalShadowCommand {
         })
     }
 
-    fn request(&mut self, request: serde_json::Value) -> Result<serde_json::Value> {
+    fn request(&mut self, mut request: serde_json::Value) -> Result<serde_json::Value> {
+        let object = request.as_object_mut().ok_or_else(|| {
+            SkeinError::Execution("external shadow request must be a JSON object".to_string())
+        })?;
+        object.insert(
+            "protocol_version".to_string(),
+            serde_json::Value::Number(EXTERNAL_SHADOW_PROTOCOL_VERSION.into()),
+        );
         let line = serde_json::to_string(&request).map_err(|error| {
             SkeinError::Execution(format!("failed to encode shadow request: {error}"))
         })?;
@@ -26949,6 +26957,47 @@ done
             run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
 
         assert_eq!(report.shadow_engine, "external-shadow");
+        assert_eq!(
+            report.shadow_checks[0].status,
+            CompatibilityShadowStatus::Matched
+        );
+    }
+
+    #[test]
+    fn sends_external_shadow_protocol_version() {
+        let mut primary = Database::new();
+        let script = write_external_shadow_script(
+            "external-shadow-protocol-version",
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"protocol_version":1'*) echo '{"ok":{"rows":[{"title":"Graph foundations"}]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"missing protocol version"}}' ;;
+  esac
+done
+"#,
+        );
+        let mut shadow =
+            ExternalShadowCommand::spawn("external-shadow-protocol-version", "sh", [script])
+                .unwrap();
+        let fixture = CompatibilityFixture {
+            name: "external-shadow-protocol-version-fixture".to_string(),
+            setup: vec![CypherFixtureStatement::new(
+                "CREATE (:Memory {id: 1, title: 'Graph foundations'})",
+            )],
+            checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read title",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.title AS title"),
+                ExpectedRows::Exact(vec![row([(
+                    "title",
+                    Value::String("Graph foundations".to_string()),
+                )])]),
+            ))],
+        };
+
+        let report =
+            run_compatibility_fixture_with_shadow(&mut primary, &fixture, &mut shadow).unwrap();
+
         assert_eq!(
             report.shadow_checks[0].status,
             CompatibilityShadowStatus::Matched
