@@ -287,7 +287,10 @@ maintenance loops can use the planned wrappers,
 current dry-run estimate to the `Mutation` background lane before any descriptor
 advancement or maintenance WAL append. The lower-level background wrappers still
 accept caller-supplied estimates when the caller already has a stronger external
-budget model.
+budget model. For per-tick low-resource loops,
+`Database::run_bounded_background_schema_maintenance` and
+`Database::run_bounded_scheduled_background_schema_maintenance` bind the same
+operation budget to both QoS admission and descriptor-level bounded execution.
 WAL replay applies descriptor GC before the database is exposed, while record
 pages and index artifacts remain separately rebuildable or reclaimable.
 

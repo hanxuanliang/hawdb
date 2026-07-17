@@ -1046,6 +1046,24 @@ impl Database {
         }
     }
 
+    pub fn run_bounded_background_schema_maintenance(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        max_estimated_operations: usize,
+    ) -> Result<QueryOutput> {
+        let request = WorkRequest::background(WorkClass::Mutation, max_estimated_operations);
+        match policy.admit(state, &request) {
+            QosAdmission::Admit => self.run_bounded_schema_maintenance(max_estimated_operations),
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background schema maintenance deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background schema maintenance rejected: {reason}"
+            ))),
+        }
+    }
+
     pub fn run_planned_background_schema_maintenance(
         &mut self,
         policy: &LocalQosPolicy,
@@ -1082,6 +1100,34 @@ impl Database {
         };
 
         let result = self.run_schema_maintenance();
+        scheduler.finish(permit);
+        result
+    }
+
+    pub fn run_bounded_scheduled_background_schema_maintenance(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        max_estimated_operations: usize,
+    ) -> Result<QueryOutput> {
+        let permit = match scheduler.try_start(WorkRequest::background(
+            WorkClass::Mutation,
+            max_estimated_operations,
+        )) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background schema maintenance deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background schema maintenance rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.run_bounded_schema_maintenance(max_estimated_operations);
         scheduler.finish(permit);
         result
     }

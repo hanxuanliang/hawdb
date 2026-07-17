@@ -3497,6 +3497,46 @@ fn planned_background_schema_maintenance_uses_pending_work_estimate() {
 }
 
 #[test]
+fn bounded_background_schema_maintenance_limits_actual_execution() {
+    let path = unique_test_dir("bounded_background_schema_maintenance_execution");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1, title: 'a'})").unwrap();
+        db.query("CREATE (:Memory {id: 2, title: 'b'})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(title) TYPE STRING NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(title) SET STATE BACKFILL")
+            .unwrap();
+
+        let output = db
+            .run_bounded_background_schema_maintenance(
+                &LocalQosPolicy::default(),
+                &LocalQosState::default(),
+                2,
+            )
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].get("object"),
+            Some(&Value::String("Memory.id".to_string()))
+        );
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Validating
+        }));
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "title" && property.state == SchemaObjectState::Backfill
+        }));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn scheduled_background_schema_maintenance_tracks_mutation_budget() {
     let path = unique_test_dir("scheduled_schema_maintenance_budget");
     {
@@ -3524,6 +3564,56 @@ fn scheduled_background_schema_maintenance_tracks_mutation_budget() {
             output.rows[0].get("to_state"),
             Some(&Value::String("validating".to_string()))
         );
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(
+            scheduler.state().running_background_operations_by_class
+                [crate::WorkClass::Mutation.as_index()],
+            0
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn bounded_scheduled_background_schema_maintenance_limits_execution_and_releases_budget() {
+    let path = unique_test_dir("bounded_scheduled_schema_maintenance_budget");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1, title: 'a'})").unwrap();
+        db.query("CREATE (:Memory {id: 2, title: 'b'})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(title) TYPE STRING NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(title) SET STATE BACKFILL")
+            .unwrap();
+        let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+        class_limits[crate::WorkClass::Mutation.as_index()] = Some(2);
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(4),
+            max_total_background_operations: Some(4),
+            max_background_operations_by_class: class_limits,
+            ..LocalQosPolicy::default()
+        });
+
+        let output = db
+            .run_bounded_scheduled_background_schema_maintenance(&mut scheduler, 2)
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].get("object"),
+            Some(&Value::String("Memory.id".to_string()))
+        );
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Validating
+        }));
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "title" && property.state == SchemaObjectState::Backfill
+        }));
         assert_eq!(scheduler.state().running_background_operations, 0);
         assert_eq!(
             scheduler.state().running_background_operations_by_class
