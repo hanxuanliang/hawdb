@@ -1338,8 +1338,14 @@ fn semantic_aliases(token: &str) -> Vec<String> {
         }
         "csc" => vec!["compressed_sparse_column".to_string()],
         "csr" => vec!["compressed_sparse_row".to_string()],
+        "full_text" | "full_text_search" | "text_search" => vec!["fts".to_string()],
+        "fts" => vec!["full_text_search".to_string(), "text_search".to_string()],
         "kg" => vec!["knowledge_graph".to_string()],
         "knowledge_graph" => vec!["kg".to_string()],
+        "kuzu" => vec!["ladybug".to_string()],
+        "ladybug" => vec!["kuzu".to_string()],
+        "lance" => vec!["lancedb".to_string()],
+        "lancedb" => vec!["lance".to_string()],
         "log_structured" | "log_structured_merge_tree" | "merge_tree" | "structured_merge" => {
             vec!["lsm".to_string()]
         }
@@ -1347,6 +1353,9 @@ fn semantic_aliases(token: &str) -> Vec<String> {
         "mvcc" => vec!["multi_version_concurrency_control".to_string()],
         "open_cypher" => vec!["cypher".to_string()],
         "opencypher" => vec!["cypher".to_string(), "open_cypher".to_string()],
+        "pg" | "postgres" => vec!["postgresql".to_string()],
+        "postgresql" => vec!["postgres".to_string(), "pg".to_string()],
+        "pg_vector" | "pgvector" => vec!["vector_search".to_string()],
         "rag" => vec![
             "retrieval_augmented_generation".to_string(),
             "graph_rag".to_string(),
@@ -1367,6 +1376,7 @@ fn semantic_aliases(token: &str) -> Vec<String> {
         "retrieval_augmented" | "augmented_generation" | "retrieval_augmented_generation" => {
             vec!["rag".to_string(), "graph_rag".to_string()]
         }
+        "semantic_search" | "vector_search" => vec!["pgvector".to_string()],
         _ => Vec::new(),
     }
 }
@@ -2313,6 +2323,38 @@ mod tests {
         assert_eq!(csr_hits[0].id, "runtime");
         assert_eq!(csc_hits[0].id, "runtime");
         assert_eq!(opencypher_hits[0].id, "runtime");
+    }
+
+    #[test]
+    fn tokenizer_expands_migration_projection_aliases() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "projection".to_string(),
+                title: "PostgreSQL pgvector FTS LanceDB Kuzu".to_string(),
+                content: "Local graph projection replaces Ladybug search adapters".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let postgres_hits = index.search("postgres", None, SearchMode::Text, 10);
+        let pg_hits = index.search("pg", None, SearchMode::Text, 10);
+        let vector_hits = index.search("vector search", None, SearchMode::Text, 10);
+        let fts_hits = index.search_with_report("full text search", None, SearchMode::Text, 10);
+        let lance_hits = index.search("lance", None, SearchMode::Text, 10);
+        let ladybug_hits = index.search("ladybug", None, SearchMode::Text, 10);
+
+        assert_eq!(postgres_hits[0].id, "projection");
+        assert_eq!(pg_hits[0].id, "projection");
+        assert_eq!(vector_hits[0].id, "projection");
+        assert_eq!(fts_hits.hits[0].id, "projection");
+        assert_eq!(lance_hits[0].id, "projection");
+        assert_eq!(ladybug_hits[0].id, "projection");
+        assert!(fts_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "fts"));
     }
 
     #[test]

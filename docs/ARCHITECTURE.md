@@ -404,12 +404,15 @@ as `LSMTree` and `HTTPServer`, normalizes common English suffixes for
 memory/source/thread-style terms, and expands conservative knowledge-retrieval
 aliases such as `rag`, `graph_rag`, `graph_retrieval`, and `kg`, plus database
 system aliases such as `wal`/`write_ahead_log`, `mvcc`, `lsm`, `csr`, and
-`csc`. Conservative English stopwords are removed before query scoring, corpus
-statistics, and matched-term reporting, while raw compound identifiers such as
-`the_source` remain searchable. Term frequency affects rank, inverse document
-frequency is computed from the current projection, and document length
-normalization prevents verbose rows from dominating short focused matches. This
-keeps text fallback useful while the projection remains rebuildable.
+`csc`, and migration/projection aliases such as `pg`/`postgres`/`postgresql`,
+`pgvector`/`vector_search`, `fts`/`full_text_search`, `lance`/`lancedb`, and
+`kuzu`/`ladybug`. Conservative English stopwords are removed before query
+scoring, corpus statistics, and matched-term reporting, while raw compound
+identifiers such as `the_source` remain searchable. Term frequency affects rank,
+inverse document frequency is computed from the current projection, and
+document length normalization prevents verbose rows from dominating short
+focused matches. This keeps text fallback useful while the projection remains
+rebuildable.
 
 Search hits expose the information needed by a knowledge retrieval surface:
 fused RRF score, per-child RRF components, vector score, text score, vector
