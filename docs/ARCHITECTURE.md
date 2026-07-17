@@ -469,8 +469,9 @@ without making the search projection canonical. Callers that need
 response-level diagnostics can use
 `SearchIndex::search_with_report` to get the total document count, post-filter
 document count, candidate-set report, pre-limit hit count, requested limit, rank
-window, truncation flag, truncation reasons, fallback reasons, child retriever availability,
-candidate counts, top hit IDs, and per-child top candidate ranks and scores.
+window, truncation flag, truncation reasons, fallback reasons, child retriever
+availability, child fallback reasons, candidate counts, top hit IDs, and
+per-child top candidate ranks and scores.
 
 The stable embedded facade exposes this boundary without owning search state:
 `Database::rebuild_search_projection` derives projection rows from the canonical
@@ -520,8 +521,9 @@ graph child even when the caller has no usable search projection.
 At the knowledge facade level, `KnowledgeRetrieverReport` normalizes child
 retriever diagnostics for vector, text, and graph seed legs: availability,
 candidate count, optional limit, optional rank window, optional fusion weight,
-truncation flag, truncation reasons, and top candidate rank, score, canonical
-node ID, matched spans, and graph context path count are exposed in one place.
+fallback reasons, truncation flag, truncation reasons, and top candidate rank,
+score, canonical node ID, matched spans, and graph context path count are exposed
+in one place.
 Search child top candidates also carry projection freshness, while graph seed
 top candidates leave it empty because they are read directly from canonical
 graph state. Search child reports distinguish rank-window trimming from

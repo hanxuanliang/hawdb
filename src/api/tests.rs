@@ -714,6 +714,22 @@ fn knowledge_retrieval_diagnostics_expose_search_fallback_reasons() {
         .search_fallback_reasons
         .iter()
         .any(|reason| reason == "index has no vector rows"));
+    let vector_report = output
+        .retrievers
+        .iter()
+        .find(|report| report.name == "vector")
+        .expect("expected vector retriever report");
+    assert!(!vector_report.available);
+    assert!(vector_report
+        .fallback_reasons
+        .iter()
+        .any(|reason| reason == "index has no vector rows"));
+    let text_report = output
+        .retrievers
+        .iter()
+        .find(|report| report.name == "text")
+        .expect("expected text retriever report");
+    assert!(text_report.fallback_reasons.is_empty());
     assert!(output.search.hits[0]
         .fallback_reasons
         .iter()

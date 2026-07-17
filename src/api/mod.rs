@@ -447,6 +447,7 @@ pub struct KnowledgeRetrieverReport {
     pub limit: Option<usize>,
     pub rank_window: Option<usize>,
     pub fusion_weight: Option<f64>,
+    pub fallback_reasons: Vec<String>,
     pub truncated: bool,
     pub truncation_reasons: Vec<String>,
     pub top_candidates: Vec<KnowledgeRetrieverCandidate>,
@@ -1788,6 +1789,7 @@ fn knowledge_retriever_reports(
                 report.name.as_str(),
                 search.fusion_weights,
             ),
+            fallback_reasons: report.fallback_reasons.clone(),
             truncated: report.candidate_count > report.top_candidates.len(),
             truncation_reasons: knowledge_search_retriever_truncation_reasons(
                 report.name.as_str(),
@@ -1825,6 +1827,7 @@ fn knowledge_retriever_reports(
         limit: Some(graph_seed_limit),
         rank_window: None,
         fusion_weight: None,
+        fallback_reasons: Vec::new(),
         truncated: graph_seed_candidate_count > graph_seeds.len(),
         truncation_reasons: knowledge_graph_seed_truncation_reasons(
             graph_seed_candidate_count,

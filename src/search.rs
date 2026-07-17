@@ -177,6 +177,7 @@ pub struct SearchRetrieverReport {
     pub name: String,
     pub available: bool,
     pub candidate_count: usize,
+    pub fallback_reasons: Vec<String>,
     pub top_hit_ids: Vec<String>,
     pub top_candidates: Vec<SearchRetrieverCandidate>,
 }
@@ -1005,6 +1006,7 @@ impl SearchIndex {
                 name: "vector".to_string(),
                 available: vector_available && mode != SearchMode::Text,
                 candidate_count: vector_scores.len(),
+                fallback_reasons: fallback_reasons.clone(),
                 top_hit_ids: top_ranked_ids(&vector_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&vector_window_ranks, &vector_scores, limit),
             },
@@ -1012,6 +1014,7 @@ impl SearchIndex {
                 name: "text".to_string(),
                 available: text_available && mode != SearchMode::Vector,
                 candidate_count: text_scores.len(),
+                fallback_reasons: Vec::new(),
                 top_hit_ids: top_ranked_ids(&text_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&text_window_ranks, &text_scores, limit),
             },
@@ -2869,6 +2872,19 @@ mod tests {
         assert_eq!(hits[0].text_rank, Some(1));
         assert!(result.fallback_reasons[0].contains("dimension"));
         assert!(hits[0].fallback_reasons[0].contains("dimension"));
+        let vector = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "vector")
+            .expect("expected vector retriever report");
+        assert!(!vector.available);
+        assert!(vector.fallback_reasons[0].contains("dimension"));
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert!(text.fallback_reasons.is_empty());
     }
 
     #[test]
