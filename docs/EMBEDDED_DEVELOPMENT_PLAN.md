@@ -39,6 +39,12 @@ Three codebases define the work:
    rule set, and search budget.
 7. The first concurrency contract is one writer with snapshot readers.
 8. A Ladybug compatibility comparison must pass before any production cutover.
+9. Embedded deployments are resource constrained by default: foreground graph
+   reads and writes must be able to bound or defer background projection,
+   import, analytics, and shadow work.
+10. FTS/BM25 and retrieval projections must support incremental maintenance for
+    ordinary row upsert/delete changes; full rebuilds are repair paths, not the
+    steady-state update mechanism.
 
 ## Required Capability Surface
 
@@ -51,6 +57,8 @@ Three codebases define the work:
 - explicit read and write transactions
 - commit, rollback, and checkpoint
 - bounded resource configuration
+- basic local QoS hooks for admission, operation budgets, and deferrable
+  background work
 
 ### Cypher and Semantic Analysis
 
@@ -569,7 +577,11 @@ before advancing them to `PUBLIC`, and removes `GC` descriptors through a single
 grouped WAL batch. Projected graph derived artifacts can be refreshed through a
 report-oriented `Database::rebuild_derived_artifacts` entry point; search
 projection artifacts expose the same report-oriented rebuild shape through
-`SearchIndex::rebuild_derived_artifacts`. Content artifact jobs are scheduled at
+`SearchIndex::rebuild_derived_artifacts`. Search projections also expose
+bounded incremental deltas for ordinary FTS/BM25 row upsert/delete changes:
+`SearchIndex::apply_projection_delta` accepts an operation budget and fails
+without partial index mutation on budget or embedding-dimension errors. Content
+artifact jobs are scheduled at
 the same boundary; callers can attach structured job payloads for object
 references, checksums, parser hints, and projection targets. The default
 graph-kernel runner rejects those jobs while preserving the payload in the job

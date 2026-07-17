@@ -304,6 +304,25 @@ pub struct SearchDerivedArtifactReport {
     pub metadata_repair_reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct SearchProjectionDelta {
+    pub upserts: Vec<SearchProjectionRow>,
+    pub deletes: Vec<String>,
+    pub max_operations: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionDeltaReport {
+    pub artifact_type: String,
+    pub name: String,
+    pub action: String,
+    pub before_document_count: usize,
+    pub after_document_count: usize,
+    pub upserted_documents: usize,
+    pub deleted_documents: usize,
+    pub operation_count: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct SearchIndex {
     documents: BTreeMap<String, SearchDocument>,
@@ -358,6 +377,72 @@ impl SearchIndex {
 
     pub fn delete(&mut self, id: &str) {
         self.documents.remove(id);
+    }
+
+    pub fn apply_projection_delta(
+        &mut self,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let operation_count = delta.upserts.len() + delta.deletes.len();
+        if let Some(limit) = delta.max_operations {
+            if operation_count > limit {
+                return Err(SkeinError::Storage(format!(
+                    "incremental projection update operation count {operation_count} exceeded configured limit {limit}"
+                )));
+            }
+        }
+
+        let mut next_embedding_dimension = self.embedding_dimension;
+        for row in &delta.upserts {
+            let Some(embedding) = &row.embedding else {
+                continue;
+            };
+            let dimension = embedding.len();
+            if let Some(manifest) = &self.embedding_manifest {
+                if manifest.dimension != dimension {
+                    return Err(SkeinError::Storage(format!(
+                        "embedding dimension mismatch: manifest expects {}, row has {dimension}",
+                        manifest.dimension
+                    )));
+                }
+            }
+            match next_embedding_dimension {
+                Some(existing) if existing != dimension => {
+                    return Err(SkeinError::Storage(format!(
+                        "embedding dimension mismatch: index has {existing}, row has {dimension}"
+                    )));
+                }
+                Some(_) => {}
+                None => next_embedding_dimension = Some(dimension),
+            }
+        }
+
+        let before_document_count = self.documents.len();
+        let mut next_documents = self.documents.clone();
+        let mut deleted_documents = 0;
+        for id in delta.deletes {
+            if next_documents.remove(&id).is_some() {
+                deleted_documents += 1;
+            }
+        }
+        let upserted_documents = delta.upserts.len();
+        for row in delta.upserts {
+            let document = row.into_document();
+            next_documents.insert(document.id.clone(), document);
+        }
+
+        self.documents = next_documents;
+        self.embedding_dimension = next_embedding_dimension;
+        Ok(SearchProjectionDeltaReport {
+            artifact_type: "search_projection".to_string(),
+            name: "search_projection".to_string(),
+            action: "incremental_update".to_string(),
+            before_document_count,
+            after_document_count: self.documents.len(),
+            upserted_documents,
+            deleted_documents,
+            operation_count,
+        })
     }
 
     pub fn document(&self, id: &str) -> Option<&SearchDocument> {
@@ -3660,6 +3745,109 @@ mod tests {
         assert!(error.to_string().contains("row limit"));
         assert_eq!(index.document_count(), 1);
         assert!(index.document("old").is_some());
+    }
+
+    #[test]
+    fn projection_delta_incrementally_updates_search_rows() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("memory:old", "Old projection", "Remove me", [1.0, 0.0]))
+            .unwrap();
+
+        let report = index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: vec![SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "new".to_string(),
+                    title: "Incremental FTS".to_string(),
+                    body: "Small batches keep embedded search cheap".to_string(),
+                    embedding: Some(vec![0.0, 1.0]),
+                    source_id: None,
+                    metadata: BTreeMap::new(),
+                }],
+                deletes: vec!["memory:old".to_string()],
+                max_operations: Some(2),
+            })
+            .unwrap();
+
+        assert_eq!(report.action, "incremental_update");
+        assert_eq!(report.before_document_count, 1);
+        assert_eq!(report.after_document_count, 1);
+        assert_eq!(report.upserted_documents, 1);
+        assert_eq!(report.deleted_documents, 1);
+        assert_eq!(report.operation_count, 2);
+        assert!(index.document("memory:old").is_none());
+        assert!(index.document("memory:new").is_some());
+        let hits = index.search("embedded search", None, SearchMode::Text, 10);
+        assert_eq!(hits[0].id, "memory:new");
+    }
+
+    #[test]
+    fn projection_delta_budget_failure_keeps_existing_projection() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:old",
+                "Old projection",
+                "Should stay",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+
+        let error = index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: vec![SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "new".to_string(),
+                    title: "Too much work".to_string(),
+                    body: "Should not be applied".to_string(),
+                    embedding: Some(vec![0.0, 1.0]),
+                    source_id: None,
+                    metadata: BTreeMap::new(),
+                }],
+                deletes: vec!["memory:old".to_string()],
+                max_operations: Some(1),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("operation count 2"));
+        assert_eq!(index.document_count(), 1);
+        assert!(index.document("memory:old").is_some());
+        assert!(index.document("memory:new").is_none());
+    }
+
+    #[test]
+    fn projection_delta_dimension_failure_keeps_existing_projection() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:old",
+                "Old projection",
+                "Should stay",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+
+        let error = index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: vec![SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "new".to_string(),
+                    title: "Bad dimension".to_string(),
+                    body: "Should not be applied".to_string(),
+                    embedding: Some(vec![1.0, 0.0, 0.0]),
+                    source_id: None,
+                    metadata: BTreeMap::new(),
+                }],
+                deletes: vec!["memory:old".to_string()],
+                max_operations: Some(2),
+            })
+            .unwrap_err();
+
+        assert!(error.to_string().contains("embedding dimension mismatch"));
+        assert_eq!(index.document_count(), 1);
+        assert!(index.document("memory:old").is_some());
+        assert!(index.document("memory:new").is_none());
     }
 
     #[test]

@@ -85,8 +85,9 @@ pub use schema::{
 pub use search::{
     MetadataRepairOptions, MetadataRepairSummary, SearchAnalyzerLexicon,
     SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchHit, SearchIndex,
-    SearchMode, SearchProjectionFreshness, SearchProjectionKind, SearchProjectionRow,
-    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
+    SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchProjectionKind, SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary,
+    SearchResultSet,
 };
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,
