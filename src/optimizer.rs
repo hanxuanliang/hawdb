@@ -2135,6 +2135,27 @@ impl OptimizerCatalog {
         input_rows.div_ceil(divisor).max(1)
     }
 
+    fn estimate_rel_property_null_rows(
+        &self,
+        rel_type: &str,
+        property: &str,
+        input_rows: u64,
+    ) -> u64 {
+        let distinct_count = self.rel_property_distinct_count(rel_type, property).max(1);
+        input_rows.div_ceil(distinct_count.min(10)).max(1)
+    }
+
+    fn estimate_rel_property_not_null_rows(
+        &self,
+        rel_type: &str,
+        property: &str,
+        input_rows: u64,
+    ) -> u64 {
+        input_rows
+            .saturating_sub(self.estimate_rel_property_null_rows(rel_type, property, input_rows))
+            .max(1)
+    }
+
     fn estimate_rel_property_range_rows(
         &self,
         rel_type: &str,
@@ -2228,6 +2249,17 @@ impl OptimizerCatalog {
             .min(max_divisor)
             .max(1);
         input_rows.div_ceil(divisor).max(1)
+    }
+
+    fn estimate_property_null_rows(&self, label: &str, property: &str, input_rows: u64) -> u64 {
+        let distinct_count = self.distinct_count(label, property).max(1);
+        input_rows.div_ceil(distinct_count.min(10)).max(1)
+    }
+
+    fn estimate_property_not_null_rows(&self, label: &str, property: &str, input_rows: u64) -> u64 {
+        input_rows
+            .saturating_sub(self.estimate_property_null_rows(label, property, input_rows))
+            .max(1)
     }
 
     fn estimate_property_range_rows(
@@ -4351,6 +4383,14 @@ fn estimate_node_property_filter_rows(
         } => physical_plan_node_label(input, variable).map(|label| {
             catalog.estimate_property_string_match_rows(label, property, input_rows, 6)
         }),
+        Predicate::PropertyIsNull { variable, property } => {
+            physical_plan_node_label(input, variable)
+                .map(|label| catalog.estimate_property_null_rows(label, property, input_rows))
+        }
+        Predicate::PropertyIsNotNull { variable, property } => {
+            physical_plan_node_label(input, variable)
+                .map(|label| catalog.estimate_property_not_null_rows(label, property, input_rows))
+        }
         _ => None,
     }
 }
@@ -4713,6 +4753,30 @@ fn estimate_relationship_filter_rows(
                 catalog.estimate_rel_property_string_match_rows(rel_type, property, rows, 6)
             },
         ),
+        Predicate::PropertyIsNull { variable, property } => {
+            estimate_relationship_property_filter_rows(
+                input,
+                variable,
+                property,
+                input_rows,
+                catalog,
+                |catalog, rel_type, property, rows| {
+                    catalog.estimate_rel_property_null_rows(rel_type, property, rows)
+                },
+            )
+        }
+        Predicate::PropertyIsNotNull { variable, property } => {
+            estimate_relationship_property_filter_rows(
+                input,
+                variable,
+                property,
+                input_rows,
+                catalog,
+                |catalog, rel_type, property, rows| {
+                    catalog.estimate_rel_property_not_null_rows(rel_type, property, rows)
+                },
+            )
+        }
         _ => None,
     }
 }
@@ -6668,6 +6732,43 @@ mod tests {
             trace.selected_plan_cost,
             PlanCost {
                 estimated_rows: 100,
+                cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn residual_node_null_predicate_uses_conservative_selectivity() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::PropertyIsNotNull {
+                variable: "c".to_string(),
+                property: "ai_summary".to_string(),
+            },
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "c".to_string(),
+                label: "Community".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Community".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [(("Community".to_string(), "ai_summary".to_string()), 100)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 900,
                 cost: 2_004,
             }
         );

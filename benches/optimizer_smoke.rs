@@ -361,6 +361,19 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=100 cost=2004",
             ],
         },
+        OptimizerSmokeCase {
+            name: "community_summary_presence_filter",
+            logical: community_summary_presence_filter_plan(),
+            catalog: community_summary_presence_filter_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 900,
+                cost: 2004,
+            },
+            fingerprint_contains: "PropertyIsNotNull",
+            decision_contains: &[
+                "selected physical plan cost: estimated_rows=900 cost=2004",
+            ],
+        },
     ]
 }
 
@@ -1546,6 +1559,34 @@ fn thread_optional_source_filter_catalog() -> OptimizerCatalog {
             [],
             [],
             [(("Thread".to_string(), "source".to_string()), 10)],
+            [],
+        ),
+    )
+}
+
+fn community_summary_presence_filter_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::PropertyIsNotNull {
+            variable: "c".to_string(),
+            property: "ai_summary".to_string(),
+        },
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "c".to_string(),
+            label: "Community".to_string(),
+        }),
+    }
+}
+
+fn community_summary_presence_filter_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Community".to_string(), 1_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Community".to_string(), "ai_summary".to_string()), 100)],
             [],
         ),
     )
