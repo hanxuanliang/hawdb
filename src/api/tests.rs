@@ -1,11 +1,11 @@
 use super::{
     validate_graph_lightning_graph_stream, BackgroundMaintenanceOptions, CanonicalStableIdMapping,
-    Database, DatabaseConfig, DerivedArtifactJobStatus, KnowledgeCandidateScoringPolicy,
-    KnowledgeCandidateSource, KnowledgeEntityRequest, KnowledgeGraphPathDirection,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    Database, DatabaseConfig, DerivedArtifactJobStatus, ExternalContentArtifactJobCompletion,
+    KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
+    KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgePathRequest, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
+    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -7814,6 +7814,118 @@ fn caller_owned_content_artifact_runtime_can_run_specific_pending_job() {
         .unwrap()
         .unwrap();
     assert_eq!(next.job.id, first.id);
+}
+
+#[test]
+fn caller_owned_content_artifact_runtime_can_complete_with_lineage_manifest() {
+    let mut db = Database::new();
+    let job = db.schedule_external_content_artifact_job_with_payload(
+        "source-1",
+        "parse",
+        BTreeMap::from([
+            (
+                "content_uri".to_string(),
+                Value::String("file:///nowledge/source-1.md".to_string()),
+            ),
+            ("sha256".to_string(), Value::String("input-sha".to_string())),
+        ]),
+    );
+
+    let report = db
+        .complete_next_external_content_artifact_job_with(|job| {
+            assert_eq!(job.status, DerivedArtifactJobStatus::Running);
+            assert_eq!(
+                job.payload.get("sha256"),
+                Some(&Value::String("input-sha".to_string()))
+            );
+            Ok(ExternalContentArtifactJobCompletion::new("nowledge-parser")
+                .with_runtime_version("0.3.7")
+                .with_input_ref("file:///nowledge/source-1.md")
+                .with_input_checksum("sha256:input-sha")
+                .with_output_ref("projection://search/source-1")
+                .with_output_checksum("sha256:projection-sha")
+                .with_projection("search", "search:source-1:v2")
+                .with_source_graph_commit_epoch(42)
+                .with_rows_produced(3)
+                .with_metadata("parser_mode", Value::String("markdown".to_string())))
+        })
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.job.id, job.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+    assert_eq!(report.job.last_output, Some(report.output.clone()));
+    let row = &report.output.rows[0];
+    assert_eq!(row.get("job_id"), Some(&Value::Int(job.id as i64)));
+    assert_eq!(
+        row.get("runtime_name"),
+        Some(&Value::String("nowledge-parser".to_string()))
+    );
+    assert_eq!(
+        row.get("runtime_version"),
+        Some(&Value::String("0.3.7".to_string()))
+    );
+    assert_eq!(
+        row.get("input_ref"),
+        Some(&Value::String("file:///nowledge/source-1.md".to_string()))
+    );
+    assert_eq!(
+        row.get("input_checksum"),
+        Some(&Value::String("sha256:input-sha".to_string()))
+    );
+    assert_eq!(
+        row.get("output_ref"),
+        Some(&Value::String("projection://search/source-1".to_string()))
+    );
+    assert_eq!(
+        row.get("output_checksum"),
+        Some(&Value::String("sha256:projection-sha".to_string()))
+    );
+    assert_eq!(
+        row.get("projection_kind"),
+        Some(&Value::String("search".to_string()))
+    );
+    assert_eq!(
+        row.get("projection_ref"),
+        Some(&Value::String("search:source-1:v2".to_string()))
+    );
+    assert_eq!(row.get("source_graph_commit_epoch"), Some(&Value::Int(42)));
+    assert_eq!(row.get("rows_produced"), Some(&Value::Int(3)));
+    assert_eq!(
+        row.get("metadata"),
+        Some(&Value::Map(BTreeMap::from([(
+            "parser_mode".to_string(),
+            Value::String("markdown".to_string())
+        )])))
+    );
+}
+
+#[test]
+fn content_artifact_completion_runner_only_claims_external_jobs() {
+    let mut db = Database::new();
+    let projected_graph = db.schedule_projected_graph_artifact_rebuild("MissingGraph");
+    let parse = db.schedule_external_content_artifact_job("source-parse", "parse");
+
+    assert!(db
+        .complete_external_content_artifact_job_with(projected_graph.id, |_| unreachable!())
+        .unwrap()
+        .is_none());
+
+    let report = db
+        .complete_external_content_artifact_job_with(parse.id, |_| {
+            Ok(ExternalContentArtifactJobCompletion::new("parser").with_rows_produced(1))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.job.id, parse.id);
+    assert_eq!(
+        report.output.rows[0].get("runtime_version"),
+        Some(&Value::Null)
+    );
+    assert_eq!(
+        report.output.rows[0].get("rows_produced"),
+        Some(&Value::Int(1))
+    );
 }
 
 #[test]

@@ -390,6 +390,13 @@ operator audit; large parser results, raw bytes, chunks, and projection payloads
 remain caller-owned artifacts outside the graph kernel. Bounded succeeded-job
 views expose those retained output rows globally or per action without requiring
 the external runtime to scan all derived-artifact jobs.
+Runtimes that want a standard lightweight lineage shape can use
+`ExternalContentArtifactJobCompletion` with
+`Database::complete_next_external_content_artifact_job_with` or
+`Database::complete_external_content_artifact_job_with`. The completion row
+records runtime identity, input/output refs, checksums, projection refs, source
+graph epoch, produced-row counts, and small metadata. It deliberately stores
+only references and audit metadata, not parser result payloads.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` for stateless
 `LocalQosPolicy` admission or

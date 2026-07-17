@@ -46,6 +46,89 @@ pub struct DerivedArtifactJobReport {
     pub output: QueryOutput,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalContentArtifactJobCompletion {
+    pub runtime_name: String,
+    pub runtime_version: Option<String>,
+    pub input_ref: Option<String>,
+    pub input_checksum: Option<String>,
+    pub output_ref: Option<String>,
+    pub output_checksum: Option<String>,
+    pub projection_kind: Option<String>,
+    pub projection_ref: Option<String>,
+    pub source_graph_commit_epoch: Option<u64>,
+    pub rows_produced: Option<usize>,
+    pub metadata: BTreeMap<String, Value>,
+}
+
+impl ExternalContentArtifactJobCompletion {
+    pub fn new(runtime_name: impl Into<String>) -> Self {
+        Self {
+            runtime_name: runtime_name.into(),
+            runtime_version: None,
+            input_ref: None,
+            input_checksum: None,
+            output_ref: None,
+            output_checksum: None,
+            projection_kind: None,
+            projection_ref: None,
+            source_graph_commit_epoch: None,
+            rows_produced: None,
+            metadata: BTreeMap::new(),
+        }
+    }
+
+    pub fn with_runtime_version(mut self, runtime_version: impl Into<String>) -> Self {
+        self.runtime_version = Some(runtime_version.into());
+        self
+    }
+
+    pub fn with_input_ref(mut self, input_ref: impl Into<String>) -> Self {
+        self.input_ref = Some(input_ref.into());
+        self
+    }
+
+    pub fn with_input_checksum(mut self, input_checksum: impl Into<String>) -> Self {
+        self.input_checksum = Some(input_checksum.into());
+        self
+    }
+
+    pub fn with_output_ref(mut self, output_ref: impl Into<String>) -> Self {
+        self.output_ref = Some(output_ref.into());
+        self
+    }
+
+    pub fn with_output_checksum(mut self, output_checksum: impl Into<String>) -> Self {
+        self.output_checksum = Some(output_checksum.into());
+        self
+    }
+
+    pub fn with_projection(
+        mut self,
+        projection_kind: impl Into<String>,
+        projection_ref: impl Into<String>,
+    ) -> Self {
+        self.projection_kind = Some(projection_kind.into());
+        self.projection_ref = Some(projection_ref.into());
+        self
+    }
+
+    pub fn with_source_graph_commit_epoch(mut self, commit_epoch: u64) -> Self {
+        self.source_graph_commit_epoch = Some(commit_epoch);
+        self
+    }
+
+    pub fn with_rows_produced(mut self, rows_produced: usize) -> Self {
+        self.rows_produced = Some(rows_produced);
+        self
+    }
+
+    pub fn with_metadata(mut self, key: impl Into<String>, value: Value) -> Self {
+        self.metadata.insert(key.into(), value);
+        self
+    }
+}
+
 impl DerivedArtifactJob {
     pub fn background_work_request(&self, estimated_operations: usize) -> WorkRequest {
         let class = if self.artifact_type == "projected_graph" {
@@ -586,6 +669,27 @@ impl Database {
         self.run_external_content_artifact_job_at_index(index, &mut runtime)
     }
 
+    pub fn complete_next_external_content_artifact_job_with(
+        &mut self,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_next_external_content_artifact_job_with(|job| {
+            let completion = runtime(job)?;
+            Ok(external_content_artifact_completion_output(job, completion))
+        })
+    }
+
+    pub fn complete_external_content_artifact_job_with(
+        &mut self,
+        job_id: u64,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_external_content_artifact_job_with(job_id, |job| {
+            let completion = runtime(job)?;
+            Ok(external_content_artifact_completion_output(job, completion))
+        })
+    }
+
     pub fn run_background_external_content_artifact_job_with(
         &mut self,
         policy: &LocalQosPolicy,
@@ -834,6 +938,75 @@ fn derived_artifact_job_failure_row(job: &DerivedArtifactJob, error: &str) -> Ro
         ("attempts".to_string(), Value::Int(job.attempts as i64)),
         ("error".to_string(), Value::String(error.to_string())),
     ])
+}
+
+fn external_content_artifact_completion_output(
+    job: &DerivedArtifactJob,
+    completion: ExternalContentArtifactJobCompletion,
+) -> QueryOutput {
+    QueryOutput {
+        rows: vec![external_content_artifact_completion_row(job, completion)],
+    }
+}
+
+fn external_content_artifact_completion_row(
+    job: &DerivedArtifactJob,
+    completion: ExternalContentArtifactJobCompletion,
+) -> Row {
+    BTreeMap::from([
+        ("job_id".to_string(), Value::Int(job.id as i64)),
+        (
+            "artifact_type".to_string(),
+            Value::String(job.artifact_type.clone()),
+        ),
+        ("name".to_string(), Value::String(job.name.clone())),
+        ("action".to_string(), Value::String(job.action.clone())),
+        (
+            "runtime_name".to_string(),
+            Value::String(completion.runtime_name),
+        ),
+        (
+            "runtime_version".to_string(),
+            optional_string_value(completion.runtime_version),
+        ),
+        (
+            "input_ref".to_string(),
+            optional_string_value(completion.input_ref),
+        ),
+        (
+            "input_checksum".to_string(),
+            optional_string_value(completion.input_checksum),
+        ),
+        (
+            "output_ref".to_string(),
+            optional_string_value(completion.output_ref),
+        ),
+        (
+            "output_checksum".to_string(),
+            optional_string_value(completion.output_checksum),
+        ),
+        (
+            "projection_kind".to_string(),
+            optional_string_value(completion.projection_kind),
+        ),
+        (
+            "projection_ref".to_string(),
+            optional_string_value(completion.projection_ref),
+        ),
+        (
+            "source_graph_commit_epoch".to_string(),
+            optional_u64_value(completion.source_graph_commit_epoch),
+        ),
+        (
+            "rows_produced".to_string(),
+            optional_usize_value(completion.rows_produced),
+        ),
+        ("metadata".to_string(), Value::Map(completion.metadata)),
+    ])
+}
+
+fn optional_string_value(value: Option<String>) -> Value {
+    value.map(Value::String).unwrap_or(Value::Null)
 }
 
 fn is_external_content_artifact_job(artifact_type: &str) -> bool {

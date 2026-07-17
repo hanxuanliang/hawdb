@@ -660,6 +660,13 @@ Caller-owned runtimes can read those successful lineage rows through bounded
 `Database::succeeded_external_content_artifact_jobs` or action-scoped
 `Database::succeeded_external_content_artifact_jobs_for_action` views instead
 of scanning the full derived-artifact history.
+`ExternalContentArtifactJobCompletion` provides a standard lightweight
+completion manifest for caller-owned parser/crawler runtimes that want to report
+runtime identity, input/output refs, checksums, projection refs, source graph
+epoch, produced-row counts, and small metadata without storing parser payloads
+in the graph kernel. `Database::complete_next_external_content_artifact_job_with`
+and `Database::complete_external_content_artifact_job_with` convert that
+manifest into the retained audit row.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` or
 `Database::run_next_scheduled_background_external_content_artifact_job_with` to
