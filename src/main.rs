@@ -748,6 +748,11 @@ fn verify_graph_lightning_staging_catalog(
     let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
     let catalog = read_json_file(&catalog_path)?;
     let mut errors = Vec::new();
+    let mut artifact_errors = Vec::new();
+    let mut manifest_errors = Vec::new();
+    let mut graph_stream_errors = Vec::new();
+    let mut bundle_errors = Vec::new();
+    let mut catalog_errors = Vec::new();
     let mut artifact_reports = Vec::new();
     let mut manifest = None;
     let mut graph_stream = None;
@@ -758,7 +763,11 @@ fn verify_graph_lightning_staging_catalog(
         .and_then(serde_json::Value::as_array)
         .cloned()
         .unwrap_or_else(|| {
-            errors.push("staging catalog missing artifacts array".to_string());
+            push_grouped_error(
+                &mut errors,
+                &mut catalog_errors,
+                "staging catalog missing artifacts array",
+            );
             Vec::new()
         });
     for artifact in &artifacts {
@@ -767,13 +776,19 @@ fn verify_graph_lightning_staging_catalog(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
         let Some(path) = artifact.get("path").and_then(serde_json::Value::as_str) else {
-            errors.push(format!("staging artifact {kind} missing path"));
+            push_grouped_error(
+                &mut errors,
+                &mut artifact_errors,
+                format!("staging artifact {kind} missing path"),
+            );
             continue;
         };
         if path.contains('/') || path.contains('\\') {
-            errors.push(format!(
-                "staging artifact {kind} uses non-local path {path}"
-            ));
+            push_grouped_error(
+                &mut errors,
+                &mut artifact_errors,
+                format!("staging artifact {kind} uses non-local path {path}"),
+            );
             continue;
         }
         let artifact_path = staging_dir.join(path);
@@ -786,27 +801,51 @@ fn verify_graph_lightning_staging_catalog(
                 let byte_len_matches = expected_byte_len == Some(actual_byte_len);
                 let checksum_matches = expected_checksum == Some(actual_checksum);
                 if !byte_len_matches {
-                    errors.push(format!("staging artifact {kind} byte length mismatch"));
+                    push_grouped_error(
+                        &mut errors,
+                        &mut artifact_errors,
+                        format!("staging artifact {kind} byte length mismatch"),
+                    );
                 }
                 if !checksum_matches {
-                    errors.push(format!("staging artifact {kind} checksum mismatch"));
+                    push_grouped_error(
+                        &mut errors,
+                        &mut artifact_errors,
+                        format!("staging artifact {kind} checksum mismatch"),
+                    );
                 }
                 match kind {
                     "manifest" => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                         Ok(value) => manifest = Some(value),
                         Err(error) => {
-                            errors.push(format!("invalid manifest artifact JSON: {error}"))
+                            push_grouped_error(
+                                &mut errors,
+                                &mut manifest_errors,
+                                format!("invalid manifest artifact JSON: {error}"),
+                            );
                         }
                     },
                     "graph_stream" => match String::from_utf8(bytes.clone()) {
                         Ok(value) => graph_stream = Some(value),
-                        Err(error) => errors.push(format!("invalid GraphStream UTF-8: {error}")),
+                        Err(error) => push_grouped_error(
+                            &mut errors,
+                            &mut graph_stream_errors,
+                            format!("invalid GraphStream UTF-8: {error}"),
+                        ),
                     },
                     "bundle" => match serde_json::from_slice::<serde_json::Value>(&bytes) {
                         Ok(value) => bundle = Some(value),
-                        Err(error) => errors.push(format!("invalid bundle artifact JSON: {error}")),
+                        Err(error) => push_grouped_error(
+                            &mut errors,
+                            &mut bundle_errors,
+                            format!("invalid bundle artifact JSON: {error}"),
+                        ),
                     },
-                    _ => errors.push(format!("unknown staging artifact kind {kind}")),
+                    _ => push_grouped_error(
+                        &mut errors,
+                        &mut artifact_errors,
+                        format!("unknown staging artifact kind {kind}"),
+                    ),
                 }
                 artifact_reports.push(serde_json::json!({
                     "kind": kind,
@@ -820,9 +859,11 @@ fn verify_graph_lightning_staging_catalog(
                 }));
             }
             Err(error) => {
-                errors.push(format!(
-                    "missing staging artifact {kind} at {path}: {error}"
-                ));
+                push_grouped_error(
+                    &mut errors,
+                    &mut artifact_errors,
+                    format!("missing staging artifact {kind} at {path}: {error}"),
+                );
                 artifact_reports.push(serde_json::json!({
                     "kind": kind,
                     "path": path,
@@ -870,12 +911,20 @@ fn verify_graph_lightning_staging_catalog(
                     .and_then(serde_json::Value::as_u64)
                     == Some(validation.relationship_count as u64);
             if !matches {
-                errors.push("manifest does not match GraphStream artifact".to_string());
+                push_grouped_error(
+                    &mut errors,
+                    &mut manifest_errors,
+                    "manifest does not match GraphStream artifact",
+                );
             }
             matches
         }
         _ => {
-            errors.push("manifest or GraphStream artifact missing".to_string());
+            push_grouped_error(
+                &mut errors,
+                &mut manifest_errors,
+                "manifest or GraphStream artifact missing",
+            );
             false
         }
     };
@@ -885,12 +934,16 @@ fn verify_graph_lightning_staging_catalog(
                 && bundle.get("graph_stream_validation") == Some(validation)
                 && bundle.get("export_gate") == catalog.get("export_gate");
             if !matches {
-                errors.push("bundle does not match staged manifest, GraphStream validation, or catalog gate".to_string());
+                push_grouped_error(
+                    &mut errors,
+                    &mut bundle_errors,
+                    "bundle does not match staged manifest, GraphStream validation, or catalog gate",
+                );
             }
             matches
         }
         _ => {
-            errors.push("bundle artifact missing".to_string());
+            push_grouped_error(&mut errors, &mut bundle_errors, "bundle artifact missing");
             false
         }
     };
@@ -914,13 +967,21 @@ fn verify_graph_lightning_staging_catalog(
             .and_then(serde_json::Value::as_str)
             == Some("ready");
     if !catalog_state_ready {
-        errors.push("staging catalog is not READY".to_string());
+        push_grouped_error(
+            &mut errors,
+            &mut catalog_errors,
+            "staging catalog is not READY",
+        );
     }
     let graph_stream_valid = graph_stream_validation
         .as_ref()
         .is_some_and(|validation| validation.is_valid);
     if !graph_stream_valid {
-        errors.push("GraphStream validation failed".to_string());
+        push_grouped_error(
+            &mut errors,
+            &mut graph_stream_errors,
+            "GraphStream validation failed",
+        );
     }
     let decision = if errors.is_empty()
         && artifact_integrity
@@ -945,9 +1006,29 @@ fn verify_graph_lightning_staging_catalog(
         "artifacts": artifact_reports,
         "validation_gate": {
             "decision": decision,
+            "artifact_errors": artifact_errors.len(),
+            "manifest_errors": manifest_errors.len(),
+            "graph_stream_errors": graph_stream_errors.len(),
+            "bundle_errors": bundle_errors.len(),
+            "catalog_errors": catalog_errors.len(),
+            "artifact_error_messages": artifact_errors,
+            "manifest_error_messages": manifest_errors,
+            "graph_stream_error_messages": graph_stream_errors,
+            "bundle_error_messages": bundle_errors,
+            "catalog_error_messages": catalog_errors,
             "errors": errors,
         },
     }))
+}
+
+fn push_grouped_error(
+    errors: &mut Vec<String>,
+    group: &mut Vec<String>,
+    message: impl Into<String>,
+) {
+    let message = message.into();
+    errors.push(message.clone());
+    group.push(message);
 }
 
 fn publish_graph_lightning_staging_catalog(
@@ -1948,6 +2029,11 @@ mod tests {
         assert_eq!(report["artifact_integrity"], true);
         assert_eq!(report["manifest_matches_graph_stream"], true);
         assert_eq!(report["bundle_matches_artifacts"], true);
+        assert_eq!(report["validation_gate"]["artifact_errors"], 0);
+        assert_eq!(report["validation_gate"]["manifest_errors"], 0);
+        assert_eq!(report["validation_gate"]["graph_stream_errors"], 0);
+        assert_eq!(report["validation_gate"]["bundle_errors"], 0);
+        assert_eq!(report["validation_gate"]["catalog_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
@@ -1973,6 +2059,23 @@ mod tests {
         assert_eq!(report["validation_gate"]["decision"], "blocked");
         assert_eq!(report["artifact_integrity"], false);
         assert_eq!(report["manifest_matches_graph_stream"], false);
+        assert_eq!(report["validation_gate"]["artifact_errors"], 2);
+        assert_eq!(report["validation_gate"]["manifest_errors"], 1);
+        assert_eq!(report["validation_gate"]["graph_stream_errors"], 1);
+        assert_eq!(report["validation_gate"]["bundle_errors"], 1);
+        assert_eq!(report["validation_gate"]["catalog_errors"], 0);
+        assert!(report["validation_gate"]["artifact_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("graph_stream checksum mismatch")));
+        assert_eq!(
+            report["validation_gate"]["graph_stream_error_messages"][0],
+            "GraphStream validation failed"
+        );
         assert!(report["validation_gate"]["errors"]
             .as_array()
             .unwrap()

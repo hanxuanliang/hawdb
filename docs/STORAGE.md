@@ -150,7 +150,9 @@ it is outside the graph WAL and does not alter the published graph snapshot.
 `skein graph-lightning-verify-staging [--require-ready] <staging-dir>` reopens
 that staging catalog without the source database, verifies artifact byte
 lengths and checksums, recomputes GraphStream validation, and checks agreement
-between the catalog, manifest, bundle, and GraphStream artifact.
+between the catalog, manifest, bundle, and GraphStream artifact. Its validation
+gate keeps flat errors for logs and grouped artifact, manifest, GraphStream,
+bundle, and catalog error arrays for local upload/resume automation.
 `skein graph-lightning-publish-staging <staging-dir> <publish-dir>` verifies a
 READY staging catalog and atomically writes
 `graph_lightning_published_manifest.json`. Repeating the command for the same

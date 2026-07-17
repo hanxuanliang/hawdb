@@ -60,6 +60,8 @@ previous-wrapper parity failures.
 Graph Lightning bootstrap bundle export gates likewise split manifest and
 GraphStream blockers into counts and grouped messages for import preflight
 automation.
+Staging verification gates also split artifact, manifest, GraphStream, bundle,
+and catalog errors into grouped arrays for offline upload/resume automation.
 
 ## Current Compatibility Evidence
 
