@@ -373,6 +373,13 @@ When the preflight succeeds, the printed migration gate bundle includes a
 top-level `shadow_ready` object with the accepted `protocol_version` and
 advertised `capabilities`.
 
+The `migration_gate` object keeps the existing flattened `blockers` list for
+human-readable logs and also includes machine-readable
+`fixture_mismatch_blockers`, `inventory_blockers`, and `shadow_blockers` counts.
+Cutover automation should use those counts to distinguish scanner coverage
+gaps, fixture wiring drift, and shadow parity failures without parsing blocker
+strings.
+
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is
 `request`, `response`, or `error`. Error events include the failure message and

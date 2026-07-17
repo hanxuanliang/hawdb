@@ -53,6 +53,9 @@ External content artifact orchestration also exposes bounded pending/failed
 polling, specific-job execution, and explicit failed-job retry for caller-owned
 parser runtimes, while keeping database-owned projected graph artifact rebuilds
 on the graph-kernel runner.
+Migration gate JSON keeps human-readable blockers and adds machine-readable
+fixture-mismatch, inventory, and shadow blocker counts so cutover automation can
+separate scanner coverage gaps from previous-wrapper parity failures.
 
 ## Current Compatibility Evidence
 

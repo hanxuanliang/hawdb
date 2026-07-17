@@ -63,6 +63,9 @@ pub struct CompatibilityMigrationGateReport {
     pub decision: CompatibilityCutoverDecision,
     pub inventory_decision: CompatibilityCutoverDecision,
     pub shadow_decision: CompatibilityCutoverDecision,
+    pub fixture_mismatch_blockers: usize,
+    pub inventory_blockers: usize,
+    pub shadow_blockers: usize,
     pub blockers: Vec<String>,
 }
 
@@ -287,6 +290,9 @@ pub fn compatibility_migration_gate_report_to_json(
         "decision": compatibility_cutover_decision_as_str(report.decision),
         "inventory_decision": compatibility_cutover_decision_as_str(report.inventory_decision),
         "shadow_decision": compatibility_cutover_decision_as_str(report.shadow_decision),
+        "fixture_mismatch_blockers": report.fixture_mismatch_blockers,
+        "inventory_blockers": report.inventory_blockers,
+        "shadow_blockers": report.shadow_blockers,
         "blockers": report.blockers,
     })
 }
@@ -598,18 +604,22 @@ pub fn assess_compatibility_migration_gate(
     shadow: &CompatibilityCutoverReport,
 ) -> CompatibilityMigrationGateReport {
     let mut blockers = Vec::new();
+    let mut fixture_mismatch_blockers = 0;
     if inventory.fixture != shadow.fixture {
+        fixture_mismatch_blockers += 1;
         blockers.push(format!(
             "inventory fixture '{}' does not match shadow fixture '{}'",
             inventory.fixture, shadow.fixture
         ));
     }
+    let inventory_blockers = inventory.blockers.len();
     blockers.extend(
         inventory
             .blockers
             .iter()
             .map(|blocker| format!("inventory: {blocker}")),
     );
+    let shadow_blockers = shadow.blockers.len();
     blockers.extend(
         shadow
             .blockers
@@ -628,6 +638,9 @@ pub fn assess_compatibility_migration_gate(
         },
         inventory_decision: inventory.decision,
         shadow_decision: shadow.decision,
+        fixture_mismatch_blockers,
+        inventory_blockers,
+        shadow_blockers,
         blockers,
     }
 }
