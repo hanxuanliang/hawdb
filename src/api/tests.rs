@@ -6788,6 +6788,61 @@ fn failed_external_content_artifact_jobs_are_bounded_and_filtered() {
 }
 
 #[test]
+fn failed_external_content_artifact_jobs_can_be_filtered_by_action() {
+    let mut db = Database::new();
+    let parse = db.schedule_external_content_artifact_job_with_payload(
+        "source-parse",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-parse.md".to_string()),
+        )]),
+    );
+    let crawl = db.schedule_external_content_artifact_job_with_payload(
+        "source-crawl",
+        "crawl",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("https://example.invalid/source-crawl".to_string()),
+        )]),
+    );
+
+    db.run_next_external_content_artifact_job_with(|_| {
+        Err(crate::error::SkeinError::Execution(
+            "parse failed".to_string(),
+        ))
+    })
+    .unwrap()
+    .unwrap();
+    db.run_next_external_content_artifact_job_with(|_| {
+        Err(crate::error::SkeinError::Execution(
+            "crawl failed".to_string(),
+        ))
+    })
+    .unwrap()
+    .unwrap();
+
+    let parse_failed = db.failed_external_content_artifact_jobs_for_action("parse", 8);
+    assert_eq!(parse_failed.len(), 1);
+    assert_eq!(parse_failed[0].id, parse.id);
+    assert_eq!(
+        parse_failed[0].payload.get("content_uri"),
+        Some(&Value::String(
+            "file:///nowledge/source-parse.md".to_string()
+        ))
+    );
+    let crawl_failed = db.failed_external_content_artifact_jobs_for_action("crawl", 8);
+    assert_eq!(crawl_failed.len(), 1);
+    assert_eq!(crawl_failed[0].id, crawl.id);
+    assert!(db
+        .failed_external_content_artifact_jobs_for_action("embed", 8)
+        .is_empty());
+    assert!(db
+        .failed_external_content_artifact_jobs_for_action("parse", 0)
+        .is_empty());
+}
+
+#[test]
 fn external_content_artifact_job_summary_counts_runtime_work_only() {
     let mut db = Database::new();
     let first = db.schedule_external_content_artifact_job("source-1", "parse");

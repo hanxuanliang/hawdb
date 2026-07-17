@@ -147,6 +147,23 @@ impl Database {
             .collect()
     }
 
+    pub fn failed_external_content_artifact_jobs_for_action(
+        &self,
+        action: &str,
+        limit: usize,
+    ) -> Vec<DerivedArtifactJob> {
+        self.derived_artifact_jobs
+            .iter()
+            .filter(|job| {
+                job.status == DerivedArtifactJobStatus::Failed
+                    && job.action == action
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     pub fn external_content_artifact_job_summary(&self) -> ExternalContentArtifactJobSummary {
         let mut summary = ExternalContentArtifactJobSummary::default();
         for job in self

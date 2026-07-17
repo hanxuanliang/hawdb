@@ -648,7 +648,10 @@ charge that work to the `Import` background lane while leaving explicit runtime
 calls ungated. If the runtime first polls a bounded pending list and chooses a
 specific job, `Database::run_background_external_content_artifact_job_with` and
 `Database::run_scheduled_background_external_content_artifact_job_with` apply the
-same Import-lane admission to that concrete job.
+same Import-lane admission to that concrete job. Action-specific runtimes can
+also poll failed jobs for their own action through
+`Database::failed_external_content_artifact_jobs_for_action` before deciding
+which retry to schedule.
 
 An internal compatibility fixture harness is implemented for Nowledge-shaped
 query families. It runs setup statements, parameterized Cypher checks, expected
