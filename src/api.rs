@@ -428,6 +428,7 @@ pub struct KnowledgeRetrieverCandidate {
     pub score: f64,
     pub matched_spans: Vec<SearchMatchedSpan>,
     pub graph_context_path_count: usize,
+    pub projection_freshness: Option<SearchProjectionFreshness>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1050,11 +1051,13 @@ impl Database {
             request.graph_context_max_hops,
         );
         let evidence = self.knowledge_evidence_for_search(&search, &graph_context_paths);
+        let projection_freshness = search_index.projection_freshness();
         let retrievers = knowledge_retriever_reports(
             &search,
             &evidence,
             &graph_seeds,
             &graph_context_paths,
+            &projection_freshness,
             request.graph_seed_limit,
             graph_seed_candidate_count,
         );
@@ -1070,7 +1073,6 @@ impl Database {
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
         let graph_commit_epoch = self.store.commit_epoch();
-        let projection_freshness = search_index.projection_freshness();
         let diagnostics = knowledge_retrieval_diagnostics(
             &search,
             request,
@@ -1609,6 +1611,7 @@ fn knowledge_retriever_reports(
     evidence: &[KnowledgeEvidence],
     graph_seeds: &[KnowledgeGraphSeed],
     graph_context_paths: &[KnowledgeGraphContextPath],
+    projection_freshness: &SearchProjectionFreshness,
     graph_seed_limit: usize,
     graph_seed_candidate_count: usize,
 ) -> Vec<KnowledgeRetrieverReport> {
@@ -1648,6 +1651,7 @@ fn knowledge_retriever_reports(
                         graph_context_path_count: evidence
                             .map(|evidence| evidence.graph_context_path_count)
                             .unwrap_or_default(),
+                        projection_freshness: Some(projection_freshness.clone()),
                     }
                 })
                 .collect(),
@@ -1680,6 +1684,7 @@ fn knowledge_retriever_reports(
                     score: seed.score,
                     matched_spans: Vec::new(),
                     graph_context_path_count,
+                    projection_freshness: None,
                 }
             })
             .collect(),
@@ -4342,6 +4347,10 @@ mod tests {
         assert_eq!(text_retriever.candidate_count, 2);
         assert_eq!(text_retriever.top_candidates[0].canonical_node_id, Some(0));
         assert_eq!(text_retriever.top_candidates[0].graph_context_path_count, 1);
+        assert_eq!(
+            text_retriever.top_candidates[0].projection_freshness,
+            Some(output.projection_freshness.clone())
+        );
         assert!(text_retriever.top_candidates[0]
             .matched_spans
             .iter()
@@ -4405,6 +4414,10 @@ mod tests {
         assert_eq!(
             graph_seed_report.top_candidates[0].graph_context_path_count,
             0
+        );
+        assert_eq!(
+            graph_seed_report.top_candidates[0].projection_freshness,
+            None
         );
         assert_eq!(
             graph_seed_report.top_candidates[0].id.as_str(),
@@ -4966,6 +4979,10 @@ mod tests {
         assert_eq!(
             graph_seed_report.top_candidates[0].graph_context_path_count,
             1
+        );
+        assert_eq!(
+            graph_seed_report.top_candidates[0].projection_freshness,
+            None
         );
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
         assert_eq!(graph_seed_report.limit, Some(1));
