@@ -234,6 +234,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "community_synthesized_source_coverage",
+            logical: community_synthesized_source_coverage_plan(),
+            catalog: community_synthesized_source_coverage_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 21,
+            },
+            fingerprint_contains: "AggregateExec",
+            decision_contains: &[
+                "choose IndexNodeSeek for Community.id",
+                "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
+                "selected physical plan cost: estimated_rows=1 cost=21",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "endpoint_existence_cartesian_product",
             logical: endpoint_existence_cartesian_product_plan(),
             catalog: endpoint_existence_cartesian_product_catalog(),
@@ -1026,6 +1041,85 @@ fn source_memory_entity_label_workload_catalog() -> OptimizerCatalog {
                 (("Entity".to_string(), "community_id".to_string()), 8),
                 (("Label".to_string(), "name".to_string()), 10),
             ],
+            [],
+        ),
+    )
+}
+
+fn community_synthesized_source_coverage_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(1),
+        input: Box::new(LogicalPlan::Aggregate {
+            group_keys: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "c".to_string(),
+                    property: "id".to_string(),
+                },
+                name: "cid".to_string(),
+            }],
+            items: vec![Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::Variable("s".to_string()),
+                distinct: true,
+                name: "covered".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "c".to_string(),
+                source_label: "Community".to_string(),
+                rel_variable: None,
+                rel_type: "SYNTHESIZED_FROM".to_string(),
+                rel_properties: Default::default(),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "s".to_string(),
+                target_label: "Source".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyEq {
+                        variable: "c".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("community-42".to_string()),
+                    },
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "c".to_string(),
+                        label: "Community".to_string(),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn community_synthesized_source_coverage_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Community".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Community".to_string(), 5_000),
+                ("Source".to_string(), 20_000),
+            ],
+            [("SYNTHESIZED_FROM".to_string(), 40_000)],
+            [("SYNTHESIZED_FROM".to_string(), 12_000)],
+            [(
+                (
+                    "Community".to_string(),
+                    "SYNTHESIZED_FROM".to_string(),
+                    "Source".to_string(),
+                ),
+                40_000,
+            )],
+            [(
+                (
+                    "Community".to_string(),
+                    "SYNTHESIZED_FROM".to_string(),
+                    "Source".to_string(),
+                    1,
+                ),
+                40_000,
+            )],
+            [(("Community".to_string(), "id".to_string()), 5_000)],
             [],
         ),
     )

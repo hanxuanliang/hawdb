@@ -806,6 +806,7 @@ Current implemented slice:
   pushed-down relationship equality plus relationship range-filter workload, a
   source-to-memory-to-label cross-pattern aggregate workload, a larger
   source-to-memory-to-entity-to-label grouped workload,
+  community-to-synthesized-source coverage aggregate workload,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
   equality/`IN`/range selectivity, grouped node-property aggregate cardinality,
