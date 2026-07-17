@@ -2617,10 +2617,10 @@ fn context_path_for_relationship(
             .to_string(),
         source_node_id: relationship.source.0,
         source_labels: node_label_names(catalog, source),
-        source_external_id: node_external_id(source),
+        source_external_id: Some(projected_node_external_id(source)),
         target_node_id: relationship.target.0,
         target_labels: node_label_names(catalog, target),
-        target_external_id: node_external_id(target),
+        target_external_id: Some(projected_node_external_id(target)),
     })
 }
 
@@ -2628,7 +2628,7 @@ fn knowledge_entity_from_node(catalog: &Catalog, node: &NodeRecord) -> Knowledge
     KnowledgeEntity {
         node_id: node.id.0,
         labels: node_label_names(catalog, node),
-        external_id: node_external_id(node),
+        external_id: Some(projected_node_external_id(node)),
         properties: node.properties.clone(),
     }
 }
@@ -4735,7 +4735,7 @@ mod tests {
         assert_eq!(output.graph_context_paths.len(), 1);
         assert_eq!(
             output.graph_context_paths[0].source_external_id.as_deref(),
-            None
+            Some("0")
         );
         assert_eq!(
             output.graph_context_paths[0].target_external_id.as_deref(),
@@ -5469,6 +5469,27 @@ mod tests {
 
         assert_eq!(output.graph_commit_epoch, 1);
         assert!(output.entity.is_none());
+    }
+
+    #[test]
+    fn knowledge_entity_uses_projected_identity_for_idless_nodes() {
+        let mut db = Database::new();
+        db.query("CREATE (:Entity {name: 'Anonymous entity', kind: 'concept'})")
+            .unwrap();
+
+        let output = db.knowledge_entity(&KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "0".to_string(),
+        });
+
+        let entity = output.entity.expect("expected entity");
+        assert_eq!(output.graph_commit_epoch, 1);
+        assert_eq!(entity.node_id, 0);
+        assert_eq!(entity.external_id.as_deref(), Some("0"));
+        assert_eq!(
+            entity.properties.get("name"),
+            Some(&Value::String("Anonymous entity".to_string()))
+        );
     }
 
     #[test]
