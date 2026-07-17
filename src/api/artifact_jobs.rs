@@ -79,6 +79,18 @@ impl Database {
         self.derived_artifact_jobs.clone()
     }
 
+    pub fn pending_external_content_artifact_jobs(&self, limit: usize) -> Vec<DerivedArtifactJob> {
+        self.derived_artifact_jobs
+            .iter()
+            .filter(|job| {
+                job.status == DerivedArtifactJobStatus::Pending
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     pub fn run_next_derived_artifact_job(&mut self) -> Result<Option<DerivedArtifactJobReport>> {
         self.ensure_writable()?;
         let Some(index) = self

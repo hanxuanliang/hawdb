@@ -4669,6 +4669,54 @@ fn external_content_artifact_jobs_are_explicitly_outside_graph_kernel() {
 }
 
 #[test]
+fn pending_external_content_artifact_jobs_are_bounded_and_filtered() {
+    let mut db = Database::new();
+    db.schedule_derived_artifact_rebuild();
+    let first = db.schedule_external_content_artifact_job_with_payload(
+        "source-1",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-1.md".to_string()),
+        )]),
+    );
+    let second = db.schedule_external_content_artifact_job("source-2", "parse");
+
+    let pending_one = db.pending_external_content_artifact_jobs(1);
+    assert_eq!(pending_one.len(), 1);
+    assert_eq!(pending_one[0].id, first.id);
+    assert_eq!(
+        pending_one[0].payload.get("content_uri"),
+        Some(&Value::String("file:///nowledge/source-1.md".to_string()))
+    );
+
+    let pending_all = db.pending_external_content_artifact_jobs(usize::MAX);
+    assert_eq!(
+        pending_all.iter().map(|job| job.id).collect::<Vec<_>>(),
+        vec![first.id, second.id]
+    );
+    assert!(db.pending_external_content_artifact_jobs(0).is_empty());
+
+    let report = db
+        .run_next_external_content_artifact_job_with(|job| {
+            Ok(QueryOutput {
+                rows: vec![BTreeMap::from([(
+                    "job_id".to_string(),
+                    Value::Int(job.id as i64),
+                )])],
+            })
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.job.id, first.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+
+    let remaining = db.pending_external_content_artifact_jobs(8);
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].id, second.id);
+}
+
+#[test]
 fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
     let mut db = Database::new();
     let job = db.schedule_external_content_artifact_job_with_payload(
