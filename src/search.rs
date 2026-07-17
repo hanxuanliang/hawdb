@@ -1446,6 +1446,10 @@ fn normalize_english_suffixes(token: &str) -> Vec<String> {
 fn semantic_aliases(token: &str) -> Vec<String> {
     match token {
         "ahead_log" | "write_ahead" | "write_ahead_log" => vec!["wal".to_string()],
+        "ann" => vec!["approximate_nearest_neighbor".to_string()],
+        "approximate_nearest" | "nearest_neighbor" | "approximate_nearest_neighbor" => {
+            vec!["ann".to_string()]
+        }
         "compressed_sparse_column" | "sparse_column" => vec!["csc".to_string()],
         "compressed_sparse_row" | "sparse_row" => vec!["csr".to_string()],
         "concurrency_control" | "multi_version" | "multi_version_concurrency_control" => {
@@ -1491,6 +1495,8 @@ fn semantic_aliases(token: &str) -> Vec<String> {
         "retrieval_augmented" | "augmented_generation" | "retrieval_augmented_generation" => {
             vec!["rag".to_string(), "graph_rag".to_string()]
         }
+        "reciprocal_rank" | "rank_fusion" | "reciprocal_rank_fusion" => vec!["rrf".to_string()],
+        "rrf" => vec!["reciprocal_rank_fusion".to_string()],
         "semantic_search" | "vector_search" => vec!["pgvector".to_string()],
         _ => Vec::new(),
     }
@@ -2595,6 +2601,29 @@ mod tests {
             .matched_terms
             .iter()
             .any(|term| term == "fts"));
+    }
+
+    #[test]
+    fn tokenizer_expands_retriever_algorithm_aliases() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "retrieval".to_string(),
+                title: "RRF hybrid ranking over ANN candidates".to_string(),
+                content: "reciprocal rank fusion explains vector and text child retrievers"
+                    .to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let rrf_hits = index.search("reciprocal rank fusion", None, SearchMode::Text, 10);
+        let ann_hits = index.search("approximate nearest neighbor", None, SearchMode::Text, 10);
+        let abbreviation_hits = index.search("rrf ann", None, SearchMode::Text, 10);
+
+        assert_eq!(rrf_hits[0].id, "retrieval");
+        assert_eq!(ann_hits[0].id, "retrieval");
+        assert_eq!(abbreviation_hits[0].id, "retrieval");
     }
 
     #[test]
