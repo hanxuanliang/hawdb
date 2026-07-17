@@ -318,6 +318,13 @@ background operation budgets between start and finish, including optional
 per-class budgets for projection, import, analytics, and shadow lanes; it does
 not own worker threads, reorder jobs, or gate foreground explicit rebuild
 requests.
+Callers that maintain their own background loop can build a
+`BackgroundWorkPlan` with `BackgroundWorkHint` signals for active topic,
+recent delta size, query probability, staleness TTL, freshness SLO, and tenant
+budget. `LocalQosPolicy::evaluate_background_work` returns the existing
+admission result plus a deterministic expected-value score and reasons, so the
+caller can rank or skip internal background work without moving queue ownership
+into Skein.
 `Database::schedule_external_content_artifact_job` records content/blob parser
 work at the same orchestration boundary. Callers that need structured parser
 inputs can use `Database::schedule_external_content_artifact_job_with_payload`

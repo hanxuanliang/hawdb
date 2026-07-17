@@ -79,8 +79,9 @@ pub use nowledge_inventory::{
     NowledgeInventoryScanOptions,
 };
 pub use qos::{
-    LocalQosPermit, LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass,
-    WorkPriority, WorkRequest, WORK_CLASS_COUNT,
+    BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPermit, LocalQosPolicy,
+    LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkPriority, WorkRequest,
+    WORK_CLASS_COUNT,
 };
 pub use schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,

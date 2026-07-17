@@ -23,6 +23,30 @@ pub struct WorkRequest {
     pub estimated_operations: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BackgroundWorkHint {
+    pub active_topic: bool,
+    pub recent_delta_operations: usize,
+    pub query_probability_per_million: u32,
+    pub staleness_millis: u64,
+    pub staleness_ttl_millis: Option<u64>,
+    pub freshness_slo_millis: Option<u64>,
+    pub tenant_budget_remaining_operations: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundWorkPlan {
+    pub request: WorkRequest,
+    pub hint: BackgroundWorkHint,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundWorkDecision {
+    pub admission: QosAdmission,
+    pub score: u64,
+    pub reasons: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalQosPolicy {
     pub max_background_operations: Option<usize>,
@@ -97,11 +121,136 @@ impl WorkRequest {
     }
 }
 
+impl BackgroundWorkHint {
+    pub fn expected_value_score(&self) -> u64 {
+        self.score_with_reasons(0).0
+    }
+
+    fn score_with_reasons(&self, estimated_operations: usize) -> (u64, Vec<String>) {
+        let mut score = 0u64;
+        let mut reasons = Vec::new();
+
+        if let Some(remaining) = self.tenant_budget_remaining_operations {
+            if remaining < estimated_operations {
+                reasons.push(format!(
+                    "tenant budget remaining {remaining} below estimated operations {estimated_operations}"
+                ));
+                return (0, reasons);
+            }
+        }
+
+        if self.active_topic {
+            score = score.saturating_add(1_000_000);
+            reasons.push("active topic".to_string());
+        }
+
+        let query_probability = u64::from(self.query_probability_per_million).min(1_000_000);
+        if query_probability > 0 {
+            score = score.saturating_add(query_probability);
+            reasons.push(format!("query probability {query_probability} per million"));
+        }
+
+        let recent_delta_score = (self.recent_delta_operations as u64).min(1_000_000);
+        if recent_delta_score > 0 {
+            score = score.saturating_add(recent_delta_score);
+            reasons.push(format!(
+                "recent delta operations {}",
+                self.recent_delta_operations
+            ));
+        }
+
+        if let Some(ttl) = self.staleness_ttl_millis {
+            let staleness_score = scaled_staleness_score(self.staleness_millis, ttl);
+            if staleness_score > 0 {
+                score = score.saturating_add(staleness_score);
+                if self.staleness_millis >= ttl {
+                    reasons.push(format!(
+                        "staleness ttl reached at {} ms",
+                        self.staleness_millis
+                    ));
+                } else {
+                    reasons.push(format!(
+                        "staleness {} of ttl {} ms",
+                        self.staleness_millis, ttl
+                    ));
+                }
+            }
+        }
+
+        if let Some(slo) = self.freshness_slo_millis {
+            let freshness_score = scaled_staleness_score(self.staleness_millis, slo);
+            if freshness_score > 0 {
+                score = score.saturating_add(freshness_score);
+                if self.staleness_millis >= slo {
+                    reasons.push(format!(
+                        "freshness slo missed at {} ms",
+                        self.staleness_millis
+                    ));
+                } else {
+                    reasons.push(format!(
+                        "freshness age {} of slo {} ms",
+                        self.staleness_millis, slo
+                    ));
+                }
+            }
+        }
+
+        (score, reasons)
+    }
+}
+
+impl BackgroundWorkPlan {
+    pub fn background(
+        class: WorkClass,
+        estimated_operations: usize,
+        hint: BackgroundWorkHint,
+    ) -> Self {
+        Self {
+            request: WorkRequest::background(class, estimated_operations),
+            hint,
+        }
+    }
+}
+
 impl LocalQosPolicy {
     pub fn admit(&self, state: &LocalQosState, request: &WorkRequest) -> QosAdmission {
         match request.priority {
             WorkPriority::Foreground => QosAdmission::Admit,
             WorkPriority::Background => self.admit_background(state, request),
+        }
+    }
+
+    pub fn evaluate_background_work(
+        &self,
+        state: &LocalQosState,
+        plan: &BackgroundWorkPlan,
+    ) -> BackgroundWorkDecision {
+        let admission = self.admit(state, &plan.request);
+        if plan.request.priority != WorkPriority::Background {
+            return BackgroundWorkDecision {
+                admission,
+                score: 0,
+                reasons: vec!["foreground work is not background-ranked".to_string()],
+            };
+        }
+
+        let (score, mut reasons) = plan
+            .hint
+            .score_with_reasons(plan.request.estimated_operations);
+        match &admission {
+            QosAdmission::Admit => {}
+            QosAdmission::Defer { reason } => {
+                reasons.push(format!("admission deferred: {reason}"));
+            }
+            QosAdmission::Reject { reason } => {
+                reasons.push(format!("admission rejected: {reason}"));
+            }
+        }
+
+        BackgroundWorkDecision {
+            admission,
+            score,
+            reasons,
         }
     }
 
@@ -151,6 +300,16 @@ impl LocalQosPolicy {
     }
 }
 
+fn scaled_staleness_score(age_millis: u64, limit_millis: u64) -> u64 {
+    if age_millis == 0 || limit_millis == 0 {
+        return 0;
+    }
+    if age_millis >= limit_millis {
+        return 1_000_000;
+    }
+    age_millis.saturating_mul(1_000_000) / limit_millis
+}
+
 impl LocalQosPermit {
     pub fn request(&self) -> &WorkRequest {
         &self.request
@@ -175,6 +334,10 @@ impl LocalQosScheduler {
 
     pub fn admit(&self, request: &WorkRequest) -> QosAdmission {
         self.policy.admit(&self.state, request)
+    }
+
+    pub fn evaluate_background_work(&self, plan: &BackgroundWorkPlan) -> BackgroundWorkDecision {
+        self.policy.evaluate_background_work(&self.state, plan)
     }
 
     pub fn try_start(
@@ -216,7 +379,8 @@ impl LocalQosScheduler {
 #[cfg(test)]
 mod tests {
     use super::{
-        LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+        BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
+        QosAdmission, WorkClass, WorkRequest,
     };
 
     #[test]
@@ -275,6 +439,133 @@ mod tests {
             policy.admit(&state, &request),
             QosAdmission::Defer { reason } if reason.contains("above limit 12")
         ));
+    }
+
+    #[test]
+    fn background_work_hint_scores_expected_value_signals() {
+        let low = BackgroundWorkHint {
+            query_probability_per_million: 10_000,
+            recent_delta_operations: 2,
+            staleness_millis: 100,
+            staleness_ttl_millis: Some(1_000),
+            ..BackgroundWorkHint::default()
+        };
+        let high = BackgroundWorkHint {
+            active_topic: true,
+            query_probability_per_million: 800_000,
+            recent_delta_operations: 20,
+            staleness_millis: 6_000,
+            staleness_ttl_millis: Some(1_000),
+            freshness_slo_millis: Some(5_000),
+            ..BackgroundWorkHint::default()
+        };
+
+        assert!(high.expected_value_score() > low.expected_value_score());
+        let decision = LocalQosPolicy::default().evaluate_background_work(
+            &LocalQosState::default(),
+            &BackgroundWorkPlan::background(WorkClass::Projection, 1, high),
+        );
+
+        assert_eq!(decision.admission, QosAdmission::Admit);
+        assert!(decision.score > 0);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("active topic")));
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("staleness ttl reached")));
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("freshness slo missed")));
+    }
+
+    #[test]
+    fn background_work_evaluation_keeps_value_when_budget_defers() {
+        let policy = LocalQosPolicy {
+            max_total_background_operations: Some(4),
+            ..LocalQosPolicy::default()
+        };
+        let state = LocalQosState {
+            running_background_operations: 3,
+            ..LocalQosState::default()
+        };
+        let decision = policy.evaluate_background_work(
+            &state,
+            &BackgroundWorkPlan::background(
+                WorkClass::Analytics,
+                2,
+                BackgroundWorkHint {
+                    active_topic: true,
+                    query_probability_per_million: 500_000,
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+        );
+
+        assert!(matches!(
+            decision.admission,
+            QosAdmission::Defer { reason } if reason.contains("above limit 4")
+        ));
+        assert!(decision.score > 0);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("admission deferred")));
+    }
+
+    #[test]
+    fn tenant_budget_can_zero_background_work_score_without_rejecting_admission() {
+        let decision = LocalQosPolicy::default().evaluate_background_work(
+            &LocalQosState::default(),
+            &BackgroundWorkPlan::background(
+                WorkClass::Import,
+                8,
+                BackgroundWorkHint {
+                    active_topic: true,
+                    query_probability_per_million: 1_000_000,
+                    tenant_budget_remaining_operations: Some(4),
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+        );
+
+        assert_eq!(decision.admission, QosAdmission::Admit);
+        assert_eq!(decision.score, 0);
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("tenant budget remaining 4")));
+    }
+
+    #[test]
+    fn scheduler_evaluates_background_work_against_running_state() {
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_total_background_operations: Some(4),
+            ..LocalQosPolicy::default()
+        });
+        let running = scheduler
+            .try_start(WorkRequest::background(WorkClass::Projection, 3))
+            .unwrap();
+
+        let decision = scheduler.evaluate_background_work(&BackgroundWorkPlan::background(
+            WorkClass::Import,
+            2,
+            BackgroundWorkHint {
+                active_topic: true,
+                ..BackgroundWorkHint::default()
+            },
+        ));
+
+        assert!(matches!(
+            decision.admission,
+            QosAdmission::Defer { reason } if reason.contains("above limit 4")
+        ));
+        assert!(decision.score > 0);
+
+        scheduler.finish(running);
     }
 
     #[test]
