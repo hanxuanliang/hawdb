@@ -12,8 +12,8 @@ use crate::schema::{
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
-    SearchFusionWeights, SearchIndex, SearchMode, SearchProjectionFreshness, SearchQueryOptions,
-    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
+    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionFreshness,
+    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
 };
 use crate::store::{
     DurabilityPolicy, GraphMutation, GraphStore, NodeId, NodeRecord, ProjectedGraphStatus,
@@ -479,6 +479,7 @@ pub struct KnowledgeEvidence {
     pub canonical_node_id: Option<u64>,
     pub graph_context_path_count: usize,
     pub matched_terms: Vec<String>,
+    pub matched_spans: Vec<SearchMatchedSpan>,
     pub score: f64,
     pub rrf_score: f64,
     pub vector_rrf_score: f64,
@@ -1425,6 +1426,7 @@ impl Database {
                     canonical_node_id,
                     graph_context_path_count,
                     matched_terms: hit.matched_terms.clone(),
+                    matched_spans: hit.matched_spans.clone(),
                     score: hit.score,
                     rrf_score: hit.rrf_score,
                     vector_rrf_score: hit.vector_rrf_score,
@@ -4335,6 +4337,12 @@ mod tests {
         assert!(output.evidence[0]
             .matched_terms
             .contains(&"projection".to_string()));
+        assert!(output.evidence[0]
+            .matched_spans
+            .iter()
+            .any(|span| span.field == "content"
+                && span.text == "Projection"
+                && span.term == "projection"));
         assert!(output.evidence[0].text_score > 0.0);
         assert_eq!(output.graph_seeds.len(), 2);
         let graph_seed_report = output

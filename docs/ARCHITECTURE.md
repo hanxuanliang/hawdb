@@ -414,11 +414,13 @@ keeps text fallback useful while the projection remains rebuildable.
 Search hits expose the information needed by a knowledge retrieval surface:
 fused RRF score, per-child RRF components, vector score, text score, vector
 rank, text rank, fallback reasons, projection kind, external ID, source ID,
-matched analyzer terms, and projection freshness derived from the recorded
-source graph commit epoch, current projection markers, and embedding manifest
-state. Hybrid ranking uses weighted reciprocal-rank fusion over the vector and
-text child retrievers, preserving each child position and child RRF component for
-explainability. Callers that need bounded candidate growth can use
+matched analyzer terms, matched projection-text spans, and projection freshness
+derived from the recorded source graph commit epoch, current projection markers,
+and embedding manifest state. Hybrid ranking uses weighted reciprocal-rank
+fusion over the vector and text child retrievers, preserving each child position
+and child RRF component for explainability. Matched spans are byte ranges over
+the rebuildable search projection title/content fields; they are not canonical
+large-value blob spans. Callers that need bounded candidate growth can use
 `SearchIndex::search_with_options` with a rank window, which limits which child
 candidates participate in RRF while still reporting each child's total candidate
 count. The same options also carry
@@ -476,7 +478,8 @@ record graph-seed limit truncation.
 into one application-facing candidate surface. Each candidate records its source
 leg, source-local rank, merged source legs, combined score, score breakdown,
 optional canonical entity snapshot, optional search evidence summary, matched
-graph properties, and graph-context path count. Search-hit and graph-seed
+projection spans, matched graph properties, and graph-context path count.
+Search-hit and graph-seed
 candidates that resolve to the same canonical node are merged by graph identity,
 with the search hit kept as the primary leg and the graph seed recorded in
 `merged_sources`. `KnowledgeCandidateScoringPolicy` currently supports default

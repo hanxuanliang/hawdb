@@ -119,8 +119,18 @@ pub struct SearchHit {
     pub external_id: Option<String>,
     pub source_id: Option<String>,
     pub matched_terms: Vec<String>,
+    pub matched_spans: Vec<SearchMatchedSpan>,
     pub fallback_reasons: Vec<String>,
     pub projection_freshness: SearchProjectionFreshness,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchMatchedSpan {
+    pub field: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub text: String,
+    pub term: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -645,6 +655,7 @@ impl SearchIndex {
                     external_id: document.metadata.get("external_id").cloned(),
                     source_id: document.metadata.get("source_id").cloned(),
                     matched_terms: matched_query_terms(&query_terms, document),
+                    matched_spans: matched_query_spans(&query_terms, document),
                     fallback_reasons: fallback_reasons.clone(),
                     projection_freshness: projection_freshness.clone(),
                 });
@@ -1116,6 +1127,62 @@ fn matched_query_terms(query_terms: &BTreeSet<String>, document: &SearchDocument
         .filter(|term| document_terms.contains(*term))
         .cloned()
         .collect()
+}
+
+fn matched_query_spans(
+    query_terms: &BTreeSet<String>,
+    document: &SearchDocument,
+) -> Vec<SearchMatchedSpan> {
+    if query_terms.is_empty() {
+        return Vec::new();
+    }
+    let mut spans = Vec::new();
+    collect_matched_query_spans("title", &document.title, query_terms, &mut spans);
+    collect_matched_query_spans("content", &document.content, query_terms, &mut spans);
+    spans
+}
+
+fn collect_matched_query_spans(
+    field: &str,
+    text: &str,
+    query_terms: &BTreeSet<String>,
+    spans: &mut Vec<SearchMatchedSpan>,
+) {
+    let mut run_start = None::<usize>;
+    for (index, ch) in text.char_indices() {
+        if ch.is_alphanumeric() || ch == '_' {
+            run_start.get_or_insert(index);
+        } else if let Some(start) = run_start.take() {
+            push_matched_query_spans(field, text, start, index, query_terms, spans);
+        }
+    }
+    if let Some(start) = run_start {
+        push_matched_query_spans(field, text, start, text.len(), query_terms, spans);
+    }
+}
+
+fn push_matched_query_spans(
+    field: &str,
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    query_terms: &BTreeSet<String>,
+    spans: &mut Vec<SearchMatchedSpan>,
+) {
+    let raw = &text[start_byte..end_byte];
+    let matching_terms = identifier_tokens(raw)
+        .into_iter()
+        .filter(|term| query_terms.contains(term))
+        .collect::<BTreeSet<_>>();
+    for term in matching_terms {
+        spans.push(SearchMatchedSpan {
+            field: field.to_string(),
+            start_byte,
+            end_byte,
+            text: raw.to_string(),
+            term,
+        });
+    }
 }
 
 fn document_tokens(document: &SearchDocument) -> Vec<String> {
@@ -2302,6 +2369,18 @@ mod tests {
         assert!(hits[0].matched_terms.iter().any(|term| term == "rag"));
         assert!(hits[0].matched_terms.iter().any(|term| term == "source"));
         assert!(hits[0].matched_terms.iter().any(|term| term == "chunk"));
+        assert!(hits[0]
+            .matched_spans
+            .iter()
+            .any(|span| span.field == "title" && span.text == "GraphRAG" && span.term == "rag"));
+        assert!(hits[0]
+            .matched_spans
+            .iter()
+            .any(|span| span.field == "content" && span.text == "source" && span.term == "source"));
+        assert!(hits[0]
+            .matched_spans
+            .iter()
+            .any(|span| span.field == "content" && span.text == "chunks" && span.term == "chunk"));
     }
 
     #[test]
