@@ -3212,6 +3212,86 @@ fn schema_maintenance_rejects_invalid_validation_before_wal() {
 }
 
 #[test]
+fn schema_maintenance_plan_reports_pending_property_work_without_wal_write() {
+    let path = unique_test_dir("schema_maintenance_plan_property");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+        let plan = db.plan_schema_maintenance();
+
+        assert_eq!(plan.rows.len(), 1);
+        assert_eq!(
+            plan.rows[0].get("object"),
+            Some(&Value::String("Memory.id".to_string()))
+        );
+        assert_eq!(
+            plan.rows[0].get("from_state"),
+            Some(&Value::String("backfill".to_string()))
+        );
+        assert_eq!(
+            plan.rows[0].get("to_state"),
+            Some(&Value::String("validating".to_string()))
+        );
+        assert_eq!(
+            plan.rows[0].get("estimated_operations"),
+            Some(&Value::Int(2))
+        );
+        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        assert_eq!(after, before);
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Backfill
+        }));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn schema_maintenance_plan_estimates_relationship_table_validation_work() {
+    let path = unique_test_dir("schema_maintenance_plan_relationship");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE RELATIONSHIP TABLE MENTIONS").unwrap();
+        db.query("CREATE (:Memory {id: 1})-[:MENTIONS {weight: 3}]->(:Entity {id: 2})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 3})-[:MENTIONS {weight: 4}]->(:Entity {id: 4})")
+            .unwrap();
+        db.query("CREATE PROPERTY ON RELATIONSHIP TABLE MENTIONS(weight) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER RELATIONSHIP TABLE MENTIONS SET STATE VALIDATING")
+            .unwrap();
+
+        let plan = db.plan_schema_maintenance();
+
+        assert_eq!(plan.rows.len(), 1);
+        assert_eq!(
+            plan.rows[0].get("object"),
+            Some(&Value::String("MENTIONS".to_string()))
+        );
+        assert_eq!(
+            plan.rows[0].get("from_state"),
+            Some(&Value::String("validating".to_string()))
+        );
+        assert_eq!(
+            plan.rows[0].get("to_state"),
+            Some(&Value::String("public".to_string()))
+        );
+        assert_eq!(
+            plan.rows[0].get("estimated_operations"),
+            Some(&Value::Int(2))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn background_schema_maintenance_defers_without_mutating_schema() {
     let path = unique_test_dir("background_schema_maintenance_defers");
     {

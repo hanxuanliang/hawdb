@@ -967,6 +967,34 @@ impl Database {
         self.catalog.property_descriptors().cloned().collect()
     }
 
+    pub fn plan_schema_maintenance(&self) -> QueryOutput {
+        let rows = self
+            .store
+            .plan_schema_maintenance(&self.catalog)
+            .into_iter()
+            .map(|item| {
+                BTreeMap::from([
+                    ("object_type".to_string(), Value::String(item.object_type)),
+                    ("object".to_string(), Value::String(item.object)),
+                    (
+                        "from_state".to_string(),
+                        schema_state_value(item.from_state),
+                    ),
+                    (
+                        "to_state".to_string(),
+                        item.to_state.map(schema_state_value).unwrap_or(Value::Null),
+                    ),
+                    ("action".to_string(), Value::String(item.action)),
+                    (
+                        "estimated_operations".to_string(),
+                        Value::Int(i64::try_from(item.estimated_operations).unwrap_or(i64::MAX)),
+                    ),
+                ])
+            })
+            .collect();
+        QueryOutput { rows }
+    }
+
     pub fn run_schema_maintenance(&mut self) -> Result<QueryOutput> {
         self.ensure_writable()?;
         let actions = self.store.run_schema_maintenance(&mut self.catalog)?;

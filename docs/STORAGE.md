@@ -272,8 +272,11 @@ and property descriptors, validates the next state before appending WAL, and
 then writes all selected maintenance operations as one grouped WAL batch.
 `BACKFILL` descriptors advance to `VALIDATING`, `VALIDATING` descriptors advance
 to `PUBLIC` only after validation, and `GC` descriptors are tombstoned from the
-catalog. Explicit callers use this direct path without local background
-admission. Internal maintenance loops can instead use
+catalog. `Database::plan_schema_maintenance` is a read-only dry-run report for
+pending descriptor maintenance, including the source state, target state,
+action, and estimated operation count for budget admission. Explicit callers use
+the direct execution path without local background admission. Internal
+maintenance loops can instead use
 `Database::run_background_schema_maintenance` with `LocalQosPolicy` or
 `Database::run_scheduled_background_schema_maintenance` with
 `LocalQosScheduler`; both wrappers charge schema maintenance to the `Mutation`

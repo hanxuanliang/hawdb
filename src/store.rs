@@ -2,7 +2,7 @@ use crate::analytics::ProjectedGraph;
 use crate::error::{Result, SkeinError};
 use crate::schema::{
     Catalog, ConstraintId, GraphStatistics, IndexId, IndexKind, LabelId, PropertyId, PropertyType,
-    RelTypeId, SchemaObjectState, TableId, TableKind,
+    RelTypeId, SchemaObjectState, TableDescriptor, TableId, TableKind,
 };
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -509,6 +509,16 @@ pub struct SchemaMaintenanceAction {
     pub from_state: SchemaObjectState,
     pub to_state: Option<SchemaObjectState>,
     pub action: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SchemaMaintenancePlanItem {
+    pub object_type: String,
+    pub object: String,
+    pub from_state: SchemaObjectState,
+    pub to_state: Option<SchemaObjectState>,
+    pub action: String,
+    pub estimated_operations: usize,
 }
 
 #[derive(Debug, Default)]
@@ -1022,6 +1032,145 @@ impl GraphStore {
         }
         self.commit_epoch += 1;
         Ok(actions)
+    }
+
+    pub fn plan_schema_maintenance(&self, catalog: &Catalog) -> Vec<SchemaMaintenancePlanItem> {
+        let mut plan = Vec::new();
+
+        let gc_table_ids = catalog
+            .table_descriptors()
+            .filter(|table| table.state == SchemaObjectState::Gc)
+            .map(|table| table.id)
+            .collect::<BTreeSet<_>>();
+
+        for property in catalog.property_descriptors().cloned() {
+            if gc_table_ids.contains(&property.table_id) {
+                continue;
+            }
+            let Some(table) = catalog.table_descriptor(property.table_id) else {
+                continue;
+            };
+            let estimated_operations = self.schema_table_record_count(catalog, table).max(1);
+            match property.state {
+                SchemaObjectState::Backfill => {
+                    plan.push(SchemaMaintenancePlanItem {
+                        object_type: "property".to_string(),
+                        object: format!("{}.{}", table.name, property.name),
+                        from_state: property.state,
+                        to_state: Some(SchemaObjectState::Validating),
+                        action: "advance".to_string(),
+                        estimated_operations,
+                    });
+                }
+                SchemaObjectState::Validating => {
+                    plan.push(SchemaMaintenancePlanItem {
+                        object_type: "property".to_string(),
+                        object: format!("{}.{}", table.name, property.name),
+                        from_state: property.state,
+                        to_state: Some(SchemaObjectState::Public),
+                        action: "advance".to_string(),
+                        estimated_operations,
+                    });
+                }
+                SchemaObjectState::Gc => {
+                    plan.push(SchemaMaintenancePlanItem {
+                        object_type: "property".to_string(),
+                        object: format!("{}.{}", table.name, property.name),
+                        from_state: property.state,
+                        to_state: None,
+                        action: "gc".to_string(),
+                        estimated_operations: 1,
+                    });
+                }
+                SchemaObjectState::DeleteOnly
+                | SchemaObjectState::WriteOnly
+                | SchemaObjectState::Public => {}
+            }
+        }
+
+        for table in catalog.table_descriptors().cloned() {
+            let record_count = self.schema_table_record_count(catalog, &table).max(1);
+            match table.state {
+                SchemaObjectState::Backfill => {
+                    plan.push(SchemaMaintenancePlanItem {
+                        object_type: "table".to_string(),
+                        object: table.name.clone(),
+                        from_state: table.state,
+                        to_state: Some(SchemaObjectState::Validating),
+                        action: "advance".to_string(),
+                        estimated_operations: record_count,
+                    });
+                }
+                SchemaObjectState::Validating => {
+                    let active_property_count = catalog
+                        .property_descriptors()
+                        .filter(|property| {
+                            property.table_id == table.id && property.state != SchemaObjectState::Gc
+                        })
+                        .count()
+                        .max(1);
+                    plan.push(SchemaMaintenancePlanItem {
+                        object_type: "table".to_string(),
+                        object: table.name.clone(),
+                        from_state: table.state,
+                        to_state: Some(SchemaObjectState::Public),
+                        action: "advance".to_string(),
+                        estimated_operations: record_count.saturating_mul(active_property_count),
+                    });
+                }
+                SchemaObjectState::Gc => {
+                    for property in catalog
+                        .property_descriptors()
+                        .filter(|property| property.table_id == table.id)
+                    {
+                        plan.push(SchemaMaintenancePlanItem {
+                            object_type: "property".to_string(),
+                            object: format!("{}.{}", table.name, property.name),
+                            from_state: property.state,
+                            to_state: None,
+                            action: "gc".to_string(),
+                            estimated_operations: 1,
+                        });
+                    }
+                    plan.push(SchemaMaintenancePlanItem {
+                        object_type: "table".to_string(),
+                        object: table.name.clone(),
+                        from_state: table.state,
+                        to_state: None,
+                        action: "gc".to_string(),
+                        estimated_operations: 1,
+                    });
+                }
+                SchemaObjectState::DeleteOnly
+                | SchemaObjectState::WriteOnly
+                | SchemaObjectState::Public => {}
+            }
+        }
+
+        plan
+    }
+
+    fn schema_table_record_count(&self, catalog: &Catalog, table: &TableDescriptor) -> usize {
+        match table.kind {
+            TableKind::Node => {
+                let Some(label_id) = catalog.label_id(&table.name) else {
+                    return 0;
+                };
+                self.nodes
+                    .values()
+                    .filter(|node| node.labels.contains(&label_id))
+                    .count()
+            }
+            TableKind::Relationship => {
+                let Some(rel_type_id) = catalog.rel_type_id(&table.name) else {
+                    return 0;
+                };
+                self.relationships
+                    .values()
+                    .filter(|relationship| relationship.rel_type == rel_type_id)
+                    .count()
+            }
+        }
     }
 
     pub fn create_property_index(
