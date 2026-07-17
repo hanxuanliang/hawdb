@@ -629,6 +629,7 @@ fn retrieves_knowledge_through_database_facade() {
     assert_eq!(graph_seed_report.limit, Some(2));
     assert_eq!(graph_seed_report.rank_window, None);
     assert_eq!(graph_seed_report.fusion_weight, None);
+    assert!(graph_seed_report.fallback_reasons.is_empty());
     assert_eq!(graph_seed_report.top_candidates.len(), 2);
     assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
     assert_eq!(
@@ -1522,6 +1523,16 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
     assert!(search_disabled_by_limit
         .diagnostics
         .empty_reasons
+        .iter()
+        .any(|reason| reason == "graph seed retriever disabled by limit 0"));
+    let disabled_graph_seed_report = search_disabled_by_limit
+        .retrievers
+        .iter()
+        .find(|report| report.name == "graph_seed")
+        .expect("graph seed retriever report");
+    assert!(!disabled_graph_seed_report.available);
+    assert!(disabled_graph_seed_report
+        .fallback_reasons
         .iter()
         .any(|reason| reason == "graph seed retriever disabled by limit 0"));
 }

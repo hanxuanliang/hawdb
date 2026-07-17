@@ -1827,7 +1827,7 @@ fn knowledge_retriever_reports(
         limit: Some(graph_seed_limit),
         rank_window: None,
         fusion_weight: None,
-        fallback_reasons: Vec::new(),
+        fallback_reasons: knowledge_graph_seed_fallback_reasons(graph_seed_limit),
         truncated: graph_seed_candidate_count > graph_seeds.len(),
         truncation_reasons: knowledge_graph_seed_truncation_reasons(
             graph_seed_candidate_count,
@@ -1909,6 +1909,14 @@ fn knowledge_graph_seed_truncation_reasons(
         vec![format!(
             "graph_seed limit {graph_seed_limit} returned from {candidate_count} candidates"
         )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn knowledge_graph_seed_fallback_reasons(graph_seed_limit: usize) -> Vec<String> {
+    if graph_seed_limit == 0 {
+        vec!["graph seed retriever disabled by limit 0".to_string()]
     } else {
         Vec::new()
     }

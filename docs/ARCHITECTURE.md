@@ -530,7 +530,8 @@ Search child top candidates also carry projection freshness, while graph seed
 top candidates leave it empty because they are read directly from canonical
 graph state. Search child reports distinguish rank-window trimming from
 search-limit truncation and expose their vector/text fusion weights, while graph
-seed reports record graph-seed limit truncation.
+seed reports record graph-seed limit truncation and disabled-by-limit fallback
+reasons.
 `KnowledgeCandidate` then projects returned search hits and graph-native seeds
 into one application-facing candidate surface. Each candidate records its source
 leg, source-local rank, merged source legs, combined score, score breakdown,
