@@ -889,7 +889,16 @@ fn projection_row_from_node(catalog: &Catalog, node: &NodeRecord) -> Option<Sear
         if matches!(key.as_str(), "kind" | "external_id" | "source_id") {
             continue;
         }
-        metadata.insert(key.clone(), value_to_projection_string(value));
+        metadata.insert(key.clone(), projection_metadata_value(key, value));
+    }
+    metadata
+        .entry("space_id".to_string())
+        .or_insert_with(|| DEFAULT_SPACE_ID.to_string());
+    if metadata
+        .get("space_id")
+        .is_some_and(|space_id| space_id.is_empty())
+    {
+        metadata.insert("space_id".to_string(), DEFAULT_SPACE_ID.to_string());
     }
     Some(SearchProjectionRow {
         kind,
@@ -920,6 +929,17 @@ fn first_string_property(node: &NodeRecord, keys: &[&str]) -> Option<String> {
 
 fn string_property(node: &NodeRecord, key: &str) -> Option<String> {
     node.properties.get(key).map(value_to_projection_string)
+}
+
+const DEFAULT_SPACE_ID: &str = "default";
+
+fn projection_metadata_value(key: &str, value: &Value) -> String {
+    let text = value_to_projection_string(value);
+    if key == "space_id" && text.is_empty() {
+        DEFAULT_SPACE_ID.to_string()
+    } else {
+        text
+    }
 }
 
 fn value_to_projection_string(value: &Value) -> String {
@@ -1044,7 +1064,24 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
 fn metadata_matches(document: &SearchDocument, filters: &BTreeMap<String, String>) -> bool {
     filters
         .iter()
-        .all(|(key, value)| document.metadata.get(key) == Some(value))
+        .all(|(key, value)| metadata_value_matches(document, key, value))
+}
+
+fn metadata_value_matches(document: &SearchDocument, key: &str, expected: &str) -> bool {
+    if key == "space_id" {
+        let actual = document
+            .metadata
+            .get(key)
+            .map(String::as_str)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(DEFAULT_SPACE_ID);
+        actual == expected
+    } else {
+        document
+            .metadata
+            .get(key)
+            .is_some_and(|actual| actual == expected)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2082,6 +2119,63 @@ mod tests {
     }
 
     #[test]
+    fn search_metadata_filters_normalize_default_space() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:missing_space".to_string(),
+                title: "Scoped graph".to_string(),
+                content: "default space retrieval".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:empty_space".to_string(),
+                title: "Scoped graph".to_string(),
+                content: "default space retrieval".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), String::new())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:team_space".to_string(),
+                title: "Scoped graph".to_string(),
+                content: "default space retrieval".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "default space retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "space_id".to_string(),
+                    DEFAULT_SPACE_ID.to_string(),
+                )]),
+            },
+        );
+        let hit_ids = result
+            .hits
+            .iter()
+            .map(|hit| hit.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(result.filtered_document_count, 2);
+        assert!(hit_ids.contains("memory:missing_space"));
+        assert!(hit_ids.contains("memory:empty_space"));
+        assert!(!hit_ids.contains("memory:team_space"));
+    }
+
+    #[test]
     fn search_report_exposes_metadata_filter_empty_scope() {
         let mut index = SearchIndex::in_memory();
         index
@@ -3084,6 +3178,59 @@ mod tests {
         assert_eq!(
             document.metadata.get("space_id").map(String::as_str),
             Some("default")
+        );
+    }
+
+    #[test]
+    fn graph_projection_normalizes_default_space_metadata() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("missing_space".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Missing space".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("empty_space".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Empty space".to_string()),
+                    ),
+                    ("space_id".to_string(), Value::String(String::new())),
+                ]),
+            )
+            .unwrap();
+
+        let mut index = SearchIndex::in_memory();
+        index
+            .rebuild_from_graph(&catalog, &store, SearchRebuildOptions::default())
+            .unwrap();
+
+        assert_eq!(
+            index
+                .document("memory:missing_space")
+                .and_then(|document| document.metadata.get("space_id"))
+                .map(String::as_str),
+            Some(DEFAULT_SPACE_ID)
+        );
+        assert_eq!(
+            index
+                .document("memory:empty_space")
+                .and_then(|document| document.metadata.get("space_id"))
+                .map(String::as_str),
+            Some(DEFAULT_SPACE_ID)
         );
     }
 

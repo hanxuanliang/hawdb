@@ -1980,11 +1980,20 @@ fn knowledge_graph_seed_matches_filter(
                 .is_some_and(|label_id| node.labels.contains(&label_id))
         }
         "external_id" => node_external_id(node).as_deref() == Some(value),
+        "space_id" => normalized_node_space_id(node) == value,
         _ => node
             .properties
             .get(key)
             .is_some_and(|property| value_to_external_id(property) == value),
     }
+}
+
+fn normalized_node_space_id(node: &NodeRecord) -> String {
+    node.properties
+        .get("space_id")
+        .map(value_to_external_id)
+        .filter(|space_id| !space_id.is_empty())
+        .unwrap_or_else(|| "default".to_string())
 }
 
 fn knowledge_query_terms(text: &str) -> BTreeSet<String> {
@@ -4043,7 +4052,7 @@ mod tests {
     use crate::search::{SearchFusionWeights, SearchIndex, SearchMode, SearchRebuildOptions};
     use crate::store::NodeId;
     use crate::Value;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
     use std::io::{Cursor, Write};
 
     #[test]
@@ -4637,6 +4646,60 @@ mod tests {
             .expect("graph seed retriever report");
         assert_eq!(graph_seed_report.candidate_count, 1);
         assert_eq!(graph_seed_report.top_candidates[0].id, "Memory:mem_1");
+    }
+
+    #[test]
+    fn knowledge_retrieval_normalizes_default_space_filters() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem_1', title: 'Scoped graph', content: 'default space retrieval'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem_2', title: 'Scoped graph', content: 'default space retrieval', space_id: ''})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem_3', title: 'Scoped graph', content: 'default space retrieval', space_id: 'team'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "default space retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 10,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+        let search_hit_ids = output
+            .search
+            .hits
+            .iter()
+            .map(|hit| hit.external_id.as_deref())
+            .collect::<BTreeSet<_>>();
+        let graph_seed_ids = output
+            .graph_seeds
+            .iter()
+            .map(|seed| seed.entity.external_id.as_deref())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(output.search.total_hits, 2);
+        assert_eq!(output.diagnostics.search_filtered_document_count, 2);
+        assert_eq!(output.diagnostics.graph_seed_candidate_count, 2);
+        assert!(search_hit_ids.contains(&Some("mem_1")));
+        assert!(search_hit_ids.contains(&Some("mem_2")));
+        assert!(!search_hit_ids.contains(&Some("mem_3")));
+        assert!(graph_seed_ids.contains(&Some("mem_1")));
+        assert!(graph_seed_ids.contains(&Some("mem_2")));
+        assert!(!graph_seed_ids.contains(&Some("mem_3")));
     }
 
     #[test]
