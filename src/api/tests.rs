@@ -7432,6 +7432,7 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     assert!(names.contains(&"property_index_projection"));
     assert!(names.contains(&"search_projection_graph_delta"));
     assert!(names.contains(&"search_projection_rebuild"));
+    assert!(names.contains(&"graph_lightning_bootstrap_export"));
     assert!(names.contains(&"external_content_artifact_job"));
 
     let policy = LocalQosPolicy {
@@ -7463,6 +7464,87 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
         ),
         QosAdmission::Admit
     );
+}
+
+#[test]
+fn background_maintenance_includes_graph_lightning_bootstrap_import_work() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let candidates = db.background_maintenance_candidates(
+        None,
+        BackgroundMaintenanceOptions {
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(candidates[0].name, "graph_lightning_bootstrap_export");
+    assert_eq!(candidates[0].plan.request.class, WorkClass::Import);
+    assert_eq!(candidates[0].plan.request.estimated_operations, 3);
+}
+
+#[test]
+fn background_maintenance_can_disable_graph_lightning_bootstrap_candidate() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})").unwrap();
+    let candidates = db.background_maintenance_candidates(
+        None,
+        BackgroundMaintenanceOptions {
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_graph_lightning_bootstrap_export: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
+fn background_maintenance_ranks_graph_lightning_against_import_lane_budget() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+    class_limits[WorkClass::Import.as_index()] = Some(2);
+    let policy = LocalQosPolicy {
+        max_background_operations_by_class: class_limits,
+        ..LocalQosPolicy::default()
+    };
+    let ranked = db.rank_background_maintenance(
+        None,
+        &policy,
+        &LocalQosState::default(),
+        BackgroundMaintenanceOptions {
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].name, "graph_lightning_bootstrap_export");
+    assert!(matches!(
+        ranked[0].decision.admission,
+        QosAdmission::Defer { .. }
+    ));
+    assert!(ranked[0]
+        .decision
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("above class limit")));
 }
 
 #[test]

@@ -619,7 +619,10 @@ embedded deployments. A direct caller can still request
 but caller-owned pre-upload or background import loops can first ask
 `graph_lightning_bootstrap_export_background_work_plan` for an `Import` lane
 estimate and then execute through the background or scheduled background export
-facades. Deferred background export does not generate stable-ID mapping files,
+facades. The same plan can appear in `background_maintenance_candidates`, so a
+caller-owned multi-queue loop can rank Graph Lightning pre-export against
+projection, parser, schema, and analytics maintenance before attempting
+admission. Deferred background export does not generate stable-ID mapping files,
 so QoS rejection cannot create partial import state.
 
 Typed knowledge operations can bypass the search projection entirely when the

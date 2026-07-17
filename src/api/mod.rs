@@ -433,6 +433,7 @@ pub struct BackgroundMaintenanceOptions {
     pub include_property_index_projection: bool,
     pub include_search_projection_rebuild: bool,
     pub include_search_projection_metadata_repair: bool,
+    pub include_graph_lightning_bootstrap_export: bool,
     pub include_external_content_artifact_jobs: bool,
     pub external_content_artifact_estimated_operations: usize,
     pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
@@ -446,6 +447,7 @@ impl Default for BackgroundMaintenanceOptions {
             include_property_index_projection: true,
             include_search_projection_rebuild: true,
             include_search_projection_metadata_repair: true,
+            include_graph_lightning_bootstrap_export: true,
             include_external_content_artifact_jobs: true,
             external_content_artifact_estimated_operations: 1,
             search_projection_graph_delta: None,
@@ -1658,6 +1660,17 @@ impl Database {
                         plan,
                     });
                 }
+            }
+        }
+
+        if options.include_graph_lightning_bootstrap_export {
+            if let Some(plan) =
+                self.graph_lightning_bootstrap_export_background_work_plan(options.hint.clone())
+            {
+                candidates.push(BackgroundMaintenanceCandidate {
+                    name: "graph_lightning_bootstrap_export".to_string(),
+                    plan,
+                });
             }
         }
 
