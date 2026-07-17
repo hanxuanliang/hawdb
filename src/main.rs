@@ -1521,6 +1521,7 @@ fn graph_lightning_import_status(
     let mut presence_errors = Vec::new();
     let mut staging_errors = Vec::new();
     let mut published_errors = Vec::new();
+    let mut resource_errors = Vec::new();
     let mut staging_verification = None;
     let mut published_verification = None;
     let import_state = if !staging_catalog_present && published_pointer_present {
@@ -1563,17 +1564,26 @@ fn graph_lightning_import_status(
             "READY"
         }
     };
-    let decision = if import_state == "QUARANTINED" {
+    let resume_action = graph_lightning_import_resume_action(import_state);
+    let resource_retention = graph_lightning_import_resource_retention(
+        import_state,
+        staging_catalog_present,
+        staging_dir,
+        publish_dir,
+        &mut errors,
+        &mut resource_errors,
+    );
+    let decision = if import_state == "QUARANTINED" || !resource_errors.is_empty() {
         "blocked"
     } else {
         "ready"
     };
-    let resume_action = graph_lightning_import_resume_action(import_state);
     Ok(serde_json::json!({
         "protocol": "graph-lightning-import-status",
         "protocol_version": 1,
         "import_state": import_state,
         "resume_action": resume_action,
+        "resource_retention": resource_retention,
         "staging_catalog_present": staging_catalog_present,
         "published_pointer_present": published_pointer_present,
         "staging_verification": staging_verification,
@@ -1583,12 +1593,105 @@ fn graph_lightning_import_status(
             "presence_errors": presence_errors.len(),
             "staging_errors": staging_errors.len(),
             "published_errors": published_errors.len(),
+            "resource_errors": resource_errors.len(),
             "presence_error_messages": presence_errors,
             "staging_error_messages": staging_errors,
             "published_error_messages": published_errors,
+            "resource_error_messages": resource_errors,
             "errors": errors,
         },
     }))
+}
+
+fn graph_lightning_import_resource_retention(
+    import_state: &str,
+    staging_catalog_present: bool,
+    staging_dir: &Path,
+    publish_dir: &Path,
+    errors: &mut Vec<String>,
+    resource_errors: &mut Vec<String>,
+) -> serde_json::Value {
+    if !staging_catalog_present {
+        return serde_json::json!({
+            "action": "none",
+            "safe_to_collect": false,
+            "protected_count": 0,
+            "deletable_count": 0,
+            "reason": "staging catalog is missing",
+            "gc_report": serde_json::Value::Null,
+        });
+    }
+
+    let gc_report = match graph_lightning_gc_staging_report(staging_dir, publish_dir) {
+        Ok(report) => report,
+        Err(error) => {
+            push_grouped_error(
+                errors,
+                resource_errors,
+                format!("resource retention report failed: {error}"),
+            );
+            return serde_json::json!({
+                "action": "hold_for_inspection",
+                "safe_to_collect": false,
+                "protected_count": 0,
+                "deletable_count": 0,
+                "reason": "resource retention could not verify staging artifacts",
+                "gc_report": serde_json::Value::Null,
+            });
+        }
+    };
+    let candidate_count = gc_report
+        .get("candidate_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let pinned_count = gc_report
+        .get("pinned_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let gc_deletable_count = gc_report
+        .get("deletable_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    let gc_ready = gate_decision(&gc_report, "gc_gate") == Some("ready");
+
+    match import_state {
+        "READY" => serde_json::json!({
+            "action": "retain_for_publish",
+            "safe_to_collect": false,
+            "protected_count": candidate_count,
+            "deletable_count": 0,
+            "gc_deletable_count": gc_deletable_count,
+            "reason": "staging artifacts are required for publishing",
+            "gc_report": gc_report,
+        }),
+        "PUBLISHED" => serde_json::json!({
+            "action": "follow_gc_report",
+            "safe_to_collect": gc_ready && gc_deletable_count > 0,
+            "protected_count": pinned_count,
+            "deletable_count": if gc_ready { gc_deletable_count } else { 0 },
+            "gc_deletable_count": gc_deletable_count,
+            "reason": "published pointer verification controls staging retention",
+            "gc_report": gc_report,
+        }),
+        "QUARANTINED" => serde_json::json!({
+            "action": "hold_for_inspection",
+            "safe_to_collect": false,
+            "protected_count": candidate_count,
+            "deletable_count": 0,
+            "gc_deletable_count": gc_deletable_count,
+            "reason": "status gate has blocking errors",
+            "gc_report": gc_report,
+        }),
+        _ => serde_json::json!({
+            "action": "hold_for_inspection",
+            "safe_to_collect": false,
+            "protected_count": candidate_count,
+            "deletable_count": 0,
+            "gc_deletable_count": gc_deletable_count,
+            "reason": "unknown import state",
+            "gc_report": gc_report,
+        }),
+    }
 }
 
 fn graph_lightning_import_resume_action(import_state: &str) -> serde_json::Value {
@@ -2674,9 +2777,14 @@ mod tests {
         assert_eq!(report["resume_action"]["operation"], "stage_bootstrap");
         assert_eq!(report["resume_action"]["safe_to_retry"], true);
         assert_eq!(report["resume_action"]["terminal"], false);
+        assert_eq!(report["resource_retention"]["action"], "none");
+        assert_eq!(report["resource_retention"]["safe_to_collect"], false);
+        assert_eq!(report["resource_retention"]["protected_count"], 0);
+        assert_eq!(report["resource_retention"]["deletable_count"], 0);
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
+        assert_eq!(report["status_gate"]["resource_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
@@ -2701,9 +2809,14 @@ mod tests {
         assert_eq!(report["resume_action"]["operation"], "inspect_errors");
         assert_eq!(report["resume_action"]["safe_to_retry"], false);
         assert_eq!(report["resume_action"]["terminal"], true);
+        assert_eq!(report["resource_retention"]["action"], "none");
+        assert_eq!(report["resource_retention"]["safe_to_collect"], false);
+        assert_eq!(report["resource_retention"]["protected_count"], 0);
+        assert_eq!(report["resource_retention"]["deletable_count"], 0);
         assert_eq!(report["status_gate"]["presence_errors"], 1);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
+        assert_eq!(report["status_gate"]["resource_errors"], 0);
         assert!(report["status_gate"]["presence_error_messages"]
             .as_array()
             .unwrap()
@@ -2750,9 +2863,19 @@ mod tests {
         assert_eq!(report["resume_action"]["operation"], "publish_staging");
         assert_eq!(report["resume_action"]["safe_to_retry"], true);
         assert_eq!(report["resume_action"]["terminal"], false);
+        assert_eq!(report["resource_retention"]["action"], "retain_for_publish");
+        assert_eq!(report["resource_retention"]["safe_to_collect"], false);
+        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["deletable_count"], 0);
+        assert_eq!(report["resource_retention"]["gc_deletable_count"], 4);
+        assert_eq!(
+            report["resource_retention"]["gc_report"]["gc_gate"]["decision"],
+            "ready"
+        );
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
+        assert_eq!(report["status_gate"]["resource_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
@@ -2782,9 +2905,19 @@ mod tests {
         assert_eq!(report["resume_action"]["operation"], "none");
         assert_eq!(report["resume_action"]["safe_to_retry"], false);
         assert_eq!(report["resume_action"]["terminal"], true);
+        assert_eq!(report["resource_retention"]["action"], "follow_gc_report");
+        assert_eq!(report["resource_retention"]["safe_to_collect"], false);
+        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["deletable_count"], 0);
+        assert_eq!(report["resource_retention"]["gc_deletable_count"], 0);
+        assert_eq!(
+            report["resource_retention"]["gc_report"]["published_pointer_state"],
+            "verified"
+        );
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
+        assert_eq!(report["status_gate"]["resource_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
         std::fs::remove_dir_all(publish_dir).unwrap();
@@ -2815,9 +2948,18 @@ mod tests {
         assert_eq!(report["resume_action"]["operation"], "inspect_errors");
         assert_eq!(report["resume_action"]["safe_to_retry"], false);
         assert_eq!(report["resume_action"]["terminal"], true);
+        assert_eq!(
+            report["resource_retention"]["action"],
+            "hold_for_inspection"
+        );
+        assert_eq!(report["resource_retention"]["safe_to_collect"], false);
+        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["deletable_count"], 0);
+        assert_eq!(report["resource_retention"]["gc_deletable_count"], 4);
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 1);
         assert_eq!(report["status_gate"]["published_errors"], 0);
+        assert_eq!(report["status_gate"]["resource_errors"], 0);
         assert!(report["status_gate"]["staging_error_messages"]
             .as_array()
             .unwrap()
@@ -2834,6 +2976,52 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("staging catalog is not READY")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_blocks_when_resource_retention_cannot_read_candidates() {
+        let staging_dir = unique_main_test_dir("graph_lightning_status_resource_blocked_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_resource_blocked_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_staging_catalog.json"),
+            serde_json::json!({
+                "protocol": "graph-lightning-staging-catalog",
+                "stage_state": "READY",
+                "export_gate": {
+                    "decision": "ready"
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "QUARANTINED");
+        assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(
+            report["resource_retention"]["action"],
+            "hold_for_inspection"
+        );
+        assert_eq!(report["resource_retention"]["safe_to_collect"], false);
+        assert_eq!(report["resource_retention"]["protected_count"], 0);
+        assert_eq!(report["resource_retention"]["deletable_count"], 0);
+        assert_eq!(
+            report["resource_retention"]["gc_report"],
+            serde_json::Value::Null
+        );
+        assert_eq!(report["status_gate"]["resource_errors"], 1);
+        assert!(report["status_gate"]["resource_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("resource retention report failed")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }

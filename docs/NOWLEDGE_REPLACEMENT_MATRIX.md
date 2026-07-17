@@ -68,9 +68,10 @@ Published-pointer verification gates split pointer, catalog, and staging errors
 for Graph Lightning resume checks.
 Staging GC gates also group published-pointer verification errors before
 declaring artifacts deletable.
-Import-status reports add a machine-readable `resume_action` so automation can
-choose staging, publishing, completion, or quarantine/manual-repair handling
-without parsing human-readable error strings.
+Import-status reports add a machine-readable `resume_action` plus active-import
+`resource_retention` policy so automation can choose staging, publishing,
+completion, quarantine/manual-repair, or artifact-retention handling without
+parsing human-readable error strings or deleting READY artifacts before publish.
 
 ## Current Compatibility Evidence
 
