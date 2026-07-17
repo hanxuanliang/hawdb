@@ -621,8 +621,9 @@ source and target identities plus the same traversal budget and returns bounded
 graph paths as ordered evidence segments with source/target presence and path
 count diagnostics. Neighbor and path diagnostics count distinct canonical nodes
 covered by returned path segments as well as returned relationships, and report
-fallback reasons when traversal budgets are explicitly disabled. Unknown
-relationship-type filters return empty typed navigation results instead of
+fallback reasons when traversal budgets are explicitly disabled or requested
+source/target graph identities are missing. Unknown relationship-type filters
+return empty typed navigation results with a diagnostic reason instead of
 falling back to untyped relationship expansion.
 `Database::knowledge_subgraph` expands a bounded typed subgraph from one
 identity, returning canonical node snapshots, relationship evidence segments,

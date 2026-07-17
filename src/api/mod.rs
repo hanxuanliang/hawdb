@@ -2694,6 +2694,11 @@ fn knowledge_neighbors_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_seed_identity: Some(knowledge_identity_description(
+                    request.label.as_str(),
+                    request.external_id.as_str(),
+                )),
+                missing_target_identity: None,
                 missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: Some(request.limit),
@@ -2721,6 +2726,8 @@ fn knowledge_neighbors_for(
                             relationship_count: 0,
                             fanout_reason_count: 0,
                             fanout_reasons: Vec::new(),
+                            missing_seed_identity: None,
+                            missing_target_identity: None,
                             missing_relationship_type: Some(name.to_string()),
                             max_hops: request.max_hops,
                             path_limit: Some(request.limit),
@@ -2756,6 +2763,8 @@ fn knowledge_neighbors_for(
             relationship_count: paths.len(),
             fanout_reason_count: fanout_reasons.len(),
             fanout_reasons: fanout_reasons.clone(),
+            missing_seed_identity: None,
+            missing_target_identity: None,
             missing_relationship_type: None,
             max_hops: request.max_hops,
             path_limit: Some(request.limit),
@@ -2802,6 +2811,16 @@ fn knowledge_paths_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_seed_identity: Some(knowledge_identity_description(
+                    request.source_label.as_str(),
+                    request.source_external_id.as_str(),
+                )),
+                missing_target_identity: target_node_id.is_none().then(|| {
+                    knowledge_identity_description(
+                        request.target_label.as_str(),
+                        request.target_external_id.as_str(),
+                    )
+                }),
                 missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: Some(request.limit),
@@ -2825,6 +2844,11 @@ fn knowledge_paths_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_seed_identity: None,
+                missing_target_identity: Some(knowledge_identity_description(
+                    request.target_label.as_str(),
+                    request.target_external_id.as_str(),
+                )),
                 missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: Some(request.limit),
@@ -2852,6 +2876,8 @@ fn knowledge_paths_for(
                             relationship_count: 0,
                             fanout_reason_count: 0,
                             fanout_reasons: Vec::new(),
+                            missing_seed_identity: None,
+                            missing_target_identity: None,
                             missing_relationship_type: Some(name.to_string()),
                             max_hops: request.max_hops,
                             path_limit: Some(request.limit),
@@ -2889,6 +2915,8 @@ fn knowledge_paths_for(
             relationship_count: paths.iter().map(|path| path.segments.len()).sum::<usize>(),
             fanout_reason_count: fanout_reasons.len(),
             fanout_reasons: fanout_reasons.clone(),
+            missing_seed_identity: None,
+            missing_target_identity: None,
             missing_relationship_type: None,
             max_hops: request.max_hops,
             path_limit: Some(request.limit),
@@ -2925,6 +2953,11 @@ fn knowledge_subgraph_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_seed_identity: Some(knowledge_identity_description(
+                    request.label.as_str(),
+                    request.external_id.as_str(),
+                )),
+                missing_target_identity: None,
                 missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: None,
@@ -2952,6 +2985,8 @@ fn knowledge_subgraph_for(
                             relationship_count: 0,
                             fanout_reason_count: 0,
                             fanout_reasons: Vec::new(),
+                            missing_seed_identity: None,
+                            missing_target_identity: None,
                             missing_relationship_type: Some(name.to_string()),
                             max_hops: request.max_hops,
                             path_limit: None,
@@ -2987,6 +3022,8 @@ fn knowledge_subgraph_for(
             relationship_count: relationships.len(),
             fanout_reason_count: fanout_reasons.len(),
             fanout_reasons: fanout_reasons.clone(),
+            missing_seed_identity: None,
+            missing_target_identity: None,
             missing_relationship_type: None,
             max_hops: request.max_hops,
             path_limit: None,
@@ -3007,6 +3044,8 @@ struct KnowledgeTraversalDiagnosticInput {
     relationship_count: usize,
     fanout_reason_count: usize,
     fanout_reasons: Vec<String>,
+    missing_seed_identity: Option<String>,
+    missing_target_identity: Option<String>,
     missing_relationship_type: Option<String>,
     max_hops: usize,
     path_limit: Option<usize>,
@@ -3036,6 +3075,12 @@ fn knowledge_traversal_diagnostics(
 
 fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInput) -> Vec<String> {
     let mut reasons = Vec::new();
+    if let Some(seed_identity) = &input.missing_seed_identity {
+        reasons.push(format!("seed {seed_identity} not found"));
+    }
+    if let Some(target_identity) = &input.missing_target_identity {
+        reasons.push(format!("target {target_identity} not found"));
+    }
     if input.max_hops == 0 {
         reasons.push("traversal disabled by max_hops 0".to_string());
     }
@@ -3052,6 +3097,10 @@ fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInpu
         reasons.push(format!("relationship type {relationship_type} not found"));
     }
     reasons
+}
+
+fn knowledge_identity_description(label: &str, external_id: &str) -> String {
+    format!("{label}:{external_id}")
 }
 
 fn knowledge_context_path_node_count(paths: &[KnowledgeGraphContextPath]) -> usize {

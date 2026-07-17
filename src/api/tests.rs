@@ -3318,7 +3318,10 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert!(!missing.diagnostics.seed_found);
     assert_eq!(missing.diagnostics.path_count, 0);
     assert_eq!(missing.diagnostics.fanout_reason_count, 0);
-    assert!(missing.diagnostics.fallback_reasons.is_empty());
+    assert_eq!(
+        missing.diagnostics.fallback_reasons,
+        vec!["seed Memory:missing not found".to_string()]
+    );
     assert_eq!(missing.diagnostics.path_limit, Some(8));
     assert!(missing.paths.is_empty());
     assert!(missing.fanout_reasons.is_empty());
@@ -3586,6 +3589,10 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(missing.diagnostics.seed_found);
     assert_eq!(missing.diagnostics.target_found, Some(false));
     assert_eq!(missing.diagnostics.path_count, 0);
+    assert_eq!(
+        missing.diagnostics.fallback_reasons,
+        vec!["target Entity:missing not found".to_string()]
+    );
     assert!(missing.paths.is_empty());
 
     let missing_source = db.knowledge_paths(&KnowledgePathRequest {
@@ -3603,6 +3610,10 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(!missing_source.diagnostics.seed_found);
     assert_eq!(missing_source.diagnostics.target_found, Some(true));
     assert_eq!(missing_source.diagnostics.path_count, 0);
+    assert_eq!(
+        missing_source.diagnostics.fallback_reasons,
+        vec!["seed Memory:missing not found".to_string()]
+    );
     assert!(missing_source.paths.is_empty());
 
     let missing_both = db.knowledge_paths(&KnowledgePathRequest {
@@ -3620,6 +3631,13 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert!(!missing_both.diagnostics.seed_found);
     assert_eq!(missing_both.diagnostics.target_found, Some(false));
     assert_eq!(missing_both.diagnostics.path_count, 0);
+    assert_eq!(
+        missing_both.diagnostics.fallback_reasons,
+        vec![
+            "seed Memory:missing-source not found".to_string(),
+            "target Entity:missing-target not found".to_string()
+        ]
+    );
     assert!(missing_both.paths.is_empty());
 }
 
@@ -3838,6 +3856,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert_eq!(missing.diagnostics.node_count, 0);
     assert_eq!(missing.diagnostics.relationship_count, 0);
     assert_eq!(missing.diagnostics.fanout_reason_count, 0);
+    assert_eq!(
+        missing.diagnostics.fallback_reasons,
+        vec!["seed Memory:missing not found".to_string()]
+    );
     assert!(missing.nodes.is_empty());
     assert!(missing.relationships.is_empty());
     assert!(missing.fanout_reasons.is_empty());
