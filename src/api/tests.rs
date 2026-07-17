@@ -1,4 +1,3 @@
-
 use super::{
     validate_graph_lightning_graph_stream, CanonicalStableIdMapping, Database, DatabaseConfig,
     DerivedArtifactJobStatus, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
