@@ -342,6 +342,15 @@ pending job selected from a bounded poll result. Skein records the state
 transition without embedding parsing, crawling, chunking, or large-value runtime
 logic. That runtime reads the payload and publishes rebuildable projections back
 to Skein through caller-owned output.
+Internal parser/crawler loops can use
+`Database::run_next_background_external_content_artifact_job_with` for stateless
+`LocalQosPolicy` admission or
+`Database::run_next_scheduled_background_external_content_artifact_job_with` for
+`LocalQosScheduler` accounting. These paths charge external content work to the
+`Import` class and keep direct caller-owned runtime APIs available for explicit
+foreground work. Action-specific runtimes can use
+`Database::run_next_scheduled_background_external_content_artifact_job_for_action_with`
+for the same accounting without claiming unrelated pending work.
 Runtimes that only support a subset of content actions can use
 `Database::pending_external_content_artifact_jobs_for_action` and
 `Database::run_next_external_content_artifact_job_for_action_with` to poll and
