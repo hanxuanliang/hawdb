@@ -21,8 +21,9 @@ use crate::search::{
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
-    NodeRecord, ProjectedGraphStatus, RecoveryMode, RelRecord, SchemaMaintenanceAction,
-    StorageReclamationWatermark, StoreStableIdMapping, WalReplayConfig,
+    NodeRecord, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction, RecoveryMode,
+    RelRecord, SchemaMaintenanceAction, StorageReclamationWatermark, StoreStableIdMapping,
+    WalReplayConfig,
 };
 use crate::value::Value;
 use std::cell::RefCell;
@@ -933,6 +934,18 @@ impl Database {
 
     pub fn composite_property_indexes(&self) -> Vec<CompositeIndexDescriptor> {
         self.catalog.composite_property_indexes().cloned().collect()
+    }
+
+    pub fn rebuild_bounded_property_index_projections(
+        &mut self,
+        max_estimated_operations: usize,
+    ) -> QueryOutput {
+        property_index_projection_rebuild_output(
+            self.store.rebuild_bounded_property_index_projections(
+                &self.catalog,
+                max_estimated_operations,
+            ),
+        )
     }
 
     pub fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
@@ -3871,6 +3884,33 @@ fn schema_maintenance_actions_output(actions: Vec<SchemaMaintenanceAction>) -> Q
                         .unwrap_or(Value::Null),
                 ),
                 ("action".to_string(), Value::String(action.action)),
+            ])
+        })
+        .collect();
+    QueryOutput { rows }
+}
+
+fn property_index_projection_rebuild_output(
+    actions: Vec<PropertyIndexProjectionRebuildAction>,
+) -> QueryOutput {
+    let rows = actions
+        .into_iter()
+        .map(|action| {
+            BTreeMap::from([
+                ("index_kind".to_string(), Value::String(action.index_kind)),
+                ("label".to_string(), Value::String(action.label)),
+                (
+                    "properties".to_string(),
+                    Value::List(action.properties.into_iter().map(Value::String).collect()),
+                ),
+                (
+                    "estimated_operations".to_string(),
+                    Value::Int(i64::try_from(action.estimated_operations).unwrap_or(i64::MAX)),
+                ),
+                (
+                    "indexed_entries".to_string(),
+                    Value::Int(i64::try_from(action.indexed_entries).unwrap_or(i64::MAX)),
+                ),
             ])
         })
         .collect();

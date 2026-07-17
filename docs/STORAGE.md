@@ -217,9 +217,13 @@ for `CONTAINS` predicates backed by a full-text descriptor, and
 `IndexNodeRangeSeek` for single-bound and conjunctive bounded range predicates
 when a range index descriptor exists. Text seeks use the ngram index only as a
 candidate source and retain a residual `FilterExec` so exact string containment
-semantics remain authoritative. Conjunctive range seeks keep the complete `AND`
-predicate as a residual filter while using merged lower and upper bounds as the
-access path. Statistics now include per-label/property and
+semantics remain authoritative. Composite and full-text execution projections
+can be rebuilt through `Database::rebuild_bounded_property_index_projections`,
+which applies complete descriptor rebuilds that fit a caller-supplied operation
+budget and reports estimated operations plus indexed entry counts without
+writing WAL. Conjunctive range seeks keep the complete `AND` predicate as a
+residual filter while using merged lower and upper bounds as the access path.
+Statistics now include per-label/property and
 per-relationship-type/property distinct counts, bounded sorted value histograms,
 and exact-versus-sampled markers. Histograms use deterministic adaptive samples:
 small distinct sets remain exact, medium sets keep up to 256 values, and large

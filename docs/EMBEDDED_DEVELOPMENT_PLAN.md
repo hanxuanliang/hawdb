@@ -584,9 +584,11 @@ writer. `Database::run_bounded_schema_maintenance` can then apply a prefix of
 complete descriptor-level maintenance actions that fit the caller's operation
 budget, leaving the rest resumable through later maintenance calls. The bounded
 background variants bind that same budget to QoS admission and execution for
-per-tick internal loops. Projected graph derived artifacts can be refreshed
-through a
-report-oriented `Database::rebuild_derived_artifacts` entry point; search
+per-tick internal loops. Composite and full-text property-index execution
+projections expose `Database::rebuild_bounded_property_index_projections` for
+bounded descriptor-level rebuild reports without making those projections
+canonical durability. Projected graph derived artifacts can be refreshed through
+a report-oriented `Database::rebuild_derived_artifacts` entry point; search
 projection artifacts expose the same report-oriented rebuild shape through
 `SearchIndex::rebuild_derived_artifacts`. Search projections also expose
 bounded incremental deltas for ordinary FTS/BM25 row upsert/delete changes:

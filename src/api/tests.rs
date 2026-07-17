@@ -3987,6 +3987,89 @@ fn full_text_index_ddl_enables_text_seek_plans() {
 }
 
 #[test]
+fn bounded_property_index_projection_rebuild_skips_descriptors_over_budget_without_wal_write() {
+    let path = unique_test_dir("bounded_index_projection_rebuild_skip");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'Graph foundations'})")
+            .unwrap();
+        db.query("CREATE (:Memory {kind: 'note', source_id: 'b', title: 'Vector search'})")
+            .unwrap();
+        db.query("CREATE (:Memory {kind: 'task', source_id: 'a', title: 'Graph query planning'})")
+            .unwrap();
+        db.query("CREATE INDEX ON :Memory(kind, source_id)")
+            .unwrap();
+        db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
+        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+        let output = db.rebuild_bounded_property_index_projections(2);
+
+        assert!(output.rows.is_empty());
+        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        assert_eq!(after, before);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn bounded_property_index_projection_rebuild_reports_descriptor_batches() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'Graph foundations'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'b', title: 'Vector search'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'task', source_id: 'a', title: 'Graph query planning'})")
+        .unwrap();
+    db.query("CREATE INDEX ON :Memory(kind, source_id)")
+        .unwrap();
+    db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
+
+    let first = db.rebuild_bounded_property_index_projections(3);
+
+    assert_eq!(first.rows.len(), 1);
+    assert_eq!(
+        first.rows[0].get("index_kind"),
+        Some(&Value::String("composite".to_string()))
+    );
+    assert_eq!(
+        first.rows[0].get("label"),
+        Some(&Value::String("Memory".to_string()))
+    );
+    assert_eq!(
+        first.rows[0].get("properties"),
+        Some(&Value::List(vec![
+            Value::String("kind".to_string()),
+            Value::String("source_id".to_string())
+        ]))
+    );
+    assert_eq!(
+        first.rows[0].get("estimated_operations"),
+        Some(&Value::Int(3))
+    );
+    assert_eq!(first.rows[0].get("indexed_entries"), Some(&Value::Int(3)));
+
+    let second = db.rebuild_bounded_property_index_projections(6);
+
+    assert_eq!(second.rows.len(), 2);
+    assert_eq!(
+        second.rows[1].get("index_kind"),
+        Some(&Value::String("full_text".to_string()))
+    );
+    assert_eq!(
+        second.rows[1].get("properties"),
+        Some(&Value::List(vec![Value::String("title".to_string())]))
+    );
+    assert_eq!(
+        second.rows[1].get("estimated_operations"),
+        Some(&Value::Int(3))
+    );
+    assert!(matches!(
+        second.rows[1].get("indexed_entries"),
+        Some(Value::Int(value)) if *value > 0
+    ));
+}
+
+#[test]
 fn range_predicates_filter_and_use_range_index() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, created_at: 10, title: 'Old'})")

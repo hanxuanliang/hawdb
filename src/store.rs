@@ -521,6 +521,15 @@ pub struct SchemaMaintenancePlanItem {
     pub estimated_operations: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyIndexProjectionRebuildAction {
+    pub index_kind: String,
+    pub label: String,
+    pub properties: Vec<String>,
+    pub estimated_operations: usize,
+    pub indexed_entries: usize,
+}
+
 #[derive(Debug, Default)]
 pub struct GraphStore {
     next_node_id: u64,
@@ -1233,10 +1242,7 @@ impl GraphStore {
                 let Some(label_id) = catalog.label_id(&table.name) else {
                     return 0;
                 };
-                self.nodes
-                    .values()
-                    .filter(|node| node.labels.contains(&label_id))
-                    .count()
+                self.index_label_record_count(label_id)
             }
             TableKind::Relationship => {
                 let Some(rel_type_id) = catalog.rel_type_id(&table.name) else {
@@ -1248,6 +1254,13 @@ impl GraphStore {
                     .count()
             }
         }
+    }
+
+    fn index_label_record_count(&self, label_id: LabelId) -> usize {
+        self.nodes
+            .values()
+            .filter(|node| node.labels.contains(&label_id))
+            .count()
     }
 
     pub fn create_property_index(
@@ -1344,6 +1357,70 @@ impl GraphStore {
         self.rebuild_full_text_property_index_for_descriptor(label_id, property);
         self.commit_epoch += 1;
         Ok(id)
+    }
+
+    pub fn rebuild_bounded_property_index_projections(
+        &mut self,
+        catalog: &Catalog,
+        max_estimated_operations: usize,
+    ) -> Vec<PropertyIndexProjectionRebuildAction> {
+        let mut actions = Vec::new();
+        let mut used_estimated_operations = 0usize;
+
+        for index in catalog
+            .composite_property_indexes()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            let estimated_operations = self.index_label_record_count(index.label_id).max(1);
+            if !reserve_schema_maintenance_budget(
+                &mut used_estimated_operations,
+                Some(max_estimated_operations),
+                estimated_operations,
+            ) {
+                continue;
+            }
+            let indexed_entries =
+                self.rebuild_composite_property_index_projection(index.label_id, &index.properties);
+            actions.push(PropertyIndexProjectionRebuildAction {
+                index_kind: "composite".to_string(),
+                label: catalog
+                    .label_name(index.label_id)
+                    .unwrap_or("<unknown>")
+                    .to_string(),
+                properties: index.properties,
+                estimated_operations,
+                indexed_entries,
+            });
+        }
+
+        for index in catalog.property_indexes().cloned().collect::<Vec<_>>() {
+            if index.kind != IndexKind::FullText {
+                continue;
+            }
+            let estimated_operations = self.index_label_record_count(index.label_id).max(1);
+            if !reserve_schema_maintenance_budget(
+                &mut used_estimated_operations,
+                Some(max_estimated_operations),
+                estimated_operations,
+            ) {
+                continue;
+            }
+            let indexed_entries =
+                self.rebuild_full_text_property_index_projection(index.label_id, &index.property);
+            actions.push(PropertyIndexProjectionRebuildAction {
+                index_kind: "full_text".to_string(),
+                label: catalog
+                    .label_name(index.label_id)
+                    .unwrap_or("<unknown>")
+                    .to_string(),
+                properties: vec![index.property],
+                estimated_operations,
+                indexed_entries,
+            });
+        }
+
+        actions
     }
 
     pub fn create_unique_constraint(
@@ -4223,6 +4300,23 @@ impl GraphStore {
         label_id: LabelId,
         properties: &[String],
     ) {
+        self.rebuild_composite_property_index_projection(label_id, properties);
+    }
+
+    fn rebuild_composite_property_index_projection(
+        &mut self,
+        label_id: LabelId,
+        properties: &[String],
+    ) -> usize {
+        self.composite_property_index
+            .retain(|(candidate_label_id, key), _| {
+                *candidate_label_id != label_id
+                    || key
+                        .iter()
+                        .map(|(property, _)| property)
+                        .ne(properties.iter())
+            });
+        let mut indexed_entries = 0usize;
         let nodes = self.nodes.values().cloned().collect::<Vec<_>>();
         for node in nodes {
             if !node.labels.contains(&label_id) {
@@ -4235,7 +4329,9 @@ impl GraphStore {
                 .entry((label_id, key))
                 .or_default()
                 .insert(node.id);
+            indexed_entries = indexed_entries.saturating_add(1);
         }
+        indexed_entries
     }
 
     fn add_node_to_full_text_property_indexes(&mut self, catalog: &Catalog, node: &NodeRecord) {
@@ -4284,6 +4380,19 @@ impl GraphStore {
         label_id: LabelId,
         property: &str,
     ) {
+        self.rebuild_full_text_property_index_projection(label_id, property);
+    }
+
+    fn rebuild_full_text_property_index_projection(
+        &mut self,
+        label_id: LabelId,
+        property: &str,
+    ) -> usize {
+        self.full_text_property_index
+            .retain(|(candidate_label_id, candidate_property, _), _| {
+                *candidate_label_id != label_id || candidate_property != property
+            });
+        let mut indexed_entries = 0usize;
         let nodes = self.nodes.values().cloned().collect::<Vec<_>>();
         for node in nodes {
             if !node.labels.contains(&label_id) {
@@ -4297,8 +4406,10 @@ impl GraphStore {
                     .entry((label_id, property.to_string(), token))
                     .or_default()
                     .insert(node.id);
+                indexed_entries = indexed_entries.saturating_add(1);
             }
         }
+        indexed_entries
     }
 
     fn apply_schema_maintenance_op(&mut self, catalog: &mut Catalog, op: WalOp) {
