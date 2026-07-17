@@ -2970,13 +2970,18 @@ impl GroupExpr {
                 properties,
                 legs,
                 output,
-            } => PhysicalPlan::OptionalRelationshipCountSumExec {
-                variable: variable.clone(),
-                label: label.clone(),
-                properties: properties.clone(),
-                legs: legs.clone(),
-                output: output.clone(),
-            },
+            } => {
+                push_optional_relationship_count_sum_cost_decision(
+                    catalog, decisions, label, properties, legs,
+                );
+                PhysicalPlan::OptionalRelationshipCountSumExec {
+                    variable: variable.clone(),
+                    label: label.clone(),
+                    properties: properties.clone(),
+                    legs: legs.clone(),
+                    output: output.clone(),
+                }
+            }
             LogicalPlan::ThreadRepairStats {
                 label,
                 identity_label,
@@ -3617,13 +3622,18 @@ fn logical_to_physical_direct(
             properties,
             legs,
             output,
-        } => PhysicalPlan::OptionalRelationshipCountSumExec {
-            variable: variable.clone(),
-            label: label.clone(),
-            properties: properties.clone(),
-            legs: legs.clone(),
-            output: output.clone(),
-        },
+        } => {
+            push_optional_relationship_count_sum_cost_decision(
+                catalog, decisions, label, properties, legs,
+            );
+            PhysicalPlan::OptionalRelationshipCountSumExec {
+                variable: variable.clone(),
+                label: label.clone(),
+                properties: properties.clone(),
+                legs: legs.clone(),
+                output: output.clone(),
+            }
+        }
         LogicalPlan::ThreadRepairStats {
             label,
             identity_label,
@@ -3891,6 +3901,33 @@ fn push_cartesian_product_cost_decision(
         left_cost.cost,
         right_cost.cost,
         cost.cost
+    ));
+}
+
+fn push_optional_relationship_count_sum_cost_decision(
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+    label: &str,
+    properties: &BTreeMap<String, Value>,
+    legs: &[RelationshipCountLeg],
+) {
+    let estimate = estimate_optional_relationship_count_sum(label, properties, legs, catalog);
+    let leg_rows = estimate
+        .leg_rows
+        .iter()
+        .map(|leg| {
+            format!(
+                "{}:{}:{}",
+                leg.rel_type,
+                format_relationship_direction(leg.direction),
+                leg.rows
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    decisions.push(format!(
+        "estimate OptionalRelationshipCountSum for {label}: seed_rows={} leg_rows=[{}] estimated_rows={} cost={}",
+        estimate.seed_rows, leg_rows, estimate.cost.estimated_rows, estimate.cost.cost
     ));
 }
 
@@ -4235,17 +4272,59 @@ fn estimate_optional_relationship_count_sum_cost(
     legs: &[RelationshipCountLeg],
     catalog: &OptimizerCatalog,
 ) -> PlanCost {
+    estimate_optional_relationship_count_sum(label, properties, legs, catalog).cost
+}
+
+struct OptionalRelationshipCountSumEstimate {
+    seed_rows: u64,
+    leg_rows: Vec<OptionalRelationshipCountLegEstimate>,
+    cost: PlanCost,
+}
+
+struct OptionalRelationshipCountLegEstimate {
+    rel_type: String,
+    direction: RelationshipDirection,
+    rows: u64,
+}
+
+fn estimate_optional_relationship_count_sum(
+    label: &str,
+    properties: &BTreeMap<String, Value>,
+    legs: &[RelationshipCountLeg],
+    catalog: &OptimizerCatalog,
+) -> OptionalRelationshipCountSumEstimate {
     let seed_rows = estimate_seed_rows_from_properties(label, properties, catalog);
-    let relationship_rows = legs
+    let leg_rows = legs
         .iter()
-        .map(|leg| estimate_relationship_count_leg_rows(seed_rows, leg, catalog))
+        .map(|leg| OptionalRelationshipCountLegEstimate {
+            rel_type: leg.rel_type.clone(),
+            direction: leg.direction,
+            rows: estimate_relationship_count_leg_rows(seed_rows, leg, catalog),
+        })
+        .collect::<Vec<_>>();
+    let relationship_rows = leg_rows
+        .iter()
+        .map(|leg| leg.rows)
         .fold(0_u64, |acc, rows| acc.saturating_add(rows));
-    PlanCost {
+    let cost = PlanCost {
         estimated_rows: 1,
         cost: seed_rows
             .saturating_add(relationship_rows)
             .saturating_add(legs.len() as u64)
             .saturating_add(4),
+    };
+    OptionalRelationshipCountSumEstimate {
+        seed_rows,
+        leg_rows,
+        cost,
+    }
+}
+
+fn format_relationship_direction(direction: RelationshipDirection) -> &'static str {
+    match direction {
+        RelationshipDirection::Outgoing => "out",
+        RelationshipDirection::Incoming => "in",
+        RelationshipDirection::Undirected => "both",
     }
 }
 
@@ -6611,6 +6690,11 @@ mod tests {
                 cost: 11,
             }
         );
+        assert!(trace.decisions.iter().any(|decision| {
+            decision.contains(
+                "estimate OptionalRelationshipCountSum for Thread: seed_rows=1 leg_rows=[CONTAINS:out:5] estimated_rows=1 cost=11",
+            )
+        }));
     }
 
     #[test]

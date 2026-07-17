@@ -257,7 +257,10 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 cost: 11,
             },
             fingerprint_contains: "OptionalRelationshipCountSumExec",
-            decision_contains: &["selected physical plan cost: estimated_rows=1 cost=11"],
+            decision_contains: &[
+                "estimate OptionalRelationshipCountSum for Thread: seed_rows=1 leg_rows=[CONTAINS:out:5] estimated_rows=1 cost=11",
+                "selected physical plan cost: estimated_rows=1 cost=11",
+            ],
         },
         OptimizerSmokeCase {
             name: "endpoint_existence_cartesian_product",
