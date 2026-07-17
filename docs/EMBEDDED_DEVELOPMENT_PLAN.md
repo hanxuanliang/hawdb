@@ -767,7 +767,8 @@ Current implemented slice:
 - metadata-aware expand cardinality estimates for bounded outgoing patterns:
   the optimizer consumes label/type/label path counts and relationship fanout
   summaries, applies relationship-property distinct counts for property pattern
-  filters, then records per-hop exact/fallback row estimates and total
+  filters and one-hop relationship-variable equality predicates pushed down
+  from `WHERE`, then records per-hop exact/fallback row estimates and total
   estimated rows in the explain trace while keeping the current
   `AdjacencyExpandExec` implementation stable
 - `OptimizerTrace::selected_plan_cost` exposes recursive output-row and cost

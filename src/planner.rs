@@ -1657,10 +1657,14 @@ pub fn plan_with_params(
                 parameters,
             )?;
             if let Some(predicate) = predicate {
-                input = LogicalPlan::Filter {
-                    predicate,
-                    input: Box::new(input),
-                };
+                if let Some(predicate) =
+                    pushdown_relationship_property_eq_predicates(&mut input, predicate)
+                {
+                    input = LogicalPlan::Filter {
+                        predicate,
+                        input: Box::new(input),
+                    };
+                }
             }
             if let Some(collect_with) = &query.collect_with {
                 return plan_collect_with_match_return(input, query, collect_with);
@@ -3704,6 +3708,54 @@ fn combine_optional_predicates(
         (Some(left), Some(right)) => Some(Predicate::And(vec![left, right])),
         (Some(predicate), None) | (None, Some(predicate)) => Some(predicate),
         (None, None) => None,
+    }
+}
+
+fn pushdown_relationship_property_eq_predicates(
+    input: &mut LogicalPlan,
+    predicate: Predicate,
+) -> Option<Predicate> {
+    let predicates = match predicate {
+        Predicate::And(predicates) => predicates,
+        predicate => vec![predicate],
+    };
+    let mut residual = Vec::new();
+    for predicate in predicates {
+        if !try_pushdown_relationship_property_eq(input, &predicate) {
+            residual.push(predicate);
+        }
+    }
+    combine_predicates(residual)
+}
+
+fn try_pushdown_relationship_property_eq(input: &mut LogicalPlan, predicate: &Predicate) -> bool {
+    let Predicate::PropertyEq {
+        variable,
+        property,
+        value,
+    } = predicate
+    else {
+        return false;
+    };
+    match input {
+        LogicalPlan::Expand {
+            rel_variable: Some(rel_variable),
+            rel_properties,
+            min_hops,
+            max_hops,
+            ..
+        } if rel_variable == variable && *min_hops == 1 && *max_hops == 1 => {
+            if let Some(existing) = rel_properties.get(property) {
+                existing == value
+            } else {
+                rel_properties.insert(property.clone(), value.clone());
+                true
+            }
+        }
+        LogicalPlan::Expand { input, .. } => {
+            try_pushdown_relationship_property_eq(input, predicate)
+        }
+        _ => false,
     }
 }
 

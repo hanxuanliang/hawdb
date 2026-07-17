@@ -6711,10 +6711,13 @@ mod tests {
 
         let explain = db
             .explain_query(
-                "MATCH (m:Memory {id: 1})-[r:MENTIONS {weight: 1}]->(e:Entity) RETURN r.weight AS weight",
+                "MATCH (m:Memory {id: 1})-[r:MENTIONS]->(e:Entity) WHERE r.weight = 1 RETURN r.weight AS weight",
             )
             .unwrap();
+        let physical_plan = explain.physical_plan.explain(0);
 
+        assert!(physical_plan.contains("AdjacencyExpandExec"));
+        assert!(physical_plan.contains(r#"properties={"weight": Int(1)}"#));
         assert!(explain.trace.decisions.iter().any(|decision| {
             decision.contains("estimate AdjacencyExpand")
                 && decision.contains("rel_property_distinct_product=10")
