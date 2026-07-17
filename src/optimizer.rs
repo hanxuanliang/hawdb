@@ -2138,6 +2138,38 @@ impl OptimizerCatalog {
             .max(1)
     }
 
+    fn estimate_property_eq_rows(&self, label: &str, property: &str, input_rows: u64) -> u64 {
+        input_rows
+            .div_ceil(self.distinct_count(label, property).max(1))
+            .max(1)
+    }
+
+    fn estimate_property_range_rows(
+        &self,
+        label: &str,
+        property: &str,
+        op: ComparisonOp,
+        value: &Value,
+        input_rows: u64,
+    ) -> u64 {
+        let Some(histogram) = self
+            .property_histograms
+            .get(&(label.to_string(), property.to_string()))
+            .filter(|values| !values.is_empty())
+        else {
+            return input_rows.div_ceil(2).max(1);
+        };
+        let matching_values = histogram
+            .iter()
+            .filter(|candidate| compare_histogram_value(candidate, op, value))
+            .count() as u64;
+        let distinct_count = histogram.len() as u64;
+        input_rows
+            .saturating_mul(matching_values)
+            .div_ceil(distinct_count)
+            .max(1)
+    }
+
     fn estimate_range_bounds_rows(
         &self,
         label: &str,
@@ -4077,7 +4109,168 @@ fn estimate_filter_rows(
     catalog: &OptimizerCatalog,
 ) -> u64 {
     estimate_relationship_filter_rows(predicate, input, input_rows, catalog)
+        .or_else(|| estimate_node_property_filter_rows(predicate, input, input_rows, catalog))
         .unwrap_or_else(|| input_rows.div_ceil(2).max(1))
+}
+
+fn estimate_node_property_filter_rows(
+    predicate: &Predicate,
+    input: &PhysicalPlan,
+    input_rows: u64,
+    catalog: &OptimizerCatalog,
+) -> Option<u64> {
+    match predicate {
+        Predicate::And(predicates) => {
+            let mut rows = input_rows.max(1);
+            let mut matched = false;
+            for predicate in predicates {
+                if let Some(estimated) =
+                    estimate_node_property_filter_rows(predicate, input, rows, catalog)
+                {
+                    rows = estimated;
+                    matched = true;
+                }
+            }
+            matched.then_some(rows)
+        }
+        Predicate::PropertyEq {
+            variable, property, ..
+        } => {
+            if physical_plan_access_path_covers_property(input, variable, property) {
+                None
+            } else {
+                physical_plan_node_label(input, variable)
+                    .map(|label| catalog.estimate_property_eq_rows(label, property, input_rows))
+            }
+        }
+        Predicate::PropertyCompare {
+            variable,
+            property,
+            op,
+            value,
+        } => {
+            if physical_plan_access_path_covers_property(input, variable, property) {
+                None
+            } else {
+                physical_plan_node_label(input, variable).map(|label| {
+                    catalog.estimate_property_range_rows(label, property, *op, value, input_rows)
+                })
+            }
+        }
+        _ => None,
+    }
+}
+
+fn physical_plan_access_path_covers_property(
+    plan: &PhysicalPlan,
+    variable: &str,
+    property: &str,
+) -> bool {
+    match plan {
+        PhysicalPlan::IndexNodeSeek {
+            variable: plan_variable,
+            property: plan_property,
+            ..
+        }
+        | PhysicalPlan::IndexNodeRangeSeek {
+            variable: plan_variable,
+            property: plan_property,
+            ..
+        }
+        | PhysicalPlan::IndexNodeTextSeek {
+            variable: plan_variable,
+            property: plan_property,
+            ..
+        } => plan_variable == variable && plan_property == property,
+        PhysicalPlan::IndexNodeCompositeSeek {
+            variable: plan_variable,
+            predicates,
+            ..
+        } => {
+            plan_variable == variable
+                && predicates
+                    .iter()
+                    .any(|(plan_property, _)| plan_property == property)
+        }
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            physical_plan_access_path_covers_property(left, variable, property)
+                || physical_plan_access_path_covers_property(right, variable, property)
+        }
+        PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::NodeColumnLookupExec { input, .. }
+        | PhysicalPlan::AdjacencyExpandExec { input, .. }
+        | PhysicalPlan::OptionalDegreeExec { input, .. }
+        | PhysicalPlan::AggregateExec { input, .. }
+        | PhysicalPlan::DistinctExec { input }
+        | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. } => {
+            physical_plan_access_path_covers_property(input, variable, property)
+        }
+        _ => false,
+    }
+}
+
+fn physical_plan_node_label<'a>(plan: &'a PhysicalPlan, variable: &str) -> Option<&'a str> {
+    match plan {
+        PhysicalPlan::SeqNodeScan {
+            variable: plan_variable,
+            label,
+        }
+        | PhysicalPlan::IndexNodeSeek {
+            variable: plan_variable,
+            label,
+            ..
+        }
+        | PhysicalPlan::IndexNodeCompositeSeek {
+            variable: plan_variable,
+            label,
+            ..
+        }
+        | PhysicalPlan::IndexNodeRangeSeek {
+            variable: plan_variable,
+            label,
+            ..
+        }
+        | PhysicalPlan::IndexNodeTextSeek {
+            variable: plan_variable,
+            label,
+            ..
+        }
+        | PhysicalPlan::NodeColumnLookupExec {
+            variable: plan_variable,
+            label,
+            ..
+        } if plan_variable == variable => Some(label.as_str()),
+        PhysicalPlan::AdjacencyExpandExec {
+            source_variable,
+            source_label,
+            target_variable,
+            target_label,
+            input,
+            ..
+        } => {
+            if source_variable == variable {
+                Some(source_label.as_str())
+            } else if target_variable == variable {
+                Some(target_label.as_str())
+            } else {
+                physical_plan_node_label(input, variable)
+            }
+        }
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            physical_plan_node_label(left, variable)
+                .or_else(|| physical_plan_node_label(right, variable))
+        }
+        PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::OptionalDegreeExec { input, .. }
+        | PhysicalPlan::AggregateExec { input, .. }
+        | PhysicalPlan::DistinctExec { input }
+        | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. } => physical_plan_node_label(input, variable),
+        _ => None,
+    }
 }
 
 fn estimate_relationship_filter_rows(
@@ -5870,6 +6063,63 @@ mod tests {
                 cost: 40,
             }
         );
+    }
+
+    #[test]
+    fn post_product_node_property_filter_uses_node_statistics() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::PropertyEq {
+                variable: "m".to_string(),
+                property: "kind".to_string(),
+                value: Value::String("note".to_string()),
+            },
+            input: Box::new(LogicalPlan::NodeCartesianProduct {
+                left: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+                right: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyEq {
+                        variable: "s".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("source-42".to_string()),
+                    },
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "s".to_string(),
+                        label: "Source".to_string(),
+                    }),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([("Source".to_string(), "id".to_string())], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000), ("Source".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [
+                    (("Memory".to_string(), "kind".to_string()), 10),
+                    (("Source".to_string(), "id".to_string()), 1_000),
+                ],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 100,
+                cost: 3_007,
+            }
+        );
+        assert!(trace.decisions.iter().any(
+            |decision| decision == "selected physical plan cost: estimated_rows=100 cost=3007"
+        ));
     }
 
     #[test]

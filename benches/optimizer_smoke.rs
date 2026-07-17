@@ -146,13 +146,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             logical: low_selectivity_scan_plan(),
             catalog: low_selectivity_scan_catalog(),
             expected_cost: PlanCost {
-                estimated_rows: 500,
-                cost: 2504,
+                estimated_rows: 1000,
+                cost: 3004,
             },
             fingerprint_contains: "SeqNodeScan",
             decision_contains: &[
                 "choose SeqNodeScan",
-                "selected physical plan cost: estimated_rows=500 cost=2504",
+                "selected physical plan cost: estimated_rows=1000 cost=3004",
             ],
         },
         OptimizerSmokeCase {
@@ -245,6 +245,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "order NodeCartesianProduct single-row inputs: inputs=3",
                 "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=9 cost=13",
                 "selected physical plan cost: estimated_rows=1 cost=14",
+            ],
+        },
+        OptimizerSmokeCase {
+            name: "post_product_node_property_filter",
+            logical: post_product_node_property_filter_plan(),
+            catalog: post_product_node_property_filter_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 100,
+                cost: 3007,
+            },
+            fingerprint_contains: "FilterExec",
+            decision_contains: &[
+                "choose IndexNodeSeek for Source.id",
+                "keep NodeCartesianProduct input order: left_rows=1000 right_rows=1 reason=non_single_row_input",
+                "selected physical plan cost: estimated_rows=100 cost=3007",
             ],
         },
     ]
@@ -954,6 +969,48 @@ fn nested_endpoint_existence_cartesian_product_catalog() -> OptimizerCatalog {
                 (("Entity".to_string(), "id".to_string()), 50_000),
                 (("Memory".to_string(), "id".to_string()), 10_000),
                 (("Memory".to_string(), "kind".to_string()), 2),
+                (("Source".to_string(), "id".to_string()), 1_000),
+            ],
+            [],
+        ),
+    )
+}
+
+fn post_product_node_property_filter_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::PropertyEq {
+            variable: "m".to_string(),
+            property: "kind".to_string(),
+            value: Value::String("note".to_string()),
+        },
+        input: Box::new(LogicalPlan::NodeCartesianProduct {
+            left: Box::new(memory_scan()),
+            right: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "s".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("source-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "s".to_string(),
+                    label: "Source".to_string(),
+                }),
+            }),
+        }),
+    }
+}
+
+fn post_product_node_property_filter_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Source".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 1_000), ("Source".to_string(), 1_000)],
+            [],
+            [],
+            [],
+            [],
+            [
+                (("Memory".to_string(), "kind".to_string()), 10),
                 (("Source".to_string(), "id".to_string()), 1_000),
             ],
             [],

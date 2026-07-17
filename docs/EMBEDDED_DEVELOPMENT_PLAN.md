@@ -783,6 +783,10 @@ Current implemented slice:
   choose a stable left-deep physical input order by child cost and fingerprint,
   covering Nowledge endpoint-existence checks without changing broader
   unordered multi-row product semantics
+- residual node-property filters use the selected physical plan to recover the
+  filtered node variable's label and apply node-property distinct counts or
+  histograms, so low-selectivity scan fallbacks and cross-pattern filters are
+  not forced through the generic half-selectivity fallback
 - deterministic physical plan fingerprints are exposed through
   `OptimizerTrace::selected_plan_fingerprint` and `PhysicalPlan::fingerprint`
   for regression tests and future compatibility/shadow comparisons
@@ -797,13 +801,13 @@ Current implemented slice:
   pushed-down relationship equality plus relationship range-filter workload, a
   source-to-memory-to-label cross-pattern aggregate workload,
   endpoint-existence and nested endpoint-existence cartesian product cost
-  tracing and single-row input ordering, selected-plan cost stability,
-  deterministic fingerprints, and budget-fallback paths without depending on a
-  storage fixture
+  tracing and single-row input ordering, residual node-property filter
+  selectivity, selected-plan cost stability, deterministic fingerprints, and
+  budget-fallback paths without depending on a storage fixture
 
 Remaining Phase 4 work:
 
-- richer cross-pattern statistics
+- richer cross-pattern statistics beyond residual node-property filters
 - alternative expand implementation candidates and pattern join-order
   enumeration once multi-pattern logical plans exist
 - bounded left-deep join-order enumeration beyond the current all-single-row
