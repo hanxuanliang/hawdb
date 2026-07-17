@@ -363,6 +363,9 @@ pub struct SearchProjectionDeltaReport {
     pub upserted_documents: usize,
     pub deleted_documents: usize,
     pub operation_count: usize,
+    pub source_graph_commit_epoch_before: Option<u64>,
+    pub source_graph_commit_epoch_after: Option<u64>,
+    pub source_graph_commit_epoch_updated: bool,
 }
 
 #[derive(Debug, Default)]
@@ -460,6 +463,7 @@ impl SearchIndex {
         }
 
         let before_document_count = self.documents.len();
+        let source_graph_commit_epoch_before = self.source_graph_commit_epoch;
         let mut next_documents = self.documents.clone();
         let mut deleted_documents = 0;
         for id in delta.deletes {
@@ -475,9 +479,11 @@ impl SearchIndex {
 
         self.documents = next_documents;
         self.embedding_dimension = next_embedding_dimension;
+        let source_graph_commit_epoch_updated = delta.source_graph_commit_epoch.is_some();
         if let Some(epoch) = delta.source_graph_commit_epoch {
             self.source_graph_commit_epoch = Some(epoch);
         }
+        let source_graph_commit_epoch_after = self.source_graph_commit_epoch;
         Ok(SearchProjectionDeltaReport {
             artifact_type: "search_projection".to_string(),
             name: "search_projection".to_string(),
@@ -487,6 +493,9 @@ impl SearchIndex {
             upserted_documents,
             deleted_documents,
             operation_count,
+            source_graph_commit_epoch_before,
+            source_graph_commit_epoch_after,
+            source_graph_commit_epoch_updated,
         })
     }
 
@@ -4467,6 +4476,9 @@ mod tests {
         assert_eq!(report.upserted_documents, 1);
         assert_eq!(report.deleted_documents, 1);
         assert_eq!(report.operation_count, 2);
+        assert_eq!(report.source_graph_commit_epoch_before, None);
+        assert_eq!(report.source_graph_commit_epoch_after, None);
+        assert!(!report.source_graph_commit_epoch_updated);
         assert!(index.document("memory:old").is_none());
         assert!(index.document("memory:new").is_some());
         let hits = index.search("embedded search", None, SearchMode::Text, 10);
@@ -4476,7 +4488,7 @@ mod tests {
     #[test]
     fn projection_delta_updates_source_graph_commit_epoch_when_provided() {
         let mut index = SearchIndex::in_memory();
-        index
+        let report = index
             .apply_projection_delta(SearchProjectionDelta {
                 upserts: vec![SearchProjectionRow {
                     kind: SearchProjectionKind::Memory,
@@ -4493,6 +4505,9 @@ mod tests {
             })
             .unwrap();
 
+        assert_eq!(report.source_graph_commit_epoch_before, None);
+        assert_eq!(report.source_graph_commit_epoch_after, Some(7));
+        assert!(report.source_graph_commit_epoch_updated);
         assert_eq!(
             index.projection_freshness().source_graph_commit_epoch,
             Some(7)

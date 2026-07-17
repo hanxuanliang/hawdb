@@ -365,6 +365,12 @@ fn database_facade_builds_search_projection_delta_from_graph_nodes() {
     assert_eq!(report.operation_count, 2);
     assert_eq!(report.upserted_documents, 1);
     assert_eq!(report.deleted_documents, 1);
+    assert_eq!(report.source_graph_commit_epoch_before, None);
+    assert_eq!(
+        report.source_graph_commit_epoch_after,
+        Some(db.store.commit_epoch())
+    );
+    assert!(report.source_graph_commit_epoch_updated);
     assert_eq!(
         search_index
             .projection_freshness()

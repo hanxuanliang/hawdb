@@ -582,9 +582,11 @@ background-QoS, and scheduled-background facades as lower-level
 `SearchProjectionDelta`. Graph-derived deltas can carry an explicit
 complete-through graph commit epoch only when the caller knows the delta covers
 all projection-relevant changes through that epoch, so retrieval diagnostics can
-distinguish a fresh incremental projection from a partial one. This keeps
-FTS/vector projection maintenance incremental without writing search state into
-the graph WAL.
+distinguish a fresh incremental projection from a partial one. Delta apply
+reports include the source graph commit epoch before and after the update plus a
+boolean indicating whether this delta advanced the projection freshness
+watermark. This keeps FTS/vector projection maintenance incremental without
+writing search state into the graph WAL.
 
 Typed knowledge operations can bypass the search projection entirely when the
 caller already has graph identity. `Database::knowledge_entity` returns a
