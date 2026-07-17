@@ -458,10 +458,11 @@ keys map to same-name scalar node properties. Returned diagnostics preserve the
 search limit, rank window, graph seed budget, graph context budget, candidate
 budget, filtered candidate counts, search document scope, search hit count,
 graph seed counts, graph context path count, fan-out reason count, final
-candidate count, projection source graph commit epoch, stale projection
-warnings, projection marker warnings, and empty-result reasons. This keeps
-Knowledge Retrieval as the primary application-facing path while preserving the
-rule that search artifacts are rebuildable and outside the graph WAL.
+candidate count, pre-limit merged candidate count, projection source graph
+commit epoch, stale projection warnings, projection marker warnings, and
+empty-result reasons. This keeps Knowledge Retrieval as the primary
+application-facing path while preserving the rule that search artifacts are
+rebuildable and outside the graph WAL.
 
 `Database::retrieve_knowledge` also includes a bounded graph-native seed
 retriever over canonical nodes. `KnowledgeRetrievalRequest::graph_seed_limit`

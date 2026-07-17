@@ -404,6 +404,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_context_max_hops: usize,
     pub fanout_reason_count: usize,
     pub candidate_count: usize,
+    pub candidate_total_count: usize,
     pub candidate_limit: Option<usize>,
     pub warnings: Vec<String>,
     pub empty_reasons: Vec<String>,
@@ -1061,14 +1062,15 @@ impl Database {
             request.graph_seed_limit,
             graph_seed_candidate_count,
         );
-        let (candidates, candidate_fanout_reasons) = self.knowledge_candidates(
-            &search,
-            &evidence,
-            &graph_seeds,
-            &graph_context_paths,
-            request.candidate_limit,
-            request.candidate_scoring,
-        );
+        let (candidates, candidate_total_count, candidate_fanout_reasons) = self
+            .knowledge_candidates(
+                &search,
+                &evidence,
+                &graph_seeds,
+                &graph_context_paths,
+                request.candidate_limit,
+                request.candidate_scoring,
+            );
         let mut fanout_reasons = fanout_reasons;
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
@@ -1084,6 +1086,7 @@ impl Database {
                 graph_context_path_count: graph_context_paths.len(),
                 fanout_reason_count: fanout_reasons.len(),
                 candidate_count: candidates.len(),
+                candidate_total_count,
             },
         );
         KnowledgeRetrievalOutput {
@@ -1456,7 +1459,7 @@ impl Database {
         graph_context_paths: &[KnowledgeGraphContextPath],
         candidate_limit: Option<usize>,
         scoring: KnowledgeCandidateScoringPolicy,
-    ) -> (Vec<KnowledgeCandidate>, Vec<String>) {
+    ) -> (Vec<KnowledgeCandidate>, usize, Vec<String>) {
         let mut candidates = search
             .hits
             .iter()
@@ -1552,7 +1555,7 @@ impl Database {
                 ));
             }
         }
-        (candidates, fanout_reasons)
+        (candidates, total, fanout_reasons)
     }
 
     fn search_knowledge_graph_seeds(
@@ -1744,6 +1747,7 @@ struct KnowledgeRetrievalDiagnosticsInput {
     graph_context_path_count: usize,
     fanout_reason_count: usize,
     candidate_count: usize,
+    candidate_total_count: usize,
 }
 
 fn knowledge_retrieval_diagnostics(
@@ -1783,6 +1787,7 @@ fn knowledge_retrieval_diagnostics(
         graph_context_max_hops: request.graph_context_max_hops,
         fanout_reason_count: input.fanout_reason_count,
         candidate_count: input.candidate_count,
+        candidate_total_count: input.candidate_total_count,
         candidate_limit: request.candidate_limit,
         warnings: knowledge_retrieval_warnings(projection_freshness, graph_commit_epoch),
         empty_reasons,
@@ -4096,6 +4101,10 @@ mod tests {
         assert_eq!(output.diagnostics.graph_context_limit, 4);
         assert_eq!(output.diagnostics.graph_context_max_hops, 1);
         assert_eq!(output.diagnostics.candidate_limit, None);
+        assert_eq!(
+            output.diagnostics.candidate_total_count,
+            output.diagnostics.candidate_count
+        );
         assert_eq!(output.diagnostics.graph_context_path_count, 1);
         assert_eq!(output.graph_context_paths.len(), 1);
         assert!(output
@@ -5056,6 +5065,8 @@ mod tests {
         assert_eq!(output.candidates.len(), 1);
         assert_eq!(output.diagnostics.search_limit, 5);
         assert_eq!(output.diagnostics.candidate_limit, Some(1));
+        assert_eq!(output.diagnostics.candidate_count, 1);
+        assert_eq!(output.diagnostics.candidate_total_count, 3);
         assert_eq!(output.diagnostics.graph_seed_limit, 3);
         assert_eq!(output.diagnostics.graph_context_limit, 0);
         assert_eq!(
