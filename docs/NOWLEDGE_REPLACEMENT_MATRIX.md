@@ -49,6 +49,9 @@ scheduler coverage includes GraphMeta state reads, candidate scans, member
 entity lookups, and summary writes. Cleanup scheduler coverage includes bounded
 seed scans, EVOLVES pair reads, cleanup fingerprint row fetches, and floor-zero
 engagement `CASE` ordering.
+External content artifact orchestration also exposes bounded pending polling and
+explicit failed-job retry for caller-owned parser runtimes, while keeping
+database-owned projected graph artifact rebuilds on the graph-kernel runner.
 
 ## Current Compatibility Evidence
 

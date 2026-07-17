@@ -91,6 +91,25 @@ impl Database {
             .collect()
     }
 
+    pub fn retry_failed_external_content_artifact_job(
+        &mut self,
+        job_id: u64,
+    ) -> Option<DerivedArtifactJob> {
+        let job = self
+            .derived_artifact_jobs
+            .iter_mut()
+            .find(|job| job.id == job_id)?;
+        if job.status != DerivedArtifactJobStatus::Failed
+            || !is_external_content_artifact_job(&job.artifact_type)
+        {
+            return None;
+        }
+
+        job.status = DerivedArtifactJobStatus::Pending;
+        job.last_error = None;
+        Some(job.clone())
+    }
+
     pub fn run_next_derived_artifact_job(&mut self) -> Result<Option<DerivedArtifactJobReport>> {
         self.ensure_writable()?;
         let Some(index) = self

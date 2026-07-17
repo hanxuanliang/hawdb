@@ -308,6 +308,11 @@ the content artifact runtime and complete the job status without embedding
 parsing, crawling, chunking, or large-value runtime logic in Skein. That runtime
 reads the payload and publishes rebuildable projections back to Skein through
 caller-owned output.
+`Database::retry_failed_external_content_artifact_job` explicitly resets failed
+external content jobs to pending, preserving the payload and attempt history
+while clearing the last error. It does not retry graph-kernel projected artifact
+jobs, keeping content parser recovery separate from database-owned artifact
+rebuilds.
 
 Search projection rebuild has the same orchestration shape at the search layer:
 `SearchIndex::rebuild_derived_artifacts` reports the search projection artifact

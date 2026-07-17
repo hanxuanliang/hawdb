@@ -4717,6 +4717,81 @@ fn pending_external_content_artifact_jobs_are_bounded_and_filtered() {
 }
 
 #[test]
+fn failed_external_content_artifact_jobs_can_be_retried() {
+    let mut db = Database::new();
+    let job = db.schedule_external_content_artifact_job_with_payload(
+        "source-1",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-1.md".to_string()),
+        )]),
+    );
+
+    let failed = db
+        .run_next_external_content_artifact_job_with(|_| {
+            Err(crate::error::SkeinError::Execution(
+                "transient parser failure".to_string(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(failed.job.status, DerivedArtifactJobStatus::Failed);
+    assert_eq!(failed.job.attempts, 1);
+    assert!(failed
+        .job
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("transient parser failure")));
+    assert!(db.pending_external_content_artifact_jobs(8).is_empty());
+
+    let retried = db
+        .retry_failed_external_content_artifact_job(job.id)
+        .unwrap();
+    assert_eq!(retried.status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(retried.attempts, 1);
+    assert!(retried.last_error.is_none());
+    assert_eq!(
+        retried.payload.get("content_uri"),
+        Some(&Value::String("file:///nowledge/source-1.md".to_string()))
+    );
+    assert_eq!(db.pending_external_content_artifact_jobs(8)[0].id, job.id);
+
+    let succeeded = db
+        .run_next_external_content_artifact_job_with(|job| {
+            Ok(QueryOutput {
+                rows: vec![BTreeMap::from([
+                    ("job_id".to_string(), Value::Int(job.id as i64)),
+                    ("attempts".to_string(), Value::Int(job.attempts as i64)),
+                ])],
+            })
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(succeeded.job.status, DerivedArtifactJobStatus::Succeeded);
+    assert_eq!(succeeded.job.attempts, 2);
+    assert!(succeeded.job.last_error.is_none());
+    assert_eq!(
+        succeeded.output.rows[0].get("attempts"),
+        Some(&Value::Int(2))
+    );
+    assert!(db
+        .retry_failed_external_content_artifact_job(job.id)
+        .is_none());
+
+    let projected_graph_job = db.schedule_projected_graph_artifact_rebuild("MissingGraph");
+    let projected_graph_failure = db.run_next_derived_artifact_job().unwrap().unwrap();
+    assert_eq!(projected_graph_failure.job.id, projected_graph_job.id);
+    assert_eq!(
+        projected_graph_failure.job.status,
+        DerivedArtifactJobStatus::Failed
+    );
+    assert!(db
+        .retry_failed_external_content_artifact_job(projected_graph_job.id)
+        .is_none());
+}
+
+#[test]
 fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
     let mut db = Database::new();
     let job = db.schedule_external_content_artifact_job_with_payload(
