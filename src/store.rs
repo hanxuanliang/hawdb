@@ -5298,6 +5298,7 @@ impl GraphStore {
                 | ["stat_label_count", _, _]
                 | ["stat_rel_type_count", _, _]
                 | ["stat_rel_type_source_count", _, _]
+                | ["stat_rel_type_target_count", _, _]
                 | ["stat_path_count", _, _, _, _]
                 | ["stat_bounded_path_count", _, _, _, _, _]
                 | ["stat_property_distinct_count", _, _, _]
@@ -5881,6 +5882,12 @@ impl DurableStore {
         for (rel_type_id, count) in &statistics.rel_type_source_counts {
             body.push_str(&format!(
                 "stat_rel_type_source_count\t{}\t{}\n",
+                rel_type_id.0, count
+            ));
+        }
+        for (rel_type_id, count) in &statistics.rel_type_target_counts {
+            body.push_str(&format!(
+                "stat_rel_type_target_count\t{}\t{}\n",
                 rel_type_id.0, count
             ));
         }
@@ -7865,6 +7872,7 @@ fn compute_statistics(
     let mut property_values = BTreeMap::<(LabelId, String), BTreeSet<Value>>::new();
     let mut rel_property_values = BTreeMap::<(RelTypeId, String), BTreeSet<Value>>::new();
     let mut rel_type_sources = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
+    let mut rel_type_targets = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
     let mut outgoing_by_source_type = BTreeMap::<(NodeId, RelTypeId), Vec<NodeId>>::new();
 
     for node in nodes.values() {
@@ -7887,6 +7895,10 @@ fn compute_statistics(
             .entry(relationship.rel_type)
             .or_default()
             .insert(relationship.source);
+        rel_type_targets
+            .entry(relationship.rel_type)
+            .or_default()
+            .insert(relationship.target);
         outgoing_by_source_type
             .entry((relationship.source, relationship.rel_type))
             .or_default()
@@ -7914,6 +7926,10 @@ fn compute_statistics(
     statistics.rel_type_source_counts = rel_type_sources
         .into_iter()
         .map(|(rel_type, sources)| (rel_type, sources.len() as u64))
+        .collect();
+    statistics.rel_type_target_counts = rel_type_targets
+        .into_iter()
+        .map(|(rel_type, targets)| (rel_type, targets.len() as u64))
         .collect();
     for (key, values) in property_values {
         let histogram_sample_limit = adaptive_histogram_sample_limit(values.len());

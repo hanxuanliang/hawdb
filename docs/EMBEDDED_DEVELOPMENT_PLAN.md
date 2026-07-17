@@ -828,8 +828,8 @@ Current implemented slice:
 - persistent equality index descriptors for observed label/property pairs
 - checkpointed graph statistics for total nodes, total relationships,
   per-label counts, per-relationship-type counts, relationship-type source
-  counts, label/type/label one-hop path cardinalities, bounded exact multi-hop
-  path cardinalities, per-label/property distinct-value counts, and
+  and target counts, label/type/label one-hop path cardinalities, bounded exact
+  multi-hop path cardinalities, per-label/property distinct-value counts, and
   per-relationship-type/property distinct-value counts plus relationship
   property histograms
 - statistics freshness metadata with the commit epoch used to compute the

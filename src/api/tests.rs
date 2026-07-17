@@ -6364,6 +6364,7 @@ fn exposes_property_index_descriptors_and_statistics() {
     assert_eq!(statistics.label_counts.values().sum::<u64>(), 4);
     assert_eq!(statistics.rel_type_counts.values().sum::<u64>(), 1);
     assert_eq!(statistics.rel_type_source_counts.values().sum::<u64>(), 1);
+    assert_eq!(statistics.rel_type_target_counts.values().sum::<u64>(), 1);
     assert_eq!(statistics.path_counts.values().sum::<u64>(), 1);
     assert_eq!(
         statistics.property_distinct_counts.values().copied().max(),
@@ -6439,6 +6440,7 @@ fn checkpoint_persists_index_descriptors_and_statistics() {
     assert!(checkpoint.contains("stat_property_histogram"));
     assert!(checkpoint.contains("stat_rel_property_histogram_sampled"));
     assert!(checkpoint.contains("stat_property_histogram_sampled"));
+    assert!(checkpoint.contains("stat_rel_type_target_count"));
 
     {
         let db = Database::open(&path).unwrap();

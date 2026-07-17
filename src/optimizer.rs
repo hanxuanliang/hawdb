@@ -1888,6 +1888,7 @@ pub struct OptimizerCatalog {
     label_counts: BTreeMap<String, u64>,
     rel_type_counts: BTreeMap<String, u64>,
     rel_type_source_counts: BTreeMap<String, u64>,
+    rel_type_target_counts: BTreeMap<String, u64>,
     path_counts: BTreeMap<(String, String, String), u64>,
     bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     property_distinct_counts: BTreeMap<(String, String), u64>,
@@ -1909,6 +1910,7 @@ pub struct OptimizerCatalogStatistics {
     label_counts: BTreeMap<String, u64>,
     rel_type_counts: BTreeMap<String, u64>,
     rel_type_source_counts: BTreeMap<String, u64>,
+    rel_type_target_counts: BTreeMap<String, u64>,
     path_counts: BTreeMap<(String, String, String), u64>,
     bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     property_distinct_counts: BTreeMap<(String, String), u64>,
@@ -1991,6 +1993,7 @@ impl OptimizerCatalog {
             label_counts: statistics.label_counts,
             rel_type_counts: statistics.rel_type_counts,
             rel_type_source_counts: statistics.rel_type_source_counts,
+            rel_type_target_counts: statistics.rel_type_target_counts,
             path_counts: statistics.path_counts,
             bounded_path_counts: statistics.bounded_path_counts,
             property_distinct_counts: statistics.property_distinct_counts,
@@ -2435,6 +2438,7 @@ impl OptimizerCatalogStatistics {
             label_counts: label_counts.into_iter().collect(),
             rel_type_counts: rel_type_counts.into_iter().collect(),
             rel_type_source_counts: rel_type_source_counts.into_iter().collect(),
+            rel_type_target_counts: BTreeMap::new(),
             path_counts: path_counts.into_iter().collect(),
             bounded_path_counts: bounded_path_counts.into_iter().collect(),
             property_distinct_counts: property_distinct_counts.into_iter().collect(),
@@ -2449,6 +2453,14 @@ impl OptimizerCatalogStatistics {
         rel_property_distinct_counts: impl IntoIterator<Item = ((String, String), u64)>,
     ) -> Self {
         self.rel_property_distinct_counts = rel_property_distinct_counts.into_iter().collect();
+        self
+    }
+
+    pub fn with_relationship_type_target_counts(
+        mut self,
+        rel_type_target_counts: impl IntoIterator<Item = (String, u64)>,
+    ) -> Self {
+        self.rel_type_target_counts = rel_type_target_counts.into_iter().collect();
         self
     }
 

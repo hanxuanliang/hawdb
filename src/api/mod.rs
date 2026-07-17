@@ -3807,6 +3807,15 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
                     .rel_type_name(*rel_type_id)
                     .map(|rel_type| (rel_type.to_string(), *count))
             });
+    let rel_type_target_counts =
+        statistics
+            .rel_type_target_counts
+            .iter()
+            .filter_map(|(rel_type_id, count)| {
+                catalog
+                    .rel_type_name(*rel_type_id)
+                    .map(|rel_type| (rel_type.to_string(), *count))
+            });
     let path_counts = statistics.path_counts.iter().filter_map(
         |((source_label_id, rel_type_id, target_label_id), count)| {
             Some((
@@ -3880,6 +3889,7 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
             property_distinct_counts,
             property_histograms,
         )
+        .with_relationship_type_target_counts(rel_type_target_counts)
         .with_relationship_property_distinct_counts(rel_property_distinct_counts)
         .with_relationship_property_histograms(rel_property_histograms),
     )
