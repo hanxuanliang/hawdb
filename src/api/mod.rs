@@ -16,10 +16,10 @@ use crate::schema::{
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
-    projection_row_from_node, SearchCandidateSetReport, SearchFusionWeights, SearchIndex,
-    SearchMatchedSpan, SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet, SearchRetrieverCandidateSetReport,
+    projection_row_from_node, SearchCandidateSetReport, SearchDerivedArtifactReport,
+    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -1310,6 +1310,44 @@ impl Database {
         options: SearchRebuildOptions,
     ) -> Result<SearchRebuildSummary> {
         search_index.rebuild_from_graph(&self.catalog, &self.store, options)
+    }
+
+    pub fn search_projection_rebuild_background_work_plan(
+        &self,
+        search_index: &SearchIndex,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        search_index.rebuild_background_work_plan(&self.store, hint)
+    }
+
+    pub fn rebuild_background_search_projection(
+        &self,
+        search_index: &mut SearchIndex,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: SearchRebuildOptions,
+    ) -> Result<SearchDerivedArtifactReport> {
+        search_index.rebuild_background_derived_artifacts(
+            policy,
+            state,
+            &self.catalog,
+            &self.store,
+            options,
+        )
+    }
+
+    pub fn rebuild_scheduled_background_search_projection(
+        &self,
+        search_index: &mut SearchIndex,
+        scheduler: &mut LocalQosScheduler,
+        options: SearchRebuildOptions,
+    ) -> Result<SearchDerivedArtifactReport> {
+        search_index.rebuild_scheduled_background_derived_artifacts(
+            scheduler,
+            &self.catalog,
+            &self.store,
+            options,
+        )
     }
 
     pub fn search_projection_delta_background_work_plan(

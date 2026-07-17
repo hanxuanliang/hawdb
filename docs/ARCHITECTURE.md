@@ -475,9 +475,11 @@ sets, top hit IDs, and per-child top candidate ranks and scores.
 
 The stable embedded facade exposes this boundary without owning search state:
 `Database::rebuild_search_projection` derives projection rows from the canonical
-graph into a caller-owned `SearchIndex`, while
-`DatabaseReadTransaction::rebuild_search_projection` can derive the same
-projection from a pinned catalog and graph snapshot. `Database::retrieve_knowledge`
+graph into a caller-owned `SearchIndex`, and the background variants expose the
+same rebuild through `LocalQosPolicy` or `LocalQosScheduler` admission for
+caller-owned maintenance loops. `DatabaseReadTransaction::rebuild_search_projection`
+can derive the same projection from a pinned catalog and graph snapshot.
+`Database::retrieve_knowledge`
 combines the projection report with the current graph commit epoch and a compact
 diagnostics summary. `DatabaseReadTransaction::retrieve_knowledge` uses the same
 caller-owned `SearchIndex` while resolving graph seeds and graph context against

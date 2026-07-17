@@ -315,6 +315,79 @@ fn database_facade_scheduled_search_projection_delta_releases_background_budget(
 }
 
 #[test]
+fn database_facade_background_search_projection_rebuild_uses_qos_admission() {
+    let mut db = Database::new();
+    for id in ["mem_1", "mem_2"] {
+        db.query(&format!(
+            "CREATE (:Memory {{id: '{id}', title: '{id}', content: 'background rebuild'}})"
+        ))
+        .unwrap();
+    }
+    let mut search_index = SearchIndex::in_memory();
+    search_index
+        .upsert_projection_row(search_projection_row("old", "Old projection", "Keep me"))
+        .unwrap();
+
+    let plan = db
+        .search_projection_rebuild_background_work_plan(
+            &search_index,
+            BackgroundWorkHint {
+                active_topic: true,
+                ..BackgroundWorkHint::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(plan.request.class, WorkClass::Projection);
+    assert_eq!(plan.request.estimated_operations, 2);
+
+    let policy = LocalQosPolicy {
+        max_background_operations: Some(1),
+        ..LocalQosPolicy::default()
+    };
+    let error = db
+        .rebuild_background_search_projection(
+            &mut search_index,
+            &policy,
+            &LocalQosState::default(),
+            SearchRebuildOptions::default(),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("deferred"));
+    assert!(search_index.document("memory:old").is_some());
+    assert!(search_index.document("memory:mem_1").is_none());
+}
+
+#[test]
+fn database_facade_scheduled_search_projection_rebuild_releases_background_budget() {
+    let mut db = Database::new();
+    for id in ["mem_1", "mem_2"] {
+        db.query(&format!(
+            "CREATE (:Memory {{id: '{id}', title: '{id}', content: 'scheduled rebuild'}})"
+        ))
+        .unwrap();
+    }
+    let mut search_index = SearchIndex::in_memory();
+    search_index
+        .upsert_projection_row(search_projection_row("old", "Old projection", "Keep me"))
+        .unwrap();
+    let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+    let error = db
+        .rebuild_scheduled_background_search_projection(
+            &mut search_index,
+            &mut scheduler,
+            SearchRebuildOptions { max_rows: Some(1) },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("row limit"));
+    assert_eq!(scheduler.state().running_background_operations, 0);
+    assert!(search_index.document("memory:old").is_some());
+    assert!(search_index.document("memory:mem_1").is_none());
+}
+
+#[test]
 fn database_facade_builds_search_projection_delta_from_graph_nodes() {
     let mut db = Database::new();
     let node_id = db
