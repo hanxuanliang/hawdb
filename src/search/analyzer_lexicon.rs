@@ -23,6 +23,24 @@ pub(super) const CORE_SEMANTIC_ALIAS_RULES: &[(&[&str], &[&str])] = &[
     (&["csr"], &["compressed_sparse_row"]),
     (&["full_text", "full_text_search", "text_search"], &["fts"]),
     (&["fts"], &["full_text_search", "text_search"]),
+    (
+        &["bulk_graph_import", "bulk_import", "graph_import"],
+        &["graph_lightning"],
+    ),
+    (
+        &["checkpoint", "checkpointed"],
+        &["snapshot", "storage_snapshot"],
+    ),
+    (&["content_stream", "contentstream"], &["value_stream"]),
+    (
+        &["graph_export", "graph_stream", "graphstream"],
+        &["graphstream"],
+    ),
+    (
+        &["graph_lightning", "graphlightning", "lightning_import"],
+        &["bulk_graph_import", "graph_import"],
+    ),
+    (&["graphstream"], &["graph_stream", "graph_export"]),
     (&["hybrid_retrieval"], &["hybrid_retrieve", "hybrid_search"]),
     (&["hybrid_retrieve", "hybrid_search"], &["hybrid_retrieval"]),
     (&["kg"], &["knowledge_graph"]),
@@ -47,6 +65,10 @@ pub(super) const CORE_SEMANTIC_ALIAS_RULES: &[(&[&str], &[&str])] = &[
     (&["pg", "postgres"], &["postgresql"]),
     (&["postgresql"], &["postgres", "pg"]),
     (&["pg_vector", "pgvector"], &["vector_search"]),
+    (
+        &["projection_freshness", "projection_staleness"],
+        &["freshness"],
+    ),
     (
         &["rag"],
         &[
@@ -76,4 +98,9 @@ pub(super) const CORE_SEMANTIC_ALIAS_RULES: &[(&[&str], &[&str])] = &[
     ),
     (&["rrf"], &["reciprocal_rank_fusion"]),
     (&["semantic_search", "vector_search"], &["pgvector"]),
+    (
+        &["snapshot", "storage_snapshot"],
+        &["checkpoint", "checkpointed"],
+    ),
+    (&["value_stream", "valuestream"], &["content_stream"]),
 ];
