@@ -63,11 +63,12 @@ Graph Lightning bootstrap bundle export gates likewise split manifest and
 GraphStream blockers into counts and grouped messages for import preflight
 automation.
 Staging verification gates also split artifact, manifest, GraphStream, bundle,
-and catalog errors into grouped arrays for offline upload/resume automation.
+and catalog errors into grouped arrays for offline upload/resume automation,
+with staged artifact count/byte summaries for upload observability.
 Published-pointer verification gates split pointer, catalog, and staging errors
 for Graph Lightning resume checks.
 Staging GC gates also group published-pointer verification errors before
-declaring artifacts deletable.
+declaring artifacts deletable and report total/pinned/deletable staging bytes.
 Import-status reports add a machine-readable `resume_action`, optional
 caller-owned state-marker aggregation with active-state idempotency-key
 validation, optional caller-owned checkpoint-log aggregation with failure

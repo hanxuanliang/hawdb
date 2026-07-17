@@ -868,6 +868,8 @@ fn stage_graph_lightning_bootstrap_export(
         "graph_lightning_bootstrap_bundle.json",
         &bundle_bytes,
     )?;
+    let artifacts = vec![manifest_artifact, graph_stream_artifact, bundle_artifact];
+    let artifact_summary = graph_lightning_artifact_summary(&artifacts, "byte_len");
     let catalog = serde_json::json!({
         "protocol": "graph-lightning-staging-catalog",
         "protocol_version": 1,
@@ -876,11 +878,8 @@ fn stage_graph_lightning_bootstrap_export(
         "logical_checksum": export.manifest.logical_checksum,
         "schema_checksum": export.manifest.schema_checksum,
         "export_gate": bundle["export_gate"].clone(),
-        "artifacts": [
-            manifest_artifact,
-            graph_stream_artifact,
-            bundle_artifact,
-        ],
+        "artifact_summary": artifact_summary,
+        "artifacts": artifacts,
         "graph_stream_validation": graph_lightning_graph_stream_validation_json(&graph_stream_validation),
     });
     let catalog_bytes = serde_json::to_vec_pretty(&catalog).unwrap();
@@ -1109,6 +1108,7 @@ fn verify_graph_lightning_staging_catalog(
                 .and_then(serde_json::Value::as_bool)
                 == Some(true)
     });
+    let artifact_summary = graph_lightning_artifact_summary(&artifact_reports, "actual_byte_len");
     let catalog_state_ready = catalog
         .get("stage_state")
         .and_then(serde_json::Value::as_str)
@@ -1155,6 +1155,7 @@ fn verify_graph_lightning_staging_catalog(
         "bundle_matches_artifacts": bundle_matches_artifacts,
         "catalog_state_ready": catalog_state_ready,
         "graph_stream_validation": graph_stream_validation_json,
+        "artifact_summary": artifact_summary,
         "artifacts": artifact_reports,
         "validation_gate": {
             "decision": decision,
@@ -1594,6 +1595,20 @@ fn graph_lightning_gc_staging_report(
                 == Some(true)
         })
         .count();
+    let total_bytes = graph_lightning_sum_artifact_bytes(&candidate_reports, |_| true);
+    let deletable_bytes = graph_lightning_sum_artifact_bytes(&candidate_reports, |candidate| {
+        candidate
+            .get("deletable")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    });
+    let pinned_bytes = graph_lightning_sum_artifact_bytes(&candidate_reports, |candidate| {
+        candidate
+            .get("pinned_by_published_pointer")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+    });
+    let artifact_summary = graph_lightning_artifact_summary(&candidate_reports, "byte_len");
     let decision = if errors.is_empty() {
         "ready"
     } else {
@@ -1606,6 +1621,10 @@ fn graph_lightning_gc_staging_report(
         "candidate_count": candidate_reports.len(),
         "pinned_count": pinned_count,
         "deletable_count": deletable_count,
+        "total_bytes": total_bytes,
+        "pinned_bytes": pinned_bytes,
+        "deletable_bytes": deletable_bytes,
+        "artifact_summary": artifact_summary,
         "candidates": candidate_reports,
         "gc_gate": {
             "decision": decision,
@@ -1655,6 +1674,51 @@ fn graph_lightning_staging_gc_candidates(
         }));
     }
     Ok(candidates)
+}
+
+fn graph_lightning_artifact_summary(
+    artifacts: &[serde_json::Value],
+    byte_len_field: &str,
+) -> serde_json::Value {
+    let mut kind_counts = BTreeMap::new();
+    let mut total_byte_len = 0u64;
+    let mut measured_object_count = 0usize;
+    for artifact in artifacts {
+        if let Some(kind) = artifact.get("kind").and_then(serde_json::Value::as_str) {
+            *kind_counts.entry(kind.to_string()).or_insert(0usize) += 1;
+        }
+        if let Some(byte_len) = artifact
+            .get(byte_len_field)
+            .and_then(serde_json::Value::as_u64)
+        {
+            total_byte_len = total_byte_len.saturating_add(byte_len);
+            measured_object_count += 1;
+        }
+    }
+    let average_byte_len = if measured_object_count == 0 {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!(total_byte_len as f64 / measured_object_count as f64)
+    };
+    serde_json::json!({
+        "object_count": artifacts.len(),
+        "measured_object_count": measured_object_count,
+        "missing_byte_len_count": artifacts.len().saturating_sub(measured_object_count),
+        "total_byte_len": total_byte_len,
+        "average_byte_len": average_byte_len,
+        "kind_counts": kind_counts,
+    })
+}
+
+fn graph_lightning_sum_artifact_bytes(
+    artifacts: &[serde_json::Value],
+    predicate: impl Fn(&serde_json::Value) -> bool,
+) -> u64 {
+    artifacts
+        .iter()
+        .filter(|artifact| predicate(artifact))
+        .filter_map(|artifact| artifact.get("byte_len").and_then(serde_json::Value::as_u64))
+        .sum()
 }
 
 fn graph_lightning_import_status(
@@ -3058,6 +3122,21 @@ mod tests {
         assert_eq!(catalog["stage_state"], "READY");
         assert_eq!(catalog["export_gate"]["decision"], "ready");
         assert_eq!(catalog["artifacts"].as_array().unwrap().len(), 3);
+        assert_eq!(catalog["artifact_summary"]["object_count"], 3);
+        assert_eq!(catalog["artifact_summary"]["measured_object_count"], 3);
+        assert_eq!(catalog["artifact_summary"]["missing_byte_len_count"], 0);
+        assert!(
+            catalog["artifact_summary"]["total_byte_len"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(catalog["artifact_summary"]["kind_counts"]["manifest"], 1);
+        assert_eq!(
+            catalog["artifact_summary"]["kind_counts"]["graph_stream"],
+            1
+        );
+        assert_eq!(catalog["artifact_summary"]["kind_counts"]["bundle"], 1);
         assert!(staging_dir
             .join("graph_lightning_bootstrap_manifest.json")
             .exists());
@@ -3098,6 +3177,15 @@ mod tests {
         assert_eq!(report["artifact_integrity"], true);
         assert_eq!(report["manifest_matches_graph_stream"], true);
         assert_eq!(report["bundle_matches_artifacts"], true);
+        assert_eq!(report["artifact_summary"]["object_count"], 3);
+        assert_eq!(report["artifact_summary"]["measured_object_count"], 3);
+        assert_eq!(report["artifact_summary"]["missing_byte_len_count"], 0);
+        assert!(
+            report["artifact_summary"]["total_byte_len"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
         assert_eq!(report["validation_gate"]["artifact_errors"], 0);
         assert_eq!(report["validation_gate"]["manifest_errors"], 0);
         assert_eq!(report["validation_gate"]["graph_stream_errors"], 0);
@@ -3496,6 +3584,11 @@ mod tests {
         assert_eq!(report["candidate_count"], 4);
         assert_eq!(report["pinned_count"], 4);
         assert_eq!(report["deletable_count"], 0);
+        assert_eq!(report["artifact_summary"]["object_count"], 4);
+        assert_eq!(report["artifact_summary"]["measured_object_count"], 4);
+        assert!(report["total_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(report["pinned_bytes"], report["total_bytes"]);
+        assert_eq!(report["deletable_bytes"], 0);
         assert_eq!(report["gc_gate"]["decision"], "ready");
         assert_eq!(report["gc_gate"]["published_pointer_errors"], 0);
         assert!(report["candidates"]
@@ -3528,6 +3621,11 @@ mod tests {
         assert_eq!(report["candidate_count"], 4);
         assert_eq!(report["pinned_count"], 0);
         assert_eq!(report["deletable_count"], 4);
+        assert_eq!(report["artifact_summary"]["object_count"], 4);
+        assert_eq!(report["artifact_summary"]["measured_object_count"], 4);
+        assert!(report["total_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(report["pinned_bytes"], 0);
+        assert_eq!(report["deletable_bytes"], report["total_bytes"]);
         assert_eq!(report["gc_gate"]["decision"], "ready");
         assert_eq!(report["gc_gate"]["published_pointer_errors"], 0);
         assert!(report["candidates"]
@@ -3566,6 +3664,9 @@ mod tests {
         assert_eq!(report["candidate_count"], 4);
         assert_eq!(report["pinned_count"], 0);
         assert_eq!(report["deletable_count"], 0);
+        assert!(report["total_bytes"].as_u64().unwrap() > 0);
+        assert_eq!(report["pinned_bytes"], 0);
+        assert_eq!(report["deletable_bytes"], 0);
         assert_eq!(report["gc_gate"]["decision"], "blocked");
         assert_eq!(report["gc_gate"]["published_pointer_errors"], 4);
         assert!(report["gc_gate"]["published_pointer_error_messages"]

@@ -146,13 +146,17 @@ without parsing strings.
 <staging-dir>` writes a local staging catalog plus manifest, GraphStream, and
 bootstrap bundle artifacts with atomic file publication and directory sync. The
 catalog is the v1 local checkpoint boundary for offline bootstrap upload/resume;
-it is outside the graph WAL and does not alter the published graph snapshot.
+it is outside the graph WAL and does not alter the published graph snapshot. The
+catalog also summarizes staged object count, measured byte count, total bytes,
+average object size, and per-kind object counts for upload observability.
 `skein graph-lightning-verify-staging [--require-ready] <staging-dir>` reopens
 that staging catalog without the source database, verifies artifact byte
 lengths and checksums, recomputes GraphStream validation, and checks agreement
 between the catalog, manifest, bundle, and GraphStream artifact. Its validation
 gate keeps flat errors for logs and grouped artifact, manifest, GraphStream,
-bundle, and catalog error arrays for local upload/resume automation.
+bundle, and catalog error arrays for local upload/resume automation. Its
+artifact summary reports the same count and byte metrics from the actually
+measured artifacts.
 `skein graph-lightning-publish-staging [--require-state-marker]
 [--fencing-token <token>] [--expected-graph-epoch <epoch>] <staging-dir>
 <publish-dir>` verifies a READY staging catalog and atomically writes
@@ -170,7 +174,9 @@ pointer, catalog, and staging error arrays so resume automation can distinguish
 pointer corruption from staging catalog drift.
 `skein graph-lightning-gc-staging-report <staging-dir> <publish-dir>` fails
 closed when a published pointer cannot be verified and groups the propagated
-published-pointer verification errors for cleanup automation.
+published-pointer verification errors for cleanup automation. The GC report also
+summarizes total, pinned, and deletable staging bytes so callers can distinguish
+published retention from orphan staging space.
 `skein graph-lightning-import-status <staging-dir> <publish-dir>` summarizes
 CREATED/READY/PUBLISHED/QUARANTINED state and can merge an optional
 caller-owned `graph_lightning_import_state.json` marker for
