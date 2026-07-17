@@ -525,14 +525,18 @@ expansion for returned search hits whose projection metadata maps back to a
 canonical graph node and for graph-native seeds matched directly from canonical
 nodes. The result includes hop number, source/target node labels, external IDs,
 relationship type, path direction, and fan-out reasons when the configured graph
-context limit cuts expansion short. This gives RAG callers graph evidence paths
-without issuing ad hoc Cypher for common neighborhood and short-path context,
-including pure graph-seed retrieval when no search projection is available. It
-also returns `KnowledgeEvidence` summaries that bind each search hit to its
-projection kind, external ID, source ID, canonical node ID, matched terms, score
-components, ranks, and graph context path count. This keeps raw evidence
-provenance explicit even though the search projection remains outside canonical
-graph storage.
+context limit cuts expansion short. Graph context relationship de-duplication is
+scoped by retriever seed ID, so the same canonical relationship may explain a
+search-hit seed and a graph-native seed independently when both map to the same
+canonical node. This keeps per-retriever explanation counts stable while the
+global graph-context budget still bounds emitted paths. This gives RAG callers
+graph evidence paths without issuing ad hoc Cypher for common neighborhood and
+short-path context, including pure graph-seed retrieval when no search
+projection is available. It also returns `KnowledgeEvidence` summaries that bind
+each search hit to its projection kind, external ID, source ID, canonical node
+ID, matched terms, score components, ranks, and graph context path count. This
+keeps raw evidence provenance explicit even though the search projection remains
+outside canonical graph storage.
 
 Typed knowledge operations can bypass the search projection entirely when the
 caller already has graph identity. `Database::knowledge_entity` returns a
