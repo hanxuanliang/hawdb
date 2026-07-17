@@ -681,6 +681,56 @@ impl SearchIndex {
         })
     }
 
+    pub fn repair_background_metadata_from_graph(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        catalog: &Catalog,
+        store: &GraphStore,
+        options: MetadataRepairOptions,
+        estimated_operations: usize,
+    ) -> Result<MetadataRepairSummary> {
+        let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
+        match policy.admit(state, &request) {
+            QosAdmission::Admit => self.repair_metadata_from_graph(catalog, store, options),
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background search metadata repair deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background search metadata repair rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn repair_scheduled_background_metadata_from_graph(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        catalog: &Catalog,
+        store: &GraphStore,
+        options: MetadataRepairOptions,
+        estimated_operations: usize,
+    ) -> Result<MetadataRepairSummary> {
+        let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
+        let permit = match scheduler.try_start(request) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search metadata repair deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search metadata repair rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.repair_metadata_from_graph(catalog, store, options);
+        scheduler.finish(permit);
+        result
+    }
+
     pub fn checkpoint(&self) -> Result<()> {
         let Some(path) = &self.path else {
             return Ok(());
@@ -4155,6 +4205,237 @@ mod tests {
         assert_eq!(
             document.metadata.get("space_id").map(String::as_str),
             Some("default")
+        );
+    }
+
+    #[test]
+    fn background_metadata_repair_uses_qos_admission() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("mem_1".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Graph storage".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:mem_1".to_string(),
+                title: "Old title".to_string(),
+                content: "Old body should stay".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("kind".to_string(), "stale".to_string())]),
+            })
+            .unwrap();
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(0),
+            ..LocalQosPolicy::default()
+        };
+
+        let error = index
+            .repair_background_metadata_from_graph(
+                &policy,
+                &LocalQosState::default(),
+                &catalog,
+                &store,
+                MetadataRepairOptions::default(),
+                1,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        assert_eq!(
+            index
+                .document("memory:mem_1")
+                .unwrap()
+                .metadata
+                .get("kind")
+                .map(String::as_str),
+            Some("stale")
+        );
+    }
+
+    #[test]
+    fn scheduled_background_metadata_repair_tracks_running_budget() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("mem_1".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Graph storage".to_string()),
+                    ),
+                    ("space_id".to_string(), Value::String("default".to_string())),
+                ]),
+            )
+            .unwrap();
+
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:mem_1".to_string(),
+                title: "Old title".to_string(),
+                content: "Old body should stay".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("kind".to_string(), "stale".to_string())]),
+            })
+            .unwrap();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(1),
+            max_total_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        });
+
+        let summary = index
+            .repair_scheduled_background_metadata_from_graph(
+                &mut scheduler,
+                &catalog,
+                &store,
+                MetadataRepairOptions::default(),
+                1,
+            )
+            .unwrap();
+
+        assert_eq!(summary.repaired_documents, 1);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(
+            index
+                .document("memory:mem_1")
+                .unwrap()
+                .metadata
+                .get("kind")
+                .map(String::as_str),
+            Some("memory")
+        );
+    }
+
+    #[test]
+    fn scheduled_background_metadata_repair_defers_when_scheduler_is_full() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("mem_1".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Graph storage".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:mem_1".to_string(),
+                title: "Old title".to_string(),
+                content: "Old body should stay".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("kind".to_string(), "stale".to_string())]),
+            })
+            .unwrap();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(4),
+            max_total_background_operations: Some(4),
+            ..LocalQosPolicy::default()
+        });
+        let running = scheduler
+            .try_start(WorkRequest::background(WorkClass::Analytics, 3))
+            .unwrap();
+
+        let error = index
+            .repair_scheduled_background_metadata_from_graph(
+                &mut scheduler,
+                &catalog,
+                &store,
+                MetadataRepairOptions::default(),
+                2,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        assert_eq!(scheduler.state().running_background_operations, 3);
+        assert_eq!(
+            index
+                .document("memory:mem_1")
+                .unwrap()
+                .metadata
+                .get("kind")
+                .map(String::as_str),
+            Some("stale")
+        );
+
+        scheduler.finish(running);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+    }
+
+    #[test]
+    fn scheduled_background_metadata_repair_releases_budget_on_repair_error() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in ["mem_1", "mem_2"] {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    BTreeMap::from([
+                        ("id".to_string(), Value::String(id.to_string())),
+                        ("title".to_string(), Value::String(id.to_string())),
+                    ]),
+                )
+                .unwrap();
+        }
+
+        let mut index = SearchIndex::in_memory();
+        for id in ["mem_1", "mem_2"] {
+            index
+                .upsert(SearchDocument {
+                    id: format!("memory:{id}"),
+                    title: id.to_string(),
+                    content: id.to_string(),
+                    embedding: None,
+                    metadata: BTreeMap::from([("kind".to_string(), "stale".to_string())]),
+                })
+                .unwrap();
+        }
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+        let error = index
+            .repair_scheduled_background_metadata_from_graph(
+                &mut scheduler,
+                &catalog,
+                &store,
+                MetadataRepairOptions { max_rows: Some(1) },
+                2,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("row limit"));
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(
+            index
+                .document("memory:mem_1")
+                .unwrap()
+                .metadata
+                .get("kind")
+                .map(String::as_str),
+            Some("stale")
         );
     }
 

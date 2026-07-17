@@ -362,6 +362,12 @@ Incremental search projection deltas can also run through
 `LocalQosScheduler` to account for in-flight internal background projection
 work while keeping the direct delta API available for explicit foreground
 callers.
+The metadata-only repair path follows the same boundary:
+`SearchIndex::repair_background_metadata_from_graph` uses stateless
+`LocalQosPolicy` admission, and
+`SearchIndex::repair_scheduled_background_metadata_from_graph` uses
+`LocalQosScheduler` for in-flight background budget tracking without rewriting
+document content or embeddings.
 
 ## Durability Policy
 
