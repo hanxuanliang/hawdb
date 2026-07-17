@@ -1289,7 +1289,13 @@ fn graph_lightning_import_status(
     let mut errors = Vec::new();
     let mut staging_verification = None;
     let mut published_verification = None;
-    let import_state = if !staging_catalog_present {
+    let import_state = if !staging_catalog_present && published_pointer_present {
+        errors.push(
+            "published pointer exists without a matching staging catalog; refusing to treat import as created"
+                .to_string(),
+        );
+        "QUARANTINED"
+    } else if !staging_catalog_present {
         "CREATED"
     } else {
         let staging_report = verify_graph_lightning_staging_catalog(staging_dir)?;
@@ -2185,6 +2191,35 @@ mod tests {
         assert_eq!(report["status_gate"]["decision"], "ready");
 
         std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_quarantines_pointer_without_staging_catalog() {
+        let staging_dir = unique_main_test_dir("graph_lightning_status_pointer_only_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_pointer_only_target");
+        std::fs::create_dir_all(&publish_dir).unwrap();
+        std::fs::write(
+            publish_dir.join("graph_lightning_published_manifest.json"),
+            "{}",
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "QUARANTINED");
+        assert_eq!(report["staging_catalog_present"], false);
+        assert_eq!(report["published_pointer_present"], true);
+        assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert!(report["status_gate"]["errors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("published pointer exists without a matching staging catalog")));
+
+        std::fs::remove_dir_all(publish_dir).unwrap();
     }
 
     #[test]
