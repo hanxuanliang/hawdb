@@ -305,11 +305,13 @@ the matching bounded failed view for recovery queues and operator-facing parser
 diagnostics. The graph-kernel job runner still rejects those jobs with a
 graph-kernel-external error and preserves the payload in the failed job report,
 while
-`Database::run_next_external_content_artifact_job_with` lets the caller supply
-the content artifact runtime and complete the job status without embedding
-parsing, crawling, chunking, or large-value runtime logic in Skein. That runtime
-reads the payload and publishes rebuildable projections back to Skein through
-caller-owned output.
+`Database::run_next_external_content_artifact_job_with` and
+`Database::run_external_content_artifact_job_with` let the caller supply the
+content artifact runtime and complete either the next pending job or a specific
+pending job selected from a bounded poll result. Skein records the state
+transition without embedding parsing, crawling, chunking, or large-value runtime
+logic. That runtime reads the payload and publishes rebuildable projections back
+to Skein through caller-owned output.
 `Database::retry_failed_external_content_artifact_job` explicitly resets failed
 external content jobs to pending, preserving the payload and attempt history
 while clearing the last error. It does not retry graph-kernel projected artifact

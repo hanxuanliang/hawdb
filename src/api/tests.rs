@@ -4932,6 +4932,70 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
 }
 
 #[test]
+fn caller_owned_content_artifact_runtime_can_run_specific_pending_job() {
+    let mut db = Database::new();
+    let first = db.schedule_external_content_artifact_job("source-1", "parse");
+    let second = db.schedule_external_content_artifact_job_with_payload(
+        "source-2",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-2.md".to_string()),
+        )]),
+    );
+    let projected_graph = db.schedule_projected_graph_artifact_rebuild("MissingGraph");
+
+    let report = db
+        .run_external_content_artifact_job_with(second.id, |job| {
+            assert_eq!(job.id, second.id);
+            assert_eq!(job.status, DerivedArtifactJobStatus::Running);
+            assert_eq!(
+                job.payload.get("content_uri"),
+                Some(&Value::String("file:///nowledge/source-2.md".to_string()))
+            );
+            Ok(QueryOutput {
+                rows: vec![BTreeMap::from([(
+                    "job_id".to_string(),
+                    Value::Int(job.id as i64),
+                )])],
+            })
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(report.job.id, second.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+
+    let pending = db.pending_external_content_artifact_jobs(8);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, first.id);
+    assert!(db
+        .run_external_content_artifact_job_with(second.id, |_| unreachable!())
+        .unwrap()
+        .is_none());
+    assert!(db
+        .run_external_content_artifact_job_with(projected_graph.id, |_| unreachable!())
+        .unwrap()
+        .is_none());
+    assert!(db
+        .run_external_content_artifact_job_with(99, |_| unreachable!())
+        .unwrap()
+        .is_none());
+
+    let next = db
+        .run_next_external_content_artifact_job_with(|job| {
+            Ok(QueryOutput {
+                rows: vec![BTreeMap::from([(
+                    "job_id".to_string(),
+                    Value::Int(job.id as i64),
+                )])],
+            })
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(next.job.id, first.id);
+}
+
+#[test]
 fn graph_kernel_rejects_external_content_jobs_with_payload_intact() {
     let mut db = Database::new();
     db.schedule_external_content_artifact_job_with_payload(

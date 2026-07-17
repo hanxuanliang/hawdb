@@ -177,6 +177,31 @@ impl Database {
             return Ok(None);
         };
 
+        self.run_external_content_artifact_job_at_index(index, &mut runtime)
+    }
+
+    pub fn run_external_content_artifact_job_with(
+        &mut self,
+        job_id: u64,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.id == job_id
+                && job.status == DerivedArtifactJobStatus::Pending
+                && is_external_content_artifact_job(&job.artifact_type)
+        }) else {
+            return Ok(None);
+        };
+
+        self.run_external_content_artifact_job_at_index(index, &mut runtime)
+    }
+
+    fn run_external_content_artifact_job_at_index(
+        &mut self,
+        index: usize,
+        runtime: &mut impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
         self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Running;
         self.derived_artifact_jobs[index].attempts += 1;
         self.derived_artifact_jobs[index].last_error = None;
