@@ -6,6 +6,7 @@ pub mod executor;
 pub mod nowledge_inventory;
 pub mod optimizer;
 pub mod planner;
+pub mod qos;
 pub mod search;
 pub mod store;
 
@@ -77,6 +78,7 @@ pub use nowledge_inventory::{
     scan_nowledge_query_inventory_to_json, scan_nowledge_query_inventory_with_options,
     NowledgeInventoryScanOptions,
 };
+pub use qos::{LocalQosPolicy, LocalQosState, QosAdmission, WorkClass, WorkPriority, WorkRequest};
 pub use schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,
     ConstraintSubject, GraphStatistics, IndexDescriptor, IndexId, IndexKind, PropertyDescriptor,

@@ -40,8 +40,9 @@ Three codebases define the work:
 7. The first concurrency contract is one writer with snapshot readers.
 8. A Ladybug compatibility comparison must pass before any production cutover.
 9. Embedded deployments are resource constrained by default: foreground graph
-   reads and writes must be able to bound or defer background projection,
-   import, analytics, and shadow work.
+   user requests should not be gated by local background budgets, while
+   internal projection, import, analytics, and shadow work must be able to
+   defer itself under resource pressure.
 10. FTS/BM25 and retrieval projections must support incremental maintenance for
     ordinary row upsert/delete changes; full rebuilds are repair paths, not the
     steady-state update mechanism.
@@ -57,8 +58,9 @@ Three codebases define the work:
 - explicit read and write transactions
 - commit, rollback, and checkpoint
 - bounded resource configuration
-- basic local QoS hooks for admission, operation budgets, and deferrable
-  background work
+- basic local QoS hooks for internal background admission, operation budgets,
+  and deferrable work; performance should come from clean architecture and
+  bounded work units before low-level tuning
 
 ### Cypher and Semantic Analysis
 
