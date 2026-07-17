@@ -387,7 +387,9 @@ logic. That runtime reads the payload and publishes rebuildable projections back
 to Skein through caller-owned output. Successful external content jobs keep the
 last structured output rows on the job ledger for lightweight lineage and
 operator audit; large parser results, raw bytes, chunks, and projection payloads
-remain caller-owned artifacts outside the graph kernel.
+remain caller-owned artifacts outside the graph kernel. Bounded succeeded-job
+views expose those retained output rows globally or per action without requiring
+the external runtime to scan all derived-artifact jobs.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` for stateless
 `LocalQosPolicy` admission or

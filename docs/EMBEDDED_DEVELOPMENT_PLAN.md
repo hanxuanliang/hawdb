@@ -656,6 +656,10 @@ embedding that runtime in Skein. Successful external content jobs retain the
 runtime's last structured `QueryOutput` on the job ledger so callers can audit
 published projection refs, parser versions, checksums, chunk counts, and other
 small lineage fields without storing large parsed content in the graph kernel.
+Caller-owned runtimes can read those successful lineage rows through bounded
+`Database::succeeded_external_content_artifact_jobs` or action-scoped
+`Database::succeeded_external_content_artifact_jobs_for_action` views instead
+of scanning the full derived-artifact history.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` or
 `Database::run_next_scheduled_background_external_content_artifact_job_with` to

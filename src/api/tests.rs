@@ -6847,6 +6847,82 @@ fn failed_external_content_artifact_jobs_can_be_filtered_by_action() {
 }
 
 #[test]
+fn succeeded_external_content_artifact_jobs_are_bounded_and_filtered() {
+    let mut db = Database::new();
+    let parse = db.schedule_external_content_artifact_job_with_payload(
+        "source-parse",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-parse.md".to_string()),
+        )]),
+    );
+    let crawl = db.schedule_external_content_artifact_job("source-crawl", "crawl");
+    let projected_graph = db.schedule_projected_graph_artifact_rebuild("MissingGraph");
+
+    let parse_report = db
+        .run_next_external_content_artifact_job_with(|job| {
+            Ok(QueryOutput {
+                rows: vec![BTreeMap::from([
+                    ("job_id".to_string(), Value::Int(job.id as i64)),
+                    (
+                        "projection_ref".to_string(),
+                        Value::String("search:v1".to_string()),
+                    ),
+                ])],
+            })
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(parse_report.job.id, parse.id);
+
+    let crawl_report = db
+        .run_next_external_content_artifact_job_with(|job| {
+            Ok(QueryOutput {
+                rows: vec![BTreeMap::from([
+                    ("job_id".to_string(), Value::Int(job.id as i64)),
+                    (
+                        "projection_ref".to_string(),
+                        Value::String("crawl-log:v1".to_string()),
+                    ),
+                ])],
+            })
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(crawl_report.job.id, crawl.id);
+    let projected_graph_failure = db.run_next_derived_artifact_job().unwrap().unwrap();
+    assert_eq!(projected_graph_failure.job.id, projected_graph.id);
+
+    let succeeded_one = db.succeeded_external_content_artifact_jobs(1);
+    assert_eq!(succeeded_one.len(), 1);
+    assert_eq!(succeeded_one[0].id, parse.id);
+    assert_eq!(succeeded_one[0].last_output, Some(parse_report.output));
+
+    let succeeded_all = db.succeeded_external_content_artifact_jobs(usize::MAX);
+    assert_eq!(
+        succeeded_all.iter().map(|job| job.id).collect::<Vec<_>>(),
+        vec![parse.id, crawl.id]
+    );
+    assert_eq!(succeeded_all[1].last_output, Some(crawl_report.output));
+    assert!(db.succeeded_external_content_artifact_jobs(0).is_empty());
+
+    let parse_succeeded = db.succeeded_external_content_artifact_jobs_for_action("parse", 8);
+    assert_eq!(parse_succeeded.len(), 1);
+    assert_eq!(parse_succeeded[0].id, parse.id);
+    assert_eq!(
+        parse_succeeded[0].last_output.as_ref().unwrap().rows[0].get("projection_ref"),
+        Some(&Value::String("search:v1".to_string()))
+    );
+    assert!(db
+        .succeeded_external_content_artifact_jobs_for_action("embed", 8)
+        .is_empty());
+    assert!(db
+        .succeeded_external_content_artifact_jobs_for_action("parse", 0)
+        .is_empty());
+}
+
+#[test]
 fn external_content_artifact_job_summary_counts_runtime_work_only() {
     let mut db = Database::new();
     let first = db.schedule_external_content_artifact_job("source-1", "parse");

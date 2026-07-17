@@ -149,6 +149,21 @@ impl Database {
             .collect()
     }
 
+    pub fn succeeded_external_content_artifact_jobs(
+        &self,
+        limit: usize,
+    ) -> Vec<DerivedArtifactJob> {
+        self.derived_artifact_jobs
+            .iter()
+            .filter(|job| {
+                job.status == DerivedArtifactJobStatus::Succeeded
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     pub fn failed_external_content_artifact_jobs_for_action(
         &self,
         action: &str,
@@ -158,6 +173,23 @@ impl Database {
             .iter()
             .filter(|job| {
                 job.status == DerivedArtifactJobStatus::Failed
+                    && job.action == action
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn succeeded_external_content_artifact_jobs_for_action(
+        &self,
+        action: &str,
+        limit: usize,
+    ) -> Vec<DerivedArtifactJob> {
+        self.derived_artifact_jobs
+            .iter()
+            .filter(|job| {
+                job.status == DerivedArtifactJobStatus::Succeeded
                     && job.action == action
                     && is_external_content_artifact_job(&job.artifact_type)
             })
