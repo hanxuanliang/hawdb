@@ -779,6 +779,10 @@ Current implemented slice:
   selected input cardinality, so selective seek inputs no longer make the trace
   report full-label expand cost; endpoint cartesian products report estimated
   left/right rows, output rows, and product cost
+- endpoint cartesian products whose two inputs both estimate to one row choose a
+  stable physical input order by child cost and fingerprint, covering
+  Nowledge endpoint-existence checks without changing broader unordered
+  multi-row product semantics
 - deterministic physical plan fingerprints are exposed through
   `OptimizerTrace::selected_plan_fingerprint` and `PhysicalPlan::fingerprint`
   for regression tests and future compatibility/shadow comparisons
@@ -792,15 +796,17 @@ Current implemented slice:
   sort/limit, one-hop relationship-property expand reads, a Nowledge-shaped
   pushed-down relationship equality plus relationship range-filter workload, a
   source-to-memory-to-label cross-pattern aggregate workload,
-  endpoint-existence cartesian product cost tracing, selected-plan cost
-  stability, deterministic fingerprints, and budget-fallback paths without
-  depending on a storage fixture
+  endpoint-existence cartesian product cost tracing and single-row input
+  ordering, selected-plan cost stability, deterministic fingerprints, and
+  budget-fallback paths without depending on a storage fixture
 
 Remaining Phase 4 work:
 
 - richer cross-pattern statistics
 - alternative expand implementation candidates and pattern join-order
   enumeration once multi-pattern logical plans exist
+- bounded left-deep join-order enumeration beyond the current two-input
+  single-row endpoint ordering
 - larger cross-pattern workload-shaped optimizer benchmark suites beyond the
   current source-memory-label smoke case
 

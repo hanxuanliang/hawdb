@@ -2815,6 +2815,8 @@ impl GroupExpr {
             LogicalPlan::NodeCartesianProduct { .. } => {
                 let left = memo.best_physical(self.children[0], catalog, decisions);
                 let right = memo.best_physical(self.children[1], catalog, decisions);
+                let (left, right) =
+                    order_single_row_cartesian_product_children(catalog, decisions, left, right);
                 push_cartesian_product_cost_decision(catalog, decisions, &left, &right);
                 PhysicalPlan::NodeCartesianProductExec {
                     left: Box::new(left),
@@ -3460,6 +3462,8 @@ fn logical_to_physical_direct(
         LogicalPlan::NodeCartesianProduct { left, right } => {
             let left = logical_to_physical_direct(left, catalog, decisions);
             let right = logical_to_physical_direct(right, catalog, decisions);
+            let (left, right) =
+                order_single_row_cartesian_product_children(catalog, decisions, left, right);
             push_cartesian_product_cost_decision(catalog, decisions, &left, &right);
             PhysicalPlan::NodeCartesianProductExec {
                 left: Box::new(left),
@@ -3700,6 +3704,41 @@ fn format_selected_plan_cost(cost: PlanCost) -> String {
         "selected physical plan cost: estimated_rows={} cost={}",
         cost.estimated_rows, cost.cost
     )
+}
+
+fn order_single_row_cartesian_product_children(
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+    left: PhysicalPlan,
+    right: PhysicalPlan,
+) -> (PhysicalPlan, PhysicalPlan) {
+    let left_cost = estimate_physical_plan_cost(&left, catalog);
+    let right_cost = estimate_physical_plan_cost(&right, catalog);
+    if left_cost.estimated_rows != 1 || right_cost.estimated_rows != 1 {
+        decisions.push(format!(
+            "keep NodeCartesianProduct input order: left_rows={} right_rows={} reason=non_single_row_input",
+            left_cost.estimated_rows, right_cost.estimated_rows
+        ));
+        return (left, right);
+    }
+
+    let left_fingerprint = left.fingerprint();
+    let right_fingerprint = right.fingerprint();
+    let should_swap =
+        (right_cost.cost, right_fingerprint.as_str()) < (left_cost.cost, left_fingerprint.as_str());
+    if should_swap {
+        decisions.push(format!(
+            "swap NodeCartesianProduct input order: left_cost={} right_cost={} left_fingerprint={} right_fingerprint={}",
+            left_cost.cost, right_cost.cost, left_fingerprint, right_fingerprint
+        ));
+        (right, left)
+    } else {
+        decisions.push(format!(
+            "keep NodeCartesianProduct input order: left_cost={} right_cost={} left_fingerprint={} right_fingerprint={}",
+            left_cost.cost, right_cost.cost, left_fingerprint, right_fingerprint
+        ));
+        (left, right)
+    }
 }
 
 fn push_cartesian_product_cost_decision(
@@ -5491,6 +5530,9 @@ mod tests {
             .optimize_with_catalog(&logical, &catalog);
 
         assert!(trace.decisions.iter().any(|decision| {
+            decision.starts_with("keep NodeCartesianProduct input order: left_cost=3 right_cost=3")
+        }));
+        assert!(trace.decisions.iter().any(|decision| {
             decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=3 cost=7"
         }));
         assert_eq!(
@@ -5498,6 +5540,88 @@ mod tests {
             PlanCost {
                 estimated_rows: 1,
                 cost: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn cartesian_product_orders_single_row_inputs_by_cost() {
+        let logical = LogicalPlan::NodeCartesianProduct {
+            left: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::And(vec![
+                    Predicate::PropertyEq {
+                        variable: "m".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("memory-42".to_string()),
+                    },
+                    Predicate::PropertyEq {
+                        variable: "m".to_string(),
+                        property: "kind".to_string(),
+                        value: Value::String("note".to_string()),
+                    },
+                ]),
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+            right: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "s".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("source-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "s".to_string(),
+                    label: "Source".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new(
+                [("Source".to_string(), "id".to_string())],
+                [(
+                    "Memory".to_string(),
+                    vec!["id".to_string(), "kind".to_string()],
+                )],
+                [],
+                [],
+            ),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Memory".to_string(), 10_000),
+                    ("Source".to_string(), 1_000),
+                ],
+                [],
+                [],
+                [],
+                [],
+                [
+                    (("Memory".to_string(), "id".to_string()), 10_000),
+                    (("Memory".to_string(), "kind".to_string()), 2),
+                    (("Source".to_string(), "id".to_string()), 1_000),
+                ],
+                [],
+            ),
+        );
+
+        let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert!(trace.decisions.iter().any(|decision| {
+            decision.starts_with("swap NodeCartesianProduct input order: left_cost=5 right_cost=3")
+        }));
+        assert!(trace.decisions.iter().any(|decision| {
+            decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=5 cost=9"
+        }));
+        assert!(plan
+            .fingerprint()
+            .contains("NodeCartesianProductExec(IndexNodeSeek(1:s:6:Source"));
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 9,
             }
         );
     }
