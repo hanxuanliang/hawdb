@@ -666,7 +666,9 @@ runtime identity, input/output refs, checksums, projection refs, source graph
 epoch, produced-row counts, and small metadata without storing parser payloads
 in the graph kernel. `Database::complete_next_external_content_artifact_job_with`
 and `Database::complete_external_content_artifact_job_with` convert that
-manifest into the retained audit row.
+manifest into the retained audit row. The matching background and scheduled
+completion runners preserve the same row shape while charging parser/crawler
+work to the `Import` QoS lane.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` or
 `Database::run_next_scheduled_background_external_content_artifact_job_with` to

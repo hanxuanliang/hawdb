@@ -690,6 +690,78 @@ impl Database {
         })
     }
 
+    pub fn complete_next_background_external_content_artifact_job_with(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_next_background_external_content_artifact_job_with(
+            policy,
+            state,
+            |job| {
+                let completion = runtime(job)?;
+                Ok(external_content_artifact_completion_output(job, completion))
+            },
+            estimated_operations,
+        )
+    }
+
+    pub fn complete_next_scheduled_background_external_content_artifact_job_with(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_next_scheduled_background_external_content_artifact_job_with(
+            scheduler,
+            |job| {
+                let completion = runtime(job)?;
+                Ok(external_content_artifact_completion_output(job, completion))
+            },
+            estimated_operations,
+        )
+    }
+
+    pub fn complete_background_external_content_artifact_job_with(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        job_id: u64,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_background_external_content_artifact_job_with(
+            policy,
+            state,
+            job_id,
+            |job| {
+                let completion = runtime(job)?;
+                Ok(external_content_artifact_completion_output(job, completion))
+            },
+            estimated_operations,
+        )
+    }
+
+    pub fn complete_scheduled_background_external_content_artifact_job_with(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        job_id: u64,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_scheduled_background_external_content_artifact_job_with(
+            scheduler,
+            job_id,
+            |job| {
+                let completion = runtime(job)?;
+                Ok(external_content_artifact_completion_output(job, completion))
+            },
+            estimated_operations,
+        )
+    }
+
     pub fn run_background_external_content_artifact_job_with(
         &mut self,
         policy: &LocalQosPolicy,

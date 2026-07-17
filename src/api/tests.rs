@@ -7929,6 +7929,76 @@ fn content_artifact_completion_runner_only_claims_external_jobs() {
 }
 
 #[test]
+fn background_content_artifact_completion_uses_qos_admission() {
+    let mut db = Database::new();
+    db.schedule_external_content_artifact_job("source-parse", "parse");
+    let policy = LocalQosPolicy {
+        max_background_operations: Some(0),
+        ..LocalQosPolicy::default()
+    };
+
+    let error = db
+        .complete_next_background_external_content_artifact_job_with(
+            &policy,
+            &LocalQosState::default(),
+            |_| unreachable!(),
+            1,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("deferred"));
+    let jobs = db.derived_artifact_jobs();
+    assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[0].attempts, 0);
+    assert!(jobs[0].last_output.is_none());
+}
+
+#[test]
+fn scheduled_specific_content_artifact_completion_releases_import_budget() {
+    let mut db = Database::new();
+    let first = db.schedule_external_content_artifact_job("source-1", "parse");
+    let second = db.schedule_external_content_artifact_job("source-2", "parse");
+    let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+    let report = db
+        .complete_scheduled_background_external_content_artifact_job_with(
+            &mut scheduler,
+            second.id,
+            |job| {
+                assert_eq!(job.id, second.id);
+                assert_eq!(job.status, DerivedArtifactJobStatus::Running);
+                Ok(ExternalContentArtifactJobCompletion::new("parser")
+                    .with_projection("search", "search:source-2")
+                    .with_rows_produced(2))
+            },
+            3,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.job.id, second.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+    assert_eq!(
+        report.output.rows[0].get("projection_ref"),
+        Some(&Value::String("search:source-2".to_string()))
+    );
+    assert_eq!(
+        report.output.rows[0].get("rows_produced"),
+        Some(&Value::Int(2))
+    );
+    assert_eq!(scheduler.state().running_background_operations, 0);
+    assert_eq!(
+        scheduler.state().running_background_operations_by_class
+            [crate::WorkClass::Import.as_index()],
+        0
+    );
+
+    let pending = db.pending_external_content_artifact_jobs(8);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, first.id);
+}
+
+#[test]
 fn caller_owned_content_artifact_runtime_can_poll_and_run_by_action() {
     let mut db = Database::new();
     let crawl = db.schedule_external_content_artifact_job("source-crawl", "crawl");

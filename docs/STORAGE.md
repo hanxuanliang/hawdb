@@ -396,7 +396,9 @@ Runtimes that want a standard lightweight lineage shape can use
 `Database::complete_external_content_artifact_job_with`. The completion row
 records runtime identity, input/output refs, checksums, projection refs, source
 graph epoch, produced-row counts, and small metadata. It deliberately stores
-only references and audit metadata, not parser result payloads.
+only references and audit metadata, not parser result payloads. The matching
+background and scheduled completion runners apply the same standard row shape
+while charging parser/crawler work to the `Import` QoS lane.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` for stateless
 `LocalQosPolicy` admission or
