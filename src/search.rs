@@ -1198,7 +1198,7 @@ fn document_tokens(document: &SearchDocument) -> Vec<String> {
 }
 
 fn searchable_metadata_tokens(document: &SearchDocument) -> Vec<String> {
-    ["kind", "external_id", "source_id"]
+    ["kind", "external_id", "source_id", "space_id"]
         .into_iter()
         .filter_map(|key| document.metadata.get(key))
         .flat_map(|value| tokenize_list(value))
@@ -2379,6 +2379,7 @@ mod tests {
                     ("kind".to_string(), "memory".to_string()),
                     ("external_id".to_string(), "mem_graph_alpha".to_string()),
                     ("source_id".to_string(), "thread_projection_1".to_string()),
+                    ("space_id".to_string(), "team_archive".to_string()),
                 ]),
             })
             .unwrap();
@@ -2386,14 +2387,21 @@ mod tests {
         let external_id_hits = index.search("mem graph alpha", None, SearchMode::Text, 10);
         let source_id_hits =
             index.search_with_report("thread projection 1", None, SearchMode::Text, 10);
+        let space_id_hits = index.search_with_report("team archive", None, SearchMode::Text, 10);
 
         assert_eq!(external_id_hits[0].id, "metadata-only");
         assert_eq!(source_id_hits.hits[0].id, "metadata-only");
+        assert_eq!(space_id_hits.hits[0].id, "metadata-only");
         assert!(source_id_hits.hits[0]
             .matched_terms
             .iter()
             .any(|term| term == "thread"));
+        assert!(space_id_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "archive"));
         assert!(source_id_hits.hits[0].matched_spans.is_empty());
+        assert!(space_id_hits.hits[0].matched_spans.is_empty());
     }
 
     #[test]

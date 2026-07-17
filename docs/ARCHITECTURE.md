@@ -412,10 +412,10 @@ identifiers such as `the_source` remain searchable. Term frequency affects rank,
 inverse document frequency is computed from the current projection, and
 document length normalization prevents verbose rows from dominating short
 focused matches. Selected graph-derived projection metadata identifiers
-(`kind`, `external_id`, and `source_id`) also contribute analyzer terms for
-text fallback, while matched projection-text spans remain limited to title and
-content fields. This keeps text fallback useful while the projection remains
-rebuildable.
+(`kind`, `external_id`, `source_id`, and `space_id`) also contribute analyzer
+terms for text fallback, while matched projection-text spans remain limited to
+title and content fields. This keeps text fallback useful while the projection
+remains rebuildable.
 
 Search hits expose the information needed by a knowledge retrieval surface:
 fused RRF score, per-child RRF components, vector score, text score, vector
