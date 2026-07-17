@@ -391,11 +391,17 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_document_count: usize,
     pub search_filtered_document_count: usize,
     pub search_total_hits: usize,
+    pub search_limit: usize,
+    pub rank_window: Option<usize>,
     pub graph_seed_candidate_count: usize,
     pub graph_seed_returned_count: usize,
+    pub graph_seed_limit: usize,
     pub graph_context_path_count: usize,
+    pub graph_context_limit: usize,
+    pub graph_context_max_hops: usize,
     pub fanout_reason_count: usize,
     pub candidate_count: usize,
+    pub candidate_limit: Option<usize>,
     pub empty_reasons: Vec<String>,
 }
 
@@ -1053,7 +1059,7 @@ impl Database {
             graph_context_paths.len(),
             fanout_reasons.len(),
             candidates.len(),
-            request.graph_seed_limit,
+            request,
         );
         KnowledgeRetrievalOutput {
             graph_commit_epoch: self.store.commit_epoch(),
@@ -1618,7 +1624,7 @@ fn knowledge_retrieval_diagnostics(
     graph_context_path_count: usize,
     fanout_reason_count: usize,
     candidate_count: usize,
-    graph_seed_limit: usize,
+    request: &KnowledgeRetrievalRequest,
 ) -> KnowledgeRetrievalDiagnostics {
     let mut empty_reasons = Vec::new();
     if search.document_count == 0 {
@@ -1628,7 +1634,7 @@ fn knowledge_retrieval_diagnostics(
     } else if search.total_hits == 0 {
         empty_reasons.push("search retrievers returned no hits inside filtered scope".to_string());
     }
-    if graph_seed_limit > 0 && graph_seed_candidate_count == 0 {
+    if request.graph_seed_limit > 0 && graph_seed_candidate_count == 0 {
         empty_reasons.push("graph seed retriever returned no candidates".to_string());
     }
     if candidate_count == 0 {
@@ -1638,11 +1644,17 @@ fn knowledge_retrieval_diagnostics(
         search_document_count: search.document_count,
         search_filtered_document_count: search.filtered_document_count,
         search_total_hits: search.total_hits,
+        search_limit: search.limit,
+        rank_window: search.rank_window,
         graph_seed_candidate_count,
         graph_seed_returned_count,
+        graph_seed_limit: request.graph_seed_limit,
         graph_context_path_count,
+        graph_context_limit: request.graph_context_limit,
+        graph_context_max_hops: request.graph_context_max_hops,
         fanout_reason_count,
         candidate_count,
+        candidate_limit: request.candidate_limit,
         empty_reasons,
     }
 }
@@ -3926,6 +3938,12 @@ mod tests {
         assert_eq!(output.graph_commit_epoch, 1);
         assert_eq!(output.projection_freshness.document_count, 2);
         assert_eq!(output.diagnostics.search_total_hits, 1);
+        assert_eq!(output.diagnostics.search_limit, 4);
+        assert_eq!(output.diagnostics.rank_window, None);
+        assert_eq!(output.diagnostics.graph_seed_limit, 2);
+        assert_eq!(output.diagnostics.graph_context_limit, 4);
+        assert_eq!(output.diagnostics.graph_context_max_hops, 1);
+        assert_eq!(output.diagnostics.candidate_limit, None);
         assert_eq!(output.diagnostics.graph_context_path_count, 1);
         assert_eq!(output.graph_context_paths.len(), 1);
         assert!(output
@@ -4128,6 +4146,12 @@ mod tests {
         assert_eq!(output.projection_freshness.document_count, 4);
         assert_eq!(output.search.total_hits, 2);
         assert_eq!(output.search.hits.len(), 1);
+        assert_eq!(output.diagnostics.search_limit, 1);
+        assert_eq!(output.diagnostics.rank_window, None);
+        assert_eq!(output.diagnostics.graph_seed_limit, 2);
+        assert_eq!(output.diagnostics.graph_context_limit, 1);
+        assert_eq!(output.diagnostics.graph_context_max_hops, 1);
+        assert_eq!(output.diagnostics.candidate_limit, None);
         assert_eq!(output.evidence.len(), 1);
         assert_eq!(output.candidates.len(), 2);
         assert_eq!(
@@ -4333,11 +4357,17 @@ mod tests {
         assert_eq!(output.diagnostics.search_document_count, 1);
         assert_eq!(output.diagnostics.search_filtered_document_count, 0);
         assert_eq!(output.diagnostics.search_total_hits, 0);
+        assert_eq!(output.diagnostics.search_limit, 10);
+        assert_eq!(output.diagnostics.rank_window, None);
         assert_eq!(output.diagnostics.graph_seed_candidate_count, 0);
         assert_eq!(output.diagnostics.graph_seed_returned_count, 0);
+        assert_eq!(output.diagnostics.graph_seed_limit, 10);
         assert_eq!(output.diagnostics.graph_context_path_count, 0);
+        assert_eq!(output.diagnostics.graph_context_limit, 0);
+        assert_eq!(output.diagnostics.graph_context_max_hops, 1);
         assert_eq!(output.diagnostics.fanout_reason_count, 0);
         assert_eq!(output.diagnostics.candidate_count, 0);
+        assert_eq!(output.diagnostics.candidate_limit, None);
         assert!(output
             .diagnostics
             .empty_reasons
@@ -4478,6 +4508,11 @@ mod tests {
         );
 
         assert_eq!(output.search.rank_window, Some(1));
+        assert_eq!(output.diagnostics.search_limit, 10);
+        assert_eq!(output.diagnostics.rank_window, Some(1));
+        assert_eq!(output.diagnostics.graph_seed_limit, 0);
+        assert_eq!(output.diagnostics.graph_context_limit, 0);
+        assert_eq!(output.diagnostics.graph_context_max_hops, 1);
         assert_eq!(output.evidence.len(), output.search.hits.len());
         assert!(output
             .evidence
@@ -4617,6 +4652,10 @@ mod tests {
 
         assert_eq!(output.graph_seeds.len(), 3);
         assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.diagnostics.search_limit, 5);
+        assert_eq!(output.diagnostics.candidate_limit, Some(1));
+        assert_eq!(output.diagnostics.graph_seed_limit, 3);
+        assert_eq!(output.diagnostics.graph_context_limit, 0);
         assert_eq!(
             output.candidates[0].source,
             KnowledgeCandidateSource::GraphSeed

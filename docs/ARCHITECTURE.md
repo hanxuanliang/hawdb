@@ -440,7 +440,8 @@ hits and graph-native seed candidates. Filter keys align with graph-derived
 projection metadata:
 `kind` maps to canonical node labels, `external_id` maps to node `id`, and other
 keys map to same-name scalar node properties. Returned diagnostics preserve the
-rank window, filtered candidate counts, search document scope, search hit count,
+search limit, rank window, graph seed budget, graph context budget, candidate
+budget, filtered candidate counts, search document scope, search hit count,
 graph seed counts, graph context path count, fan-out reason count, final
 candidate count, and empty-result reasons. This keeps Knowledge Retrieval as
 the primary application-facing path while preserving the rule that search
