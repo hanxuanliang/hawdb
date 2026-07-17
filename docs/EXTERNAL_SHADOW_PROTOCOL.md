@@ -378,10 +378,10 @@ decision is `ready`. Its `blockers` array is intended for CI and release gates
 that need to reject protocol smoke or incomplete shadow runs without rejoining
 the rest of the bundle fields.
 
-`--require-cutover-evidence` exits with an error unless `cutover_evidence.eligible`
-is true. Use it for production cutover automation that must reject self-shadow
-smoke runs, missing ready preflights, missing shadow parity evidence, or blocked
-migration gates with one stable command-line gate.
+`--require-cutover-evidence` runs the same `ready` preflight and exits with an
+error unless `cutover_evidence.eligible` is true. Use it for production cutover
+automation that must reject self-shadow smoke runs, missing shadow parity
+evidence, or blocked migration gates with one stable command-line gate.
 
 `--shadow-ready` sends the same `ready` preflight without requiring the final
 migration gate decision to be `ready`. Use it for previous-wrapper adapter

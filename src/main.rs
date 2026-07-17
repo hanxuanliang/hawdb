@@ -85,9 +85,9 @@ fn main() -> Result<()> {
                 .ok_or_else(|| SkeinError::Semantic(nowledge_cypher_migration_gate_usage()))?;
             let program_args = args.collect::<Vec<_>>();
             let is_self_shadow = is_self_shadow_command(&shadow_name, &program, &program_args);
-            if require_ready && !allow_self_shadow && is_self_shadow {
+            if (require_ready || require_cutover_evidence) && !allow_self_shadow && is_self_shadow {
                 return Err(SkeinError::Execution(
-                    "nowledge migration gate requires a previous-wrapper shadow for --require-ready; pass --allow-self-shadow only for protocol smoke tests"
+                    "nowledge migration gate requires a previous-wrapper shadow for required cutover gates; pass --allow-self-shadow only for protocol smoke tests"
                     .to_string(),
                 ));
             }
@@ -117,11 +117,12 @@ fn main() -> Result<()> {
                 )?,
                 (None, None) => ExternalShadowCommand::spawn(shadow_name, program, program_args)?,
             };
-            let shadow_ready_report = if should_run_shadow_ready(require_ready, shadow_ready) {
-                Some(shadow.require_ready()?)
-            } else {
-                None
-            };
+            let shadow_ready_report =
+                if should_run_shadow_ready(require_ready, require_cutover_evidence, shadow_ready) {
+                    Some(shadow.require_ready()?)
+                } else {
+                    None
+                };
             let shadow_ready_preflight = shadow_ready_report.is_some();
             let mut json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
@@ -670,8 +671,12 @@ fn cutover_evidence_is_eligible(bundle: &serde_json::Value) -> bool {
         .unwrap_or(false)
 }
 
-fn should_run_shadow_ready(require_ready: bool, shadow_ready: bool) -> bool {
-    require_ready || shadow_ready
+fn should_run_shadow_ready(
+    require_ready: bool,
+    require_cutover_evidence: bool,
+    shadow_ready: bool,
+) -> bool {
+    require_ready || require_cutover_evidence || shadow_ready
 }
 
 fn is_self_shadow_command(shadow_name: &str, program: &str, program_args: &[String]) -> bool {
@@ -1902,17 +1907,22 @@ mod tests {
 
     #[test]
     fn require_ready_runs_shadow_ready_preflight() {
-        assert!(should_run_shadow_ready(true, false));
+        assert!(should_run_shadow_ready(true, false, false));
+    }
+
+    #[test]
+    fn require_cutover_evidence_runs_shadow_ready_preflight() {
+        assert!(should_run_shadow_ready(false, true, false));
     }
 
     #[test]
     fn shadow_ready_runs_preflight_without_requiring_ready_decision() {
-        assert!(should_run_shadow_ready(false, true));
+        assert!(should_run_shadow_ready(false, false, true));
     }
 
     #[test]
     fn skips_shadow_ready_preflight_by_default() {
-        assert!(!should_run_shadow_ready(false, false));
+        assert!(!should_run_shadow_ready(false, false, false));
     }
 
     #[test]

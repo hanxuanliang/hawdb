@@ -350,14 +350,17 @@ and migration gate report helpers; their `decision` fields are lowercase
 packages the four reports into one result, and
 `compatibility_migration_gate_bundle_to_json` preserves the same structure for
 artifact upload. The `nowledge-cypher-migration-gate [--require-ready]
-[--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>]
-[--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]` CLI command
+[--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready]
+[--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name>
+<program> [args...]` CLI command
 scans a Nowledge source tree,
 runs the public Nowledge core fixture through `ExternalShadowCommand`, uses
 normalized Cypher coverage so scanner-generated `file:line:hash` names do not
 have to match semantic fixture names, and prints the same migration-gate bundle
 JSON. With `--require-ready`, the command exits with an error when the migration
-gate decision is blocked, making it suitable as a CI cutover gate.
+gate decision is blocked. With `--require-cutover-evidence`, the command also
+runs the ready preflight and requires previous-wrapper shadow evidence, making it
+suitable as a production cutover gate.
 `skein-shadow-self` is a JSON-lines self-shadow process for protocol and CLI
 smoke testing; it exercises the process boundary but does not replace the
 required previous-wrapper parity run. The CLI bundle includes `shadow_run`
