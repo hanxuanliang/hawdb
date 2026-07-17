@@ -1629,6 +1629,8 @@ fn graph_lightning_import_state_marker(
             "present": false,
             "path": "graph_lightning_import_state.json",
             "import_state": serde_json::Value::Null,
+            "idempotency_ready": false,
+            "idempotency_key": serde_json::Value::Null,
             "raw": serde_json::Value::Null,
         });
     }
@@ -1645,6 +1647,8 @@ fn graph_lightning_import_state_marker(
                 "present": true,
                 "path": "graph_lightning_import_state.json",
                 "import_state": "QUARANTINED",
+                "idempotency_ready": false,
+                "idempotency_key": serde_json::Value::Null,
                 "raw": serde_json::Value::Null,
             });
         }
@@ -1681,11 +1685,15 @@ fn graph_lightning_import_state_marker(
             format!("import state marker uses unsupported state {import_state}"),
         );
     }
+    let idempotency_key =
+        graph_lightning_import_marker_idempotency_key(&marker, import_state, errors, state_errors);
 
     serde_json::json!({
         "present": true,
         "path": "graph_lightning_import_state.json",
         "import_state": if state_errors.is_empty() { import_state } else { "QUARANTINED" },
+        "idempotency_ready": state_errors.is_empty() && idempotency_key.is_some(),
+        "idempotency_key": idempotency_key,
         "raw": marker,
     })
 }
@@ -1695,6 +1703,56 @@ fn graph_lightning_import_marker_state_allowed(import_state: &str) -> bool {
         import_state,
         "EXPORTING" | "UPLOADING" | "MERGING" | "VALIDATING" | "FAILED" | "CANCELED"
     )
+}
+
+fn graph_lightning_import_marker_idempotency_key(
+    marker: &serde_json::Value,
+    import_state: &str,
+    errors: &mut Vec<String>,
+    state_errors: &mut Vec<String>,
+) -> Option<serde_json::Value> {
+    let import_id = marker_string_field(marker, "import_id");
+    let task_id = marker_string_field(marker, "task_id");
+    let fencing_token = marker_string_field(marker, "fencing_token");
+    let object_digest = marker_string_field(marker, "object_digest");
+    if graph_lightning_import_marker_state_is_active(import_state) {
+        for missing in [
+            ("import_id", import_id),
+            ("task_id", task_id),
+            ("fencing_token", fencing_token),
+            ("object_digest", object_digest),
+        ]
+        .into_iter()
+        .filter_map(|(field, value)| value.is_none().then_some(field))
+        {
+            push_grouped_error(
+                errors,
+                state_errors,
+                format!("active import state marker missing idempotency field {missing}"),
+            );
+        }
+    }
+
+    Some(serde_json::json!({
+        "import_id": import_id?,
+        "task_id": task_id?,
+        "fencing_token": fencing_token?,
+        "object_digest": object_digest?,
+    }))
+}
+
+fn graph_lightning_import_marker_state_is_active(import_state: &str) -> bool {
+    matches!(
+        import_state,
+        "EXPORTING" | "UPLOADING" | "MERGING" | "VALIDATING"
+    )
+}
+
+fn marker_string_field<'a>(marker: &'a serde_json::Value, field: &str) -> Option<&'a str> {
+    marker
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| !value.is_empty())
 }
 
 fn graph_lightning_effective_import_state<'a>(
@@ -2974,6 +3032,23 @@ mod tests {
         assert_eq!(report["state_marker"]["present"], true);
         assert_eq!(report["state_marker"]["import_state"], "EXPORTING");
         assert_eq!(report["state_marker"]["raw"]["import_id"], "import-1");
+        assert_eq!(report["state_marker"]["idempotency_ready"], true);
+        assert_eq!(
+            report["state_marker"]["idempotency_key"]["import_id"],
+            "import-1"
+        );
+        assert_eq!(
+            report["state_marker"]["idempotency_key"]["task_id"],
+            "task-1"
+        );
+        assert_eq!(
+            report["state_marker"]["idempotency_key"]["fencing_token"],
+            "fence-1"
+        );
+        assert_eq!(
+            report["state_marker"]["idempotency_key"]["object_digest"],
+            "digest-1"
+        );
         assert_eq!(report["resume_action"]["operation"], "continue_export");
         assert_eq!(report["resume_action"]["safe_to_retry"], true);
         assert_eq!(report["resume_action"]["terminal"], false);
@@ -3203,6 +3278,11 @@ mod tests {
         assert_eq!(report["artifact_state"], "READY");
         assert_eq!(report["import_state"], "CANCELED");
         assert_eq!(report["state_marker"]["import_state"], "CANCELED");
+        assert_eq!(report["state_marker"]["idempotency_ready"], false);
+        assert_eq!(
+            report["state_marker"]["idempotency_key"],
+            serde_json::Value::Null
+        );
         assert_eq!(report["resume_action"]["operation"], "none");
         assert_eq!(report["resume_action"]["safe_to_retry"], false);
         assert_eq!(report["resume_action"]["terminal"], true);
@@ -3260,6 +3340,58 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("resource retention report failed")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_quarantines_active_state_marker_without_idempotency_key() {
+        let staging_dir =
+            unique_main_test_dir("graph_lightning_status_missing_idempotency_marker_staging");
+        let publish_dir =
+            unique_main_test_dir("graph_lightning_status_missing_idempotency_marker_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_state.json"),
+            serde_json::json!({
+                "protocol": "graph-lightning-import-state",
+                "protocol_version": 1,
+                "import_state": "UPLOADING",
+                "import_id": "import-1",
+                "task_id": "task-1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["artifact_state"], "CREATED");
+        assert_eq!(report["import_state"], "QUARANTINED");
+        assert_eq!(report["state_marker"]["import_state"], "QUARANTINED");
+        assert_eq!(report["state_marker"]["idempotency_ready"], false);
+        assert_eq!(
+            report["state_marker"]["idempotency_key"],
+            serde_json::Value::Null
+        );
+        assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["status_gate"]["state_errors"], 2);
+        assert!(report["status_gate"]["state_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("missing idempotency field fencing_token")));
+        assert!(report["status_gate"]["state_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("missing idempotency field object_digest")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }

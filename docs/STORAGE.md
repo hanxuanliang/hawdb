@@ -172,11 +172,13 @@ CREATED/READY/PUBLISHED/QUARANTINED state and can merge an optional
 caller-owned `graph_lightning_import_state.json` marker for
 EXPORTING/UPLOADING/MERGING/VALIDATING/FAILED/CANCELED coordinator states. It
 groups presence, staging, published-pointer, state-marker, and resource errors
-for resume automation. The report also includes machine-readable
-`resume_action` and `resource_retention` fields that distinguish staging,
-publishing, active work, completed, canceled, failed, and
-quarantined/manual-repair states without requiring callers to parse
-human-readable error strings.
+for resume automation. Active coordinator states require the marker to carry the
+idempotent retry tuple `import_id`, `task_id`, `fencing_token`, and
+`object_digest`; missing fields quarantine the status report before retry. The
+report also includes machine-readable `resume_action`, `state_marker`, and
+`resource_retention` fields that distinguish staging, publishing, active work,
+completed, canceled, failed, and quarantined/manual-repair states without
+requiring callers to parse human-readable error strings.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
