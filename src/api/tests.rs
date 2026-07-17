@@ -464,7 +464,7 @@ fn returns_relationship_endpoint_properties() {
 #[test]
 fn retrieves_knowledge_through_database_facade() {
     let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'mem_1', title: 'Graph retrieval', content: 'Projection freshness and truncation diagnostics', source_id: 'thread_1'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Skein'})")
+    db.query("CREATE (:Memory {id: 'mem_1', title: 'Graph retrieval', content: 'Projection freshness and truncation diagnostics', source_id: 'thread_1'})-[:MENTIONS {chunk_index: 3, source_id: 'thread_1'}]->(:Entity {id: 'entity_1', name: 'Skein'})")
             .unwrap();
     db.query(
             "CREATE (:Memory {id: 'mem_2', title: 'Graph retrieval', content: 'Search result diagnostics'})",
@@ -628,6 +628,18 @@ fn retrieves_knowledge_through_database_facade() {
     assert_eq!(
         output.graph_context_paths[0].relationship_type.as_str(),
         "MENTIONS"
+    );
+    assert_eq!(
+        output.graph_context_paths[0]
+            .relationship_properties
+            .get("chunk_index"),
+        Some(&Value::Int(3))
+    );
+    assert_eq!(
+        output.graph_context_paths[0]
+            .relationship_properties
+            .get("source_id"),
+        Some(&Value::String("thread_1".to_string()))
     );
     assert_eq!(
         output.graph_context_paths[0].source_external_id.as_deref(),
@@ -1851,7 +1863,13 @@ fn retrieves_bounded_multi_hop_knowledge_context() {
         )
         .unwrap();
     db.store
-        .create_relationship(&mut db.catalog, NodeId(1), leaf, "LINKS", BTreeMap::new())
+        .create_relationship(
+            &mut db.catalog,
+            NodeId(1),
+            leaf,
+            "LINKS",
+            BTreeMap::from([("weight".to_string(), Value::Int(2))]),
+        )
         .unwrap();
 
     let mut search_index = SearchIndex::in_memory();
@@ -1883,7 +1901,8 @@ fn retrieves_bounded_multi_hop_knowledge_context() {
         && path.target_external_id.as_deref() == Some("mid")));
     assert!(output.graph_context_paths.iter().any(|path| path.hop == 2
         && path.source_external_id.as_deref() == Some("mid")
-        && path.target_external_id.as_deref() == Some("leaf")));
+        && path.target_external_id.as_deref() == Some("leaf")
+        && path.relationship_properties.get("weight") == Some(&Value::Int(2))));
 }
 
 #[test]
@@ -2567,7 +2586,13 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         )
         .unwrap();
     db.store
-        .create_relationship(&mut db.catalog, NodeId(1), leaf, "LINKS", BTreeMap::new())
+        .create_relationship(
+            &mut db.catalog,
+            NodeId(1),
+            leaf,
+            "LINKS",
+            BTreeMap::from([("weight".to_string(), Value::Int(2))]),
+        )
         .unwrap();
     db.store
         .create_relationship(
@@ -2609,7 +2634,8 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         .all(|path| { path.direction == KnowledgeGraphPathDirection::Outgoing }));
     assert!(outgoing.paths.iter().any(|path| path.hop == 2
         && path.source_external_id.as_deref() == Some("mid")
-        && path.target_external_id.as_deref() == Some("leaf")));
+        && path.target_external_id.as_deref() == Some("leaf")
+        && path.relationship_properties.get("weight") == Some(&Value::Int(2))));
 
     let incoming = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
@@ -2852,7 +2878,7 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
 fn retrieves_bounded_knowledge_paths_without_search_projection() {
     let mut db = Database::new();
     db.query(
-        "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'mid', name: 'Mid'})",
+        "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {weight: 1}]->(:Entity {id: 'mid', name: 'Mid'})",
     )
     .unwrap();
     let leaf = db
@@ -2867,7 +2893,13 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
         )
         .unwrap();
     db.store
-        .create_relationship(&mut db.catalog, NodeId(1), leaf, "LINKS", BTreeMap::new())
+        .create_relationship(
+            &mut db.catalog,
+            NodeId(1),
+            leaf,
+            "LINKS",
+            BTreeMap::from([("weight".to_string(), Value::Int(2))]),
+        )
         .unwrap();
 
     let output = db.knowledge_paths(&KnowledgePathRequest {
@@ -2898,8 +2930,16 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
     assert_eq!(path.segments.len(), 2);
     assert_eq!(path.segments[0].source_external_id.as_deref(), Some("root"));
     assert_eq!(path.segments[0].target_external_id.as_deref(), Some("mid"));
+    assert_eq!(
+        path.segments[0].relationship_properties.get("weight"),
+        Some(&Value::Int(1))
+    );
     assert_eq!(path.segments[1].source_external_id.as_deref(), Some("mid"));
     assert_eq!(path.segments[1].target_external_id.as_deref(), Some("leaf"));
+    assert_eq!(
+        path.segments[1].relationship_properties.get("weight"),
+        Some(&Value::Int(2))
+    );
     assert!(path
         .segments
         .iter()

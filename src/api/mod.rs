@@ -670,6 +670,7 @@ pub struct KnowledgeGraphContextPath {
     pub direction: KnowledgeGraphPathDirection,
     pub relationship_id: u64,
     pub relationship_type: String,
+    pub relationship_properties: BTreeMap<String, Value>,
     pub source_node_id: u64,
     pub source_labels: Vec<String>,
     pub source_external_id: Option<String>,
@@ -3064,6 +3065,7 @@ fn context_path_for_relationship(
             .rel_type_name(relationship.rel_type)
             .unwrap_or("<unknown>")
             .to_string(),
+        relationship_properties: relationship.properties.clone(),
         source_node_id: relationship.source.0,
         source_labels: node_label_names(catalog, source),
         source_external_id: Some(projected_node_external_id(source)),

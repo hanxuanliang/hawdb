@@ -566,10 +566,12 @@ canonical node. This keeps per-retriever explanation counts stable while the
 global graph-context budget still bounds emitted paths. This gives RAG callers
 graph evidence paths without issuing ad hoc Cypher for common neighborhood and
 short-path context, including pure graph-seed retrieval when no search
-projection is available. It also returns `KnowledgeEvidence` summaries that bind
-each search hit to its projection kind, external ID, source ID, canonical node
-ID, matched terms, score components, ranks, and graph context path count. This
-keeps raw evidence provenance explicit even though the search projection remains
+projection is available. Graph context path segments carry relationship
+properties so source-provenance, weight, and temporal edge metadata remain
+available to callers. It also returns `KnowledgeEvidence` summaries that bind each
+search hit to its projection kind, external ID, source ID, canonical node ID,
+matched terms, score components, ranks, and graph context path count. This keeps
+raw evidence provenance explicit even though the search projection remains
 outside canonical graph storage.
 
 Typed knowledge operations can bypass the search projection entirely when the
