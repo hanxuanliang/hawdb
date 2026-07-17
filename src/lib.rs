@@ -75,8 +75,9 @@ pub use nowledge_inventory::{
     scan_nowledge_query_inventory, scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_to_json,
+    scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
     scan_nowledge_query_inventory_to_json, scan_nowledge_query_inventory_with_options,
-    NowledgeInventoryScanOptions,
+    NowledgeCypherMigrationGateJsonOptions, NowledgeInventoryScanOptions,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPermit, LocalQosPolicy,

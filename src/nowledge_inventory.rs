@@ -5,7 +5,7 @@ use crate::compat::{
     compatibility_migration_gate_bundle_to_json, nowledge_memory_core_fixture,
     run_compatibility_fixture_with_shadow, CompatibilityCutoverPolicy,
     CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite, CompatibilityQueryInventory,
-    CompatibilityShadowEngine,
+    CompatibilityShadowEngine, ExternalShadowReady,
 };
 use crate::error::{Result, SkeinError};
 use std::fs;
@@ -16,6 +16,17 @@ const DEFAULT_INVENTORY_NAME: &str = "nowledge-scanned-inventory";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeInventoryScanOptions {
     pub inventory_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NowledgeCypherMigrationGateJsonOptions {
+    pub shadow_name: Option<String>,
+    pub self_shadow: bool,
+    pub shadow_ready: Option<ExternalShadowReady>,
+    pub ready_preflight: bool,
+    pub shadow_trace_path: Option<String>,
+    pub shadow_request_count: Option<u64>,
+    pub include_cutover_evidence: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,8 +173,21 @@ pub fn scan_nowledge_query_inventory_cypher_migration_gate_to_json(
     root: impl AsRef<Path>,
     shadow: &mut impl CompatibilityShadowEngine,
 ) -> Result<serde_json::Value> {
+    scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+        root,
+        shadow,
+        NowledgeCypherMigrationGateJsonOptions::default(),
+    )
+}
+
+pub fn scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+    root: impl AsRef<Path>,
+    shadow: &mut impl CompatibilityShadowEngine,
+    options: NowledgeCypherMigrationGateJsonOptions,
+) -> Result<serde_json::Value> {
     let inventory = scan_nowledge_query_inventory(root)?;
     let fixture = nowledge_memory_core_fixture();
+    let shadow_engine_name = shadow.name().to_string();
     let mut primary = Database::new();
     let shadow_report = run_compatibility_fixture_with_shadow(&mut primary, &fixture, shadow)?;
     let bundle = assess_compatibility_cypher_migration_gate_bundle(
@@ -173,7 +197,150 @@ pub fn scan_nowledge_query_inventory_cypher_migration_gate_to_json(
         CompatibilityInventoryCoveragePolicy::default(),
         CompatibilityCutoverPolicy::default(),
     );
-    Ok(compatibility_migration_gate_bundle_to_json(&bundle))
+    let mut json = compatibility_migration_gate_bundle_to_json(&bundle);
+    add_shadow_metadata_to_migration_gate_json(&mut json, &shadow_engine_name, options)?;
+    Ok(json)
+}
+
+fn add_shadow_metadata_to_migration_gate_json(
+    bundle: &mut serde_json::Value,
+    fallback_shadow_name: &str,
+    options: NowledgeCypherMigrationGateJsonOptions,
+) -> Result<()> {
+    let shadow_name = options
+        .shadow_name
+        .as_deref()
+        .unwrap_or(fallback_shadow_name);
+    let ready_preflight = options.ready_preflight || options.shadow_ready.is_some();
+
+    if options.shadow_name.is_some() || options.include_cutover_evidence {
+        insert_shadow_run_json(bundle, shadow_name, options.self_shadow)?;
+    }
+    if let Some(ready) = options.shadow_ready.as_ref() {
+        insert_shadow_ready_json(bundle, ready)?;
+    }
+    if let Some(trace_path) = options.shadow_trace_path.as_ref() {
+        insert_shadow_trace_json(
+            bundle,
+            trace_path,
+            options.shadow_request_count.unwrap_or_default(),
+        )?;
+    }
+    if options.include_cutover_evidence {
+        insert_cutover_evidence_json(bundle, options.self_shadow, ready_preflight)?;
+    }
+    Ok(())
+}
+
+fn migration_gate_json_object(
+    bundle: &mut serde_json::Value,
+) -> Result<&mut serde_json::Map<String, serde_json::Value>> {
+    bundle.as_object_mut().ok_or_else(|| {
+        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+    })
+}
+
+fn insert_shadow_run_json(
+    bundle: &mut serde_json::Value,
+    shadow_name: &str,
+    self_shadow: bool,
+) -> Result<()> {
+    migration_gate_json_object(bundle)?.insert(
+        "shadow_run".to_string(),
+        serde_json::json!({
+            "shadow_name": shadow_name,
+            "self_shadow": self_shadow,
+            "evidence_kind": if self_shadow {
+                "protocol_smoke"
+            } else {
+                "previous_wrapper"
+            },
+        }),
+    );
+    Ok(())
+}
+
+fn insert_shadow_ready_json(
+    bundle: &mut serde_json::Value,
+    ready: &ExternalShadowReady,
+) -> Result<()> {
+    migration_gate_json_object(bundle)?.insert(
+        "shadow_ready".to_string(),
+        serde_json::json!({
+            "protocol_version": ready.protocol_version,
+            "capabilities": &ready.capabilities,
+        }),
+    );
+    Ok(())
+}
+
+fn insert_shadow_trace_json(
+    bundle: &mut serde_json::Value,
+    trace_path: &str,
+    request_count: u64,
+) -> Result<()> {
+    migration_gate_json_object(bundle)?.insert(
+        "shadow_trace".to_string(),
+        serde_json::json!({
+            "path": trace_path,
+            "request_count": request_count,
+        }),
+    );
+    Ok(())
+}
+
+fn insert_cutover_evidence_json(
+    bundle: &mut serde_json::Value,
+    self_shadow: bool,
+    ready_preflight: bool,
+) -> Result<()> {
+    let migration_gate = bundle
+        .get("migration_gate")
+        .and_then(serde_json::Value::as_object)
+        .ok_or_else(|| {
+            SkeinError::Execution("migration gate bundle missing migration_gate".to_string())
+        })?;
+    let migration_gate_ready = migration_gate
+        .get("decision")
+        .and_then(serde_json::Value::as_str)
+        == Some("ready");
+    let shadow_evidence_present = migration_gate
+        .get("shadow_evidence_present")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let mut blockers = Vec::new();
+    if self_shadow {
+        blockers.push("shadow run is protocol smoke, not previous-wrapper evidence");
+    }
+    if !ready_preflight {
+        blockers.push("shadow ready preflight was not executed");
+    }
+    if !shadow_evidence_present {
+        blockers.push("no matched shadow checks are present");
+    }
+    if !migration_gate_ready {
+        blockers.push("migration gate decision is not ready");
+    }
+
+    migration_gate_json_object(bundle)?.insert(
+        "cutover_evidence".to_string(),
+        serde_json::json!({
+            "eligible": blockers.is_empty(),
+            "evidence_kind": if self_shadow {
+                "protocol_smoke"
+            } else {
+                "previous_wrapper"
+            },
+            "requires_previous_wrapper": true,
+            "requires_ready_preflight": true,
+            "requires_shadow_evidence": true,
+            "ready_preflight": ready_preflight,
+            "shadow_evidence_present": shadow_evidence_present,
+            "migration_gate_ready": migration_gate_ready,
+            "blockers": blockers,
+        }),
+    );
+    Ok(())
 }
 
 fn fixture_check_cypher(check: &crate::compat::CompatibilityCheck) -> Option<&str> {
@@ -773,11 +940,13 @@ mod tests {
         scan_nowledge_query_inventory,
         scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
         scan_nowledge_query_inventory_cypher_coverage_to_json,
-        scan_nowledge_query_inventory_cypher_migration_gate_to_json, scan_source_file,
-        strip_cfg_test_modules,
+        scan_nowledge_query_inventory_cypher_migration_gate_to_json,
+        scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json, scan_source_file,
+        strip_cfg_test_modules, NowledgeCypherMigrationGateJsonOptions,
     };
     use crate::compat::{
-        CompatibilityShadowEngine, ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput,
+        CompatibilityShadowEngine, ExternalShadowReady, ProjectedGraphFixtureCheck,
+        ProjectedGraphShadowOutput,
     };
     use crate::{Database, QueryOutput, Result};
     use std::fs;
@@ -1047,6 +1216,63 @@ mod tests {
                 .len(),
             0
         );
+        assert!(bundle.get("shadow_run").is_none());
+        assert!(bundle.get("cutover_evidence").is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_cypher_migration_gate_can_include_shadow_wiring_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-migration-gate-metadata-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let mut shadow = TestShadowEngine::default();
+        let bundle = scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+            &root,
+            &mut shadow,
+            NowledgeCypherMigrationGateJsonOptions {
+                shadow_name: Some("previous-wrapper".to_string()),
+                shadow_ready: Some(ExternalShadowReady {
+                    protocol_version: crate::EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                    capabilities: vec!["execute".to_string(), "project_graph".to_string()],
+                }),
+                shadow_trace_path: Some("/tmp/skein-shadow.jsonl".to_string()),
+                shadow_request_count: Some(42),
+                include_cutover_evidence: true,
+                ..NowledgeCypherMigrationGateJsonOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(bundle["migration_gate"]["decision"], "ready");
+        assert_eq!(bundle["shadow_run"]["shadow_name"], "previous-wrapper");
+        assert_eq!(bundle["shadow_run"]["self_shadow"], false);
+        assert_eq!(bundle["shadow_run"]["evidence_kind"], "previous_wrapper");
+        assert_eq!(
+            bundle["shadow_ready"]["protocol_version"],
+            crate::EXTERNAL_SHADOW_PROTOCOL_VERSION
+        );
+        assert_eq!(bundle["shadow_trace"]["request_count"], 42);
+        assert_eq!(bundle["cutover_evidence"]["eligible"], true);
+        assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
+        assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);
 
         fs::remove_dir_all(root).unwrap();
     }
