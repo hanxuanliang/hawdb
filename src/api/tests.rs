@@ -7880,6 +7880,8 @@ fn checkpoint_persists_index_descriptors_and_statistics() {
     assert!(checkpoint.contains("stat_rel_type_source_count"));
     assert!(checkpoint.contains("stat_path_count"));
     assert!(checkpoint.contains("stat_bounded_path_count"));
+    assert!(checkpoint.contains("stat_bounded_path_source_distinct_count"));
+    assert!(checkpoint.contains("stat_bounded_path_target_distinct_count"));
     assert!(checkpoint.contains("stat_property_distinct_count"));
     assert!(checkpoint.contains("stat_rel_property_distinct_count"));
     assert!(checkpoint.contains("stat_rel_property_histogram"));

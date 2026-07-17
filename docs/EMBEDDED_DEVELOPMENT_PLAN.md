@@ -928,14 +928,14 @@ Current implemented slice:
   selectivity, residual string predicate selectivity without double-counting
   full-text index candidates, constant/`OR` predicate selectivity for optional
   parameter filters, grouped node-property aggregate cardinality, selected-plan
-  cost stability, deterministic fingerprints, budget-fallback paths, and path
-  source/target coverage distinct statistics for distinct variable aggregate
-  costing without depending on a storage fixture
+  cost stability, deterministic fingerprints, budget-fallback paths, one-hop
+  and bounded multi-hop path source/target coverage distinct statistics for
+  distinct variable aggregate costing without depending on a storage fixture
 
 Remaining Phase 4 work:
 
 - richer cross-pattern statistics beyond residual filters, grouped
-  node-property aggregates, and one-hop path coverage distinct counts
+  node-property aggregates, and bounded path coverage distinct counts
 - alternative expand implementation candidates and pattern join-order
   enumeration once multi-pattern logical plans exist
 - bounded left-deep join-order enumeration beyond the current all-single-row

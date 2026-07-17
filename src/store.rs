@@ -5303,6 +5303,8 @@ impl GraphStore {
                 | ["stat_path_source_distinct_count", _, _, _, _]
                 | ["stat_path_target_distinct_count", _, _, _, _]
                 | ["stat_bounded_path_count", _, _, _, _, _]
+                | ["stat_bounded_path_source_distinct_count", _, _, _, _, _]
+                | ["stat_bounded_path_target_distinct_count", _, _, _, _, _]
                 | ["stat_property_distinct_count", _, _, _]
                 | ["stat_rel_property_distinct_count", _, _, _]
                 | ["stat_rel_property_histogram", _, _, _]
@@ -5920,6 +5922,22 @@ impl DurableStore {
         {
             body.push_str(&format!(
                 "stat_bounded_path_count\t{}\t{}\t{}\t{}\t{}\n",
+                source_label_id.0, rel_type_id.0, target_label_id.0, hops, count
+            ));
+        }
+        for ((source_label_id, rel_type_id, target_label_id, hops), count) in
+            &statistics.bounded_path_source_distinct_counts
+        {
+            body.push_str(&format!(
+                "stat_bounded_path_source_distinct_count\t{}\t{}\t{}\t{}\t{}\n",
+                source_label_id.0, rel_type_id.0, target_label_id.0, hops, count
+            ));
+        }
+        for ((source_label_id, rel_type_id, target_label_id, hops), count) in
+            &statistics.bounded_path_target_distinct_counts
+        {
+            body.push_str(&format!(
+                "stat_bounded_path_target_distinct_count\t{}\t{}\t{}\t{}\t{}\n",
                 source_label_id.0, rel_type_id.0, target_label_id.0, hops, count
             ));
         }
@@ -7991,17 +8009,30 @@ fn compute_statistics(
             .sampled_rel_property_histograms
             .insert(key, is_sampled);
     }
-    statistics.bounded_path_counts =
-        compute_bounded_path_counts(nodes, &outgoing_by_source_type, MAX_BOUNDED_PATH_STAT_HOPS);
+    let bounded_path_statistics = compute_bounded_path_statistics(
+        nodes,
+        &outgoing_by_source_type,
+        MAX_BOUNDED_PATH_STAT_HOPS,
+    );
+    statistics.bounded_path_counts = bounded_path_statistics.counts;
+    statistics.bounded_path_source_distinct_counts = bounded_path_statistics.source_distinct_counts;
+    statistics.bounded_path_target_distinct_counts = bounded_path_statistics.target_distinct_counts;
     statistics
 }
 
-fn compute_bounded_path_counts(
+#[derive(Debug, Default)]
+struct BoundedPathStatistics {
+    counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
+    source_distinct_counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
+    target_distinct_counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
+}
+
+fn compute_bounded_path_statistics(
     nodes: &BTreeMap<NodeId, NodeRecord>,
     outgoing_by_source_type: &BTreeMap<(NodeId, RelTypeId), Vec<NodeId>>,
     max_hops: usize,
-) -> BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64> {
-    let mut counts = BTreeMap::new();
+) -> BoundedPathStatistics {
+    let mut accumulator = BoundedPathStatAccumulator::default();
     let context = BoundedPathStatContext {
         nodes,
         outgoing_by_source_type,
@@ -8014,11 +8045,30 @@ fn compute_bounded_path_counts(
     for source in nodes.values() {
         for source_label in &source.labels {
             for rel_type in &rel_types {
-                context.collect(source.id, *source_label, *rel_type, 1, &mut counts);
+                context.collect(
+                    source.id,
+                    source.id,
+                    *source_label,
+                    *rel_type,
+                    1,
+                    &mut accumulator,
+                );
             }
         }
     }
-    counts
+    BoundedPathStatistics {
+        counts: accumulator.counts,
+        source_distinct_counts: accumulator
+            .sources
+            .into_iter()
+            .map(|(path, sources)| (path, sources.len() as u64))
+            .collect(),
+        target_distinct_counts: accumulator
+            .targets
+            .into_iter()
+            .map(|(path, targets)| (path, targets.len() as u64))
+            .collect(),
+    }
 }
 
 struct BoundedPathStatContext<'a> {
@@ -8027,14 +8077,22 @@ struct BoundedPathStatContext<'a> {
     max_hops: usize,
 }
 
+#[derive(Debug, Default)]
+struct BoundedPathStatAccumulator {
+    counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
+    sources: BTreeMap<(LabelId, RelTypeId, LabelId, usize), BTreeSet<NodeId>>,
+    targets: BTreeMap<(LabelId, RelTypeId, LabelId, usize), BTreeSet<NodeId>>,
+}
+
 impl BoundedPathStatContext<'_> {
     fn collect(
         &self,
+        root_source: NodeId,
         current: NodeId,
         source_label: LabelId,
         rel_type: RelTypeId,
         hop: usize,
-        counts: &mut BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
+        accumulator: &mut BoundedPathStatAccumulator,
     ) {
         if hop > self.max_hops {
             return;
@@ -8047,11 +8105,27 @@ impl BoundedPathStatContext<'_> {
                 continue;
             };
             for target_label in &target.labels {
-                *counts
-                    .entry((source_label, rel_type, *target_label, hop))
-                    .or_default() += 1;
+                let path_key = (source_label, rel_type, *target_label, hop);
+                *accumulator.counts.entry(path_key).or_default() += 1;
+                accumulator
+                    .sources
+                    .entry(path_key)
+                    .or_default()
+                    .insert(root_source);
+                accumulator
+                    .targets
+                    .entry(path_key)
+                    .or_default()
+                    .insert(*target_id);
             }
-            self.collect(*target_id, source_label, rel_type, hop + 1, counts);
+            self.collect(
+                root_source,
+                *target_id,
+                source_label,
+                rel_type,
+                hop + 1,
+                accumulator,
+            );
         }
     }
 }
@@ -9852,6 +9926,8 @@ mod tests {
             (10, LabelId(1)),
             (11, LabelId(1)),
             (12, LabelId(1)),
+            (20, LabelId(1)),
+            (21, LabelId(1)),
         ]
         .into_iter()
         .map(|(id, label)| {
@@ -9865,21 +9941,30 @@ mod tests {
             )
         })
         .collect::<BTreeMap<_, _>>();
-        let relationships = [(0, 0, 10), (1, 0, 11), (2, 1, 11), (3, 1, 12), (4, 1, 12)]
-            .into_iter()
-            .map(|(id, source, target)| {
-                (
-                    RelId(id),
-                    RelRecord {
-                        id: RelId(id),
-                        source: NodeId(source),
-                        target: NodeId(target),
-                        rel_type: RelTypeId(0),
-                        properties: BTreeMap::new(),
-                    },
-                )
-            })
-            .collect::<BTreeMap<_, _>>();
+        let relationships = [
+            (0, 0, 10),
+            (1, 0, 11),
+            (2, 1, 11),
+            (3, 1, 12),
+            (4, 1, 12),
+            (5, 10, 20),
+            (6, 11, 20),
+            (7, 12, 21),
+        ]
+        .into_iter()
+        .map(|(id, source, target)| {
+            (
+                RelId(id),
+                RelRecord {
+                    id: RelId(id),
+                    source: NodeId(source),
+                    target: NodeId(target),
+                    rel_type: RelTypeId(0),
+                    properties: BTreeMap::new(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
 
         let statistics = compute_statistics(&nodes, &relationships, 1);
         let path = (LabelId(0), RelTypeId(0), LabelId(1));
@@ -9887,6 +9972,21 @@ mod tests {
         assert_eq!(statistics.path_counts.get(&path), Some(&5));
         assert_eq!(statistics.path_source_distinct_counts.get(&path), Some(&2));
         assert_eq!(statistics.path_target_distinct_counts.get(&path), Some(&3));
+
+        let two_hop_path = (LabelId(0), RelTypeId(0), LabelId(1), 2);
+        assert_eq!(statistics.bounded_path_counts.get(&two_hop_path), Some(&5));
+        assert_eq!(
+            statistics
+                .bounded_path_source_distinct_counts
+                .get(&two_hop_path),
+            Some(&2)
+        );
+        assert_eq!(
+            statistics
+                .bounded_path_target_distinct_counts
+                .get(&two_hop_path),
+            Some(&2)
+        );
     }
 
     #[test]
