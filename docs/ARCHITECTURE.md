@@ -613,6 +613,15 @@ the QoS ranker prioritize stale graph-derived projection maintenance by expected
 value. This keeps FTS/vector projection maintenance incremental without writing
 search state into the graph WAL.
 
+Graph Lightning bootstrap export follows the same resource boundary for
+embedded deployments. A direct caller can still request
+`prepare_graph_lightning_bootstrap_export` without local background admission,
+but caller-owned pre-upload or background import loops can first ask
+`graph_lightning_bootstrap_export_background_work_plan` for an `Import` lane
+estimate and then execute through the background or scheduled background export
+facades. Deferred background export does not generate stable-ID mapping files,
+so QoS rejection cannot create partial import state.
+
 Typed knowledge operations can bypass the search projection entirely when the
 caller already has graph identity. `Database::knowledge_entity` returns a
 canonical node snapshot by label and external ID, including node id, labels,

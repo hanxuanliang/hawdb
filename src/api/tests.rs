@@ -9129,6 +9129,91 @@ fn graph_lightning_bootstrap_manifest_reports_ready_physical_export() {
 }
 
 #[test]
+fn graph_lightning_bootstrap_export_background_plan_uses_import_lane() {
+    let mut db = Database::new();
+    assert!(db
+        .graph_lightning_bootstrap_export_background_work_plan(BackgroundWorkHint::default())
+        .is_none());
+
+    db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
+        .unwrap();
+    let plan = db
+        .graph_lightning_bootstrap_export_background_work_plan(BackgroundWorkHint {
+            active_topic: true,
+            ..BackgroundWorkHint::default()
+        })
+        .unwrap();
+
+    assert_eq!(plan.request.class, WorkClass::Import);
+    assert_eq!(plan.request.estimated_operations, 3);
+    assert!(plan.hint.active_topic);
+}
+
+#[test]
+fn graph_lightning_background_bootstrap_export_uses_qos_without_gating_direct_export() {
+    let path = unique_test_dir("graph_lightning_background_export_qos");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
+            .unwrap();
+        let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+        class_limits[WorkClass::Import.as_index()] = Some(0);
+        let policy = LocalQosPolicy {
+            max_background_operations_by_class: class_limits,
+            ..LocalQosPolicy::default()
+        };
+        let error = db
+            .prepare_background_graph_lightning_bootstrap_export(&policy, &LocalQosState::default())
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("background graph lightning bootstrap export deferred"));
+        assert!(!path.join("stable_ids.skein").exists());
+
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        assert_eq!(export.manifest.node_count, 2);
+        assert_eq!(export.manifest.relationship_count, 1);
+        assert!(path.join("stable_ids.skein").exists());
+    }
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn graph_lightning_scheduled_background_bootstrap_export_releases_import_budget() {
+    let path = unique_test_dir("graph_lightning_scheduled_background_export");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'root'})-[:LINKS]->(:Entity {id: 'mid'})")
+            .unwrap();
+        let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+        class_limits[WorkClass::Import.as_index()] = Some(3);
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(3),
+            max_total_background_operations: Some(3),
+            max_background_operations_by_class: class_limits,
+            ..LocalQosPolicy::default()
+        };
+        let mut scheduler = LocalQosScheduler::new(policy);
+
+        let export = db
+            .prepare_scheduled_background_graph_lightning_bootstrap_export(&mut scheduler)
+            .unwrap();
+
+        assert_eq!(export.manifest.node_count, 2);
+        assert_eq!(export.manifest.relationship_count, 1);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(
+            scheduler.state().running_background_operations_by_class[WorkClass::Import.as_index()],
+            0
+        );
+    }
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn graph_lightning_graph_stream_validation_skips_length_coded_metadata() {
     let mut db = Database::new();
     let root = db

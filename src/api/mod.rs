@@ -1018,6 +1018,81 @@ impl Database {
         })
     }
 
+    pub fn graph_lightning_bootstrap_export_background_work_plan(
+        &self,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
+        if estimated_operations == 0 {
+            return None;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Import,
+            estimated_operations,
+            hint,
+        ))
+    }
+
+    pub fn prepare_background_graph_lightning_bootstrap_export(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+    ) -> Result<GraphLightningBootstrapExport> {
+        let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
+        if estimated_operations == 0 {
+            return self.prepare_graph_lightning_bootstrap_export();
+        }
+        let request = WorkRequest::background(WorkClass::Import, estimated_operations);
+        match policy.admit(state, &request) {
+            QosAdmission::Admit => self.prepare_graph_lightning_bootstrap_export(),
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+                "background graph lightning bootstrap export deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+                "background graph lightning bootstrap export rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn prepare_scheduled_background_graph_lightning_bootstrap_export(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+    ) -> Result<GraphLightningBootstrapExport> {
+        let estimated_operations = self.graph_lightning_bootstrap_export_estimated_operations();
+        if estimated_operations == 0 {
+            return self.prepare_graph_lightning_bootstrap_export();
+        }
+        let permit = match scheduler.try_start(WorkRequest::background(
+            WorkClass::Import,
+            estimated_operations,
+        )) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background graph lightning bootstrap export deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background graph lightning bootstrap export rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.prepare_graph_lightning_bootstrap_export();
+        scheduler.finish(permit);
+        result
+    }
+
+    fn graph_lightning_bootstrap_export_estimated_operations(&self) -> usize {
+        let statistics = self.store.statistics();
+        let total = statistics
+            .node_count
+            .saturating_add(statistics.relationship_count);
+        usize::try_from(total).unwrap_or(usize::MAX)
+    }
+
     pub fn storage_version(&self) -> &'static str {
         self.store.storage_version()
     }
