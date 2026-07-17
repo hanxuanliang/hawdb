@@ -131,10 +131,21 @@ pub struct SearchResultSet {
     pub truncated: bool,
     pub truncation_reasons: Vec<String>,
     pub retrievers: Vec<SearchRetrieverReport>,
+    pub candidate_set: SearchCandidateSetReport,
     pub rank_window: Option<usize>,
     pub fusion_weights: SearchFusionWeights,
     pub document_count: usize,
     pub filtered_document_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchCandidateSetReport {
+    pub id_space: String,
+    pub representation: String,
+    pub cardinality: usize,
+    pub exact: bool,
+    pub filtered_out_count: usize,
+    pub metadata_filters: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -518,6 +529,14 @@ impl SearchIndex {
             .filter(|document| metadata_matches(document, &options.metadata_filters))
             .collect::<Vec<_>>();
         let filtered_document_count = filtered_documents.len();
+        let candidate_set = SearchCandidateSetReport {
+            id_space: "search_projection_document_id".to_string(),
+            representation: "sorted_document_ids".to_string(),
+            cardinality: filtered_document_count,
+            exact: true,
+            filtered_out_count: document_count.saturating_sub(filtered_document_count),
+            metadata_filters: options.metadata_filters.clone(),
+        };
         let vector_available = match (query_embedding, self.embedding_dimension) {
             (Some(vector), Some(dimension)) if vector.len() == dimension => true,
             (Some(vector), Some(dimension)) => {
@@ -655,6 +674,7 @@ impl SearchIndex {
             truncated,
             truncation_reasons,
             retrievers,
+            candidate_set,
             rank_window: options.rank_window,
             fusion_weights: options.fusion_weights,
             document_count,
@@ -1777,6 +1797,63 @@ mod tests {
     }
 
     #[test]
+    fn rank_window_uses_prefiltered_candidate_set() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:hidden_vector".to_string(),
+                title: "Hidden vector".to_string(),
+                content: "hidden graph".to_string(),
+                embedding: Some(vec![1.0, 0.0]),
+                metadata: BTreeMap::from([("scope".to_string(), "hidden".to_string())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:visible_vector".to_string(),
+                title: "Visible vector".to_string(),
+                content: "visible graph".to_string(),
+                embedding: Some(vec![0.9, 0.0]),
+                metadata: BTreeMap::from([("scope".to_string(), "visible".to_string())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:visible_text".to_string(),
+                title: "Visible graph".to_string(),
+                content: "visible graph graph".to_string(),
+                embedding: Some(vec![0.0, 1.0]),
+                metadata: BTreeMap::from([("scope".to_string(), "visible".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "visible graph",
+            Some(&[1.0, 0.0]),
+            SearchMode::Hybrid,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: Some(1),
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("scope".to_string(), "visible".to_string())]),
+            },
+        );
+
+        assert_eq!(result.candidate_set.cardinality, 2);
+        assert_eq!(result.candidate_set.filtered_out_count, 1);
+        assert!(result
+            .hits
+            .iter()
+            .all(|hit| hit.id != "memory:hidden_vector"));
+        let visible_vector = result
+            .hits
+            .iter()
+            .find(|hit| hit.id == "memory:visible_vector")
+            .expect("visible vector should remain eligible");
+        assert_eq!(visible_vector.vector_rank, Some(1));
+    }
+
+    #[test]
     fn hybrid_search_applies_child_fusion_weights() {
         let mut index = SearchIndex::in_memory();
         index
@@ -1886,6 +1963,18 @@ mod tests {
         assert_eq!(result.total_hits, 1);
         assert_eq!(result.document_count, 2);
         assert_eq!(result.filtered_document_count, 1);
+        assert_eq!(
+            result.candidate_set.id_space,
+            "search_projection_document_id"
+        );
+        assert_eq!(result.candidate_set.representation, "sorted_document_ids");
+        assert_eq!(result.candidate_set.cardinality, 1);
+        assert!(result.candidate_set.exact);
+        assert_eq!(result.candidate_set.filtered_out_count, 1);
+        assert_eq!(
+            result.candidate_set.metadata_filters,
+            BTreeMap::from([("source_id".to_string(), "thread_1".to_string())])
+        );
         assert_eq!(result.hits[0].id, "memory:thread_1");
         assert_eq!(result.hits[0].source_id.as_deref(), Some("thread_1"));
         let text = result
