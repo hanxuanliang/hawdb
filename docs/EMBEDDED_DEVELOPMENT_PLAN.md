@@ -587,9 +587,12 @@ background variants bind that same budget to QoS admission and execution for
 per-tick internal loops. Composite and full-text property-index execution
 projections expose `Database::rebuild_bounded_property_index_projections` for
 bounded descriptor-level rebuild reports without making those projections
-canonical durability. Projected graph derived artifacts can be refreshed through
-a report-oriented `Database::rebuild_derived_artifacts` entry point; search
-projection artifacts expose the same report-oriented rebuild shape through
+canonical durability. The same work can be exposed as a rankable `Projection`
+background plan or executed through bounded background/scheduled wrappers that
+charge QoS admission against the descriptor rebuild budget. Projected graph
+derived artifacts can be refreshed through a report-oriented
+`Database::rebuild_derived_artifacts` entry point; search projection artifacts
+expose the same report-oriented rebuild shape through
 `SearchIndex::rebuild_derived_artifacts`. Search projections also expose
 bounded incremental deltas for ordinary FTS/BM25 row upsert/delete changes:
 `SearchIndex::apply_projection_delta` accepts an operation budget and fails

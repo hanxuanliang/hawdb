@@ -221,9 +221,13 @@ semantics remain authoritative. Composite and full-text execution projections
 can be rebuilt through `Database::rebuild_bounded_property_index_projections`,
 which applies complete descriptor rebuilds that fit a caller-supplied operation
 budget and reports estimated operations plus indexed entry counts without
-writing WAL. Conjunctive range seeks keep the complete `AND` predicate as a
-residual filter while using merged lower and upper bounds as the access path.
-Statistics now include per-label/property and
+writing WAL. Internal background loops can expose the same work as a
+`Projection` `BackgroundWorkPlan` through
+`Database::property_index_projection_background_work_plan` or execute it through
+bounded background/scheduled wrappers that bind QoS admission to the same
+descriptor rebuild budget. Conjunctive range seeks keep the complete `AND`
+predicate as a residual filter while using merged lower and upper bounds as the
+access path. Statistics now include per-label/property and
 per-relationship-type/property distinct counts, bounded sorted value histograms,
 and exact-versus-sampled markers. Histograms use deterministic adaptive samples:
 small distinct sets remain exact, medium sets keep up to 256 values, and large

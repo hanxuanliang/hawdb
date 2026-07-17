@@ -948,6 +948,71 @@ impl Database {
         )
     }
 
+    pub fn property_index_projection_background_work_plan(
+        &self,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let estimated_operations = self
+            .store
+            .property_index_projection_estimated_operations(&self.catalog);
+        if estimated_operations == 0 {
+            return None;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Projection,
+            estimated_operations,
+            hint,
+        ))
+    }
+
+    pub fn rebuild_bounded_background_property_index_projections(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        max_estimated_operations: usize,
+    ) -> Result<QueryOutput> {
+        let request = WorkRequest::background(WorkClass::Projection, max_estimated_operations);
+        match policy.admit(state, &request) {
+            QosAdmission::Admit => {
+                Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations))
+            }
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background property index projection rebuild deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background property index projection rebuild rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn rebuild_bounded_scheduled_background_property_index_projections(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        max_estimated_operations: usize,
+    ) -> Result<QueryOutput> {
+        let permit = match scheduler.try_start(WorkRequest::background(
+            WorkClass::Projection,
+            max_estimated_operations,
+        )) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background property index projection rebuild deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background property index projection rebuild rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations));
+        scheduler.finish(permit);
+        result
+    }
+
     pub fn unique_constraints(&self) -> Vec<ConstraintDescriptor> {
         self.catalog.unique_constraints().cloned().collect()
     }

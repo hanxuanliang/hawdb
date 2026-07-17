@@ -4070,6 +4070,118 @@ fn bounded_property_index_projection_rebuild_reports_descriptor_batches() {
 }
 
 #[test]
+fn property_index_projection_background_work_plan_is_absent_without_descriptors() {
+    let db = Database::new();
+
+    assert!(db
+        .property_index_projection_background_work_plan(BackgroundWorkHint::default())
+        .is_none());
+}
+
+#[test]
+fn property_index_projection_background_work_plan_uses_projection_lane() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'Graph foundations'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'b', title: 'Vector search'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'task', source_id: 'a', title: 'Graph query planning'})")
+        .unwrap();
+    db.query("CREATE INDEX ON :Memory(kind, source_id)")
+        .unwrap();
+    db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
+
+    let plan = db
+        .property_index_projection_background_work_plan(BackgroundWorkHint {
+            active_topic: true,
+            query_probability_per_million: 100_000,
+            ..BackgroundWorkHint::default()
+        })
+        .unwrap();
+
+    assert_eq!(plan.request.class, crate::WorkClass::Projection);
+    assert_eq!(plan.request.estimated_operations, 6);
+    let ranked = LocalQosPolicy::default().rank_background_work(&LocalQosState::default(), &[plan]);
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(ranked[0].index, 0);
+    assert!(ranked[0]
+        .decision
+        .reasons
+        .iter()
+        .any(|reason| reason == "active topic"));
+}
+
+#[test]
+fn bounded_background_property_index_projection_rebuild_defers_without_rebuilding() {
+    let path = unique_test_dir("bounded_background_index_projection_defer");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'Graph foundations'})")
+            .unwrap();
+        db.query("CREATE (:Memory {kind: 'note', source_id: 'b', title: 'Vector search'})")
+            .unwrap();
+        db.query("CREATE INDEX ON :Memory(kind, source_id)")
+            .unwrap();
+        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        };
+
+        let error = db
+            .rebuild_bounded_background_property_index_projections(
+                &policy,
+                &LocalQosState::default(),
+                2,
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        assert_eq!(after, before);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn bounded_scheduled_background_property_index_projection_rebuild_releases_budget() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'Graph foundations'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'b', title: 'Vector search'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'task', source_id: 'a', title: 'Graph query planning'})")
+        .unwrap();
+    db.query("CREATE INDEX ON :Memory(kind, source_id)")
+        .unwrap();
+    db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
+    let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+    class_limits[crate::WorkClass::Projection.as_index()] = Some(3);
+    let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+        max_background_operations: Some(4),
+        max_total_background_operations: Some(4),
+        max_background_operations_by_class: class_limits,
+        ..LocalQosPolicy::default()
+    });
+
+    let output = db
+        .rebuild_bounded_scheduled_background_property_index_projections(&mut scheduler, 3)
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("index_kind"),
+        Some(&Value::String("composite".to_string()))
+    );
+    assert_eq!(scheduler.state().running_background_operations, 0);
+    assert_eq!(
+        scheduler.state().running_background_operations_by_class
+            [crate::WorkClass::Projection.as_index()],
+        0
+    );
+}
+
+#[test]
 fn range_predicates_filter_and_use_range_index() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, created_at: 10, title: 'Old'})")

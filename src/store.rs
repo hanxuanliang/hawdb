@@ -1423,6 +1423,19 @@ impl GraphStore {
         actions
     }
 
+    pub fn property_index_projection_estimated_operations(&self, catalog: &Catalog) -> usize {
+        let composite_operations = catalog
+            .composite_property_indexes()
+            .map(|index| self.index_label_record_count(index.label_id).max(1))
+            .fold(0usize, usize::saturating_add);
+        let full_text_operations = catalog
+            .property_indexes()
+            .filter(|index| index.kind == IndexKind::FullText)
+            .map(|index| self.index_label_record_count(index.label_id).max(1))
+            .fold(0usize, usize::saturating_add);
+        composite_operations.saturating_add(full_text_operations)
+    }
+
     pub fn create_unique_constraint(
         &mut self,
         catalog: &mut Catalog,
