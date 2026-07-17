@@ -1788,6 +1788,11 @@ fn knowledge_retrieval_diagnostics(
     input: KnowledgeRetrievalDiagnosticsInput,
 ) -> KnowledgeRetrievalDiagnostics {
     let mut empty_reasons = Vec::new();
+    let candidate_truncation_reasons = knowledge_candidate_truncation_reasons(
+        input.candidate_total_count,
+        input.candidate_count,
+        request.candidate_limit,
+    );
     if input.candidate_count == 0 {
         if search.document_count == 0 {
             empty_reasons.push("search projection has no documents".to_string());
@@ -1800,13 +1805,9 @@ fn knowledge_retrieval_diagnostics(
         if request.graph_seed_limit > 0 && input.graph_seed_candidate_count == 0 {
             empty_reasons.push("graph seed retriever returned no candidates".to_string());
         }
+        empty_reasons.extend(candidate_truncation_reasons.iter().cloned());
         empty_reasons.push("retrieval produced no candidates".to_string());
     }
-    let candidate_truncation_reasons = knowledge_candidate_truncation_reasons(
-        input.candidate_total_count,
-        input.candidate_count,
-        request.candidate_limit,
-    );
     let graph_seed_truncation_reasons = knowledge_graph_seed_truncation_reasons(
         input.graph_seed_candidate_count,
         input.graph_seed_returned_count,
@@ -5624,6 +5625,37 @@ mod tests {
         );
         assert_eq!(output.fanout_reasons.len(), 1);
         assert!(output.fanout_reasons[0].contains("knowledge_candidate_limit 1"));
+
+        let empty_by_limit = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "Graph candidate".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 5,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: Some(0),
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 3,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+        assert!(empty_by_limit.candidates.is_empty());
+        assert_eq!(empty_by_limit.diagnostics.candidate_limit, Some(0));
+        assert_eq!(empty_by_limit.diagnostics.candidate_count, 0);
+        assert_eq!(empty_by_limit.diagnostics.candidate_total_count, 3);
+        assert!(empty_by_limit.diagnostics.candidate_truncated);
+        assert!(empty_by_limit.diagnostics.empty_reasons.iter().any(
+            |reason| reason == "knowledge_candidate_limit 0 returned from 3 merged candidates"
+        ));
+        assert!(empty_by_limit
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "retrieval produced no candidates"));
     }
 
     #[test]
