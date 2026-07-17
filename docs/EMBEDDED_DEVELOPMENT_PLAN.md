@@ -793,9 +793,9 @@ Current implemented slice:
 - grouped aggregate cost estimation uses selected-plan variable labels/types
   and explicit node-property or relationship-property distinct counts for
   simple property group keys, and adds bounded work cost for distinct property
-  aggregate targets such as `COUNT(DISTINCT e2.community_id)`, while
-  non-property or missing-statistics grouping keeps the conservative fallback
-  estimate
+  aggregate targets such as `COUNT(DISTINCT e2.community_id)` plus distinct
+  variable targets such as `COUNT(DISTINCT m)`, while non-property or
+  missing-statistics grouping keeps the conservative fallback estimate
 - optional relationship count-sum costing uses source label/property
   distinct counts plus relationship type/source counts for Nowledge cleanup
   and extracted-reference count paths instead of a fixed leg-count constant

@@ -174,13 +174,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: memory_seed_entity_mentions_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1,
-                cost: 15,
+                cost: 19,
             },
             fingerprint_contains: "IndexNodeSeek",
             decision_contains: &[
                 "choose IndexNodeSeek for Memory.id",
                 "estimate AdjacencyExpand",
-                "selected physical plan cost: estimated_rows=1 cost=15",
+                "selected physical plan cost: estimated_rows=1 cost=19",
             ],
         },
         OptimizerSmokeCase {
@@ -247,14 +247,14 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: source_memory_label_cross_pattern_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 10,
-                cost: 1434,
+                cost: 1884,
             },
             fingerprint_contains: "AdjacencyExpandExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:HAS_LABEL*1..1]->Label",
-                "selected physical plan cost: estimated_rows=10 cost=1434",
+                "selected physical plan cost: estimated_rows=10 cost=1884",
             ],
         },
         OptimizerSmokeCase {
@@ -263,7 +263,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: source_memory_entity_label_workload_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 25,
-                cost: 2445,
+                cost: 3093,
             },
             fingerprint_contains: "SortExec",
             decision_contains: &[
@@ -271,7 +271,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
                 "estimate AdjacencyExpand for Memory-[:HAS_LABEL*1..1]->Label",
-                "selected physical plan cost: estimated_rows=25 cost=2445",
+                "selected physical plan cost: estimated_rows=25 cost=3093",
             ],
         },
         OptimizerSmokeCase {
@@ -280,13 +280,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: community_synthesized_source_coverage_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1,
-                cost: 21,
+                cost: 29,
             },
             fingerprint_contains: "AggregateExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Community.id",
                 "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
-                "selected physical plan cost: estimated_rows=1 cost=21",
+                "selected physical plan cost: estimated_rows=1 cost=29",
             ],
         },
         OptimizerSmokeCase {

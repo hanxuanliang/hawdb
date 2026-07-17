@@ -2055,6 +2055,10 @@ impl OptimizerCatalog {
         self.label_counts.get(label).copied().unwrap_or(1)
     }
 
+    fn relationship_count(&self, rel_type: &str) -> u64 {
+        self.rel_type_counts.get(rel_type).copied().unwrap_or(1)
+    }
+
     fn distinct_count(&self, label: &str, property: &str) -> u64 {
         self.property_distinct_counts
             .get(&(label.to_string(), property.to_string()))
@@ -4326,15 +4330,26 @@ fn estimate_aggregate_work_rows(
             if !item.distinct {
                 return None;
             }
-            let AggregateTarget::Property { variable, property } = &item.target else {
-                return None;
-            };
-            if let Some(label) = physical_plan_node_label(input, variable) {
-                catalog.known_distinct_count(label, property)
-            } else if let Some(rel_type) = physical_plan_relationship_type(input, variable) {
-                catalog.known_rel_property_distinct_count(rel_type, property)
-            } else {
-                None
+            match &item.target {
+                AggregateTarget::Variable(variable) => {
+                    if let Some(label) = physical_plan_node_label(input, variable) {
+                        Some(catalog.label_count(label))
+                    } else {
+                        physical_plan_relationship_type(input, variable)
+                            .map(|rel_type| catalog.relationship_count(rel_type))
+                    }
+                }
+                AggregateTarget::Property { variable, property } => {
+                    if let Some(label) = physical_plan_node_label(input, variable) {
+                        catalog.known_distinct_count(label, property)
+                    } else if let Some(rel_type) = physical_plan_relationship_type(input, variable)
+                    {
+                        catalog.known_rel_property_distinct_count(rel_type, property)
+                    } else {
+                        None
+                    }
+                }
+                AggregateTarget::All => None,
             }
         })
         .fold(0_u64, |sum, distinct_count| {
@@ -7169,7 +7184,7 @@ mod tests {
             trace.selected_plan_cost,
             PlanCost {
                 estimated_rows: 20,
-                cost: 6_004,
+                cost: 7_004,
             }
         );
     }
@@ -7247,7 +7262,7 @@ mod tests {
             trace.selected_plan_cost,
             PlanCost {
                 estimated_rows: 10,
-                cost: 4_004,
+                cost: 5_004,
             }
         );
     }
@@ -7300,6 +7315,52 @@ mod tests {
             PlanCost {
                 estimated_rows: 5,
                 cost: 2_014,
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_distinct_variable_targets_add_bounded_work_cost() {
+        let logical = LogicalPlan::Aggregate {
+            group_keys: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "unit_type".to_string(),
+                },
+                name: "unit_type".to_string(),
+            }],
+            items: vec![Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::Variable("m".to_string()),
+                distinct: true,
+                name: "memory_count".to_string(),
+            }],
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [(("Memory".to_string(), "unit_type".to_string()), 5)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 8 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 5,
+                cost: 3_004,
             }
         );
     }
