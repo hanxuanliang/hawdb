@@ -6963,6 +6963,70 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
 }
 
 #[test]
+fn external_content_artifact_job_background_work_plan_is_rankable_by_action() {
+    let mut db = Database::new();
+    assert!(db
+        .external_content_artifact_job_background_work_plan(BackgroundWorkHint::default(), 3)
+        .is_none());
+    assert!(db
+        .external_content_artifact_job_background_work_plan_for_action(
+            "parse",
+            BackgroundWorkHint::default(),
+            3,
+        )
+        .is_none());
+
+    db.schedule_projected_graph_artifact_rebuild("MissingGraph");
+    assert!(db
+        .external_content_artifact_job_background_work_plan(BackgroundWorkHint::default(), 3)
+        .is_none());
+
+    db.schedule_external_content_artifact_job("source-parse", "parse");
+    db.schedule_external_content_artifact_job("source-crawl", "crawl");
+    let hint = BackgroundWorkHint {
+        active_topic: true,
+        recent_delta_operations: 5,
+        tenant_budget_remaining_operations: Some(8),
+        ..BackgroundWorkHint::default()
+    };
+
+    let any_plan = db
+        .external_content_artifact_job_background_work_plan(hint.clone(), 3)
+        .unwrap();
+    assert_eq!(any_plan.request.class, WorkClass::Import);
+    assert_eq!(any_plan.request.estimated_operations, 3);
+    assert_eq!(any_plan.hint, hint);
+
+    let parse_plan = db
+        .external_content_artifact_job_background_work_plan_for_action(
+            "parse",
+            BackgroundWorkHint {
+                query_probability_per_million: 42,
+                tenant_budget_remaining_operations: Some(2),
+                ..BackgroundWorkHint::default()
+            },
+            3,
+        )
+        .unwrap();
+    assert_eq!(parse_plan.request.class, WorkClass::Import);
+    assert_eq!(parse_plan.request.estimated_operations, 3);
+    let decision =
+        LocalQosPolicy::default().evaluate_background_work(&LocalQosState::default(), &parse_plan);
+    assert!(decision
+        .reasons
+        .iter()
+        .any(|reason| reason.contains("tenant budget remaining 2")));
+
+    assert!(db
+        .external_content_artifact_job_background_work_plan_for_action(
+            "embed",
+            BackgroundWorkHint::default(),
+            3,
+        )
+        .is_none());
+}
+
+#[test]
 fn failed_external_content_artifact_jobs_can_be_retried() {
     let mut db = Database::new();
     let job = db.schedule_external_content_artifact_job_with_payload(

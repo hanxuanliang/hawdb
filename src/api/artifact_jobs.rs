@@ -2,7 +2,8 @@ use super::{optional_u64_value, optional_usize_value, Database, QueryOutput};
 use crate::error::{Result, SkeinError};
 use crate::executor::Row;
 use crate::qos::{
-    LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+    BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
+    QosAdmission, WorkClass, WorkRequest,
 };
 use crate::value::Value;
 use std::collections::BTreeMap;
@@ -187,6 +188,36 @@ impl Database {
             summarize_external_content_artifact_job(&mut summary, job);
         }
         summary
+    }
+
+    pub fn external_content_artifact_job_background_work_plan(
+        &self,
+        hint: BackgroundWorkHint,
+        estimated_operations: usize,
+    ) -> Option<BackgroundWorkPlan> {
+        self.derived_artifact_jobs
+            .iter()
+            .any(|job| {
+                job.status == DerivedArtifactJobStatus::Pending
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .then(|| BackgroundWorkPlan::background(WorkClass::Import, estimated_operations, hint))
+    }
+
+    pub fn external_content_artifact_job_background_work_plan_for_action(
+        &self,
+        action: &str,
+        hint: BackgroundWorkHint,
+        estimated_operations: usize,
+    ) -> Option<BackgroundWorkPlan> {
+        self.derived_artifact_jobs
+            .iter()
+            .any(|job| {
+                job.status == DerivedArtifactJobStatus::Pending
+                    && job.action == action
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .then(|| BackgroundWorkPlan::background(WorkClass::Import, estimated_operations, hint))
     }
 
     pub fn retry_failed_external_content_artifact_job(
