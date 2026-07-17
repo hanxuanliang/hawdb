@@ -186,7 +186,10 @@ validation rule; object-level checkpoints must include the same idempotent retry
 tuple before status automation treats them as resumable. Reusing one complete
 checkpoint idempotency tuple for conflicting source-range, partition, or
 manifest-digest coordinates blocks the status report instead of allowing resume
-automation to amplify a stale retry marker. The report also
+automation to amplify a stale retry marker. Checkpoint status also exposes
+machine-readable stage, status, failure-rule, and failure-partition counts so
+resume monitors can classify progress and failure hot spots without reparsing
+the append log. The report also
 includes machine-readable `resume_action`, `state_marker`, `checkpoint_log`, and
 `resource_retention` fields that distinguish staging, publishing, active work,
 completed, canceled, failed, and quarantined/manual-repair states without

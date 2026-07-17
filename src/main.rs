@@ -1792,6 +1792,12 @@ fn graph_lightning_import_checkpoint_log(
             "idempotency_conflict_messages": [],
             "last_checkpoint": serde_json::Value::Null,
             "failed_checkpoints": [],
+            "checkpoint_summary": {
+                "stage_counts": {},
+                "status_counts": {},
+                "failure_rule_counts": {},
+                "failure_partition_counts": {},
+            },
             "resume_summary": {
                 "last_stage": serde_json::Value::Null,
                 "last_source_range": serde_json::Value::Null,
@@ -1829,6 +1835,10 @@ fn graph_lightning_import_checkpoint_log(
     let mut failed_validation_rules = BTreeSet::new();
     let mut idempotency_fingerprints = BTreeMap::new();
     let mut idempotency_conflicts = Vec::new();
+    let mut stage_counts = BTreeMap::new();
+    let mut status_counts = BTreeMap::new();
+    let mut failure_rule_counts = BTreeMap::new();
+    let mut failure_partition_counts = BTreeMap::new();
     for (line_index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1854,6 +1864,8 @@ fn graph_lightning_import_checkpoint_log(
             errors,
             checkpoint_errors,
         );
+        increment_string_field(&entry, "stage", &mut stage_counts);
+        increment_string_field(&entry, "status", &mut status_counts);
         if let Some((key, fingerprint)) = graph_lightning_checkpoint_idempotency_fingerprint(&entry)
         {
             if let Some(previous) = idempotency_fingerprints.get(&key) {
@@ -1874,6 +1886,8 @@ fn graph_lightning_import_checkpoint_log(
             collect_string_field(&entry, "object_digest", &mut failed_object_digests);
             collect_string_field(&entry, "partition", &mut failed_partitions);
             collect_string_field(&entry, "validation_rule", &mut failed_validation_rules);
+            increment_string_field(&entry, "partition", &mut failure_partition_counts);
+            increment_string_field(&entry, "validation_rule", &mut failure_rule_counts);
             failed.push(entry.clone());
         }
         entries.push(entry);
@@ -1894,6 +1908,12 @@ fn graph_lightning_import_checkpoint_log(
         "idempotency_conflict_messages": idempotency_conflicts,
         "last_checkpoint": last_checkpoint,
         "failed_checkpoints": failed,
+        "checkpoint_summary": {
+            "stage_counts": stage_counts,
+            "status_counts": status_counts,
+            "failure_rule_counts": failure_rule_counts,
+            "failure_partition_counts": failure_partition_counts,
+        },
         "resume_summary": {
             "last_stage": last_checkpoint.get("stage").cloned().unwrap_or(serde_json::Value::Null),
             "last_source_range": last_checkpoint.get("source_range").cloned().unwrap_or(serde_json::Value::Null),
@@ -1945,6 +1965,12 @@ fn graph_lightning_import_checkpoint_blocked_json(
         "idempotency_conflict_messages": [],
         "last_checkpoint": serde_json::Value::Null,
         "failed_checkpoints": [],
+        "checkpoint_summary": {
+            "stage_counts": {},
+            "status_counts": {},
+            "failure_rule_counts": {},
+            "failure_partition_counts": {},
+        },
         "resume_summary": {
             "last_stage": serde_json::Value::Null,
             "last_source_range": serde_json::Value::Null,
@@ -2019,6 +2045,16 @@ fn graph_lightning_validate_checkpoint_entry(
 fn collect_string_field(entry: &serde_json::Value, field: &str, output: &mut BTreeSet<String>) {
     if let Some(value) = marker_string_field(entry, field) {
         output.insert(value.to_string());
+    }
+}
+
+fn increment_string_field(
+    entry: &serde_json::Value,
+    field: &str,
+    output: &mut BTreeMap<String, usize>,
+) {
+    if let Some(value) = marker_string_field(entry, field) {
+        *output.entry(value.to_string()).or_insert(0) += 1;
     }
 }
 
@@ -3694,6 +3730,32 @@ mod tests {
         assert_eq!(report["checkpoint_log"]["entry_count"], 2);
         assert_eq!(report["checkpoint_log"]["idempotency_key_count"], 1);
         assert_eq!(report["checkpoint_log"]["idempotency_conflicts"], 0);
+        assert_eq!(
+            report["checkpoint_log"]["checkpoint_summary"]["stage_counts"],
+            serde_json::json!({
+                "object_uploaded": 1,
+                "source_range_scanned": 1
+            })
+        );
+        assert_eq!(
+            report["checkpoint_log"]["checkpoint_summary"]["status_counts"],
+            serde_json::json!({
+                "completed": 1,
+                "failed": 1
+            })
+        );
+        assert_eq!(
+            report["checkpoint_log"]["checkpoint_summary"]["failure_rule_counts"],
+            serde_json::json!({
+                "multipart_checksum": 1
+            })
+        );
+        assert_eq!(
+            report["checkpoint_log"]["checkpoint_summary"]["failure_partition_counts"],
+            serde_json::json!({
+                "p0": 1
+            })
+        );
         assert_eq!(
             report["checkpoint_log"]["last_checkpoint"]["stage"],
             "object_uploaded"
