@@ -462,9 +462,9 @@ projection metadata:
 `kind` maps to canonical node labels, `external_id` maps to the projected node
 identity (non-empty `id` when present, otherwise the canonical node id string) used by
 search hits, typed knowledge navigation, and graph context path endpoints,
-`source_id` maps through the same `source_id`/`thread_id`/`source` projection
-fallback as search documents, and other keys map to same-name scalar node
-properties. `space_id` follows the Nowledge normalized-space rule: missing,
+`source_id` maps through the same non-empty `source_id`/`thread_id`/`source`
+projection fallback as search documents, and other keys map to same-name scalar
+node properties. `space_id` follows the Nowledge normalized-space rule: missing,
 `NULL`, and empty-string values are scoped as `default`. Returned diagnostics
 preserve the search limit, rank window, search fusion weights, graph seed budget, graph
 context budget, candidate budget, filtered candidate counts, search document

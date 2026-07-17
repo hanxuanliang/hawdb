@@ -885,7 +885,7 @@ fn projection_row_from_node(catalog: &Catalog, node: &NodeRecord) -> Option<Sear
         &["content", "body", "text", "summary", "title", "name"],
     )
     .unwrap_or_else(|| title.clone());
-    let source_id = first_string_property(node, &["source_id", "thread_id", "source"]);
+    let source_id = first_non_empty_string_property(node, &["source_id", "thread_id", "source"]);
     let mut metadata = BTreeMap::new();
     for (key, value) in &node.properties {
         if matches!(key.as_str(), "kind" | "external_id" | "source_id") {
@@ -927,6 +927,12 @@ fn search_projection_kind_from_label(label: &str) -> Option<SearchProjectionKind
 
 fn first_string_property(node: &NodeRecord, keys: &[&str]) -> Option<String> {
     keys.iter().find_map(|key| string_property(node, key))
+}
+
+fn first_non_empty_string_property(node: &NodeRecord, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .filter_map(|key| string_property(node, key))
+        .find(|value| !value.is_empty())
 }
 
 fn string_property(node: &NodeRecord, key: &str) -> Option<String> {
@@ -2948,6 +2954,62 @@ mod tests {
             document.metadata.get("external_id").map(String::as_str),
             Some("0")
         );
+    }
+
+    #[test]
+    fn graph_rebuild_source_id_fallback_skips_empty_values() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("mem_1".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Thread scoped graph".to_string()),
+                    ),
+                    (
+                        "content".to_string(),
+                        Value::String("source fallback projection".to_string()),
+                    ),
+                    ("source_id".to_string(), Value::String(String::new())),
+                    (
+                        "thread_id".to_string(),
+                        Value::String("thread_1".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        let mut index = SearchIndex::in_memory();
+        index
+            .rebuild_from_graph(&catalog, &store, SearchRebuildOptions::default())
+            .unwrap();
+
+        let document = index.document("memory:mem_1").expect("projected document");
+        let hits = index.search_with_options(
+            "source fallback projection",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "source_id".to_string(),
+                    "thread_1".to_string(),
+                )]),
+            },
+        );
+
+        assert_eq!(
+            document.metadata.get("source_id").map(String::as_str),
+            Some("thread_1")
+        );
+        assert_eq!(hits.total_hits, 1);
+        assert_eq!(hits.hits[0].source_id.as_deref(), Some("thread_1"));
     }
 
     #[test]
