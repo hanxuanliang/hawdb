@@ -923,7 +923,7 @@ impl SearchIndex {
         options: SearchQueryOptions,
     ) -> SearchResultSet {
         let query_terms = tokenize(query_text, &self.analyzer_lexicon);
-        let mut fallback_reasons = Vec::new();
+        let mut vector_fallback_reasons = Vec::new();
         let limit = options.limit;
         let document_count = self.documents.len();
         let filtered_documents = self
@@ -945,19 +945,26 @@ impl SearchIndex {
         let vector_available = match (query_embedding, self.embedding_dimension) {
             (Some(vector), Some(dimension)) if vector.len() == dimension => true,
             (Some(vector), Some(dimension)) => {
-                fallback_reasons.push(format!(
+                vector_fallback_reasons.push(format!(
                     "query embedding dimension {} does not match index dimension {dimension}",
                     vector.len()
                 ));
                 false
             }
             (Some(_), None) => {
-                fallback_reasons.push("index has no vector rows".to_string());
+                vector_fallback_reasons.push("index has no vector rows".to_string());
                 false
             }
             (None, _) => false,
         };
         let text_available = !query_terms.is_empty();
+        let text_fallback_reasons = if !text_available && mode != SearchMode::Vector {
+            vec!["query text produced no searchable terms".to_string()]
+        } else {
+            Vec::new()
+        };
+        let mut fallback_reasons = vector_fallback_reasons.clone();
+        fallback_reasons.extend(text_fallback_reasons.iter().cloned());
         let text_corpus = if text_available && mode != SearchMode::Vector {
             Some(TextCorpusStats::from_documents(
                 filtered_documents.iter().copied(),
@@ -1006,7 +1013,7 @@ impl SearchIndex {
                 name: "vector".to_string(),
                 available: vector_available && mode != SearchMode::Text,
                 candidate_count: vector_scores.len(),
-                fallback_reasons: fallback_reasons.clone(),
+                fallback_reasons: vector_fallback_reasons,
                 top_hit_ids: top_ranked_ids(&vector_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&vector_window_ranks, &vector_scores, limit),
             },
@@ -1014,7 +1021,7 @@ impl SearchIndex {
                 name: "text".to_string(),
                 available: text_available && mode != SearchMode::Vector,
                 candidate_count: text_scores.len(),
-                fallback_reasons: Vec::new(),
+                fallback_reasons: text_fallback_reasons,
                 top_hit_ids: top_ranked_ids(&text_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&text_window_ranks, &text_scores, limit),
             },
@@ -3573,6 +3580,42 @@ mod tests {
             result.empty_reasons,
             vec!["search retrievers returned no hits inside filtered scope".to_string()]
         );
+    }
+
+    #[test]
+    fn search_report_exposes_empty_text_query_reason() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "a".to_string(),
+                title: "Graph retrieval".to_string(),
+                content: "projection evidence".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let result = index.search_with_report("", None, SearchMode::Text, 10);
+
+        assert!(result.hits.is_empty());
+        assert!(result
+            .fallback_reasons
+            .iter()
+            .any(|reason| reason == "query text produced no searchable terms"));
+        assert!(result
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "query text produced no searchable terms"));
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert!(!text.available);
+        assert!(text
+            .fallback_reasons
+            .iter()
+            .any(|reason| reason == "query text produced no searchable terms"));
     }
 
     #[test]
