@@ -234,7 +234,9 @@ pub struct SearchDerivedArtifactReport {
     pub scanned_nodes: usize,
     pub indexed_documents: usize,
     pub full_reindex_needed: bool,
+    pub full_reindex_reasons: Vec<String>,
     pub metadata_repair_needed: bool,
+    pub metadata_repair_reasons: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -394,6 +396,7 @@ impl SearchIndex {
     ) -> Result<SearchDerivedArtifactReport> {
         let before_document_count = self.documents.len();
         let summary = self.rebuild_from_graph(catalog, store, options)?;
+        let freshness = self.projection_freshness();
         Ok(SearchDerivedArtifactReport {
             artifact_type: "search_projection".to_string(),
             name: "search_projection".to_string(),
@@ -402,8 +405,10 @@ impl SearchIndex {
             after_document_count: self.documents.len(),
             scanned_nodes: summary.scanned_nodes,
             indexed_documents: summary.indexed_documents,
-            full_reindex_needed: self.full_reindex_needed(),
-            metadata_repair_needed: self.metadata_repair_needed(),
+            full_reindex_needed: freshness.full_reindex_needed,
+            full_reindex_reasons: freshness.full_reindex_reasons,
+            metadata_repair_needed: freshness.metadata_repair_needed,
+            metadata_repair_reasons: freshness.metadata_repair_reasons,
         })
     }
 
@@ -3305,7 +3310,9 @@ mod tests {
         assert_eq!(report.scanned_nodes, 1);
         assert_eq!(report.indexed_documents, 1);
         assert!(!report.full_reindex_needed);
+        assert!(report.full_reindex_reasons.is_empty());
         assert!(!report.metadata_repair_needed);
+        assert!(report.metadata_repair_reasons.is_empty());
         assert!(index.document("old").is_none());
         assert!(index.document("memory:mem_1").is_some());
         std::fs::remove_dir_all(path).unwrap();
