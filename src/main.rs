@@ -79,15 +79,14 @@ fn main() -> Result<()> {
                 .next()
                 .ok_or_else(|| SkeinError::Semantic(nowledge_cypher_migration_gate_usage()))?;
             let program_args = args.collect::<Vec<_>>();
-            if require_ready
-                && !allow_self_shadow
-                && is_self_shadow_command(&shadow_name, &program, &program_args)
-            {
+            let is_self_shadow = is_self_shadow_command(&shadow_name, &program, &program_args);
+            if require_ready && !allow_self_shadow && is_self_shadow {
                 return Err(SkeinError::Execution(
                     "nowledge migration gate requires a previous-wrapper shadow for --require-ready; pass --allow-self-shadow only for protocol smoke tests"
                     .to_string(),
                 ));
             }
+            let shadow_name_report = shadow_name.clone();
             let shadow_trace_report = shadow_trace.clone();
             let mut shadow = match (shadow_trace, shadow_timeout) {
                 (Some(trace_path), Some(timeout)) => {
@@ -120,6 +119,7 @@ fn main() -> Result<()> {
             };
             let mut json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
+            add_shadow_run_report(&mut json, &shadow_name_report, is_self_shadow)?;
             if let Some(ready) = shadow_ready_report {
                 add_shadow_ready_report(&mut json, &ready)?;
             }
@@ -546,6 +546,29 @@ fn add_shadow_ready_report(
         serde_json::json!({
             "protocol_version": ready.protocol_version,
             "capabilities": &ready.capabilities,
+        }),
+    );
+    Ok(())
+}
+
+fn add_shadow_run_report(
+    bundle: &mut serde_json::Value,
+    shadow_name: &str,
+    self_shadow: bool,
+) -> Result<()> {
+    let object = bundle.as_object_mut().ok_or_else(|| {
+        SkeinError::Execution("migration gate bundle must be a JSON object".to_string())
+    })?;
+    object.insert(
+        "shadow_run".to_string(),
+        serde_json::json!({
+            "shadow_name": shadow_name,
+            "self_shadow": self_shadow,
+            "evidence_kind": if self_shadow {
+                "protocol_smoke"
+            } else {
+                "previous_wrapper"
+            },
         }),
     );
     Ok(())
@@ -1719,18 +1742,18 @@ fn value_json(value: &Value) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::{
-        add_shadow_ready_report, add_shadow_trace_report, canonical_snapshot_validation_json,
-        graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
-        graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
-        graph_lightning_gc_staging_report, graph_lightning_graph_stream_usage,
-        graph_lightning_graph_stream_validation_json, graph_lightning_import_status,
-        graph_lightning_publish_staging_usage, graph_lightning_stage_bootstrap_usage,
-        graph_lightning_verify_export_usage, graph_lightning_verify_published_usage,
-        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog, should_run_shadow_ready,
-        stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
-        validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
-        verify_graph_lightning_staging_catalog,
+        add_shadow_ready_report, add_shadow_run_report, add_shadow_trace_report,
+        canonical_snapshot_validation_json, graph_lightning_bootstrap_bundle_json,
+        graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
+        graph_lightning_bootstrap_manifest_usage, graph_lightning_gc_staging_report,
+        graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
+        graph_lightning_import_status, graph_lightning_publish_staging_usage,
+        graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
+        graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
+        is_self_shadow_command, parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
+        should_run_shadow_ready, stable_identity_audit_json,
+        stage_graph_lightning_bootstrap_export, validate_canonical_snapshot_usage, value_json,
+        verify_graph_lightning_published_manifest, verify_graph_lightning_staging_catalog,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -1836,6 +1859,36 @@ mod tests {
             bundle["shadow_ready"]["capabilities"],
             serde_json::json!(["execute", "execute_session", "project_graph"])
         );
+    }
+
+    #[test]
+    fn adds_previous_wrapper_shadow_run_report_to_migration_gate_bundle() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready"
+            }
+        });
+
+        add_shadow_run_report(&mut bundle, "legacy-wrapper", false).unwrap();
+
+        assert_eq!(bundle["shadow_run"]["shadow_name"], "legacy-wrapper");
+        assert_eq!(bundle["shadow_run"]["self_shadow"], false);
+        assert_eq!(bundle["shadow_run"]["evidence_kind"], "previous_wrapper");
+    }
+
+    #[test]
+    fn marks_self_shadow_run_as_protocol_smoke() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready"
+            }
+        });
+
+        add_shadow_run_report(&mut bundle, "skein-shadow-self", true).unwrap();
+
+        assert_eq!(bundle["shadow_run"]["shadow_name"], "skein-shadow-self");
+        assert_eq!(bundle["shadow_run"]["self_shadow"], true);
+        assert_eq!(bundle["shadow_run"]["evidence_kind"], "protocol_smoke");
     }
 
     #[test]

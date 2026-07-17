@@ -365,6 +365,12 @@ migration gate decision is `ready`. `skein-shadow-self` is allowed only when
 `--allow-self-shadow` is passed, and that flag is intended for protocol and CI
 smoke tests, not cutover evidence.
 
+The printed migration gate bundle includes a top-level `shadow_run` object with
+`shadow_name`, `self_shadow`, and `evidence_kind`. `evidence_kind` is
+`previous_wrapper` for normal external wrappers and `protocol_smoke` for
+self-shadow runs. Cutover automation must not treat `protocol_smoke` as
+previous-wrapper parity evidence.
+
 `--shadow-ready` sends the same `ready` preflight without requiring the final
 migration gate decision to be `ready`. Use it for previous-wrapper adapter
 integration runs when failing fast on protocol version or capability drift is
