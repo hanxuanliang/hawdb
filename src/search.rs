@@ -1193,7 +1193,16 @@ fn document_tokens(document: &SearchDocument) -> Vec<String> {
     let mut tokens = tokenize_list(&document.title);
     tokens.extend(tokenize_list(&document.title));
     tokens.extend(tokenize_list(&document.content));
+    tokens.extend(searchable_metadata_tokens(document));
     tokens
+}
+
+fn searchable_metadata_tokens(document: &SearchDocument) -> Vec<String> {
+    ["kind", "external_id", "source_id"]
+        .into_iter()
+        .filter_map(|key| document.metadata.get(key))
+        .flat_map(|value| tokenize_list(value))
+        .collect()
 }
 
 fn token_frequencies(tokens: impl Iterator<Item = String>) -> BTreeMap<String, usize> {
@@ -2355,6 +2364,36 @@ mod tests {
             .matched_terms
             .iter()
             .any(|term| term == "fts"));
+    }
+
+    #[test]
+    fn text_search_indexes_selected_projection_metadata_identifiers() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "metadata-only".to_string(),
+                title: "Untitled".to_string(),
+                content: "No body match".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([
+                    ("kind".to_string(), "memory".to_string()),
+                    ("external_id".to_string(), "mem_graph_alpha".to_string()),
+                    ("source_id".to_string(), "thread_projection_1".to_string()),
+                ]),
+            })
+            .unwrap();
+
+        let external_id_hits = index.search("mem graph alpha", None, SearchMode::Text, 10);
+        let source_id_hits =
+            index.search_with_report("thread projection 1", None, SearchMode::Text, 10);
+
+        assert_eq!(external_id_hits[0].id, "metadata-only");
+        assert_eq!(source_id_hits.hits[0].id, "metadata-only");
+        assert!(source_id_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "thread"));
+        assert!(source_id_hits.hits[0].matched_spans.is_empty());
     }
 
     #[test]
