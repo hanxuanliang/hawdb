@@ -469,7 +469,7 @@ without making the search projection canonical. Callers that need
 response-level diagnostics can use
 `SearchIndex::search_with_report` to get the total document count, post-filter
 document count, candidate-set report, pre-limit hit count, requested limit, rank
-window, truncation flag, truncation reasons, child retriever availability,
+window, truncation flag, truncation reasons, fallback reasons, child retriever availability,
 candidate counts, top hit IDs, and per-child top candidate ranks and scores.
 
 The stable embedded facade exposes this boundary without owning search state:
@@ -495,7 +495,7 @@ node properties. `space_id` follows the Nowledge normalized-space rule: missing,
 `NULL`, and empty-string values are scoped as `default`. Returned diagnostics
 preserve the search limit, rank window, search fusion weights, graph seed budget, graph
 context budget, candidate budget, filtered candidate counts, search document
-scope, search hit count, search truncation flag and reasons, graph seed counts,
+scope, search hit count, search truncation flag and reasons, search fallback reasons, graph seed counts,
 graph-seed truncation flag and reasons, graph context path count, fan-out reason
 count, final candidate count, pre-limit merged candidate count, response-level
 candidate truncation flag and reasons, graph-context truncation flag and

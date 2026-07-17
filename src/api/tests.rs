@@ -676,6 +676,51 @@ fn retrieves_knowledge_through_database_facade() {
 }
 
 #[test]
+fn knowledge_retrieval_diagnostics_expose_search_fallback_reasons() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem_1', title: 'Fallback retrieval', content: 'text leg survives vector fallback'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "fallback retrieval".to_string(),
+            query_embedding: Some(vec![1.0, 0.0]),
+            mode: SearchMode::Hybrid,
+            limit: 10,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 0,
+            graph_context_limit: 0,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert!(!output.search.hits.is_empty());
+    assert!(output
+        .search
+        .fallback_reasons
+        .iter()
+        .any(|reason| reason == "index has no vector rows"));
+    assert!(output
+        .diagnostics
+        .search_fallback_reasons
+        .iter()
+        .any(|reason| reason == "index has no vector rows"));
+    assert!(output.search.hits[0]
+        .fallback_reasons
+        .iter()
+        .any(|reason| reason == "index has no vector rows"));
+}
+
+#[test]
 fn knowledge_retrieval_expands_graph_context_by_ordered_adjacency() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'root', title: 'Ordered retrieval context'})")

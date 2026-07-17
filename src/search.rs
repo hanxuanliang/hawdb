@@ -151,6 +151,7 @@ pub struct SearchResultSet {
     pub truncated: bool,
     pub truncation_reasons: Vec<String>,
     pub empty_reasons: Vec<String>,
+    pub fallback_reasons: Vec<String>,
     pub retrievers: Vec<SearchRetrieverReport>,
     pub candidate_set: SearchCandidateSetReport,
     pub rank_window: Option<usize>,
@@ -1096,6 +1097,7 @@ impl SearchIndex {
             truncated,
             truncation_reasons,
             empty_reasons,
+            fallback_reasons,
             retrievers,
             candidate_set,
             rank_window: options.rank_window,
@@ -2856,14 +2858,33 @@ mod tests {
             .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
             .unwrap();
 
-        let hits = index.search("graph", Some(&[1.0, 0.0, 0.0]), SearchMode::Hybrid, 10);
+        let result =
+            index.search_with_report("graph", Some(&[1.0, 0.0, 0.0]), SearchMode::Hybrid, 10);
+        let hits = &result.hits;
 
         assert_eq!(hits[0].id, "a");
         assert_eq!(hits[0].vector_score, 0.0);
         assert!(hits[0].text_score > 0.0);
         assert_eq!(hits[0].vector_rank, None);
         assert_eq!(hits[0].text_rank, Some(1));
+        assert!(result.fallback_reasons[0].contains("dimension"));
         assert!(hits[0].fallback_reasons[0].contains("dimension"));
+    }
+
+    #[test]
+    fn search_report_exposes_global_fallback_reasons_without_hits() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
+            .unwrap();
+
+        let result = index.search_with_report("", Some(&[1.0, 0.0, 0.0]), SearchMode::Vector, 10);
+
+        assert!(result.hits.is_empty());
+        assert!(result
+            .fallback_reasons
+            .iter()
+            .any(|reason| reason.contains("query embedding dimension 3")));
     }
 
     #[test]
