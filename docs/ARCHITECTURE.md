@@ -475,12 +475,14 @@ sets, top hit IDs, and per-child top candidate ranks and scores.
 
 The stable embedded facade exposes this boundary without owning search state:
 `Database::rebuild_search_projection` derives projection rows from the canonical
-graph into a caller-owned `SearchIndex`, and `Database::retrieve_knowledge`
-combines that projection report with the current graph commit epoch and a
-compact diagnostics summary. `DatabaseReadTransaction::retrieve_knowledge`
-uses the same caller-owned `SearchIndex` while resolving graph seeds and graph
-context against the pinned catalog and graph snapshot, so retrieval can stay
-snapshot-stable without moving search projection state into the graph store.
+graph into a caller-owned `SearchIndex`, while
+`DatabaseReadTransaction::rebuild_search_projection` can derive the same
+projection from a pinned catalog and graph snapshot. `Database::retrieve_knowledge`
+combines the projection report with the current graph commit epoch and a compact
+diagnostics summary. `DatabaseReadTransaction::retrieve_knowledge` uses the same
+caller-owned `SearchIndex` while resolving graph seeds and graph context against
+the pinned catalog and graph snapshot, so retrieval can stay snapshot-stable
+without moving search projection state into the graph store.
 Retrieval callers can pass a rank window through
 `KnowledgeRetrievalRequest` to bound hybrid child retriever participation, pass
 search fusion weights to bias vector or text child retrievers before graph

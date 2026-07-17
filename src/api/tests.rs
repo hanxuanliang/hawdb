@@ -8252,6 +8252,44 @@ fn read_transaction_retrieves_knowledge_from_pinned_snapshot() {
 }
 
 #[test]
+fn read_transaction_rebuilds_search_projection_from_pinned_snapshot() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'snapshot', title: 'Pinned projection', content: 'snapshot only'})",
+    )
+    .unwrap();
+    let read_tx = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'live', title: 'Pinned projection', content: 'live only'})")
+        .unwrap();
+
+    let mut snapshot_index = SearchIndex::in_memory();
+    let summary = read_tx
+        .rebuild_search_projection(&mut snapshot_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    assert_eq!(summary.scanned_nodes, 1);
+    assert_eq!(summary.indexed_documents, 1);
+    assert!(snapshot_index.document("memory:snapshot").is_some());
+    assert!(snapshot_index.document("memory:live").is_none());
+    assert_eq!(
+        snapshot_index
+            .projection_freshness()
+            .source_graph_commit_epoch,
+        Some(1)
+    );
+
+    let mut live_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut live_index, SearchRebuildOptions::default())
+        .unwrap();
+    assert!(live_index.document("memory:snapshot").is_some());
+    assert!(live_index.document("memory:live").is_some());
+    assert_eq!(
+        live_index.projection_freshness().source_graph_commit_epoch,
+        Some(2)
+    );
+}
+
+#[test]
 fn read_transaction_survives_later_checkpoint() {
     let path = unique_test_dir("read_tx_checkpoint");
     {

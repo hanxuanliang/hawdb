@@ -4638,6 +4638,14 @@ impl DatabaseReadTransaction {
         export_canonical_graph_snapshot_for(&self.catalog, &self.store)
     }
 
+    pub fn rebuild_search_projection(
+        &self,
+        search_index: &mut SearchIndex,
+        options: SearchRebuildOptions,
+    ) -> Result<SearchRebuildSummary> {
+        search_index.rebuild_from_graph(&self.catalog, &self.store, options)
+    }
+
     pub fn retrieve_knowledge(
         &self,
         search_index: &SearchIndex,
