@@ -784,6 +784,58 @@ fn knowledge_retrieval_empty_reasons_include_search_fallback_reasons() {
 }
 
 #[test]
+fn knowledge_retrieval_empty_reasons_include_missing_query_embedding() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem_1', title: 'Missing embedding query', content: 'vector retrieval should explain missing embedding'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "missing embedding query".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Vector,
+            limit: 10,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 0,
+            graph_context_limit: 0,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert!(output.search.hits.is_empty());
+    assert!(output.candidates.is_empty());
+    assert!(output
+        .diagnostics
+        .search_fallback_reasons
+        .iter()
+        .any(|reason| reason == "query embedding not provided"));
+    assert!(output
+        .diagnostics
+        .empty_reasons
+        .iter()
+        .any(|reason| reason == "query embedding not provided"));
+    let vector_report = output
+        .retrievers
+        .iter()
+        .find(|report| report.name == "vector")
+        .expect("expected vector retriever report");
+    assert!(!vector_report.available);
+    assert!(vector_report
+        .fallback_reasons
+        .iter()
+        .any(|reason| reason == "query embedding not provided"));
+}
+
+#[test]
 fn knowledge_retrieval_empty_reasons_include_empty_text_query() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'mem_1', title: 'Empty text query', content: 'text fallback should explain empty retrieval'})")

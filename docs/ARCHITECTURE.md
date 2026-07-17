@@ -505,10 +505,10 @@ projection marker warnings, structured projection stale/full-reindex/
 metadata-repair flags, and empty-result reasons. Empty-result reasons
 reuse the search projection report's own empty-result reasons, distinguishing
 empty projections, metadata-filter misses, no matching rows, search fallback
-causes such as empty text queries, unusable query embeddings, or empty vector
-rows, and request-budget causes such as search limit zero, disabled graph seed
-retrievers, or response-level candidate limit zero. This keeps Knowledge
-Retrieval as the
+causes such as empty text queries, missing or incompatible query embeddings, or
+empty vector rows, and request-budget causes such as search limit zero, disabled
+graph seed retrievers, or response-level candidate limit zero. This keeps
+Knowledge Retrieval as the
 primary application-facing path while preserving the rule that search artifacts
 are rebuildable and outside the graph WAL.
 

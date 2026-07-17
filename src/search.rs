@@ -955,7 +955,12 @@ impl SearchIndex {
                 vector_fallback_reasons.push("index has no vector rows".to_string());
                 false
             }
-            (None, _) => false,
+            (None, _) => {
+                if mode != SearchMode::Text {
+                    vector_fallback_reasons.push("query embedding not provided".to_string());
+                }
+                false
+            }
         };
         let text_available = !query_terms.is_empty();
         let text_fallback_reasons = if !text_available && mode != SearchMode::Vector {
@@ -2917,6 +2922,36 @@ mod tests {
             .empty_reasons
             .iter()
             .any(|reason| reason.contains("query embedding dimension 3")));
+    }
+
+    #[test]
+    fn search_report_exposes_missing_query_embedding_reason() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("a", "Graph storage", "Native adjacency", [1.0, 0.0]))
+            .unwrap();
+
+        let result = index.search_with_report("graph", None, SearchMode::Vector, 10);
+
+        assert!(result.hits.is_empty());
+        assert!(result
+            .fallback_reasons
+            .iter()
+            .any(|reason| reason == "query embedding not provided"));
+        assert!(result
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "query embedding not provided"));
+        let vector = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "vector")
+            .expect("expected vector retriever report");
+        assert!(!vector.available);
+        assert!(vector
+            .fallback_reasons
+            .iter()
+            .any(|reason| reason == "query embedding not provided"));
     }
 
     #[test]
