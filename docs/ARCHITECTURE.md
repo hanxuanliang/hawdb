@@ -428,16 +428,18 @@ hit IDs, and per-child top candidate ranks and scores.
 The stable embedded facade exposes this boundary without owning search state:
 `Database::rebuild_search_projection` derives projection rows from the canonical
 graph into a caller-owned `SearchIndex`, and `Database::retrieve_knowledge`
-combines that projection report with the current graph commit epoch. Retrieval
-callers can pass a rank window through `KnowledgeRetrievalRequest` to bound
-hybrid child retriever participation before graph context expansion, and can
-pass metadata filters that scope both search hits and graph-native seed
-candidates. Filter keys align with graph-derived projection metadata:
+combines that projection report with the current graph commit epoch and a
+compact diagnostics summary. Retrieval callers can pass a rank window through
+`KnowledgeRetrievalRequest` to bound hybrid child retriever participation before
+graph context expansion, and can pass metadata filters that scope both search
+hits and graph-native seed candidates. Filter keys align with graph-derived
+projection metadata:
 `kind` maps to canonical node labels, `external_id` maps to node `id`, and other
 keys map to same-name scalar node properties. Returned diagnostics preserve the
-rank window and filtered candidate counts. This keeps Knowledge Retrieval as the
-primary application-facing path while preserving the rule that search artifacts
-are rebuildable and outside the graph WAL.
+rank window, filtered candidate counts, search document scope, search hit count,
+graph seed counts, final candidate count, and empty-result reasons. This keeps
+Knowledge Retrieval as the primary application-facing path while preserving the
+rule that search artifacts are rebuildable and outside the graph WAL.
 
 `Database::retrieve_knowledge` also includes a bounded graph-native seed
 retriever over canonical nodes. `KnowledgeRetrievalRequest::graph_seed_limit`

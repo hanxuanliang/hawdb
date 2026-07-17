@@ -378,11 +378,23 @@ pub struct KnowledgeRetrievalOutput {
     pub projection_freshness: SearchProjectionFreshness,
     pub search: SearchResultSet,
     pub retrievers: Vec<KnowledgeRetrieverReport>,
+    pub diagnostics: KnowledgeRetrievalDiagnostics,
     pub candidates: Vec<KnowledgeCandidate>,
     pub evidence: Vec<KnowledgeEvidence>,
     pub graph_seeds: Vec<KnowledgeGraphSeed>,
     pub graph_context_paths: Vec<KnowledgeGraphContextPath>,
     pub fanout_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRetrievalDiagnostics {
+    pub search_document_count: usize,
+    pub search_filtered_document_count: usize,
+    pub search_total_hits: usize,
+    pub graph_seed_candidate_count: usize,
+    pub graph_seed_returned_count: usize,
+    pub candidate_count: usize,
+    pub empty_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1015,11 +1027,19 @@ impl Database {
         let mut fanout_reasons = fanout_reasons;
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
+        let diagnostics = knowledge_retrieval_diagnostics(
+            &search,
+            graph_seed_candidate_count,
+            graph_seeds.len(),
+            candidates.len(),
+            request.graph_seed_limit,
+        );
         KnowledgeRetrievalOutput {
             graph_commit_epoch: self.store.commit_epoch(),
             projection_freshness: search_index.projection_freshness(),
             search,
             retrievers,
+            diagnostics,
             candidates,
             evidence,
             graph_seeds,
@@ -1568,6 +1588,38 @@ fn knowledge_retriever_reports(
             .collect(),
     });
     reports
+}
+
+fn knowledge_retrieval_diagnostics(
+    search: &SearchResultSet,
+    graph_seed_candidate_count: usize,
+    graph_seed_returned_count: usize,
+    candidate_count: usize,
+    graph_seed_limit: usize,
+) -> KnowledgeRetrievalDiagnostics {
+    let mut empty_reasons = Vec::new();
+    if search.document_count == 0 {
+        empty_reasons.push("search projection has no documents".to_string());
+    } else if search.filtered_document_count == 0 {
+        empty_reasons.push("metadata filters matched no search documents".to_string());
+    } else if search.total_hits == 0 {
+        empty_reasons.push("search retrievers returned no hits inside filtered scope".to_string());
+    }
+    if graph_seed_limit > 0 && graph_seed_candidate_count == 0 {
+        empty_reasons.push("graph seed retriever returned no candidates".to_string());
+    }
+    if candidate_count == 0 {
+        empty_reasons.push("retrieval produced no candidates".to_string());
+    }
+    KnowledgeRetrievalDiagnostics {
+        search_document_count: search.document_count,
+        search_filtered_document_count: search.filtered_document_count,
+        search_total_hits: search.total_hits,
+        graph_seed_candidate_count,
+        graph_seed_returned_count,
+        candidate_count,
+        empty_reasons,
+    }
 }
 
 fn graph_seed_candidate_id(seed: &KnowledgeGraphSeed) -> String {
@@ -3911,6 +3963,13 @@ mod tests {
         );
 
         assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.diagnostics.search_document_count, 2);
+        assert_eq!(output.diagnostics.search_filtered_document_count, 1);
+        assert_eq!(output.diagnostics.search_total_hits, 1);
+        assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
+        assert_eq!(output.diagnostics.graph_seed_returned_count, 1);
+        assert_eq!(output.diagnostics.candidate_count, 1);
+        assert!(output.diagnostics.empty_reasons.is_empty());
         assert_eq!(output.search.hits[0].external_id.as_deref(), Some("mem_1"));
         assert_eq!(output.search.hits[0].source_id.as_deref(), Some("thread_1"));
         let text_report = output
@@ -3935,6 +3994,62 @@ mod tests {
             .expect("graph seed retriever report");
         assert_eq!(graph_seed_report.candidate_count, 1);
         assert_eq!(graph_seed_report.top_candidates[0].id, "Memory:mem_1");
+    }
+
+    #[test]
+    fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem_1', title: 'Filtered graph', content: 'metadata scoped retrieval', source_id: 'thread_1'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "metadata scoped retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                metadata_filters: BTreeMap::from([(
+                    "source_id".to_string(),
+                    "missing_thread".to_string(),
+                )]),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 10,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(output.search.total_hits, 0);
+        assert_eq!(output.graph_seeds.len(), 0);
+        assert_eq!(output.candidates.len(), 0);
+        assert_eq!(output.diagnostics.search_document_count, 1);
+        assert_eq!(output.diagnostics.search_filtered_document_count, 0);
+        assert_eq!(output.diagnostics.search_total_hits, 0);
+        assert_eq!(output.diagnostics.graph_seed_candidate_count, 0);
+        assert_eq!(output.diagnostics.graph_seed_returned_count, 0);
+        assert_eq!(output.diagnostics.candidate_count, 0);
+        assert!(output
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "metadata filters matched no search documents"));
+        assert!(output
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "graph seed retriever returned no candidates"));
+        assert!(output
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "retrieval produced no candidates"));
     }
 
     #[test]
