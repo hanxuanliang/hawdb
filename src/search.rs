@@ -72,7 +72,9 @@ pub struct SearchProjectionFreshness {
     pub document_count: usize,
     pub source_graph_commit_epoch: Option<u64>,
     pub full_reindex_needed: bool,
+    pub full_reindex_reasons: Vec<String>,
     pub metadata_repair_needed: bool,
+    pub metadata_repair_reasons: Vec<String>,
     pub embedding_model: Option<String>,
     pub embedding_version: Option<String>,
     pub embedding_dimension: Option<usize>,
@@ -291,11 +293,19 @@ impl SearchIndex {
     }
 
     pub fn projection_freshness(&self) -> SearchProjectionFreshness {
+        let full_reindex_reasons = self
+            .read_marker_lines(FULL_REINDEX_MARKER)
+            .unwrap_or_default();
+        let metadata_repair_reasons = self
+            .read_marker_lines(METADATA_REPAIR_MARKER)
+            .unwrap_or_default();
         SearchProjectionFreshness {
             document_count: self.documents.len(),
             source_graph_commit_epoch: self.source_graph_commit_epoch,
-            full_reindex_needed: self.full_reindex_needed(),
-            metadata_repair_needed: self.metadata_repair_needed(),
+            full_reindex_needed: !full_reindex_reasons.is_empty(),
+            full_reindex_reasons,
+            metadata_repair_needed: !metadata_repair_reasons.is_empty(),
+            metadata_repair_reasons,
             embedding_model: self
                 .embedding_manifest
                 .as_ref()
@@ -2717,7 +2727,15 @@ mod tests {
         assert_eq!(hits[0].projection_freshness, freshness);
         assert_eq!(hits[0].projection_freshness.document_count, 1);
         assert!(hits[0].projection_freshness.full_reindex_needed);
+        assert_eq!(
+            hits[0].projection_freshness.full_reindex_reasons,
+            vec!["stale projection".to_string()]
+        );
         assert!(hits[0].projection_freshness.metadata_repair_needed);
+        assert_eq!(
+            hits[0].projection_freshness.metadata_repair_reasons,
+            vec!["missing metadata".to_string()]
+        );
         assert_eq!(
             hits[0].projection_freshness.embedding_model.as_deref(),
             Some("text-embedding-3-small")

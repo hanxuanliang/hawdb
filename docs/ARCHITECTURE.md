@@ -381,7 +381,9 @@ compare projection freshness with the live graph snapshot without moving search
 state into the graph WAL.
 `SearchIndex::rebuild_derived_artifacts` wraps the full rebuild path in a
 report-oriented orchestration API with document counts, scanned nodes, indexed
-documents, and lifecycle-marker state.
+documents, and lifecycle-marker state. Projection freshness carries the current
+full-reindex and metadata-repair marker reasons so retrieval diagnostics can
+explain why a projection is stale or requires repair.
 
 Metadata-only repairs use the same graph-derived projection row mapping but only
 replace document metadata for already-present projection rows. They preserve

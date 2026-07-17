@@ -1870,9 +1870,21 @@ fn knowledge_retrieval_warnings(
     }
     if projection_freshness.full_reindex_needed {
         warnings.push("search projection requires full reindex".to_string());
+        warnings.extend(
+            projection_freshness
+                .full_reindex_reasons
+                .iter()
+                .map(|reason| format!("search projection full reindex reason: {reason}")),
+        );
     }
     if projection_freshness.metadata_repair_needed {
         warnings.push("search projection metadata repair is needed".to_string());
+        warnings.extend(
+            projection_freshness
+                .metadata_repair_reasons
+                .iter()
+                .map(|reason| format!("search projection metadata repair reason: {reason}")),
+        );
     }
     warnings
 }
@@ -5085,7 +5097,14 @@ mod tests {
             .diagnostics
             .warnings
             .iter()
+            .any(|warning| warning == "search projection full reindex reason: stale projection"));
+        assert!(output
+            .diagnostics
+            .warnings
+            .iter()
             .any(|warning| warning == "search projection metadata repair is needed"));
+        assert!(output.diagnostics.warnings.iter().any(|warning| warning
+            == "search projection metadata repair reason: missing derived metadata"));
     }
 
     #[test]
