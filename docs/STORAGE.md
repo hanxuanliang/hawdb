@@ -333,6 +333,11 @@ pending job selected from a bounded poll result. Skein records the state
 transition without embedding parsing, crawling, chunking, or large-value runtime
 logic. That runtime reads the payload and publishes rebuildable projections back
 to Skein through caller-owned output.
+Runtimes that only support a subset of content actions can use
+`Database::pending_external_content_artifact_jobs_for_action` and
+`Database::run_next_external_content_artifact_job_for_action_with` to poll and
+claim only matching actions, such as `parse` or `crawl`, without inspecting or
+failing unrelated pending work.
 `Database::retry_failed_external_content_artifact_job` explicitly resets failed
 external content jobs to pending, preserving the payload and attempt history
 while clearing the last error. It does not retry graph-kernel projected artifact

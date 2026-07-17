@@ -102,6 +102,23 @@ impl Database {
             .collect()
     }
 
+    pub fn pending_external_content_artifact_jobs_for_action(
+        &self,
+        action: &str,
+        limit: usize,
+    ) -> Vec<DerivedArtifactJob> {
+        self.derived_artifact_jobs
+            .iter()
+            .filter(|job| {
+                job.status == DerivedArtifactJobStatus::Pending
+                    && job.action == action
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     pub fn failed_external_content_artifact_jobs(&self, limit: usize) -> Vec<DerivedArtifactJob> {
         self.derived_artifact_jobs
             .iter()
@@ -211,6 +228,23 @@ impl Database {
         self.ensure_writable()?;
         let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
             job.status == DerivedArtifactJobStatus::Pending
+                && is_external_content_artifact_job(&job.artifact_type)
+        }) else {
+            return Ok(None);
+        };
+
+        self.run_external_content_artifact_job_at_index(index, &mut runtime)
+    }
+
+    pub fn run_next_external_content_artifact_job_for_action_with(
+        &mut self,
+        action: &str,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.status == DerivedArtifactJobStatus::Pending
+                && job.action == action
                 && is_external_content_artifact_job(&job.artifact_type)
         }) else {
             return Ok(None);
