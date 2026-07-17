@@ -59,8 +59,9 @@ Three codebases define the work:
 - commit, rollback, and checkpoint
 - bounded resource configuration
 - basic local QoS hooks for internal background admission, operation budgets,
-  and deferrable work; performance should come from clean architecture and
-  bounded work units before low-level tuning
+  optional per-class background budgets, and deferrable work; performance
+  should come from clean architecture and bounded work units before low-level
+  tuning
 
 ### Cypher and Semantic Analysis
 

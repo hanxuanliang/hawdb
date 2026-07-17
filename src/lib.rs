@@ -80,7 +80,7 @@ pub use nowledge_inventory::{
 };
 pub use qos::{
     LocalQosPermit, LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass,
-    WorkPriority, WorkRequest,
+    WorkPriority, WorkRequest, WORK_CLASS_COUNT,
 };
 pub use schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,

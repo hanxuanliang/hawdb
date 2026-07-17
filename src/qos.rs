@@ -14,6 +14,8 @@ pub enum WorkClass {
     Shadow,
 }
 
+pub const WORK_CLASS_COUNT: usize = 6;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkRequest {
     pub class: WorkClass,
@@ -25,12 +27,14 @@ pub struct WorkRequest {
 pub struct LocalQosPolicy {
     pub max_background_operations: Option<usize>,
     pub max_total_background_operations: Option<usize>,
+    pub max_background_operations_by_class: [Option<usize>; WORK_CLASS_COUNT],
     pub background_enabled: bool,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LocalQosState {
     pub running_background_operations: usize,
+    pub running_background_operations_by_class: [usize; WORK_CLASS_COUNT],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,7 +60,21 @@ impl Default for LocalQosPolicy {
         Self {
             max_background_operations: Some(1024),
             max_total_background_operations: Some(4096),
+            max_background_operations_by_class: [None; WORK_CLASS_COUNT],
             background_enabled: true,
+        }
+    }
+}
+
+impl WorkClass {
+    pub fn as_index(self) -> usize {
+        match self {
+            WorkClass::Query => 0,
+            WorkClass::Mutation => 1,
+            WorkClass::Projection => 2,
+            WorkClass::Import => 3,
+            WorkClass::Analytics => 4,
+            WorkClass::Shadow => 5,
         }
     }
 }
@@ -116,6 +134,19 @@ impl LocalQosPolicy {
                 };
             }
         }
+        if let Some(limit) = self.max_background_operations_by_class[request.class.as_index()] {
+            let class_total = state.running_background_operations_by_class
+                [request.class.as_index()]
+            .saturating_add(request.estimated_operations);
+            if class_total > limit {
+                return QosAdmission::Defer {
+                    reason: format!(
+                        "background {:?} would raise class running operations to {class_total}, above class limit {limit}",
+                        request.class
+                    ),
+                };
+            }
+        }
         QosAdmission::Admit
     }
 }
@@ -157,6 +188,10 @@ impl LocalQosScheduler {
                         .state
                         .running_background_operations
                         .saturating_add(request.estimated_operations);
+                    let class_index = request.class.as_index();
+                    self.state.running_background_operations_by_class[class_index] =
+                        self.state.running_background_operations_by_class[class_index]
+                            .saturating_add(request.estimated_operations);
                 }
                 Ok(LocalQosPermit { request })
             }
@@ -170,6 +205,10 @@ impl LocalQosScheduler {
                 .state
                 .running_background_operations
                 .saturating_sub(permit.request.estimated_operations);
+            let class_index = permit.request.class.as_index();
+            self.state.running_background_operations_by_class[class_index] =
+                self.state.running_background_operations_by_class[class_index]
+                    .saturating_sub(permit.request.estimated_operations);
         }
     }
 }
@@ -228,6 +267,7 @@ mod tests {
         };
         let state = LocalQosState {
             running_background_operations: 8,
+            ..LocalQosState::default()
         };
         let request = WorkRequest::background(WorkClass::Analytics, 5);
 
@@ -285,5 +325,72 @@ mod tests {
 
         scheduler.finish(permit);
         assert_eq!(scheduler.state().running_background_operations, 0);
+    }
+
+    #[test]
+    fn scheduler_tracks_background_running_operations_by_class() {
+        let mut class_limits = [None; super::WORK_CLASS_COUNT];
+        class_limits[WorkClass::Projection.as_index()] = Some(4);
+        class_limits[WorkClass::Analytics.as_index()] = Some(10);
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(10),
+            max_total_background_operations: Some(20),
+            max_background_operations_by_class: class_limits,
+            ..LocalQosPolicy::default()
+        });
+
+        let projection = scheduler
+            .try_start(WorkRequest::background(WorkClass::Projection, 3))
+            .unwrap();
+        assert_eq!(
+            scheduler.state().running_background_operations_by_class
+                [WorkClass::Projection.as_index()],
+            3
+        );
+
+        let same_class = scheduler
+            .try_start(WorkRequest::background(WorkClass::Projection, 2))
+            .unwrap_err();
+        assert!(matches!(
+            same_class,
+            QosAdmission::Defer { reason } if reason.contains("class limit 4")
+        ));
+
+        let analytics = scheduler
+            .try_start(WorkRequest::background(WorkClass::Analytics, 2))
+            .unwrap();
+        assert_eq!(scheduler.state().running_background_operations, 5);
+        assert_eq!(
+            scheduler.state().running_background_operations_by_class
+                [WorkClass::Analytics.as_index()],
+            2
+        );
+
+        scheduler.finish(projection);
+        assert_eq!(
+            scheduler.state().running_background_operations_by_class
+                [WorkClass::Projection.as_index()],
+            0
+        );
+        assert_eq!(scheduler.state().running_background_operations, 2);
+
+        scheduler.finish(analytics);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+    }
+
+    #[test]
+    fn class_budget_does_not_gate_foreground_work() {
+        let mut class_limits = [None; super::WORK_CLASS_COUNT];
+        class_limits[WorkClass::Projection.as_index()] = Some(0);
+        let policy = LocalQosPolicy {
+            max_background_operations_by_class: class_limits,
+            ..LocalQosPolicy::default()
+        };
+        let request = WorkRequest::foreground(WorkClass::Projection, usize::MAX);
+
+        assert_eq!(
+            policy.admit(&LocalQosState::default(), &request),
+            QosAdmission::Admit
+        );
     }
 }

@@ -314,8 +314,10 @@ Internal background callers can route the same pending jobs through
 `Database::run_next_background_derived_artifact_job` for stateless admission or
 `Database::run_next_scheduled_background_derived_artifact_job` for the
 caller-driven `LocalQosScheduler` path. The scheduler only tracks running
-background operation budgets between start and finish; it does not own worker
-threads, reorder jobs, or gate foreground explicit rebuild requests.
+background operation budgets between start and finish, including optional
+per-class budgets for projection, import, analytics, and shadow lanes; it does
+not own worker threads, reorder jobs, or gate foreground explicit rebuild
+requests.
 `Database::schedule_external_content_artifact_job` records content/blob parser
 work at the same orchestration boundary. Callers that need structured parser
 inputs can use `Database::schedule_external_content_artifact_job_with_payload`
