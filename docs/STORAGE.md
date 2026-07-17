@@ -202,8 +202,9 @@ when a range index descriptor exists. Text seeks use the ngram index only as a
 candidate source and retain a residual `FilterExec` so exact string containment
 semantics remain authoritative. Conjunctive range seeks keep the complete `AND`
 predicate as a residual filter while using merged lower and upper bounds as the
-access path. Statistics now include per-label/property distinct counts and
-bounded sorted value histograms. Histograms use deterministic adaptive samples:
+access path. Statistics now include per-label/property and
+per-relationship-type/property distinct counts, bounded sorted value histograms,
+and exact-versus-sampled markers. Histograms use deterministic adaptive samples:
 small distinct sets remain exact, medium sets keep up to 256 values, and large
 sets keep up to 512 values while always retaining the minimum and maximum
 sampled bounds. Range costing uses these histograms for selectivity estimates.
@@ -261,9 +262,10 @@ Checkpoint files include a statistics snapshot for observability and future
 costing: total node count, total relationship count, per-label counts,
 per-relationship-type counts, relationship-type source counts,
 label/type/label path cardinalities, bounded exact path cardinalities up to the
-current statistics hop limit, and per-label/property distinct-value counts. The
-statistics snapshot also records the commit epoch at which it was computed, the
-histogram sample limit, and whether each per-property histogram is an exact
+current statistics hop limit, per-label/property distinct-value counts, and
+per-relationship-type/property distinct-value counts. The statistics snapshot
+also records the commit epoch at which it was computed, the histogram sample
+limit, and whether each node or relationship property histogram is an exact
 value set or a bounded deterministic sample. These statistics are derived data;
 the store recomputes the live API view from canonical records and accepts old
 checkpoints that do not contain statistics lines.

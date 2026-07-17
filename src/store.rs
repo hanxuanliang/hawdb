@@ -4779,8 +4779,9 @@ impl GraphStore {
                 | ["stat_bounded_path_count", _, _, _, _, _]
                 | ["stat_property_distinct_count", _, _, _]
                 | ["stat_rel_property_distinct_count", _, _, _]
-                | ["stat_property_histogram", _, _, _]
                 | ["stat_rel_property_histogram", _, _, _]
+                | ["stat_property_histogram", _, _, _]
+                | ["stat_rel_property_histogram_sampled", _, _, _]
                 | ["stat_property_histogram_sampled", _, _, _] => {}
                 ["project_graph", raw_name, raw_node_labels, raw_rel_types] => {
                     self.apply_project_graph_definition(
@@ -5396,6 +5397,14 @@ impl DurableStore {
                 rel_type_id.0,
                 encode_string(property),
                 encode_value_vec(values)
+            ));
+        }
+        for ((rel_type_id, property), sampled) in &statistics.sampled_rel_property_histograms {
+            body.push_str(&format!(
+                "stat_rel_property_histogram_sampled\t{}\t{}\t{}\n",
+                rel_type_id.0,
+                encode_string(property),
+                encode_bool(*sampled)
             ));
         }
         for ((label_id, property), values) in &statistics.property_histograms {
@@ -7381,12 +7390,17 @@ fn compute_statistics(
             .insert(key, is_sampled);
     }
     for (key, values) in rel_property_values {
+        let histogram_sample_limit = adaptive_histogram_sample_limit(values.len());
+        let is_sampled = values.len() > histogram_sample_limit;
         statistics
             .rel_property_distinct_counts
             .insert(key.clone(), values.len() as u64);
         statistics
             .rel_property_histograms
-            .insert(key, sample_histogram_values(values));
+            .insert(key.clone(), sample_histogram_values(values));
+        statistics
+            .sampled_rel_property_histograms
+            .insert(key, is_sampled);
     }
     statistics.bounded_path_counts =
         compute_bounded_path_counts(nodes, &outgoing_by_source_type, MAX_BOUNDED_PATH_STAT_HOPS);
@@ -8988,6 +9002,46 @@ mod tests {
                 .get(&(RelTypeId(0), "weight".to_string()))
                 .and_then(|values| values.last()),
             Some(&Value::Int(3))
+        );
+        assert_eq!(
+            statistics
+                .sampled_rel_property_histograms
+                .get(&(RelTypeId(0), "weight".to_string())),
+            Some(&false)
+        );
+    }
+
+    #[test]
+    fn adaptive_histograms_track_relationship_sampling() {
+        let relationships = (0..2_000)
+            .map(|id| {
+                (
+                    RelId(id),
+                    RelRecord {
+                        id: RelId(id),
+                        source: NodeId(id),
+                        target: NodeId(id + 100),
+                        rel_type: RelTypeId(0),
+                        properties: properties([("score", Value::Int(id as i64))]),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let statistics = compute_statistics(&BTreeMap::new(), &relationships, 1);
+        let histogram = statistics
+            .rel_property_histograms
+            .get(&(RelTypeId(0), "score".to_string()))
+            .unwrap();
+
+        assert_eq!(histogram.len(), 256);
+        assert_eq!(histogram.first(), Some(&Value::Int(0)));
+        assert_eq!(histogram.last(), Some(&Value::Int(1_999)));
+        assert_eq!(
+            statistics
+                .sampled_rel_property_histograms
+                .get(&(RelTypeId(0), "score".to_string())),
+            Some(&true)
         );
     }
 

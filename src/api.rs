@@ -7937,6 +7937,7 @@ mod tests {
         assert!(checkpoint.contains("stat_rel_property_distinct_count"));
         assert!(checkpoint.contains("stat_rel_property_histogram"));
         assert!(checkpoint.contains("stat_property_histogram"));
+        assert!(checkpoint.contains("stat_rel_property_histogram_sampled"));
         assert!(checkpoint.contains("stat_property_histogram_sampled"));
 
         {

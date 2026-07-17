@@ -135,6 +135,7 @@ pub struct GraphStatistics {
     pub property_histograms: BTreeMap<(LabelId, String), Vec<Value>>,
     pub rel_property_histograms: BTreeMap<(RelTypeId, String), Vec<Value>>,
     pub sampled_property_histograms: BTreeMap<(LabelId, String), bool>,
+    pub sampled_rel_property_histograms: BTreeMap<(RelTypeId, String), bool>,
 }
 
 #[derive(Debug, Default, Clone)]

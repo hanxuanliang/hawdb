@@ -758,7 +758,8 @@ Current implemented slice:
   per-relationship-type/property distinct-value counts plus relationship
   property histograms
 - statistics freshness metadata with the commit epoch used to compute the
-  snapshot, plus histogram sample-limit and per-histogram sampled/exact markers
+  snapshot, plus histogram sample-limit and node/relationship per-histogram
+  sampled/exact markers
 - public facade access to index descriptors and statistics for compatibility
   checks and future optimizer costing
 - metadata-aware scan/seek costing for simple label plus equality predicates:
