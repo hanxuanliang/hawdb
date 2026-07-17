@@ -111,6 +111,8 @@ pub struct SearchHit {
     pub vector_score: f64,
     pub text_score: f64,
     pub rrf_score: f64,
+    pub vector_rrf_score: f64,
+    pub text_rrf_score: f64,
     pub vector_rank: Option<usize>,
     pub text_rank: Option<usize>,
     pub kind: Option<String>,
@@ -130,6 +132,7 @@ pub struct SearchResultSet {
     pub truncation_reasons: Vec<String>,
     pub retrievers: Vec<SearchRetrieverReport>,
     pub rank_window: Option<usize>,
+    pub fusion_weights: SearchFusionWeights,
     pub document_count: usize,
     pub filtered_document_count: usize,
 }
@@ -150,10 +153,26 @@ pub struct SearchRetrieverCandidate {
     pub score: f64,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SearchFusionWeights {
+    pub vector_weight: f64,
+    pub text_weight: f64,
+}
+
+impl Default for SearchFusionWeights {
+    fn default() -> Self {
+        Self {
+            vector_weight: 1.0,
+            text_weight: 1.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct SearchQueryOptions {
     pub limit: usize,
     pub rank_window: Option<usize>,
+    pub fusion_weights: SearchFusionWeights,
     pub metadata_filters: BTreeMap<String, String>,
 }
 
@@ -476,6 +495,7 @@ impl SearchIndex {
             SearchQueryOptions {
                 limit,
                 rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
             },
         )
@@ -582,7 +602,10 @@ impl SearchIndex {
                 SearchMode::Hybrid => text_window_ranks.get(&document.id).copied(),
                 SearchMode::Vector | SearchMode::Text => text_ranks.get(&document.id).copied(),
             };
-            let rrf_score = rrf_score(vector_rank, text_rank);
+            let vector_rrf_score = rrf_child_score(vector_rank);
+            let text_rrf_score = rrf_child_score(text_rank);
+            let rrf_score =
+                weighted_rrf_score(vector_rrf_score, text_rrf_score, options.fusion_weights);
             let score = match mode {
                 SearchMode::Hybrid => rrf_score,
                 SearchMode::Vector => vector_score,
@@ -595,6 +618,8 @@ impl SearchIndex {
                     vector_score,
                     text_score,
                     rrf_score,
+                    vector_rrf_score,
+                    text_rrf_score,
                     vector_rank,
                     text_rank,
                     kind: document.metadata.get("kind").cloned(),
@@ -631,6 +656,7 @@ impl SearchIndex {
             truncation_reasons,
             retrievers,
             rank_window: options.rank_window,
+            fusion_weights: options.fusion_weights,
             document_count,
             filtered_document_count,
         }
@@ -953,12 +979,16 @@ fn top_ranked_candidates(
     ranked
 }
 
-fn rrf_score(vector_rank: Option<usize>, text_rank: Option<usize>) -> f64 {
-    [vector_rank, text_rank]
-        .into_iter()
-        .flatten()
-        .map(|rank| 1.0 / (RRF_K + rank as f64))
-        .sum()
+fn rrf_child_score(rank: Option<usize>) -> f64 {
+    rank.map(|rank| 1.0 / (RRF_K + rank as f64)).unwrap_or(0.0)
+}
+
+fn weighted_rrf_score(
+    vector_rrf_score: f64,
+    text_rrf_score: f64,
+    weights: SearchFusionWeights,
+) -> f64 {
+    vector_rrf_score * weights.vector_weight + text_rrf_score * weights.text_weight
 }
 
 fn format_embedding_manifest(manifest: &SearchEmbeddingManifest) -> String {
@@ -1726,6 +1756,7 @@ mod tests {
             SearchQueryOptions {
                 limit: 10,
                 rank_window: Some(1),
+                fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
             },
         );
@@ -1743,6 +1774,70 @@ mod tests {
             .hits
             .iter()
             .all(|hit| hit.id != "second_text" || hit.text_rank.is_none()));
+    }
+
+    #[test]
+    fn hybrid_search_applies_child_fusion_weights() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "vector_top",
+                "Vector only",
+                "semantic evidence",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+        index
+            .upsert(doc(
+                "text_top",
+                "Graph retrieval",
+                "graph retrieval graph retrieval",
+                [0.0, 1.0],
+            ))
+            .unwrap();
+
+        let text_weighted = index.search_with_options(
+            "graph retrieval",
+            Some(&[1.0, 0.0]),
+            SearchMode::Hybrid,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights {
+                    vector_weight: 1.0,
+                    text_weight: 3.0,
+                },
+                metadata_filters: BTreeMap::new(),
+            },
+        );
+        let vector_weighted = index.search_with_options(
+            "graph retrieval",
+            Some(&[1.0, 0.0]),
+            SearchMode::Hybrid,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights {
+                    vector_weight: 3.0,
+                    text_weight: 1.0,
+                },
+                metadata_filters: BTreeMap::new(),
+            },
+        );
+
+        assert_eq!(
+            text_weighted.fusion_weights,
+            SearchFusionWeights {
+                vector_weight: 1.0,
+                text_weight: 3.0
+            }
+        );
+        assert_eq!(text_weighted.hits[0].id, "text_top");
+        assert!(text_weighted.hits[0].text_rrf_score > 0.0);
+        assert_eq!(text_weighted.hits[0].vector_rrf_score, 0.0);
+        assert_eq!(vector_weighted.hits[0].id, "vector_top");
+        assert!(vector_weighted.hits[0].vector_rrf_score > 0.0);
+        assert_eq!(vector_weighted.hits[0].text_rrf_score, 0.0);
     }
 
     #[test]
@@ -1780,6 +1875,7 @@ mod tests {
             SearchQueryOptions {
                 limit: 10,
                 rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
                     "source_id".to_string(),
                     "thread_1".to_string(),
@@ -1821,6 +1917,7 @@ mod tests {
             SearchQueryOptions {
                 limit: 10,
                 rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
                     "source_id".to_string(),
                     "missing_thread".to_string(),

@@ -412,15 +412,16 @@ normalization prevents verbose rows from dominating short focused matches. This
 keeps text fallback useful while the projection remains rebuildable.
 
 Search hits expose the information needed by a knowledge retrieval surface:
-fused RRF score, vector score, text score, vector rank, text rank, fallback
-reasons, projection kind, external ID, source ID, matched analyzer terms, and
-projection freshness derived from the recorded source graph commit epoch, current
-projection markers, and embedding manifest state. Hybrid ranking uses
-reciprocal-rank fusion over the vector and text child retrievers, preserving each
-child position for explainability. Callers that need bounded candidate growth can
-use `SearchIndex::search_with_options` with a rank window, which limits which
-child candidates participate in RRF while still reporting each child's total
-candidate count. The same options also carry
+fused RRF score, per-child RRF components, vector score, text score, vector
+rank, text rank, fallback reasons, projection kind, external ID, source ID,
+matched analyzer terms, and projection freshness derived from the recorded
+source graph commit epoch, current projection markers, and embedding manifest
+state. Hybrid ranking uses weighted reciprocal-rank fusion over the vector and
+text child retrievers, preserving each child position and child RRF component for
+explainability. Callers that need bounded candidate growth can use
+`SearchIndex::search_with_options` with a rank window, which limits which child
+candidates participate in RRF while still reporting each child's total candidate
+count. The same options also carry
 exact-match metadata filters such as `kind` or `source_id`; filters are applied
 before vector scoring, BM25 corpus statistics, retriever candidate counts, and
 final truncation so scoped retrieval does not leak unscoped candidates into
@@ -438,9 +439,10 @@ The stable embedded facade exposes this boundary without owning search state:
 graph into a caller-owned `SearchIndex`, and `Database::retrieve_knowledge`
 combines that projection report with the current graph commit epoch and a
 compact diagnostics summary. Retrieval callers can pass a rank window through
-`KnowledgeRetrievalRequest` to bound hybrid child retriever participation before
-graph context expansion, and can pass metadata filters that scope both search
-hits and graph-native seed candidates. Filter keys align with graph-derived
+`KnowledgeRetrievalRequest` to bound hybrid child retriever participation, pass
+search fusion weights to bias vector or text child retrievers before graph
+context expansion, and pass metadata filters that scope both search hits and
+graph-native seed candidates. Filter keys align with graph-derived
 projection metadata:
 `kind` maps to canonical node labels, `external_id` maps to node `id`, and other
 keys map to same-name scalar node properties. Returned diagnostics preserve the

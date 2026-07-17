@@ -12,8 +12,8 @@ use crate::schema::{
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
-    SearchIndex, SearchMode, SearchProjectionFreshness, SearchQueryOptions, SearchRebuildOptions,
-    SearchRebuildSummary, SearchResultSet,
+    SearchFusionWeights, SearchIndex, SearchMode, SearchProjectionFreshness, SearchQueryOptions,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
 };
 use crate::store::{
     DurabilityPolicy, GraphMutation, GraphStore, NodeId, NodeRecord, ProjectedGraphStatus,
@@ -364,6 +364,7 @@ pub struct KnowledgeRetrievalRequest {
     pub mode: SearchMode,
     pub limit: usize,
     pub rank_window: Option<usize>,
+    pub search_fusion_weights: SearchFusionWeights,
     pub metadata_filters: BTreeMap<String, String>,
     pub candidate_limit: Option<usize>,
     pub candidate_scoring: KnowledgeCandidateScoringPolicy,
@@ -477,6 +478,8 @@ pub struct KnowledgeEvidence {
     pub matched_terms: Vec<String>,
     pub score: f64,
     pub rrf_score: f64,
+    pub vector_rrf_score: f64,
+    pub text_rrf_score: f64,
     pub vector_score: f64,
     pub text_score: f64,
     pub vector_rank: Option<usize>,
@@ -1022,6 +1025,7 @@ impl Database {
             SearchQueryOptions {
                 limit: request.limit,
                 rank_window: request.rank_window,
+                fusion_weights: request.search_fusion_weights,
                 metadata_filters: request.metadata_filters.clone(),
             },
         );
@@ -1420,6 +1424,8 @@ impl Database {
                     matched_terms: hit.matched_terms.clone(),
                     score: hit.score,
                     rrf_score: hit.rrf_score,
+                    vector_rrf_score: hit.vector_rrf_score,
+                    text_rrf_score: hit.text_rrf_score,
                     vector_score: hit.vector_score,
                     text_score: hit.text_score,
                     vector_rank: hit.vector_rank,
@@ -3843,7 +3849,7 @@ mod tests {
     use crate::schema::{
         ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
     };
-    use crate::search::{SearchIndex, SearchMode, SearchRebuildOptions};
+    use crate::search::{SearchFusionWeights, SearchIndex, SearchMode, SearchRebuildOptions};
     use crate::store::NodeId;
     use crate::Value;
     use std::collections::BTreeMap;
@@ -3966,6 +3972,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 4,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4172,6 +4179,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 1,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4323,6 +4331,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 10,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
                     "source_id".to_string(),
                     "thread_1".to_string(),
@@ -4389,6 +4398,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 10,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([(
                     "source_id".to_string(),
                     "missing_thread".to_string(),
@@ -4461,6 +4471,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 10,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4504,6 +4515,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 10,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4561,6 +4573,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 1,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4643,6 +4656,7 @@ mod tests {
                 mode: SearchMode::Hybrid,
                 limit: 10,
                 rank_window: Some(1),
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4684,6 +4698,77 @@ mod tests {
     }
 
     #[test]
+    fn knowledge_retrieval_applies_search_fusion_weights() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'vector_top', title: 'Vector seed', content: 'semantic evidence'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'text_top', title: 'Graph retrieval', content: 'graph retrieval graph retrieval'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+        search_index
+            .upsert(crate::search::SearchDocument {
+                id: "memory:vector_top".to_string(),
+                title: "Vector seed".to_string(),
+                content: "semantic evidence".to_string(),
+                embedding: Some(vec![1.0, 0.0]),
+                metadata: BTreeMap::from([
+                    ("kind".to_string(), "memory".to_string()),
+                    ("external_id".to_string(), "vector_top".to_string()),
+                ]),
+            })
+            .unwrap();
+        search_index
+            .upsert(crate::search::SearchDocument {
+                id: "memory:text_top".to_string(),
+                title: "Graph retrieval".to_string(),
+                content: "graph retrieval graph retrieval".to_string(),
+                embedding: Some(vec![0.0, 1.0]),
+                metadata: BTreeMap::from([
+                    ("kind".to_string(), "memory".to_string()),
+                    ("external_id".to_string(), "text_top".to_string()),
+                ]),
+            })
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "graph retrieval".to_string(),
+                query_embedding: Some(vec![1.0, 0.0]),
+                mode: SearchMode::Hybrid,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights {
+                    vector_weight: 1.0,
+                    text_weight: 3.0,
+                },
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 0,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(
+            output.search.fusion_weights,
+            SearchFusionWeights {
+                vector_weight: 1.0,
+                text_weight: 3.0
+            }
+        );
+        assert_eq!(output.search.hits[0].id, "memory:text_top");
+        assert_eq!(output.evidence[0].hit_id, "memory:text_top");
+        assert!(output.evidence[0].text_rrf_score > 0.0);
+        assert_eq!(output.evidence[0].vector_rrf_score, 0.0);
+        assert_eq!(output.evidence[0].score, output.evidence[0].rrf_score);
+    }
+
+    #[test]
     fn knowledge_retrieval_returns_graph_seeds_without_search_hits() {
         let mut db = Database::new();
         db.query(
@@ -4702,6 +4787,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 5,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4786,6 +4872,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 5,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: Some(1),
                 candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
@@ -4830,6 +4917,7 @@ mod tests {
                 mode: SearchMode::Text,
                 limit: 1,
                 rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
                 candidate_limit: None,
                 candidate_scoring: KnowledgeCandidateScoringPolicy::WeightedSum {
