@@ -4284,6 +4284,36 @@ impl GraphStore {
         }
     }
 
+    pub fn adjacency_group_stats_for_node(
+        &self,
+        node_id: NodeId,
+        direction: AdjacencyDirection,
+    ) -> Vec<AdjacencyGroupStats> {
+        let adjacency = match direction {
+            AdjacencyDirection::Outgoing => &self.outgoing,
+            AdjacencyDirection::Incoming => &self.incoming,
+        };
+        let mut stats = adjacency
+            .iter()
+            .filter_map(|((group_node, rel_type), rel_ids)| {
+                (*group_node == node_id).then_some(AdjacencyGroupStats {
+                    node_id,
+                    rel_type: *rel_type,
+                    direction,
+                    degree: rel_ids.len(),
+                    layout: adjacency_layout_for_degree(rel_ids.len()),
+                })
+            })
+            .collect::<Vec<_>>();
+        stats.sort_by_key(|stats| {
+            (
+                stats.rel_type,
+                adjacency_direction_sort_key(stats.direction),
+            )
+        });
+        stats
+    }
+
     pub fn ordered_adjacency_entries(
         &self,
         node_id: NodeId,
@@ -7728,6 +7758,13 @@ fn adjacency_layout_for_degree(degree: usize) -> AdjacencyLayout {
     }
 }
 
+fn adjacency_direction_sort_key(direction: AdjacencyDirection) -> u8 {
+    match direction {
+        AdjacencyDirection::Outgoing => 0,
+        AdjacencyDirection::Incoming => 1,
+    }
+}
+
 fn generated_stable_id(kind: &str, physical_id: u64) -> Value {
     Value::Map(BTreeMap::from([
         (
@@ -8541,9 +8578,10 @@ fn validate_storage_version(version: &str) -> Result<()> {
 mod tests {
     use super::{
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text,
-        AdjacencyDirection, AdjacencyLayout, ConnectedNodesCreate, DurableCompression, GraphStore,
-        NodeId, NodeRecord, OrderedAdjacencyEntry, ProjectedGraphDefinition, RelId, RelRecord,
-        RelTypeId, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
+        AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, ConnectedNodesCreate,
+        DurableCompression, GraphStore, NodeId, NodeRecord, OrderedAdjacencyEntry,
+        ProjectedGraphDefinition, RelId, RelRecord, RelTypeId, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+        DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -8754,6 +8792,63 @@ mod tests {
         assert_eq!(dense_stats.layout, AdjacencyLayout::Dense);
         assert_eq!(sparse_stats.degree, 1);
         assert_eq!(sparse_stats.layout, AdjacencyLayout::Sparse);
+    }
+
+    #[test]
+    fn adjacency_group_stats_for_node_reports_each_relationship_type() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+        let mentions_target = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let relates_target = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(2))]))
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                mentions_target,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                relates_target,
+                "RELATES_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let mentions = catalog.rel_type_id("MENTIONS").unwrap();
+        let relates_to = catalog.rel_type_id("RELATES_TO").unwrap();
+
+        let stats = store.adjacency_group_stats_for_node(source, AdjacencyDirection::Outgoing);
+
+        assert_eq!(
+            stats,
+            vec![
+                AdjacencyGroupStats {
+                    node_id: source,
+                    rel_type: mentions,
+                    direction: AdjacencyDirection::Outgoing,
+                    degree: 1,
+                    layout: AdjacencyLayout::Sparse,
+                },
+                AdjacencyGroupStats {
+                    node_id: source,
+                    rel_type: relates_to,
+                    direction: AdjacencyDirection::Outgoing,
+                    degree: 1,
+                    layout: AdjacencyLayout::Sparse,
+                },
+            ]
+        );
     }
 
     #[test]

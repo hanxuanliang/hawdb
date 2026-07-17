@@ -1025,12 +1025,13 @@ impl Database {
                 request.graph_seed_limit,
                 &request.metadata_filters,
             );
-        let (graph_context_paths, fanout_reasons) = self.expand_knowledge_context(
-            &search,
-            &graph_seeds,
-            request.graph_context_limit,
-            request.graph_context_max_hops,
-        );
+        let (graph_context_paths, fanout_reasons, graph_context_truncation_reasons) = self
+            .expand_knowledge_context(
+                &search,
+                &graph_seeds,
+                request.graph_context_limit,
+                request.graph_context_max_hops,
+            );
         let evidence = self.knowledge_evidence_for_search(&search, &graph_context_paths);
         let projection_freshness = search_index.projection_freshness();
         let retrievers = knowledge_retriever_reports(
@@ -1051,7 +1052,6 @@ impl Database {
                 request.candidate_limit,
                 request.candidate_scoring,
             );
-        let graph_context_truncation_reasons = fanout_reasons.clone();
         let mut fanout_reasons = fanout_reasons;
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
@@ -1133,11 +1133,13 @@ impl Database {
         graph_seeds: &[KnowledgeGraphSeed],
         graph_context_limit: usize,
         graph_context_max_hops: usize,
-    ) -> (Vec<KnowledgeGraphContextPath>, Vec<String>) {
+    ) -> (Vec<KnowledgeGraphContextPath>, Vec<String>, Vec<String>) {
         let mut paths = Vec::new();
         let mut fanout_reasons = Vec::new();
+        let mut truncation_reasons = Vec::new();
         let mut seen_relationships = BTreeSet::new();
         let mut seen_frontier_nodes = BTreeSet::new();
+        let mut reported_dense_groups = BTreeSet::new();
         let mut frontier = VecDeque::new();
 
         for hit in &search.hits {
@@ -1162,6 +1164,18 @@ impl Database {
             if depth >= graph_context_max_hops {
                 continue;
             }
+            record_dense_adjacency_diagnostics(
+                DenseAdjacencyDiagnosticContext {
+                    catalog: &self.catalog,
+                    store: &self.store,
+                    operation: "graph_context",
+                    relationship_type: None,
+                    requested_direction: KnowledgeNeighborDirection::Both,
+                },
+                current_node,
+                &mut reported_dense_groups,
+                &mut fanout_reasons,
+            );
             for edge in knowledge_expansion_edges_for_node(
                 &self.store,
                 current_node,
@@ -1172,10 +1186,12 @@ impl Database {
                     continue;
                 }
                 if paths.len() >= graph_context_limit {
-                    fanout_reasons.push(format!(
+                    let reason = format!(
                         "graph_context_limit {graph_context_limit} reached while expanding hit {seed_hit_id}"
-                    ));
-                    return (paths, fanout_reasons);
+                    );
+                    fanout_reasons.push(reason.clone());
+                    truncation_reasons.push(reason);
+                    return (paths, fanout_reasons, truncation_reasons);
                 }
                 let Some(path) = self.context_path_for_relationship(
                     &seed_hit_id,
@@ -1192,7 +1208,7 @@ impl Database {
             }
         }
 
-        (paths, fanout_reasons)
+        (paths, fanout_reasons, truncation_reasons)
     }
 
     fn seed_node_for_hit(
@@ -2534,30 +2550,36 @@ fn record_dense_adjacency_diagnostics(
     reported_dense_groups: &mut BTreeSet<String>,
     fanout_reasons: &mut Vec<String>,
 ) {
-    let Some(rel_type) = context.relationship_type else {
-        return;
-    };
-    let rel_type_name = context
-        .catalog
-        .rel_type_name(rel_type)
-        .unwrap_or("<unknown>");
     for adjacency_direction in adjacency_directions_for_request(context.requested_direction) {
-        let stats = context
-            .store
-            .adjacency_group_stats(node_id, rel_type, adjacency_direction);
-        if stats.layout != AdjacencyLayout::Dense {
-            continue;
-        }
-        let direction = adjacency_direction_name(adjacency_direction);
-        let key = format!(
-            "{}:{rel_type_name}:{direction}:{}",
-            context.operation, node_id.0
-        );
-        if reported_dense_groups.insert(key) {
-            fanout_reasons.push(format!(
-                "{} dense_adjacency {rel_type_name} {direction} node {} degree {}",
-                context.operation, node_id.0, stats.degree
-            ));
+        let stats = match context.relationship_type {
+            Some(rel_type) => {
+                vec![context
+                    .store
+                    .adjacency_group_stats(node_id, rel_type, adjacency_direction)]
+            }
+            None => context
+                .store
+                .adjacency_group_stats_for_node(node_id, adjacency_direction),
+        };
+        for stats in stats {
+            if stats.layout != AdjacencyLayout::Dense {
+                continue;
+            }
+            let rel_type_name = context
+                .catalog
+                .rel_type_name(stats.rel_type)
+                .unwrap_or("<unknown>");
+            let direction = adjacency_direction_name(adjacency_direction);
+            let key = format!(
+                "{}:{rel_type_name}:{direction}:{}",
+                context.operation, node_id.0
+            );
+            if reported_dense_groups.insert(key) {
+                fanout_reasons.push(format!(
+                    "{} dense_adjacency {rel_type_name} {direction} node {} degree {}",
+                    context.operation, node_id.0, stats.degree
+                ));
+            }
         }
     }
 }

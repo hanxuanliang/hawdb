@@ -644,6 +644,70 @@ fn knowledge_retrieval_expands_graph_context_by_ordered_adjacency() {
 }
 
 #[test]
+fn knowledge_retrieval_reports_dense_graph_context_without_truncation() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root', title: 'Dense retrieval root'})")
+        .unwrap();
+    for index in 0..DENSE_ADJACENCY_DEGREE_THRESHOLD {
+        let target = db
+            .store
+            .create_node(
+                &mut db.catalog,
+                "Entity",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String(format!("entity-{index}"))),
+                    ("name".to_string(), Value::String(format!("Entity {index}"))),
+                ]),
+            )
+            .unwrap();
+        db.store
+            .create_relationship(
+                &mut db.catalog,
+                NodeId(0),
+                target,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+    }
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "dense retrieval".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 1,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 0,
+            graph_context_limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert_eq!(
+        output.graph_context_paths.len(),
+        DENSE_ADJACENCY_DEGREE_THRESHOLD
+    );
+    assert_eq!(output.diagnostics.fanout_reason_count, 1);
+    assert!(!output.diagnostics.graph_context_truncated);
+    assert!(output
+        .diagnostics
+        .graph_context_truncation_reasons
+        .is_empty());
+    assert!(output.fanout_reasons[0]
+        .contains("graph_context dense_adjacency MENTIONS outgoing node 0 degree"));
+}
+
+#[test]
 fn knowledge_retrieval_applies_metadata_filters_to_search_and_graph_seeds() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'mem_1', title: 'Filtered graph', content: 'metadata scoped retrieval', source_id: 'thread_1'})")
@@ -2194,6 +2258,22 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     assert_eq!(neighbors.diagnostics.fanout_reason_count, 1);
     assert_eq!(neighbors.fanout_reasons.len(), 1);
     assert!(neighbors.fanout_reasons[0]
+        .contains("knowledge_neighbors dense_adjacency LINKS outgoing node 0 degree"));
+
+    let untyped_neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
+        label: "Memory".to_string(),
+        external_id: "root".to_string(),
+        relationship_type: None,
+        direction: KnowledgeNeighborDirection::Outgoing,
+        limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
+        max_hops: 1,
+    });
+    assert_eq!(
+        untyped_neighbors.paths.len(),
+        DENSE_ADJACENCY_DEGREE_THRESHOLD
+    );
+    assert_eq!(untyped_neighbors.diagnostics.fanout_reason_count, 1);
+    assert!(untyped_neighbors.fanout_reasons[0]
         .contains("knowledge_neighbors dense_adjacency LINKS outgoing node 0 degree"));
 
     let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
