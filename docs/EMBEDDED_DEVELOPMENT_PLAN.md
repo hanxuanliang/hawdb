@@ -800,7 +800,8 @@ Current implemented slice:
   fallback, production-shaped selective seed + bounded expand + aggregate +
   sort/limit, one-hop relationship-property expand reads, a Nowledge-shaped
   pushed-down relationship equality plus relationship range-filter workload, a
-  source-to-memory-to-label cross-pattern aggregate workload,
+  source-to-memory-to-label cross-pattern aggregate workload, a larger
+  source-to-memory-to-entity-to-label grouped workload,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
   equality/`IN`/range selectivity, selected-plan cost stability, deterministic
@@ -813,8 +814,8 @@ Remaining Phase 4 work:
   enumeration once multi-pattern logical plans exist
 - bounded left-deep join-order enumeration beyond the current all-single-row
   endpoint-product ordering
-- larger cross-pattern workload-shaped optimizer benchmark suites beyond the
-  current source-memory-label smoke case
+- broader cross-pattern workload-shaped optimizer benchmark suites beyond the
+  current source/memory/entity/label smoke cases
 
 ### Phase 5: Analytics and Cutover
 
