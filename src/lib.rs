@@ -28,12 +28,12 @@ pub use analytics::{
     CommunityAssignment, LouvainOptions, PageRankOptions, PageRankScore, ProjectedGraph,
 };
 pub use api::{
-    validate_graph_lightning_graph_stream, CanonicalGraphSnapshotExport,
-    CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
-    CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
-    CanonicalStableIdMapping, Database, DatabaseConfig, DatabaseReadTransaction,
-    DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
-    ExternalContentArtifactJobSummary, GraphLightningBootstrapExport,
+    validate_graph_lightning_graph_stream, BackgroundMaintenanceCandidate,
+    BackgroundMaintenanceOptions, CanonicalGraphSnapshotExport, CanonicalGraphSnapshotValidation,
+    CanonicalSnapshotEndpointViolation, CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode,
+    CanonicalSnapshotRelationship, CanonicalStableIdMapping, Database, DatabaseConfig,
+    DatabaseReadTransaction, DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport,
+    DerivedArtifactJobStatus, ExternalContentArtifactJobSummary, GraphLightningBootstrapExport,
     GraphLightningBootstrapManifest, GraphLightningGraphStream,
     GraphLightningGraphStreamValidation, KnowledgeCandidate, KnowledgeCandidateScoreBreakdown,
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntity,
@@ -45,8 +45,8 @@ pub use api::{
     KnowledgeRetrieverReport, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
     KnowledgeTraversalDiagnostics, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
     NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,

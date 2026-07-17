@@ -386,9 +386,14 @@ leave the previous projection intact and keep a full-reindex marker.
 Caller-owned background loops can rank full search rebuilds, incremental deltas,
 and metadata repair as `Projection` work and then execute them through QoS
 admission or scheduler wrappers; explicit foreground rebuilds continue to use
-the direct APIs. The embedded `Database` facade exposes the same metadata-only
-repair over canonical graph evidence, preserving projection text and embeddings
-while repairing graph-derived metadata fields.
+the direct APIs. The embedded `Database` facade can also collect rankable
+background maintenance candidates across schema maintenance, property-index
+projection rebuilds, search projection rebuild/repair, graph-derived search
+deltas, and external content artifact jobs; this facade only reports candidate
+plans and QoS decisions, leaving worker ownership and execution timing to the
+caller. The embedded `Database` facade exposes the same metadata-only repair
+over canonical graph evidence, preserving projection text and embeddings while
+repairing graph-derived metadata fields.
 Persistent search projection snapshots publish through a synced temporary file,
 atomic rename, and parent-directory sync, while remaining rebuildable projection
 state outside the graph WAL. A graph-derived rebuild records the source graph

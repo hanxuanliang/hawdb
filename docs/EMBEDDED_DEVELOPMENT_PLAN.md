@@ -616,7 +616,14 @@ estimate before replacing the projection. Graph-derived metadata repair exposes
 the same split through `SearchIndex::metadata_repair_background_work_plan`,
 `SearchIndex::repair_background_metadata_from_graph`, and
 `SearchIndex::repair_scheduled_background_metadata_from_graph` while preserving
-its bounded, metadata-only repair semantics. Foreground user-triggered rebuilds,
+its bounded, metadata-only repair semantics.
+`Database::background_maintenance_candidates` and
+`Database::rank_background_maintenance` provide a caller-owned scheduling
+surface that gathers pending schema maintenance, property-index projection
+rebuilds, search rebuild/repair work, graph-derived search deltas, and external
+content artifact jobs into named `BackgroundWorkPlan`s. The API returns ranked
+plans and QoS decisions only; it does not spawn workers or execute background
+work on behalf of the embedded application. Foreground user-triggered rebuilds,
 deltas, and repairs can still use the direct APIs. Database-owned
 derived artifact jobs expose the same split through
 `Database::run_next_background_derived_artifact_job`, which admits internal

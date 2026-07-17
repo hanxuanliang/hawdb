@@ -8,8 +8,8 @@ use crate::optimizer::{
 };
 use crate::planner;
 use crate::qos::{
-    BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-    QosAdmission, WorkClass, WorkRequest,
+    BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy,
+    LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
 };
 use crate::schema::{
     Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics, IndexDescriptor,
@@ -417,6 +417,46 @@ impl SearchProjectionGraphDeltaRequest {
             hint,
         ))
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundMaintenanceOptions {
+    pub hint: BackgroundWorkHint,
+    pub include_schema_maintenance: bool,
+    pub include_property_index_projection: bool,
+    pub include_search_projection_rebuild: bool,
+    pub include_search_projection_metadata_repair: bool,
+    pub include_external_content_artifact_jobs: bool,
+    pub external_content_artifact_estimated_operations: usize,
+    pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
+}
+
+impl Default for BackgroundMaintenanceOptions {
+    fn default() -> Self {
+        Self {
+            hint: BackgroundWorkHint::default(),
+            include_schema_maintenance: true,
+            include_property_index_projection: true,
+            include_search_projection_rebuild: true,
+            include_search_projection_metadata_repair: true,
+            include_external_content_artifact_jobs: true,
+            external_content_artifact_estimated_operations: 1,
+            search_projection_graph_delta: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundMaintenanceCandidate {
+    pub name: String,
+    pub plan: BackgroundWorkPlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedBackgroundMaintenance {
+    pub name: String,
+    pub plan: BackgroundWorkPlan,
+    pub decision: BackgroundWorkDecision,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1431,6 +1471,125 @@ impl Database {
                 search_projection_commit_lag(search_index, self.store.commit_epoch());
         }
         request.background_work_plan(hint)
+    }
+
+    pub fn background_maintenance_candidates(
+        &self,
+        search_index: Option<&SearchIndex>,
+        options: BackgroundMaintenanceOptions,
+    ) -> Vec<BackgroundMaintenanceCandidate> {
+        let mut candidates = Vec::new();
+
+        if options.include_schema_maintenance {
+            if let Some(plan) = self.schema_maintenance_background_work_plan(options.hint.clone()) {
+                candidates.push(BackgroundMaintenanceCandidate {
+                    name: "schema_maintenance".to_string(),
+                    plan,
+                });
+            }
+        }
+
+        if options.include_property_index_projection {
+            if let Some(plan) =
+                self.property_index_projection_background_work_plan(options.hint.clone())
+            {
+                candidates.push(BackgroundMaintenanceCandidate {
+                    name: "property_index_projection".to_string(),
+                    plan,
+                });
+            }
+        }
+
+        if let Some(delta_request) = &options.search_projection_graph_delta {
+            let plan = match search_index {
+                Some(search_index) => self
+                    .search_projection_graph_delta_freshness_background_work_plan(
+                        search_index,
+                        delta_request,
+                        options.hint.clone(),
+                    ),
+                None => self.search_projection_graph_delta_background_work_plan(
+                    delta_request,
+                    options.hint.clone(),
+                ),
+            };
+            if let Some(plan) = plan {
+                candidates.push(BackgroundMaintenanceCandidate {
+                    name: "search_projection_graph_delta".to_string(),
+                    plan,
+                });
+            }
+        }
+
+        if let Some(search_index) = search_index {
+            if options.include_search_projection_rebuild {
+                let mut hint = options.hint.clone();
+                if hint.source_graph_commit_lag == 0 {
+                    hint.source_graph_commit_lag =
+                        search_projection_commit_lag(search_index, self.store.commit_epoch());
+                }
+                if let Some(plan) =
+                    self.search_projection_rebuild_background_work_plan(search_index, hint)
+                {
+                    candidates.push(BackgroundMaintenanceCandidate {
+                        name: "search_projection_rebuild".to_string(),
+                        plan,
+                    });
+                }
+            }
+
+            if options.include_search_projection_metadata_repair {
+                if let Some(plan) = self.search_projection_metadata_repair_background_work_plan(
+                    search_index,
+                    options.hint.clone(),
+                ) {
+                    candidates.push(BackgroundMaintenanceCandidate {
+                        name: "search_projection_metadata_repair".to_string(),
+                        plan,
+                    });
+                }
+            }
+        }
+
+        if options.include_external_content_artifact_jobs {
+            if let Some(plan) = self.external_content_artifact_job_background_work_plan(
+                options.hint,
+                options.external_content_artifact_estimated_operations,
+            ) {
+                candidates.push(BackgroundMaintenanceCandidate {
+                    name: "external_content_artifact_job".to_string(),
+                    plan,
+                });
+            }
+        }
+
+        candidates
+    }
+
+    pub fn rank_background_maintenance(
+        &self,
+        search_index: Option<&SearchIndex>,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: BackgroundMaintenanceOptions,
+    ) -> Vec<RankedBackgroundMaintenance> {
+        let candidates = self.background_maintenance_candidates(search_index, options);
+        let plans = candidates
+            .iter()
+            .map(|candidate| candidate.plan.clone())
+            .collect::<Vec<_>>();
+        policy
+            .rank_background_work(state, &plans)
+            .into_iter()
+            .map(|ranked| {
+                let candidate = &candidates[ranked.index];
+                RankedBackgroundMaintenance {
+                    name: candidate.name.clone(),
+                    plan: candidate.plan.clone(),
+                    decision: ranked.decision,
+                }
+            })
+            .collect()
     }
 
     pub fn build_search_projection_graph_delta(

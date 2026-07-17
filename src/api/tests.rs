@@ -1,13 +1,17 @@
 use super::{
-    validate_graph_lightning_graph_stream, CanonicalStableIdMapping, Database, DatabaseConfig,
-    DerivedArtifactJobStatus, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
-    KnowledgeEntityRequest, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
-    KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgeRetrievalRequest,
-    KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    validate_graph_lightning_graph_stream, BackgroundMaintenanceOptions, CanonicalStableIdMapping,
+    Database, DatabaseConfig, DerivedArtifactJobStatus, KnowledgeCandidateScoringPolicy,
+    KnowledgeCandidateSource, KnowledgeEntityRequest, KnowledgeGraphPathDirection,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
+    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
-use crate::qos::{BackgroundWorkHint, LocalQosPolicy, LocalQosScheduler, LocalQosState, WorkClass};
+use crate::qos::{
+    BackgroundWorkHint, LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass,
+    WorkRequest,
+};
 use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
 };
@@ -7024,6 +7028,95 @@ fn external_content_artifact_job_background_work_plan_is_rankable_by_action() {
             3,
         )
         .is_none());
+}
+
+#[test]
+fn background_maintenance_candidates_are_empty_without_pending_work() {
+    let db = Database::new();
+    let search_index = SearchIndex::in_memory();
+
+    assert!(db
+        .background_maintenance_candidates(
+            Some(&search_index),
+            BackgroundMaintenanceOptions::default(),
+        )
+        .is_empty());
+    assert!(db
+        .rank_background_maintenance(
+            Some(&search_index),
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            BackgroundMaintenanceOptions::default(),
+        )
+        .is_empty());
+}
+
+#[test]
+fn background_maintenance_ranks_mixed_nowledge_background_work() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 2, title: 'Vector search'})")
+        .unwrap();
+    db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+        .unwrap();
+    db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+        .unwrap();
+    db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
+    db.schedule_external_content_artifact_job("source-parse", "parse");
+
+    let search_index = SearchIndex::in_memory();
+    let options = BackgroundMaintenanceOptions {
+        search_projection_graph_delta: Some(SearchProjectionGraphDeltaRequest {
+            upsert_node_ids: vec![0],
+            complete_through_graph_commit_epoch: Some(2),
+            ..SearchProjectionGraphDeltaRequest::default()
+        }),
+        external_content_artifact_estimated_operations: 1,
+        ..BackgroundMaintenanceOptions::default()
+    };
+    let candidates = db.background_maintenance_candidates(Some(&search_index), options.clone());
+    let names = candidates
+        .iter()
+        .map(|candidate| candidate.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(names.contains(&"schema_maintenance"));
+    assert!(names.contains(&"property_index_projection"));
+    assert!(names.contains(&"search_projection_graph_delta"));
+    assert!(names.contains(&"search_projection_rebuild"));
+    assert!(names.contains(&"external_content_artifact_job"));
+
+    let policy = LocalQosPolicy {
+        max_total_background_operations: Some(5),
+        ..LocalQosPolicy::default()
+    };
+    let state = LocalQosState {
+        running_background_operations: 4,
+        ..LocalQosState::default()
+    };
+    let ranked = db.rank_background_maintenance(Some(&search_index), &policy, &state, options);
+
+    assert_eq!(ranked[0].name, "search_projection_graph_delta");
+    assert_eq!(ranked[0].plan.request.class, WorkClass::Projection);
+    assert!(matches!(ranked[0].decision.admission, QosAdmission::Admit));
+    assert!(ranked[0]
+        .decision
+        .reasons
+        .iter()
+        .any(|reason| reason.starts_with("recent delta operations")));
+    assert!(ranked.iter().any(|item| {
+        item.name == "search_projection_rebuild"
+            && matches!(item.decision.admission, QosAdmission::Defer { .. })
+    }));
+    assert_eq!(
+        policy.admit(
+            &state,
+            &WorkRequest::foreground(WorkClass::Query, usize::MAX),
+        ),
+        QosAdmission::Admit
+    );
 }
 
 #[test]
