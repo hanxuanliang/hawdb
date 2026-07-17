@@ -183,7 +183,10 @@ report can also summarize an optional caller-owned
 `graph_lightning_import_checkpoints.jsonl` append log. Checkpoint entries keep
 resume/failure coordinates such as source range, object digest, partition, and
 validation rule; object-level checkpoints must include the same idempotent retry
-tuple before status automation treats them as resumable. The report also
+tuple before status automation treats them as resumable. Reusing one complete
+checkpoint idempotency tuple for conflicting source-range, partition, or
+manifest-digest coordinates blocks the status report instead of allowing resume
+automation to amplify a stale retry marker. The report also
 includes machine-readable `resume_action`, `state_marker`, `checkpoint_log`, and
 `resource_retention` fields that distinguish staging, publishing, active work,
 completed, canceled, failed, and quarantined/manual-repair states without

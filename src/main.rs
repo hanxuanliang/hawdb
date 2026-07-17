@@ -6,7 +6,7 @@ use skein::{
     CanonicalSnapshotIdentityAudit, Database, DatabaseConfig, ExternalShadowCommand,
     ExternalShadowReady, GraphLightningBootstrapManifest, Result, SkeinError, Value,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
@@ -1787,6 +1787,9 @@ fn graph_lightning_import_checkpoint_log(
             "present": false,
             "path": "graph_lightning_import_checkpoints.jsonl",
             "entry_count": 0,
+            "idempotency_key_count": 0,
+            "idempotency_conflicts": 0,
+            "idempotency_conflict_messages": [],
             "last_checkpoint": serde_json::Value::Null,
             "failed_checkpoints": [],
             "resume_summary": {
@@ -1824,6 +1827,8 @@ fn graph_lightning_import_checkpoint_log(
     let mut failed_object_digests = BTreeSet::new();
     let mut failed_partitions = BTreeSet::new();
     let mut failed_validation_rules = BTreeSet::new();
+    let mut idempotency_fingerprints = BTreeMap::new();
+    let mut idempotency_conflicts = Vec::new();
     for (line_index, line) in content.lines().enumerate() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -1849,6 +1854,21 @@ fn graph_lightning_import_checkpoint_log(
             errors,
             checkpoint_errors,
         );
+        if let Some((key, fingerprint)) = graph_lightning_checkpoint_idempotency_fingerprint(&entry)
+        {
+            if let Some(previous) = idempotency_fingerprints.get(&key) {
+                if previous != &fingerprint {
+                    let message = format!(
+                        "checkpoint log line {} reuses idempotency key for conflicting checkpoint coordinates",
+                        line_index + 1
+                    );
+                    push_grouped_error(errors, checkpoint_errors, message.clone());
+                    idempotency_conflicts.push(message);
+                }
+            } else {
+                idempotency_fingerprints.insert(key, fingerprint);
+            }
+        }
         if entry.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
             collect_string_field(&entry, "source_range", &mut failed_source_ranges);
             collect_string_field(&entry, "object_digest", &mut failed_object_digests);
@@ -1869,6 +1889,9 @@ fn graph_lightning_import_checkpoint_log(
         "present": true,
         "path": "graph_lightning_import_checkpoints.jsonl",
         "entry_count": entries.len(),
+        "idempotency_key_count": idempotency_fingerprints.len(),
+        "idempotency_conflicts": idempotency_conflicts.len(),
+        "idempotency_conflict_messages": idempotency_conflicts,
         "last_checkpoint": last_checkpoint,
         "failed_checkpoints": failed,
         "resume_summary": {
@@ -1888,6 +1911,28 @@ fn graph_lightning_import_checkpoint_log(
     })
 }
 
+fn graph_lightning_checkpoint_idempotency_fingerprint(
+    entry: &serde_json::Value,
+) -> Option<(String, serde_json::Value)> {
+    let import_id = marker_string_field(entry, "import_id")?;
+    let task_id = marker_string_field(entry, "task_id")?;
+    let fencing_token = marker_string_field(entry, "fencing_token")?;
+    let object_digest = marker_string_field(entry, "object_digest")?;
+    let key = serde_json::json!({
+        "import_id": import_id,
+        "task_id": task_id,
+        "fencing_token": fencing_token,
+        "object_digest": object_digest,
+    })
+    .to_string();
+    let fingerprint = serde_json::json!({
+        "source_range": entry.get("source_range").cloned().unwrap_or(serde_json::Value::Null),
+        "partition": entry.get("partition").cloned().unwrap_or(serde_json::Value::Null),
+        "manifest_digest": entry.get("manifest_digest").cloned().unwrap_or(serde_json::Value::Null),
+    });
+    Some((key, fingerprint))
+}
+
 fn graph_lightning_import_checkpoint_blocked_json(
     checkpoint_errors: &[String],
 ) -> serde_json::Value {
@@ -1895,6 +1940,9 @@ fn graph_lightning_import_checkpoint_blocked_json(
         "present": true,
         "path": "graph_lightning_import_checkpoints.jsonl",
         "entry_count": 0,
+        "idempotency_key_count": 0,
+        "idempotency_conflicts": 0,
+        "idempotency_conflict_messages": [],
         "last_checkpoint": serde_json::Value::Null,
         "failed_checkpoints": [],
         "resume_summary": {
@@ -3644,6 +3692,8 @@ mod tests {
         assert_eq!(report["import_state"], "UPLOADING");
         assert_eq!(report["checkpoint_log"]["present"], true);
         assert_eq!(report["checkpoint_log"]["entry_count"], 2);
+        assert_eq!(report["checkpoint_log"]["idempotency_key_count"], 1);
+        assert_eq!(report["checkpoint_log"]["idempotency_conflicts"], 0);
         assert_eq!(
             report["checkpoint_log"]["last_checkpoint"]["stage"],
             "object_uploaded"
@@ -3674,6 +3724,61 @@ mod tests {
         );
         assert_eq!(report["status_gate"]["checkpoint_errors"], 0);
         assert_eq!(report["status_gate"]["decision"], "ready");
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_blocks_checkpoint_log_idempotency_conflict() {
+        let staging_dir =
+            unique_main_test_dir("graph_lightning_status_checkpoint_conflict_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_checkpoint_conflict_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_checkpoints.jsonl"),
+            [
+                serde_json::json!({
+                    "stage": "object_uploaded",
+                    "status": "completed",
+                    "source_range": "node:0..10",
+                    "partition": "p0",
+                    "object_digest": "digest-1",
+                    "import_id": "import-1",
+                    "task_id": "task-1",
+                    "fencing_token": "fence-1"
+                })
+                .to_string(),
+                serde_json::json!({
+                    "stage": "object_verified",
+                    "status": "completed",
+                    "source_range": "node:10..20",
+                    "partition": "p0",
+                    "object_digest": "digest-1",
+                    "import_id": "import-1",
+                    "task_id": "task-1",
+                    "fencing_token": "fence-1"
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(
+            report["checkpoint_log"]["checkpoint_gate"]["decision"],
+            "blocked"
+        );
+        assert_eq!(report["checkpoint_log"]["idempotency_key_count"], 1);
+        assert_eq!(report["checkpoint_log"]["idempotency_conflicts"], 1);
+        assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["status_gate"]["checkpoint_errors"], 1);
+        assert!(report["status_gate"]["checkpoint_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("reuses idempotency key")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }

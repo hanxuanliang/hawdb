@@ -71,7 +71,8 @@ declaring artifacts deletable.
 Import-status reports add a machine-readable `resume_action`, optional
 caller-owned state-marker aggregation with active-state idempotency-key
 validation, optional caller-owned checkpoint-log aggregation with failure
-coordinates, and active-import `resource_retention` policy so automation can
+coordinates and idempotency-coordinate conflict detection, and active-import
+`resource_retention` policy so automation can
 choose staging, publishing, active resume, completion, failure/cancel handling,
 quarantine/manual-repair, or artifact-retention handling without parsing
 human-readable error strings or deleting READY artifacts before publish.
