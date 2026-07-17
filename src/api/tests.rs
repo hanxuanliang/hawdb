@@ -666,6 +666,21 @@ fn graph_search_projection_delta_budget_failure_keeps_projection_unchanged() {
 }
 
 #[test]
+fn graph_search_projection_delta_plan_is_absent_when_request_exceeds_limit() {
+    let db = Database::new();
+    let request = SearchProjectionGraphDeltaRequest {
+        upsert_node_ids: vec![1, 2],
+        delete_document_ids: vec!["memory:old".to_string()],
+        max_operations: Some(2),
+        complete_through_graph_commit_epoch: None,
+    };
+
+    assert!(db
+        .search_projection_graph_delta_background_work_plan(&request, BackgroundWorkHint::default())
+        .is_none());
+}
+
+#[test]
 fn graph_search_projection_delta_without_watermark_keeps_freshness_epoch() {
     let mut db = Database::new();
     let node_id = db
@@ -7280,6 +7295,39 @@ fn background_maintenance_candidates_are_empty_without_pending_work() {
             BackgroundMaintenanceOptions::default(),
         )
         .is_empty());
+}
+
+#[test]
+fn background_maintenance_skips_over_limit_search_projection_graph_delta() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
+        .unwrap();
+    db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
+    let search_index = SearchIndex::in_memory();
+
+    let candidates = db.background_maintenance_candidates(
+        Some(&search_index),
+        BackgroundMaintenanceOptions {
+            search_projection_graph_delta: Some(SearchProjectionGraphDeltaRequest {
+                upsert_node_ids: vec![0, 1],
+                delete_document_ids: vec!["memory:old".to_string()],
+                max_operations: Some(2),
+                ..SearchProjectionGraphDeltaRequest::default()
+            }),
+            include_schema_maintenance: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+    let names = candidates
+        .iter()
+        .map(|candidate| candidate.name.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(!names.contains(&"search_projection_graph_delta"));
+    assert!(names.contains(&"property_index_projection"));
+    assert!(names.contains(&"search_projection_rebuild"));
 }
 
 #[test]

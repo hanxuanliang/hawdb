@@ -412,6 +412,12 @@ impl SearchProjectionGraphDeltaRequest {
         if operation_count == 0 {
             return None;
         }
+        if self
+            .max_operations
+            .is_some_and(|limit| operation_count > limit)
+        {
+            return None;
+        }
         Some(BackgroundWorkPlan::background(
             WorkClass::Projection,
             operation_count,
