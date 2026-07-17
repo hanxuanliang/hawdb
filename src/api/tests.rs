@@ -3329,6 +3329,38 @@ fn background_schema_maintenance_defers_without_mutating_schema() {
 }
 
 #[test]
+fn planned_background_schema_maintenance_uses_pending_work_estimate() {
+    let path = unique_test_dir("planned_background_schema_maintenance_estimate");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        };
+
+        let error = db
+            .run_planned_background_schema_maintenance(&policy, &LocalQosState::default())
+            .unwrap_err();
+
+        assert!(error.to_string().contains("estimated operations 2"));
+        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        assert_eq!(after, before);
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Backfill
+        }));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn scheduled_background_schema_maintenance_tracks_mutation_budget() {
     let path = unique_test_dir("scheduled_schema_maintenance_budget");
     {
@@ -3349,6 +3381,46 @@ fn scheduled_background_schema_maintenance_tracks_mutation_budget() {
 
         let output = db
             .run_scheduled_background_schema_maintenance(&mut scheduler, 2)
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].get("to_state"),
+            Some(&Value::String("validating".to_string()))
+        );
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(
+            scheduler.state().running_background_operations_by_class
+                [crate::WorkClass::Mutation.as_index()],
+            0
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn planned_scheduled_background_schema_maintenance_tracks_estimated_mutation_budget() {
+    let path = unique_test_dir("planned_scheduled_schema_maintenance_budget");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+        class_limits[crate::WorkClass::Mutation.as_index()] = Some(2);
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(4),
+            max_total_background_operations: Some(4),
+            max_background_operations_by_class: class_limits,
+            ..LocalQosPolicy::default()
+        });
+
+        let output = db
+            .run_planned_scheduled_background_schema_maintenance(&mut scheduler)
             .unwrap();
 
         assert_eq!(output.rows.len(), 1);

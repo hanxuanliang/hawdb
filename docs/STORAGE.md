@@ -276,11 +276,13 @@ catalog. `Database::plan_schema_maintenance` is a read-only dry-run report for
 pending descriptor maintenance, including the source state, target state,
 action, and estimated operation count for budget admission. Explicit callers use
 the direct execution path without local background admission. Internal
-maintenance loops can instead use
-`Database::run_background_schema_maintenance` with `LocalQosPolicy` or
-`Database::run_scheduled_background_schema_maintenance` with
-`LocalQosScheduler`; both wrappers charge schema maintenance to the `Mutation`
-background lane before any descriptor advancement or maintenance WAL append.
+maintenance loops can use the planned wrappers,
+`Database::run_planned_background_schema_maintenance` and
+`Database::run_planned_scheduled_background_schema_maintenance`, to charge the
+current dry-run estimate to the `Mutation` background lane before any descriptor
+advancement or maintenance WAL append. The lower-level background wrappers still
+accept caller-supplied estimates when the caller already has a stronger external
+budget model.
 WAL replay applies descriptor GC before the database is exposed, while record
 pages and index artifacts remain separately rebuildable or reclaimable.
 

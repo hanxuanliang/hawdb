@@ -1040,6 +1040,18 @@ impl Database {
         }
     }
 
+    pub fn run_planned_background_schema_maintenance(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+    ) -> Result<QueryOutput> {
+        self.run_background_schema_maintenance(
+            policy,
+            state,
+            self.schema_maintenance_estimated_operations(),
+        )
+    }
+
     pub fn run_scheduled_background_schema_maintenance(
         &mut self,
         scheduler: &mut LocalQosScheduler,
@@ -1066,6 +1078,24 @@ impl Database {
         let result = self.run_schema_maintenance();
         scheduler.finish(permit);
         result
+    }
+
+    pub fn run_planned_scheduled_background_schema_maintenance(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+    ) -> Result<QueryOutput> {
+        self.run_scheduled_background_schema_maintenance(
+            scheduler,
+            self.schema_maintenance_estimated_operations(),
+        )
+    }
+
+    fn schema_maintenance_estimated_operations(&self) -> usize {
+        self.store
+            .plan_schema_maintenance(&self.catalog)
+            .into_iter()
+            .map(|item| item.estimated_operations)
+            .fold(0usize, usize::saturating_add)
     }
 
     pub fn projected_graph_statuses(&self) -> Vec<ProjectedGraphStatus> {
