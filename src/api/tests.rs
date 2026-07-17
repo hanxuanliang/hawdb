@@ -3284,6 +3284,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(limited.diagnostics.path_limit, Some(1));
     assert_eq!(limited.fanout_reasons.len(), 1);
     assert!(limited.fanout_reasons[0].contains("knowledge_neighbors limit 1"));
+    assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let disabled = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
@@ -3299,6 +3300,7 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
         disabled.diagnostics.fallback_reasons,
         vec!["path traversal disabled by limit 0".to_string()]
     );
+    assert_eq!(disabled.diagnostics.fanout_reasons, disabled.fanout_reasons);
 
     let missing = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
@@ -3353,6 +3355,10 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     assert_eq!(neighbors.fanout_reasons.len(), 1);
     assert!(neighbors.fanout_reasons[0]
         .contains("knowledge_neighbors dense_adjacency LINKS outgoing node 0 degree"));
+    assert_eq!(
+        neighbors.diagnostics.fanout_reasons,
+        neighbors.fanout_reasons
+    );
 
     let untyped_neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
@@ -3524,6 +3530,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(limited.diagnostics.path_limit, Some(1));
     assert_eq!(limited.fanout_reasons.len(), 1);
     assert!(limited.fanout_reasons[0].contains("knowledge_paths limit 1"));
+    assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let disabled = db.knowledge_paths(&KnowledgePathRequest {
         source_label: "Memory".to_string(),
@@ -3716,6 +3723,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert_eq!(node_limited.diagnostics.node_limit, Some(1));
     assert!(node_limited.relationships.is_empty());
     assert!(node_limited.fanout_reasons[0].contains("node_limit 1"));
+    assert_eq!(
+        node_limited.diagnostics.fanout_reasons,
+        node_limited.fanout_reasons
+    );
 
     let relationship_limited = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
         label: "Memory".to_string(),
@@ -3733,6 +3744,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert!(relationship_limited.diagnostics.fallback_reasons.is_empty());
     assert_eq!(relationship_limited.diagnostics.relationship_limit, Some(1));
     assert!(relationship_limited.fanout_reasons[0].contains("relationship_limit 1"));
+    assert_eq!(
+        relationship_limited.diagnostics.fanout_reasons,
+        relationship_limited.fanout_reasons
+    );
 
     let node_disabled = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
         label: "Memory".to_string(),
