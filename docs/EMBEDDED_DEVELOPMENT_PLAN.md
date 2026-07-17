@@ -814,8 +814,8 @@ Current implemented slice:
   tracing,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
-  equality/`IN`/range/null selectivity, residual relationship-property
-  `IN`/null selectivity, residual string predicate selectivity without
+  equality/inequality/`IN`/range/null selectivity, residual relationship-property
+  inequality/`IN`/null selectivity, residual string predicate selectivity without
   double-counting full-text index candidates, constant/`OR` predicate
   selectivity for optional parameter filters, grouped node-property aggregate cardinality,
   selected-plan cost stability, deterministic fingerprints, and budget-fallback

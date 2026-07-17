@@ -2098,6 +2098,16 @@ impl OptimizerCatalog {
             .max(1)
     }
 
+    fn estimate_rel_property_not_eq_rows(
+        &self,
+        rel_type: &str,
+        property: &str,
+        input_rows: u64,
+    ) -> u64 {
+        input_rows
+            .saturating_sub(self.estimate_rel_property_eq_rows(rel_type, property, input_rows))
+    }
+
     fn estimate_rel_property_in_rows(
         &self,
         rel_type: &str,
@@ -2212,6 +2222,10 @@ impl OptimizerCatalog {
         input_rows
             .div_ceil(self.distinct_count(label, property).max(1))
             .max(1)
+    }
+
+    fn estimate_property_not_eq_rows(&self, label: &str, property: &str, input_rows: u64) -> u64 {
+        input_rows.saturating_sub(self.estimate_property_eq_rows(label, property, input_rows))
     }
 
     fn estimate_property_in_rows(
@@ -4342,6 +4356,10 @@ fn estimate_node_property_filter_rows(
                     .map(|label| catalog.estimate_property_eq_rows(label, property, input_rows))
             }
         }
+        Predicate::PropertyNotEq {
+            variable, property, ..
+        } => physical_plan_node_label(input, variable)
+            .map(|label| catalog.estimate_property_not_eq_rows(label, property, input_rows)),
         Predicate::PropertyCompare {
             variable,
             property,
@@ -4686,6 +4704,18 @@ fn estimate_relationship_filter_rows(
             catalog,
             |catalog, rel_type, property, rows| {
                 catalog.estimate_rel_property_eq_rows(rel_type, property, rows)
+            },
+        ),
+        Predicate::PropertyNotEq {
+            variable, property, ..
+        } => estimate_relationship_property_filter_rows(
+            input,
+            variable,
+            property,
+            input_rows,
+            catalog,
+            |catalog, rel_type, property, rows| {
+                catalog.estimate_rel_property_not_eq_rows(rel_type, property, rows)
             },
         ),
         Predicate::PropertyCompare {
@@ -6758,6 +6788,44 @@ mod tests {
                 [],
                 [],
                 [(("Community".to_string(), "ai_summary".to_string()), 100)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 900,
+                cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn residual_node_not_eq_filter_uses_distinct_counts() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::PropertyNotEq {
+                variable: "m".to_string(),
+                property: "space_id".to_string(),
+                value: Value::String("default".to_string()),
+            },
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [(("Memory".to_string(), "space_id".to_string()), 10)],
                 [],
             ),
         );

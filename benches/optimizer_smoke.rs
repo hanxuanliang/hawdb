@@ -374,6 +374,19 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=900 cost=2004",
             ],
         },
+        OptimizerSmokeCase {
+            name: "normalized_space_exclusion_filter",
+            logical: normalized_space_exclusion_filter_plan(),
+            catalog: normalized_space_exclusion_filter_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 900,
+                cost: 2004,
+            },
+            fingerprint_contains: "PropertyNotEq",
+            decision_contains: &[
+                "selected physical plan cost: estimated_rows=900 cost=2004",
+            ],
+        },
     ]
 }
 
@@ -1587,6 +1600,32 @@ fn community_summary_presence_filter_catalog() -> OptimizerCatalog {
             [],
             [],
             [(("Community".to_string(), "ai_summary".to_string()), 100)],
+            [],
+        ),
+    )
+}
+
+fn normalized_space_exclusion_filter_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::PropertyNotEq {
+            variable: "m".to_string(),
+            property: "space_id".to_string(),
+            value: Value::String("default".to_string()),
+        },
+        input: Box::new(memory_scan()),
+    }
+}
+
+fn normalized_space_exclusion_filter_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 1_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "space_id".to_string()), 10)],
             [],
         ),
     )
