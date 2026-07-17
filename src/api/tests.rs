@@ -6991,6 +6991,85 @@ fn failed_external_content_artifact_jobs_can_be_retried() {
 }
 
 #[test]
+fn failed_external_content_artifact_jobs_can_be_retried_by_action() {
+    let mut db = Database::new();
+    let parse = db.schedule_external_content_artifact_job_with_payload(
+        "source-parse",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-parse.md".to_string()),
+        )]),
+    );
+    let crawl = db.schedule_external_content_artifact_job_with_payload(
+        "source-crawl",
+        "crawl",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("https://example.invalid/source-crawl".to_string()),
+        )]),
+    );
+
+    let parse_failure = db
+        .run_next_external_content_artifact_job_with(|_| {
+            Err(crate::error::SkeinError::Execution(
+                "parse runtime failed".to_string(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(parse_failure.job.id, parse.id);
+    let crawl_failure = db
+        .run_next_external_content_artifact_job_with(|_| {
+            Err(crate::error::SkeinError::Execution(
+                "crawl runtime failed".to_string(),
+            ))
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(crawl_failure.job.id, crawl.id);
+
+    assert!(db
+        .retry_failed_external_content_artifact_job_for_action("parse", crawl.id)
+        .is_none());
+    let retried = db
+        .retry_failed_external_content_artifact_job_for_action("parse", parse.id)
+        .unwrap();
+    assert_eq!(retried.status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(retried.action, "parse");
+    assert_eq!(retried.attempts, 1);
+    assert!(retried.last_error.is_none());
+    assert_eq!(
+        retried.payload.get("content_uri"),
+        Some(&Value::String(
+            "file:///nowledge/source-parse.md".to_string()
+        ))
+    );
+
+    let parse_pending = db.pending_external_content_artifact_jobs_for_action("parse", 8);
+    assert_eq!(parse_pending.len(), 1);
+    assert_eq!(parse_pending[0].id, parse.id);
+    assert!(db
+        .failed_external_content_artifact_jobs_for_action("parse", 8)
+        .is_empty());
+    let crawl_failed = db.failed_external_content_artifact_jobs_for_action("crawl", 8);
+    assert_eq!(crawl_failed.len(), 1);
+    assert_eq!(crawl_failed[0].id, crawl.id);
+
+    let mut graph_db = Database::new();
+    let projected_graph_job = graph_db.schedule_projected_graph_artifact_rebuild("MissingGraph");
+    let projected_graph_failure = graph_db.run_next_derived_artifact_job().unwrap().unwrap();
+    assert_eq!(projected_graph_failure.job.id, projected_graph_job.id);
+    assert_eq!(
+        projected_graph_failure.job.status,
+        DerivedArtifactJobStatus::Failed
+    );
+    assert!(graph_db
+        .retry_failed_external_content_artifact_job_for_action("rebuild", projected_graph_job.id,)
+        .is_none());
+}
+
+#[test]
 fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
     let mut db = Database::new();
     let job = db.schedule_external_content_artifact_job_with_payload(
