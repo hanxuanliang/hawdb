@@ -871,7 +871,7 @@ Current implemented slice:
   aggregate targets such as `COUNT(DISTINCT e2.community_id)` plus distinct
   variable targets such as `COUNT(DISTINCT m)`, while non-property or
   missing-statistics grouping keeps the conservative fallback estimate
-- optional relationship count-sum costing uses source label/property
+- optional degree and relationship count-sum costing use source label/property
   distinct counts plus relationship type/source counts for outgoing legs and
   relationship type/target counts for incoming legs in Nowledge cleanup,
   extracted-reference, and mention-count paths instead of a fixed leg-count

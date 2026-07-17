@@ -4180,13 +4180,29 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
                 cost: input_cost.cost.saturating_add(input_cost.estimated_rows),
             }
         }
-        PhysicalPlan::OptionalDegreeExec { input, .. } => {
+        PhysicalPlan::OptionalDegreeExec {
+            rel_type,
+            rel_properties,
+            direction,
+            target_label,
+            target_properties,
+            input,
+            ..
+        } => {
             let input_cost = estimate_physical_plan_cost(input, catalog);
+            let degree_work = estimate_optional_degree_work(
+                rel_type,
+                rel_properties,
+                *direction,
+                target_label,
+                target_properties,
+                catalog,
+            );
             PlanCost {
                 estimated_rows: input_cost.estimated_rows,
                 cost: input_cost
                     .cost
-                    .saturating_add(input_cost.estimated_rows.saturating_mul(2)),
+                    .saturating_add(input_cost.estimated_rows.saturating_mul(degree_work)),
             }
         }
         PhysicalPlan::OptionalRelationshipCountSumExec {
@@ -4607,6 +4623,60 @@ fn estimate_relationship_count_leg_rows(
         rows = rows.saturating_sub(rows.div_ceil(distinct)).max(1);
     }
     rows
+}
+
+fn estimate_optional_degree_work(
+    rel_type: &str,
+    rel_properties: &BTreeMap<String, Value>,
+    direction: RelationshipDirection,
+    target_label: &str,
+    target_properties: &BTreeMap<String, Value>,
+    catalog: &OptimizerCatalog,
+) -> u64 {
+    let rel_count = catalog
+        .rel_type_counts
+        .get(rel_type)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let source_count = catalog
+        .rel_type_source_counts
+        .get(rel_type)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let target_count = catalog
+        .rel_type_target_counts
+        .get(rel_type)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let fanout = match direction {
+        RelationshipDirection::Outgoing => rel_count.div_ceil(source_count).max(1),
+        RelationshipDirection::Incoming => rel_count.div_ceil(target_count).max(1),
+        RelationshipDirection::Undirected => rel_count
+            .div_ceil(source_count)
+            .saturating_add(rel_count.div_ceil(target_count))
+            .max(1),
+    };
+    let rel_property_distinct_product = rel_properties
+        .keys()
+        .map(|property| {
+            catalog
+                .rel_property_distinct_count(rel_type, property)
+                .max(1)
+        })
+        .fold(1_u64, |acc, value| acc.saturating_mul(value))
+        .max(1);
+    let target_property_distinct_product = target_properties
+        .keys()
+        .map(|property| catalog.distinct_count(target_label, property).max(1))
+        .fold(1_u64, |acc, value| acc.saturating_mul(value))
+        .max(1);
+    fanout
+        .div_ceil(rel_property_distinct_product.saturating_mul(target_property_distinct_product))
+        .max(1)
+        .saturating_add(1)
 }
 
 fn physical_plan_access_path_covers_property(
@@ -7489,6 +7559,50 @@ mod tests {
                 "estimate OptionalRelationshipCountSum for Entity: seed_rows=1 leg_rows=[MENTIONS:in:10] estimated_rows=1 cost=16",
             )
         }));
+    }
+
+    #[test]
+    fn incoming_optional_degree_cost_uses_target_statistics() {
+        let logical = LogicalPlan::OptionalDegree {
+            source_variable: "e".to_string(),
+            rel_type: "MENTIONS".to_string(),
+            rel_properties: BTreeMap::new(),
+            direction: RelationshipDirection::Incoming,
+            target_label: "Memory".to_string(),
+            target_properties: BTreeMap::new(),
+            alias: "mention_count".to_string(),
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "e".to_string(),
+                label: "Entity".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Memory".to_string(), 10_000),
+                    ("Entity".to_string(), 1_000),
+                ],
+                [("MENTIONS".to_string(), 5_000)],
+                [("MENTIONS".to_string(), 5_000)],
+                [],
+                [],
+                [],
+                [],
+            )
+            .with_relationship_type_target_counts([("MENTIONS".to_string(), 500)]),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1_000,
+                cost: 12_004,
+            }
+        );
     }
 
     #[test]
