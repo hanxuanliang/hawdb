@@ -645,11 +645,15 @@ embedding that runtime in Skein. Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` or
 `Database::run_next_scheduled_background_external_content_artifact_job_with` to
 charge that work to the `Import` background lane while leaving explicit runtime
-calls ungated. If the runtime first polls a bounded pending list and chooses a
-specific job, `Database::run_background_external_content_artifact_job_with` and
-`Database::run_scheduled_background_external_content_artifact_job_with` apply the
-same Import-lane admission to that concrete job. Action-specific runtimes can
-also poll failed jobs for their own action through
+calls ungated. Action-specific background loops can use
+`Database::run_next_background_external_content_artifact_job_for_action_with` or
+`Database::run_next_scheduled_background_external_content_artifact_job_for_action_with`
+to charge only their own pending work to the same `Import` lane. If the runtime
+first polls a bounded pending list and chooses a specific job,
+`Database::run_background_external_content_artifact_job_with` and
+`Database::run_scheduled_background_external_content_artifact_job_with` apply
+the same Import-lane admission to that concrete job. Action-specific runtimes
+can also poll failed jobs for their own action through
 `Database::failed_external_content_artifact_jobs_for_action` and requeue only
 their own failed work through
 `Database::retry_failed_external_content_artifact_job_for_action`. They can also

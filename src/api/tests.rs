@@ -7220,6 +7220,72 @@ fn background_external_content_artifact_job_uses_qos_admission() {
 }
 
 #[test]
+fn background_external_content_artifact_job_can_run_next_job_for_action() {
+    let mut db = Database::new();
+    let parse = db.schedule_external_content_artifact_job("source-parse", "parse");
+    let crawl = db.schedule_external_content_artifact_job("source-crawl", "crawl");
+
+    let report = db
+        .run_next_background_external_content_artifact_job_for_action_with(
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            "crawl",
+            |job| {
+                assert_eq!(job.id, crawl.id);
+                assert_eq!(job.action, "crawl");
+                assert_eq!(job.status, DerivedArtifactJobStatus::Running);
+                assert_eq!(job.attempts, 1);
+                Ok(QueryOutput {
+                    rows: vec![BTreeMap::from([(
+                        "job_id".to_string(),
+                        Value::Int(job.id as i64),
+                    )])],
+                })
+            },
+            2,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.job.id, crawl.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+    let jobs = db.derived_artifact_jobs();
+    assert_eq!(jobs[0].id, parse.id);
+    assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[0].attempts, 0);
+    assert_eq!(jobs[1].id, crawl.id);
+    assert_eq!(jobs[1].status, DerivedArtifactJobStatus::Succeeded);
+}
+
+#[test]
+fn background_external_content_artifact_job_for_action_uses_qos_admission() {
+    let mut db = Database::new();
+    db.schedule_external_content_artifact_job("source-parse", "parse");
+    db.schedule_external_content_artifact_job("source-crawl", "crawl");
+    let policy = LocalQosPolicy {
+        max_background_operations: Some(0),
+        ..LocalQosPolicy::default()
+    };
+
+    let error = db
+        .run_next_background_external_content_artifact_job_for_action_with(
+            &policy,
+            &LocalQosState::default(),
+            "crawl",
+            |_| unreachable!(),
+            1,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("deferred"));
+    let jobs = db.derived_artifact_jobs();
+    assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[0].attempts, 0);
+    assert_eq!(jobs[1].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[1].attempts, 0);
+}
+
+#[test]
 fn scheduled_background_external_content_artifact_job_tracks_import_budget() {
     let mut db = Database::new();
     db.schedule_external_content_artifact_job("source-1", "parse");
