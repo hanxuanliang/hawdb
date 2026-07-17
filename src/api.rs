@@ -423,6 +423,7 @@ pub struct KnowledgeRetrieverReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeRetrieverCandidate {
     pub id: String,
+    pub canonical_node_id: Option<u64>,
     pub rank: usize,
     pub score: f64,
 }
@@ -1049,6 +1050,7 @@ impl Database {
         let evidence = self.knowledge_evidence_for_search(&search, &graph_context_paths);
         let retrievers = knowledge_retriever_reports(
             &search,
+            &evidence,
             &graph_seeds,
             request.graph_seed_limit,
             graph_seed_candidate_count,
@@ -1601,10 +1603,15 @@ impl Database {
 
 fn knowledge_retriever_reports(
     search: &SearchResultSet,
+    evidence: &[KnowledgeEvidence],
     graph_seeds: &[KnowledgeGraphSeed],
     graph_seed_limit: usize,
     graph_seed_candidate_count: usize,
 ) -> Vec<KnowledgeRetrieverReport> {
+    let canonical_node_ids_by_hit = evidence
+        .iter()
+        .map(|evidence| (evidence.hit_id.as_str(), evidence.canonical_node_id))
+        .collect::<BTreeMap<_, _>>();
     let mut reports = search
         .retrievers
         .iter()
@@ -1626,6 +1633,10 @@ fn knowledge_retriever_reports(
                 .iter()
                 .map(|candidate| KnowledgeRetrieverCandidate {
                     id: candidate.id.clone(),
+                    canonical_node_id: canonical_node_ids_by_hit
+                        .get(candidate.id.as_str())
+                        .copied()
+                        .flatten(),
                     rank: candidate.rank,
                     score: candidate.score,
                 })
@@ -1648,6 +1659,7 @@ fn knowledge_retriever_reports(
             .enumerate()
             .map(|(index, seed)| KnowledgeRetrieverCandidate {
                 id: graph_seed_candidate_id(seed),
+                canonical_node_id: Some(seed.entity.node_id),
                 rank: index + 1,
                 score: seed.score,
             })
@@ -4359,6 +4371,10 @@ mod tests {
         assert_eq!(graph_seed_report.top_candidates.len(), 2);
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
         assert_eq!(
+            graph_seed_report.top_candidates[0].canonical_node_id,
+            Some(0)
+        );
+        assert_eq!(
             graph_seed_report.top_candidates[0].id.as_str(),
             "Memory:mem_1"
         );
@@ -4772,6 +4788,7 @@ mod tests {
             .find(|report| report.name == "text")
             .expect("text knowledge retriever report");
         assert_eq!(text_retriever.limit, Some(10));
+        assert_eq!(text_retriever.top_candidates[0].canonical_node_id, Some(1));
         assert!(text_retriever.truncated);
         assert!(text_retriever
             .truncation_reasons
@@ -4895,6 +4912,7 @@ mod tests {
         );
         assert_eq!(output.candidates[0].source_rank, 1);
         assert_eq!(output.candidates[0].id, "Entity:graph");
+        assert_eq!(output.candidates[0].canonical_node_id, Some(1));
         assert_eq!(
             output.candidates[0].entity.as_ref().unwrap(),
             &output.graph_seeds[0].entity
@@ -4908,6 +4926,10 @@ mod tests {
         assert_eq!(graph_seed_report.candidate_count, 3);
         assert_eq!(graph_seed_report.top_candidates.len(), 1);
         assert_eq!(graph_seed_report.top_candidates[0].id, "Entity:graph");
+        assert_eq!(
+            graph_seed_report.top_candidates[0].canonical_node_id,
+            Some(1)
+        );
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
         assert_eq!(graph_seed_report.limit, Some(1));
         assert!(graph_seed_report.truncated);
