@@ -2305,7 +2305,7 @@ fn knowledge_subgraph_for(
                 return KnowledgeSubgraphOutput {
                     graph_commit_epoch: store.commit_epoch(),
                     seed_node_id: Some(seed.id.0),
-                    nodes: vec![knowledge_entity_from_node(catalog, seed)],
+                    nodes: Vec::new(),
                     relationships: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
@@ -2313,7 +2313,7 @@ fn knowledge_subgraph_for(
                             seed_found: true,
                             target_found: None,
                             path_count: 0,
-                            node_count: 1,
+                            node_count: 0,
                             relationship_count: 0,
                             fanout_reason_count: 0,
                             max_hops: request.max_hops,
@@ -6219,6 +6219,23 @@ mod tests {
         assert_eq!(relationship_limited.diagnostics.fanout_reason_count, 1);
         assert_eq!(relationship_limited.diagnostics.relationship_limit, Some(1));
         assert!(relationship_limited.fanout_reasons[0].contains("relationship_limit 1"));
+
+        let unknown_type = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("DOES_NOT_EXIST".to_string()),
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 1,
+            node_limit: 8,
+            relationship_limit: 8,
+        });
+        assert_eq!(unknown_type.seed_node_id, Some(0));
+        assert!(unknown_type.diagnostics.seed_found);
+        assert_eq!(unknown_type.diagnostics.node_count, 0);
+        assert_eq!(unknown_type.diagnostics.relationship_count, 0);
+        assert!(unknown_type.nodes.is_empty());
+        assert!(unknown_type.relationships.is_empty());
+        assert!(unknown_type.fanout_reasons.is_empty());
 
         let missing = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
