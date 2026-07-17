@@ -810,6 +810,7 @@ Current implemented slice:
   source-to-memory-to-label cross-pattern aggregate workload, a larger
   source-to-memory-to-entity-to-label grouped workload,
   community-to-synthesized-source coverage aggregate workload,
+  thread-cleanup optional relationship count-sum workload,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
   equality/`IN`/range selectivity, grouped node-property aggregate cardinality,

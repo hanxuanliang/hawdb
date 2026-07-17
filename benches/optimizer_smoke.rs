@@ -4,7 +4,7 @@ use skein::optimizer::{
 };
 use skein::planner::{
     AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, LogicalPlan, Predicate,
-    Projection, ProjectionExpression, SortDirection, SortItem, SortKey,
+    Projection, ProjectionExpression, RelationshipCountLeg, SortDirection, SortItem, SortKey,
 };
 use skein::RelationshipDirection;
 use skein::Value;
@@ -247,6 +247,17 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
                 "selected physical plan cost: estimated_rows=1 cost=21",
             ],
+        },
+        OptimizerSmokeCase {
+            name: "thread_cleanup_optional_count",
+            logical: thread_cleanup_optional_count_plan(),
+            catalog: thread_cleanup_optional_count_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 11,
+            },
+            fingerprint_contains: "OptionalRelationshipCountSumExec",
+            decision_contains: &["selected physical plan cost: estimated_rows=1 cost=11"],
         },
         OptimizerSmokeCase {
             name: "endpoint_existence_cartesian_product",
@@ -1120,6 +1131,39 @@ fn community_synthesized_source_coverage_catalog() -> OptimizerCatalog {
                 40_000,
             )],
             [(("Community".to_string(), "id".to_string()), 5_000)],
+            [],
+        ),
+    )
+}
+
+fn thread_cleanup_optional_count_plan() -> LogicalPlan {
+    LogicalPlan::OptionalRelationshipCountSum {
+        variable: "t".to_string(),
+        label: "Thread".to_string(),
+        properties: BTreeMap::from([("id".to_string(), Value::String("thread-42".to_string()))]),
+        legs: vec![RelationshipCountLeg {
+            rel_type: "CONTAINS".to_string(),
+            direction: RelationshipDirection::Outgoing,
+            distinct: false,
+            filter: None,
+        }],
+        output: "message_count".to_string(),
+    }
+}
+
+fn thread_cleanup_optional_count_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Thread".to_string(), 1_000),
+                ("Message".to_string(), 50_000),
+            ],
+            [("CONTAINS".to_string(), 5_000)],
+            [("CONTAINS".to_string(), 1_000)],
+            [],
+            [],
+            [(("Thread".to_string(), "id".to_string()), 1_000)],
             [],
         ),
     )
