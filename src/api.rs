@@ -1149,6 +1149,14 @@ impl Database {
         self.enqueue_derived_artifact_job("projected_graph", name.into(), "rebuild")
     }
 
+    pub fn schedule_external_content_artifact_job(
+        &mut self,
+        name: impl Into<String>,
+        action: impl Into<String>,
+    ) -> DerivedArtifactJob {
+        self.enqueue_derived_artifact_job("content_artifact", name.into(), action.into())
+    }
+
     pub fn derived_artifact_jobs(&self) -> Vec<DerivedArtifactJob> {
         self.derived_artifact_jobs.clone()
     }
@@ -1281,6 +1289,12 @@ impl Database {
         name: &str,
         action: &str,
     ) -> Result<QueryOutput> {
+        if is_external_content_artifact_job(artifact_type) {
+            return Err(SkeinError::Semantic(format!(
+                "derived artifact job {artifact_type}.{name} action {action} is outside the graph kernel; run it in the content artifact job runtime"
+            )));
+        }
+
         if artifact_type != "projected_graph" || action != "rebuild" {
             return Err(SkeinError::Semantic(format!(
                 "unsupported derived artifact job {artifact_type}.{name} action {action}"
@@ -3746,6 +3760,13 @@ fn derived_artifact_job_failure_row(job: &DerivedArtifactJob, error: &str) -> Ro
         ("attempts".to_string(), Value::Int(job.attempts as i64)),
         ("error".to_string(), Value::String(error.to_string())),
     ])
+}
+
+fn is_external_content_artifact_job(artifact_type: &str) -> bool {
+    matches!(
+        artifact_type,
+        "content_artifact" | "artifact_parse" | "content_parse" | "blob_parse" | "crawler"
+    )
 }
 
 impl<'a> NowledgeGraphAdapter<'a> {
@@ -8532,6 +8553,36 @@ mod tests {
         assert_eq!(
             db.derived_artifact_jobs()[0].status,
             DerivedArtifactJobStatus::Failed
+        );
+    }
+
+    #[test]
+    fn external_content_artifact_jobs_are_explicitly_outside_graph_kernel() {
+        let mut db = Database::new();
+        let job = db.schedule_external_content_artifact_job("source-1", "parse");
+        assert_eq!(job.artifact_type, "content_artifact");
+        assert_eq!(job.name, "source-1");
+        assert_eq!(job.action, "parse");
+        assert_eq!(job.status, DerivedArtifactJobStatus::Pending);
+
+        let report = db.run_next_derived_artifact_job().unwrap().unwrap();
+
+        assert_eq!(report.job.status, DerivedArtifactJobStatus::Failed);
+        assert_eq!(report.job.attempts, 1);
+        let error = report.job.last_error.as_deref().unwrap();
+        assert!(error.contains("outside the graph kernel"));
+        assert!(error.contains("content artifact job runtime"));
+        assert_eq!(
+            report.output.rows[0].get("artifact_type"),
+            Some(&Value::String("content_artifact".to_string()))
+        );
+        assert_eq!(
+            report.output.rows[0].get("status"),
+            Some(&Value::String("failed".to_string()))
+        );
+        assert_eq!(
+            report.output.rows[0].get("error"),
+            Some(&Value::String(error.to_string()))
         );
     }
 

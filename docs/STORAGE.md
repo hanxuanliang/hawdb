@@ -293,6 +293,11 @@ and atomically replace `projected_graphs.skein`.
 for these projected graph artifacts. Jobs expose pending/running/succeeded/failed
 state, attempts, and last error without adding threads or hiding rebuild
 failures.
+`Database::schedule_external_content_artifact_job` records content/blob parser
+work at the same orchestration boundary, but running that job explicitly fails
+with a graph-kernel-external error. Content parsing, crawling, chunking, and
+large-value runtime work must execute in the caller-owned content artifact job
+runtime and publish rebuildable projections back to Skein.
 
 Search projection rebuild has the same orchestration shape at the search layer:
 `SearchIndex::rebuild_derived_artifacts` reports the search projection artifact
