@@ -1191,13 +1191,29 @@ fn normalize_english_suffixes(token: &str) -> Vec<String> {
 
 fn semantic_aliases(token: &str) -> Vec<String> {
     match token {
+        "ahead_log" | "write_ahead" | "write_ahead_log" => vec!["wal".to_string()],
+        "compressed_sparse_column" | "sparse_column" => vec!["csc".to_string()],
+        "compressed_sparse_row" | "sparse_row" => vec!["csr".to_string()],
+        "concurrency_control" | "multi_version" | "multi_version_concurrency_control" => {
+            vec!["mvcc".to_string()]
+        }
+        "csc" => vec!["compressed_sparse_column".to_string()],
+        "csr" => vec!["compressed_sparse_row".to_string()],
         "kg" => vec!["knowledge_graph".to_string()],
         "knowledge_graph" => vec!["kg".to_string()],
+        "log_structured" | "log_structured_merge_tree" | "merge_tree" | "structured_merge" => {
+            vec!["lsm".to_string()]
+        }
+        "lsm" => vec!["log_structured_merge_tree".to_string()],
+        "mvcc" => vec!["multi_version_concurrency_control".to_string()],
+        "open_cypher" => vec!["cypher".to_string()],
+        "opencypher" => vec!["cypher".to_string(), "open_cypher".to_string()],
         "rag" => vec![
             "retrieval_augmented_generation".to_string(),
             "graph_rag".to_string(),
             "graph_retrieval".to_string(),
         ],
+        "wal" => vec!["write_ahead_log".to_string()],
         "graph_rag" => vec![
             "rag".to_string(),
             "retrieval_augmented_generation".to_string(),
@@ -1940,6 +1956,43 @@ mod tests {
         assert_eq!(expanded_hits[0].id, "graph-rag");
         assert_eq!(kg_hits[0].id, "graph-rag");
         assert_eq!(knowledge_graph_hits[0].id, "graph-rag");
+    }
+
+    #[test]
+    fn tokenizer_expands_database_system_aliases() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "runtime".to_string(),
+                title: "LSMTree WALCheckpoint MVCCSnapshot CypherPlanner".to_string(),
+                content: "CSR and CSC projections back graph analytics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let wal_hits = index.search_with_report("write ahead log", None, SearchMode::Text, 10);
+        let mvcc_hits = index.search(
+            "multi version concurrency control",
+            None,
+            SearchMode::Text,
+            10,
+        );
+        let lsm_hits = index.search("log structured merge tree", None, SearchMode::Text, 10);
+        let csr_hits = index.search("compressed sparse row", None, SearchMode::Text, 10);
+        let csc_hits = index.search("compressed sparse column", None, SearchMode::Text, 10);
+        let opencypher_hits = index.search("opencypher", None, SearchMode::Text, 10);
+
+        assert_eq!(wal_hits.hits[0].id, "runtime");
+        assert!(wal_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "wal"));
+        assert_eq!(mvcc_hits[0].id, "runtime");
+        assert_eq!(lsm_hits[0].id, "runtime");
+        assert_eq!(csr_hits[0].id, "runtime");
+        assert_eq!(csc_hits[0].id, "runtime");
+        assert_eq!(opencypher_hits[0].id, "runtime");
     }
 
     #[test]
