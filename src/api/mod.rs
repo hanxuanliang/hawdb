@@ -614,6 +614,7 @@ pub struct KnowledgeTraversalDiagnostics {
     pub node_count: usize,
     pub relationship_count: usize,
     pub fanout_reason_count: usize,
+    pub fallback_reasons: Vec<String>,
     pub max_hops: usize,
     pub path_limit: Option<usize>,
     pub node_limit: Option<usize>,
@@ -2603,11 +2604,29 @@ fn knowledge_traversal_diagnostics(
         node_count: input.node_count,
         relationship_count: input.relationship_count,
         fanout_reason_count: input.fanout_reason_count,
+        fallback_reasons: knowledge_traversal_fallback_reasons(&input),
         max_hops: input.max_hops,
         path_limit: input.path_limit,
         node_limit: input.node_limit,
         relationship_limit: input.relationship_limit,
     }
+}
+
+fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInput) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if input.max_hops == 0 {
+        reasons.push("traversal disabled by max_hops 0".to_string());
+    }
+    if input.path_limit == Some(0) {
+        reasons.push("path traversal disabled by limit 0".to_string());
+    }
+    if input.node_limit == Some(0) {
+        reasons.push("subgraph traversal disabled by node_limit 0".to_string());
+    }
+    if input.relationship_limit == Some(0) {
+        reasons.push("subgraph traversal disabled by relationship_limit 0".to_string());
+    }
+    reasons
 }
 
 fn knowledge_context_path_node_count(paths: &[KnowledgeGraphContextPath]) -> usize {
