@@ -8,6 +8,7 @@ use skein::planner::{
 };
 use skein::RelationshipDirection;
 use skein::Value;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 const ITERATIONS: usize = 2_000;
@@ -167,6 +168,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "choose IndexNodeSeek for Memory.id",
                 "estimate AdjacencyExpand",
                 "selected physical plan cost: estimated_rows=1 cost=15",
+            ],
+        },
+        OptimizerSmokeCase {
+            name: "relationship_property_expand",
+            logical: relationship_property_expand_plan(),
+            catalog: relationship_property_expand_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 4,
+                cost: 12,
+            },
+            fingerprint_contains: "AdjacencyExpandExec",
+            decision_contains: &[
+                "choose IndexNodeSeek for Memory.id",
+                "estimate AdjacencyExpand",
+                "selected physical plan cost: estimated_rows=4 cost=12",
             ],
         },
     ]
@@ -432,6 +448,52 @@ fn memory_seed_entity_mentions_catalog() -> OptimizerCatalog {
             [],
         ),
     )
+}
+
+fn relationship_property_expand_plan() -> LogicalPlan {
+    LogicalPlan::Project {
+        items: vec![
+            Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "e".to_string(),
+                    property: "name".to_string(),
+                },
+                name: "entity".to_string(),
+            },
+            Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "r".to_string(),
+                    property: "weight".to_string(),
+                },
+                name: "weight".to_string(),
+            },
+        ],
+        input: Box::new(LogicalPlan::Expand {
+            source_variable: "m".to_string(),
+            source_label: "Memory".to_string(),
+            rel_variable: Some("r".to_string()),
+            rel_type: "MENTIONS".to_string(),
+            rel_properties: BTreeMap::from([("weight".to_string(), Value::Int(4))]),
+            direction: RelationshipDirection::Outgoing,
+            target_variable: "e".to_string(),
+            target_label: "Entity".to_string(),
+            min_hops: 1,
+            max_hops: 1,
+            optional: false,
+            input: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "m".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("memory-42".to_string()),
+                },
+                input: Box::new(memory_scan()),
+            }),
+        }),
+    }
+}
+
+fn relationship_property_expand_catalog() -> OptimizerCatalog {
+    memory_seed_entity_mentions_catalog()
 }
 
 fn project_memory_title(input: LogicalPlan) -> LogicalPlan {

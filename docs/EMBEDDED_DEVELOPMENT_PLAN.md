@@ -782,8 +782,9 @@ Current implemented slice:
 - `cargo bench --bench optimizer_smoke` covers optimizer-only range-seek plus
   bounded expand stats, composite seek, text seek, low-selectivity scan
   fallback, production-shaped selective seed + bounded expand + aggregate +
-  sort/limit, selected-plan cost stability, deterministic fingerprints, and
-  budget-fallback paths without depending on a storage fixture
+  sort/limit, one-hop relationship-property expand reads, selected-plan cost
+  stability, deterministic fingerprints, and budget-fallback paths without
+  depending on a storage fixture
 
 Remaining Phase 4 work:
 
