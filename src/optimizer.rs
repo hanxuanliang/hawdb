@@ -2120,6 +2120,21 @@ impl OptimizerCatalog {
             .max(1)
     }
 
+    fn estimate_rel_property_string_match_rows(
+        &self,
+        rel_type: &str,
+        property: &str,
+        input_rows: u64,
+        max_divisor: u64,
+    ) -> u64 {
+        let divisor = self
+            .rel_property_distinct_count(rel_type, property)
+            .max(1)
+            .min(max_divisor)
+            .max(1);
+        input_rows.div_ceil(divisor).max(1)
+    }
+
     fn estimate_rel_property_range_rows(
         &self,
         rel_type: &str,
@@ -2198,6 +2213,21 @@ impl OptimizerCatalog {
             .saturating_mul(value_count)
             .div_ceil(distinct_count)
             .max(1)
+    }
+
+    fn estimate_property_string_match_rows(
+        &self,
+        label: &str,
+        property: &str,
+        input_rows: u64,
+        max_divisor: u64,
+    ) -> u64 {
+        let divisor = self
+            .distinct_count(label, property)
+            .max(1)
+            .min(max_divisor)
+            .max(1);
+        input_rows.div_ceil(divisor).max(1)
     }
 
     fn estimate_property_range_rows(
@@ -4284,6 +4314,27 @@ fn estimate_node_property_filter_rows(
             values,
         } => physical_plan_node_label(input, variable)
             .map(|label| catalog.estimate_property_in_rows(label, property, values, input_rows)),
+        Predicate::PropertyContains {
+            variable, property, ..
+        } => {
+            if physical_plan_access_path_covers_property(input, variable, property) {
+                physical_plan_node_label(input, variable).map(|_| input_rows)
+            } else {
+                physical_plan_node_label(input, variable).map(|label| {
+                    catalog.estimate_property_string_match_rows(label, property, input_rows, 4)
+                })
+            }
+        }
+        Predicate::PropertyStartsWith {
+            variable, property, ..
+        } => physical_plan_node_label(input, variable).map(|label| {
+            catalog.estimate_property_string_match_rows(label, property, input_rows, 8)
+        }),
+        Predicate::PropertyEndsWith {
+            variable, property, ..
+        } => physical_plan_node_label(input, variable).map(|label| {
+            catalog.estimate_property_string_match_rows(label, property, input_rows, 6)
+        }),
         _ => None,
     }
 }
@@ -4592,6 +4643,42 @@ fn estimate_relationship_filter_rows(
             catalog,
             |catalog, rel_type, property, rows| {
                 catalog.estimate_rel_property_in_rows(rel_type, property, values, rows)
+            },
+        ),
+        Predicate::PropertyContains {
+            variable, property, ..
+        } => estimate_relationship_property_filter_rows(
+            input,
+            variable,
+            property,
+            input_rows,
+            catalog,
+            |catalog, rel_type, property, rows| {
+                catalog.estimate_rel_property_string_match_rows(rel_type, property, rows, 4)
+            },
+        ),
+        Predicate::PropertyStartsWith {
+            variable, property, ..
+        } => estimate_relationship_property_filter_rows(
+            input,
+            variable,
+            property,
+            input_rows,
+            catalog,
+            |catalog, rel_type, property, rows| {
+                catalog.estimate_rel_property_string_match_rows(rel_type, property, rows, 8)
+            },
+        ),
+        Predicate::PropertyEndsWith {
+            variable, property, ..
+        } => estimate_relationship_property_filter_rows(
+            input,
+            variable,
+            property,
+            input_rows,
+            catalog,
+            |catalog, rel_type, property, rows| {
+                catalog.estimate_rel_property_string_match_rows(rel_type, property, rows, 6)
             },
         ),
         _ => None,
@@ -6470,6 +6557,44 @@ mod tests {
             trace.selected_plan_cost,
             PlanCost {
                 estimated_rows: 0,
+                cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn residual_node_string_predicate_uses_distinct_count_cap() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::PropertyContains {
+                variable: "m".to_string(),
+                property: "body".to_string(),
+                value: "graph".to_string(),
+            },
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [(("Memory".to_string(), "body".to_string()), 100)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 250,
                 cost: 2_004,
             }
         );

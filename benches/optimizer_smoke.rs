@@ -132,13 +132,26 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             logical: text_seek_plan(),
             catalog: text_seek_catalog(),
             expected_cost: PlanCost {
-                estimated_rows: 125,
-                cost: 878,
+                estimated_rows: 250,
+                cost: 1003,
             },
             fingerprint_contains: "IndexNodeTextSeek",
             decision_contains: &[
                 "choose IndexNodeTextSeek",
-                "selected physical plan cost: estimated_rows=125 cost=878",
+                "selected physical plan cost: estimated_rows=250 cost=1003",
+            ],
+        },
+        OptimizerSmokeCase {
+            name: "residual_node_string_contains",
+            logical: residual_node_string_contains_plan(),
+            catalog: residual_node_string_contains_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 250,
+                cost: 2254,
+            },
+            fingerprint_contains: "PropertyContains",
+            decision_contains: &[
+                "selected physical plan cost: estimated_rows=250 cost=2254",
             ],
         },
         OptimizerSmokeCase {
@@ -480,6 +493,32 @@ fn text_seek_catalog() -> OptimizerCatalog {
     OptimizerCatalog::new(
         OptimizerCatalogIndexes::new([], [], [], [("Memory".to_string(), "body".to_string())]),
         OptimizerCatalogStatistics::new([("Memory".to_string(), 1_000)], [], [], [], [], [], []),
+    )
+}
+
+fn residual_node_string_contains_plan() -> LogicalPlan {
+    project_memory_title(LogicalPlan::Filter {
+        predicate: Predicate::PropertyContains {
+            variable: "m".to_string(),
+            property: "body".to_string(),
+            value: "graph".to_string(),
+        },
+        input: Box::new(memory_scan()),
+    })
+}
+
+fn residual_node_string_contains_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 1_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "body".to_string()), 100)],
+            [],
+        ),
     )
 }
 
