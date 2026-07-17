@@ -1802,10 +1802,12 @@ fn knowledge_retrieval_diagnostics(
             empty_reasons
                 .push("search retrievers returned no hits inside filtered scope".to_string());
         }
-        if request.graph_seed_limit == 0 {
-            empty_reasons.push("graph seed retriever disabled by limit 0".to_string());
-        } else if input.graph_seed_candidate_count == 0 {
-            empty_reasons.push("graph seed retriever returned no candidates".to_string());
+        if input.candidate_total_count == 0 {
+            if request.graph_seed_limit == 0 {
+                empty_reasons.push("graph seed retriever disabled by limit 0".to_string());
+            } else if input.graph_seed_candidate_count == 0 {
+                empty_reasons.push("graph seed retriever returned no candidates".to_string());
+            }
         }
         empty_reasons.extend(candidate_truncation_reasons.iter().cloned());
         empty_reasons.push("retrieval produced no candidates".to_string());
@@ -5706,6 +5708,40 @@ mod tests {
             .empty_reasons
             .iter()
             .any(|reason| reason == "retrieval produced no candidates"));
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+        let search_empty_by_limit = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "Graph candidate".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 5,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: Some(0),
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 0,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+        assert!(search_empty_by_limit.search.total_hits > 0);
+        assert_eq!(search_empty_by_limit.diagnostics.candidate_count, 0);
+        assert!(search_empty_by_limit.diagnostics.candidate_total_count > 0);
+        assert!(search_empty_by_limit
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason.starts_with("knowledge_candidate_limit 0")));
+        assert!(!search_empty_by_limit
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "graph seed retriever disabled by limit 0"));
     }
 
     #[test]
