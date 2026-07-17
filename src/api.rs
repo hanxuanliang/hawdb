@@ -402,6 +402,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub fanout_reason_count: usize,
     pub candidate_count: usize,
     pub candidate_limit: Option<usize>,
+    pub warnings: Vec<String>,
     pub empty_reasons: Vec<String>,
 }
 
@@ -1052,18 +1053,22 @@ impl Database {
         let mut fanout_reasons = fanout_reasons;
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
+        let projection_freshness = search_index.projection_freshness();
         let diagnostics = knowledge_retrieval_diagnostics(
             &search,
-            graph_seed_candidate_count,
-            graph_seeds.len(),
-            graph_context_paths.len(),
-            fanout_reasons.len(),
-            candidates.len(),
             request,
+            &projection_freshness,
+            KnowledgeRetrievalDiagnosticsInput {
+                graph_seed_candidate_count,
+                graph_seed_returned_count: graph_seeds.len(),
+                graph_context_path_count: graph_context_paths.len(),
+                fanout_reason_count: fanout_reasons.len(),
+                candidate_count: candidates.len(),
+            },
         );
         KnowledgeRetrievalOutput {
             graph_commit_epoch: self.store.commit_epoch(),
-            projection_freshness: search_index.projection_freshness(),
+            projection_freshness,
             search,
             retrievers,
             diagnostics,
@@ -1617,14 +1622,20 @@ fn knowledge_retriever_reports(
     reports
 }
 
-fn knowledge_retrieval_diagnostics(
-    search: &SearchResultSet,
+#[derive(Debug, Clone, Copy)]
+struct KnowledgeRetrievalDiagnosticsInput {
     graph_seed_candidate_count: usize,
     graph_seed_returned_count: usize,
     graph_context_path_count: usize,
     fanout_reason_count: usize,
     candidate_count: usize,
+}
+
+fn knowledge_retrieval_diagnostics(
+    search: &SearchResultSet,
     request: &KnowledgeRetrievalRequest,
+    projection_freshness: &SearchProjectionFreshness,
+    input: KnowledgeRetrievalDiagnosticsInput,
 ) -> KnowledgeRetrievalDiagnostics {
     let mut empty_reasons = Vec::new();
     if search.document_count == 0 {
@@ -1634,10 +1645,10 @@ fn knowledge_retrieval_diagnostics(
     } else if search.total_hits == 0 {
         empty_reasons.push("search retrievers returned no hits inside filtered scope".to_string());
     }
-    if request.graph_seed_limit > 0 && graph_seed_candidate_count == 0 {
+    if request.graph_seed_limit > 0 && input.graph_seed_candidate_count == 0 {
         empty_reasons.push("graph seed retriever returned no candidates".to_string());
     }
-    if candidate_count == 0 {
+    if input.candidate_count == 0 {
         empty_reasons.push("retrieval produced no candidates".to_string());
     }
     KnowledgeRetrievalDiagnostics {
@@ -1646,17 +1657,29 @@ fn knowledge_retrieval_diagnostics(
         search_total_hits: search.total_hits,
         search_limit: search.limit,
         rank_window: search.rank_window,
-        graph_seed_candidate_count,
-        graph_seed_returned_count,
+        graph_seed_candidate_count: input.graph_seed_candidate_count,
+        graph_seed_returned_count: input.graph_seed_returned_count,
         graph_seed_limit: request.graph_seed_limit,
-        graph_context_path_count,
+        graph_context_path_count: input.graph_context_path_count,
         graph_context_limit: request.graph_context_limit,
         graph_context_max_hops: request.graph_context_max_hops,
-        fanout_reason_count,
-        candidate_count,
+        fanout_reason_count: input.fanout_reason_count,
+        candidate_count: input.candidate_count,
         candidate_limit: request.candidate_limit,
+        warnings: knowledge_retrieval_warnings(projection_freshness),
         empty_reasons,
     }
+}
+
+fn knowledge_retrieval_warnings(projection_freshness: &SearchProjectionFreshness) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if projection_freshness.full_reindex_needed {
+        warnings.push("search projection requires full reindex".to_string());
+    }
+    if projection_freshness.metadata_repair_needed {
+        warnings.push("search projection metadata repair is needed".to_string());
+    }
+    warnings
 }
 
 fn graph_seed_candidate_id(seed: &KnowledgeGraphSeed) -> String {
@@ -4368,6 +4391,7 @@ mod tests {
         assert_eq!(output.diagnostics.fanout_reason_count, 0);
         assert_eq!(output.diagnostics.candidate_count, 0);
         assert_eq!(output.diagnostics.candidate_limit, None);
+        assert!(output.diagnostics.warnings.is_empty());
         assert!(output
             .diagnostics
             .empty_reasons
@@ -4383,6 +4407,54 @@ mod tests {
             .empty_reasons
             .iter()
             .any(|reason| reason == "retrieval produced no candidates"));
+    }
+
+    #[test]
+    fn knowledge_retrieval_diagnostics_report_projection_warnings() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem_1', title: 'Stale projection', content: 'projection warning retrieval'})")
+            .unwrap();
+
+        let path = unique_test_dir("knowledge_retrieval_projection_warnings");
+        let mut search_index = SearchIndex::open(&path).unwrap();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+        search_index
+            .mark_full_reindex_needed("stale projection")
+            .unwrap();
+        search_index
+            .mark_metadata_repair_needed("missing derived metadata")
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "projection warning".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 10,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert!(output.projection_freshness.full_reindex_needed);
+        assert!(output.projection_freshness.metadata_repair_needed);
+        assert!(output
+            .diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning == "search projection requires full reindex"));
+        assert!(output
+            .diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning == "search projection metadata repair is needed"));
     }
 
     #[test]
