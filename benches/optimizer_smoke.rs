@@ -216,6 +216,22 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=20 cost=1650",
             ],
         },
+        OptimizerSmokeCase {
+            name: "endpoint_existence_cartesian_product",
+            logical: endpoint_existence_cartesian_product_plan(),
+            catalog: endpoint_existence_cartesian_product_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 8,
+            },
+            fingerprint_contains: "NodeCartesianProductExec",
+            decision_contains: &[
+                "choose IndexNodeSeek for Memory.id",
+                "choose IndexNodeSeek for Source.id",
+                "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=3 cost=7",
+                "selected physical plan cost: estimated_rows=1 cost=8",
+            ],
+        },
     ]
 }
 
@@ -775,6 +791,68 @@ fn source_memory_label_cross_pattern_catalog() -> OptimizerCatalog {
                 ),
             ],
             [(("Source".to_string(), "id".to_string()), 1_000)],
+            [],
+        ),
+    )
+}
+
+fn endpoint_existence_cartesian_product_plan() -> LogicalPlan {
+    LogicalPlan::Project {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "id".to_string(),
+            },
+            name: "memory_id".to_string(),
+        }],
+        input: Box::new(LogicalPlan::NodeCartesianProduct {
+            left: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "m".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("memory-42".to_string()),
+                },
+                input: Box::new(memory_scan()),
+            }),
+            right: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "s".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("source-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "s".to_string(),
+                    label: "Source".to_string(),
+                }),
+            }),
+        }),
+    }
+}
+
+fn endpoint_existence_cartesian_product_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [
+                ("Memory".to_string(), "id".to_string()),
+                ("Source".to_string(), "id".to_string()),
+            ],
+            [],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Memory".to_string(), 10_000),
+                ("Source".to_string(), 1_000),
+            ],
+            [],
+            [],
+            [],
+            [],
+            [
+                (("Memory".to_string(), "id".to_string()), 10_000),
+                (("Source".to_string(), "id".to_string()), 1_000),
+            ],
             [],
         ),
     )

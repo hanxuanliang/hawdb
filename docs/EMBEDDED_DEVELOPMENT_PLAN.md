@@ -777,7 +777,8 @@ Current implemented slice:
 - `OptimizerTrace::selected_plan_cost` exposes recursive output-row and cost
   estimates for the chosen physical plan; expand rows are scaled by the
   selected input cardinality, so selective seek inputs no longer make the trace
-  report full-label expand cost
+  report full-label expand cost; endpoint cartesian products report estimated
+  left/right rows, output rows, and product cost
 - deterministic physical plan fingerprints are exposed through
   `OptimizerTrace::selected_plan_fingerprint` and `PhysicalPlan::fingerprint`
   for regression tests and future compatibility/shadow comparisons
@@ -790,7 +791,8 @@ Current implemented slice:
   fallback, production-shaped selective seed + bounded expand + aggregate +
   sort/limit, one-hop relationship-property expand reads, a Nowledge-shaped
   pushed-down relationship equality plus relationship range-filter workload, a
-  source-to-memory-to-label cross-pattern aggregate workload, selected-plan cost
+  source-to-memory-to-label cross-pattern aggregate workload,
+  endpoint-existence cartesian product cost tracing, selected-plan cost
   stability, deterministic fingerprints, and budget-fallback paths without
   depending on a storage fixture
 

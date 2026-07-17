@@ -2812,10 +2812,15 @@ impl GroupExpr {
                 variable: variable.clone(),
                 label: label.clone(),
             },
-            LogicalPlan::NodeCartesianProduct { .. } => PhysicalPlan::NodeCartesianProductExec {
-                left: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
-                right: Box::new(memo.best_physical(self.children[1], catalog, decisions)),
-            },
+            LogicalPlan::NodeCartesianProduct { .. } => {
+                let left = memo.best_physical(self.children[0], catalog, decisions);
+                let right = memo.best_physical(self.children[1], catalog, decisions);
+                push_cartesian_product_cost_decision(catalog, decisions, &left, &right);
+                PhysicalPlan::NodeCartesianProductExec {
+                    left: Box::new(left),
+                    right: Box::new(right),
+                }
+            }
             LogicalPlan::NodeColumnLookup {
                 variable,
                 label,
@@ -3453,9 +3458,12 @@ fn logical_to_physical_direct(
             label: label.clone(),
         },
         LogicalPlan::NodeCartesianProduct { left, right } => {
+            let left = logical_to_physical_direct(left, catalog, decisions);
+            let right = logical_to_physical_direct(right, catalog, decisions);
+            push_cartesian_product_cost_decision(catalog, decisions, &left, &right);
             PhysicalPlan::NodeCartesianProductExec {
-                left: Box::new(logical_to_physical_direct(left, catalog, decisions)),
-                right: Box::new(logical_to_physical_direct(right, catalog, decisions)),
+                left: Box::new(left),
+                right: Box::new(right),
             }
         }
         LogicalPlan::NodeColumnLookup {
@@ -3694,6 +3702,40 @@ fn format_selected_plan_cost(cost: PlanCost) -> String {
     )
 }
 
+fn push_cartesian_product_cost_decision(
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+    left: &PhysicalPlan,
+    right: &PhysicalPlan,
+) {
+    let left_cost = estimate_physical_plan_cost(left, catalog);
+    let right_cost = estimate_physical_plan_cost(right, catalog);
+    let cost = estimate_node_cartesian_product_cost(left_cost, right_cost);
+    decisions.push(format!(
+        "estimate NodeCartesianProduct: left_rows={} right_rows={} output_rows={} left_cost={} right_cost={} cost={}",
+        left_cost.estimated_rows,
+        right_cost.estimated_rows,
+        cost.estimated_rows,
+        left_cost.cost,
+        right_cost.cost,
+        cost.cost
+    ));
+}
+
+fn estimate_node_cartesian_product_cost(left_cost: PlanCost, right_cost: PlanCost) -> PlanCost {
+    let rows = left_cost
+        .estimated_rows
+        .saturating_mul(right_cost.estimated_rows)
+        .max(1);
+    PlanCost {
+        estimated_rows: rows,
+        cost: left_cost
+            .cost
+            .saturating_add(right_cost.cost)
+            .saturating_add(rows),
+    }
+}
+
 fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) -> PlanCost {
     match plan {
         PhysicalPlan::SeqNodeScan { label, .. } => {
@@ -3706,17 +3748,7 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left_cost = estimate_physical_plan_cost(left, catalog);
             let right_cost = estimate_physical_plan_cost(right, catalog);
-            let rows = left_cost
-                .estimated_rows
-                .saturating_mul(right_cost.estimated_rows)
-                .max(1);
-            PlanCost {
-                estimated_rows: rows,
-                cost: left_cost
-                    .cost
-                    .saturating_add(right_cost.cost)
-                    .saturating_add(rows),
-            }
+            estimate_node_cartesian_product_cost(left_cost, right_cost)
         }
         PhysicalPlan::NodeColumnLookupExec { label, input, .. } => {
             let input_cost = estimate_physical_plan_cost(input, catalog);
@@ -5399,6 +5431,74 @@ mod tests {
         assert_eq!(
             budgeted_trace.selected_plan_fingerprint,
             full_trace.selected_plan_fingerprint
+        );
+    }
+
+    #[test]
+    fn cartesian_product_trace_reports_input_rows_and_costs() {
+        let logical = LogicalPlan::NodeCartesianProduct {
+            left: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "m".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("memory-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+            right: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "s".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("source-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "s".to_string(),
+                    label: "Source".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new(
+                [
+                    ("Memory".to_string(), "id".to_string()),
+                    ("Source".to_string(), "id".to_string()),
+                ],
+                [],
+                [],
+                [],
+            ),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Memory".to_string(), 10_000),
+                    ("Source".to_string(), 1_000),
+                ],
+                [],
+                [],
+                [],
+                [],
+                [
+                    (("Memory".to_string(), "id".to_string()), 10_000),
+                    (("Source".to_string(), "id".to_string()), 1_000),
+                ],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert!(trace.decisions.iter().any(|decision| {
+            decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=3 cost=7"
+        }));
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 7,
+            }
         );
     }
 
