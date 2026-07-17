@@ -1462,10 +1462,12 @@ fn graph_lightning_import_status(
     } else {
         "ready"
     };
+    let resume_action = graph_lightning_import_resume_action(import_state);
     Ok(serde_json::json!({
         "protocol": "graph-lightning-import-status",
         "protocol_version": 1,
         "import_state": import_state,
+        "resume_action": resume_action,
         "staging_catalog_present": staging_catalog_present,
         "published_pointer_present": published_pointer_present,
         "staging_verification": staging_verification,
@@ -1481,6 +1483,41 @@ fn graph_lightning_import_status(
             "errors": errors,
         },
     }))
+}
+
+fn graph_lightning_import_resume_action(import_state: &str) -> serde_json::Value {
+    match import_state {
+        "CREATED" => serde_json::json!({
+            "operation": "stage_bootstrap",
+            "safe_to_retry": true,
+            "terminal": false,
+            "reason": "staging catalog is missing",
+        }),
+        "READY" => serde_json::json!({
+            "operation": "publish_staging",
+            "safe_to_retry": true,
+            "terminal": false,
+            "reason": "staging catalog verified but no published pointer exists",
+        }),
+        "PUBLISHED" => serde_json::json!({
+            "operation": "none",
+            "safe_to_retry": false,
+            "terminal": true,
+            "reason": "published pointer verified",
+        }),
+        "QUARANTINED" => serde_json::json!({
+            "operation": "inspect_errors",
+            "safe_to_retry": false,
+            "terminal": true,
+            "reason": "status gate has blocking errors",
+        }),
+        _ => serde_json::json!({
+            "operation": "inspect_errors",
+            "safe_to_retry": false,
+            "terminal": true,
+            "reason": "unknown import state",
+        }),
+    }
 }
 
 fn gate_decision<'a>(report: &'a serde_json::Value, gate: &str) -> Option<&'a str> {
@@ -2412,6 +2449,9 @@ mod tests {
         assert_eq!(report["staging_catalog_present"], false);
         assert_eq!(report["published_pointer_present"], false);
         assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["resume_action"]["operation"], "stage_bootstrap");
+        assert_eq!(report["resume_action"]["safe_to_retry"], true);
+        assert_eq!(report["resume_action"]["terminal"], false);
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
@@ -2436,6 +2476,9 @@ mod tests {
         assert_eq!(report["staging_catalog_present"], false);
         assert_eq!(report["published_pointer_present"], true);
         assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["resume_action"]["operation"], "inspect_errors");
+        assert_eq!(report["resume_action"]["safe_to_retry"], false);
+        assert_eq!(report["resume_action"]["terminal"], true);
         assert_eq!(report["status_gate"]["presence_errors"], 1);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
@@ -2482,6 +2525,9 @@ mod tests {
         );
         assert_eq!(report["published_verification"], serde_json::Value::Null);
         assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["resume_action"]["operation"], "publish_staging");
+        assert_eq!(report["resume_action"]["safe_to_retry"], true);
+        assert_eq!(report["resume_action"]["terminal"], false);
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
@@ -2511,6 +2557,9 @@ mod tests {
             "ready"
         );
         assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["resume_action"]["operation"], "none");
+        assert_eq!(report["resume_action"]["safe_to_retry"], false);
+        assert_eq!(report["resume_action"]["terminal"], true);
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
@@ -2541,6 +2590,9 @@ mod tests {
 
         assert_eq!(report["import_state"], "QUARANTINED");
         assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["resume_action"]["operation"], "inspect_errors");
+        assert_eq!(report["resume_action"]["safe_to_retry"], false);
+        assert_eq!(report["resume_action"]["terminal"], true);
         assert_eq!(report["status_gate"]["presence_errors"], 0);
         assert_eq!(report["status_gate"]["staging_errors"], 1);
         assert_eq!(report["status_gate"]["published_errors"], 0);
