@@ -16,8 +16,9 @@ use crate::search::{
     SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
 };
 use crate::store::{
-    DurabilityPolicy, GraphMutation, GraphStore, NodeId, NodeRecord, ProjectedGraphStatus,
-    RecoveryMode, RelRecord, StorageReclamationWatermark, StoreStableIdMapping, WalReplayConfig,
+    AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
+    NodeRecord, ProjectedGraphStatus, RecoveryMode, RelRecord, StorageReclamationWatermark,
+    StoreStableIdMapping, WalReplayConfig,
 };
 use crate::value::Value;
 use std::cell::RefCell;
@@ -2248,6 +2249,20 @@ struct KnowledgeSubgraphExpansion {
     relationship_limit: usize,
 }
 
+struct KnowledgeExpansionEdge<'a> {
+    direction: KnowledgeGraphPathDirection,
+    next_node: NodeId,
+    relationship: &'a RelRecord,
+}
+
+struct DenseAdjacencyDiagnosticContext<'a> {
+    catalog: &'a Catalog,
+    store: &'a GraphStore,
+    operation: &'a str,
+    relationship_type: Option<crate::schema::RelTypeId>,
+    requested_direction: KnowledgeNeighborDirection,
+}
+
 fn expand_knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -2257,6 +2272,7 @@ fn expand_knowledge_neighbors_for(
     let mut fanout_reasons = Vec::new();
     let mut seen_relationships = BTreeSet::new();
     let mut seen_frontier_nodes = BTreeSet::new();
+    let mut reported_dense_groups = BTreeSet::new();
     let mut frontier = VecDeque::from([(expansion.seed_node_id, 0usize)]);
     seen_frontier_nodes.insert(expansion.seed_node_id.0);
 
@@ -2264,17 +2280,25 @@ fn expand_knowledge_neighbors_for(
         if depth >= expansion.max_hops {
             continue;
         }
-        for relationship in store.scan_relationships(expansion.relationship_type) {
-            let (direction, next_node) = if relationship.source == current_node {
-                (KnowledgeGraphPathDirection::Outgoing, relationship.target)
-            } else if relationship.target == current_node {
-                (KnowledgeGraphPathDirection::Incoming, relationship.source)
-            } else {
-                continue;
-            };
-            if !neighbor_direction_allows(expansion.requested_direction, direction) {
-                continue;
-            }
+        record_dense_adjacency_diagnostics(
+            DenseAdjacencyDiagnosticContext {
+                catalog,
+                store,
+                operation: "knowledge_neighbors",
+                relationship_type: expansion.relationship_type,
+                requested_direction: expansion.requested_direction,
+            },
+            current_node,
+            &mut reported_dense_groups,
+            &mut fanout_reasons,
+        );
+        for edge in knowledge_expansion_edges_for_node(
+            store,
+            current_node,
+            expansion.relationship_type,
+            expansion.requested_direction,
+        ) {
+            let relationship = edge.relationship;
             if !seen_relationships.insert(relationship.id.0) {
                 continue;
             }
@@ -2290,14 +2314,14 @@ fn expand_knowledge_neighbors_for(
                 store,
                 expansion.seed_hit_id,
                 depth + 1,
-                direction,
+                edge.direction,
                 relationship,
             ) else {
                 continue;
             };
             paths.push(path);
-            if seen_frontier_nodes.insert(next_node.0) {
-                frontier.push_back((next_node, depth + 1));
+            if seen_frontier_nodes.insert(edge.next_node.0) {
+                frontier.push_back((edge.next_node, depth + 1));
             }
         }
     }
@@ -2312,6 +2336,7 @@ fn expand_knowledge_paths_for(
 ) -> (Vec<KnowledgeGraphPath>, Vec<String>) {
     let mut paths = Vec::new();
     let mut fanout_reasons = Vec::new();
+    let mut reported_dense_groups = BTreeSet::new();
     let mut frontier = VecDeque::from([(
         expansion.source_node_id,
         Vec::<KnowledgeGraphContextPath>::new(),
@@ -2322,18 +2347,27 @@ fn expand_knowledge_paths_for(
         if current_path.len() >= expansion.max_hops {
             continue;
         }
-        for relationship in store.scan_relationships(expansion.relationship_type) {
-            let (direction, next_node) = if relationship.source == current_node {
-                (KnowledgeGraphPathDirection::Outgoing, relationship.target)
-            } else if relationship.target == current_node {
-                (KnowledgeGraphPathDirection::Incoming, relationship.source)
-            } else {
-                continue;
-            };
-            if !neighbor_direction_allows(expansion.requested_direction, direction) {
-                continue;
-            }
-            if visited_nodes.contains(&next_node.0) && next_node != expansion.target_node_id {
+        record_dense_adjacency_diagnostics(
+            DenseAdjacencyDiagnosticContext {
+                catalog,
+                store,
+                operation: "knowledge_paths",
+                relationship_type: expansion.relationship_type,
+                requested_direction: expansion.requested_direction,
+            },
+            current_node,
+            &mut reported_dense_groups,
+            &mut fanout_reasons,
+        );
+        for edge in knowledge_expansion_edges_for_node(
+            store,
+            current_node,
+            expansion.relationship_type,
+            expansion.requested_direction,
+        ) {
+            if visited_nodes.contains(&edge.next_node.0)
+                && edge.next_node != expansion.target_node_id
+            {
                 continue;
             }
             let Some(segment) = context_path_for_relationship(
@@ -2341,14 +2375,14 @@ fn expand_knowledge_paths_for(
                 store,
                 "path",
                 current_path.len() + 1,
-                direction,
-                relationship,
+                edge.direction,
+                edge.relationship,
             ) else {
                 continue;
             };
             let mut next_path = current_path.clone();
             next_path.push(segment);
-            if next_node == expansion.target_node_id {
+            if edge.next_node == expansion.target_node_id {
                 if paths.len() >= expansion.limit {
                     fanout_reasons.push(format!(
                         "knowledge_paths limit {} reached while expanding path",
@@ -2362,8 +2396,8 @@ fn expand_knowledge_paths_for(
                 continue;
             }
             let mut next_visited = visited_nodes.clone();
-            next_visited.insert(next_node.0);
-            frontier.push_back((next_node, next_path, next_visited));
+            next_visited.insert(edge.next_node.0);
+            frontier.push_back((edge.next_node, next_path, next_visited));
         }
     }
 
@@ -2384,6 +2418,7 @@ fn expand_knowledge_subgraph_for(
     let mut fanout_reasons = Vec::new();
     let mut seen_nodes = BTreeSet::new();
     let mut seen_relationships = BTreeSet::new();
+    let mut reported_dense_groups = BTreeSet::new();
     let mut frontier = VecDeque::from([(expansion.seed_node_id, 0usize)]);
 
     if expansion.node_limit == 0 {
@@ -2399,21 +2434,29 @@ fn expand_knowledge_subgraph_for(
         if depth >= expansion.max_hops {
             continue;
         }
-        for relationship in store.scan_relationships(expansion.relationship_type) {
-            let (direction, next_node) = if relationship.source == current_node {
-                (KnowledgeGraphPathDirection::Outgoing, relationship.target)
-            } else if relationship.target == current_node {
-                (KnowledgeGraphPathDirection::Incoming, relationship.source)
-            } else {
-                continue;
-            };
-            if !neighbor_direction_allows(expansion.requested_direction, direction) {
-                continue;
-            }
+        record_dense_adjacency_diagnostics(
+            DenseAdjacencyDiagnosticContext {
+                catalog,
+                store,
+                operation: "knowledge_subgraph",
+                relationship_type: expansion.relationship_type,
+                requested_direction: expansion.requested_direction,
+            },
+            current_node,
+            &mut reported_dense_groups,
+            &mut fanout_reasons,
+        );
+        for edge in knowledge_expansion_edges_for_node(
+            store,
+            current_node,
+            expansion.relationship_type,
+            expansion.requested_direction,
+        ) {
+            let relationship = edge.relationship;
             if !seen_relationships.insert(relationship.id.0) {
                 continue;
             }
-            let new_node = !seen_nodes.contains(&next_node.0);
+            let new_node = !seen_nodes.contains(&edge.next_node.0);
             if new_node && nodes.len() >= expansion.node_limit {
                 fanout_reasons.push(format!(
                     "knowledge_subgraph node_limit {} reached",
@@ -2433,22 +2476,132 @@ fn expand_knowledge_subgraph_for(
                 store,
                 "subgraph",
                 depth + 1,
-                direction,
+                edge.direction,
                 relationship,
             ) else {
                 continue;
             };
             relationships.push(path);
-            if new_node && seen_nodes.insert(next_node.0) {
-                if let Some(node) = store.node(next_node) {
+            if new_node && seen_nodes.insert(edge.next_node.0) {
+                if let Some(node) = store.node(edge.next_node) {
                     nodes.push(knowledge_entity_from_node(catalog, node));
                 }
-                frontier.push_back((next_node, depth + 1));
+                frontier.push_back((edge.next_node, depth + 1));
             }
         }
     }
 
     (nodes, relationships, fanout_reasons)
+}
+
+fn knowledge_expansion_edges_for_node<'a>(
+    store: &'a GraphStore,
+    node_id: NodeId,
+    relationship_type: Option<crate::schema::RelTypeId>,
+    requested_direction: KnowledgeNeighborDirection,
+) -> Vec<KnowledgeExpansionEdge<'a>> {
+    let Some(rel_type) = relationship_type else {
+        return store
+            .scan_relationships(None)
+            .filter_map(|relationship| {
+                let (direction, next_node) = if relationship.source == node_id {
+                    (KnowledgeGraphPathDirection::Outgoing, relationship.target)
+                } else if relationship.target == node_id {
+                    (KnowledgeGraphPathDirection::Incoming, relationship.source)
+                } else {
+                    return None;
+                };
+                neighbor_direction_allows(requested_direction, direction).then_some(
+                    KnowledgeExpansionEdge {
+                        direction,
+                        next_node,
+                        relationship,
+                    },
+                )
+            })
+            .collect();
+    };
+
+    let mut edges = Vec::new();
+    let mut seen_relationships = BTreeSet::new();
+    for adjacency_direction in adjacency_directions_for_request(requested_direction) {
+        for entry in store.ordered_adjacency_entries(node_id, rel_type, adjacency_direction) {
+            let Some(relationship) = store.relationship(entry.relationship_id) else {
+                continue;
+            };
+            if !seen_relationships.insert(entry.relationship_id.0) {
+                continue;
+            }
+            edges.push(KnowledgeExpansionEdge {
+                direction: knowledge_path_direction_for_adjacency(adjacency_direction),
+                next_node: entry.neighbor_id,
+                relationship,
+            });
+        }
+    }
+    edges
+}
+
+fn record_dense_adjacency_diagnostics(
+    context: DenseAdjacencyDiagnosticContext<'_>,
+    node_id: NodeId,
+    reported_dense_groups: &mut BTreeSet<String>,
+    fanout_reasons: &mut Vec<String>,
+) {
+    let Some(rel_type) = context.relationship_type else {
+        return;
+    };
+    let rel_type_name = context
+        .catalog
+        .rel_type_name(rel_type)
+        .unwrap_or("<unknown>");
+    for adjacency_direction in adjacency_directions_for_request(context.requested_direction) {
+        let stats = context
+            .store
+            .adjacency_group_stats(node_id, rel_type, adjacency_direction);
+        if stats.layout != AdjacencyLayout::Dense {
+            continue;
+        }
+        let direction = adjacency_direction_name(adjacency_direction);
+        let key = format!(
+            "{}:{rel_type_name}:{direction}:{}",
+            context.operation, node_id.0
+        );
+        if reported_dense_groups.insert(key) {
+            fanout_reasons.push(format!(
+                "{} dense_adjacency {rel_type_name} {direction} node {} degree {}",
+                context.operation, node_id.0, stats.degree
+            ));
+        }
+    }
+}
+
+fn adjacency_directions_for_request(
+    requested_direction: KnowledgeNeighborDirection,
+) -> Vec<AdjacencyDirection> {
+    match requested_direction {
+        KnowledgeNeighborDirection::Outgoing => vec![AdjacencyDirection::Outgoing],
+        KnowledgeNeighborDirection::Incoming => vec![AdjacencyDirection::Incoming],
+        KnowledgeNeighborDirection::Both => {
+            vec![AdjacencyDirection::Outgoing, AdjacencyDirection::Incoming]
+        }
+    }
+}
+
+fn knowledge_path_direction_for_adjacency(
+    adjacency_direction: AdjacencyDirection,
+) -> KnowledgeGraphPathDirection {
+    match adjacency_direction {
+        AdjacencyDirection::Outgoing => KnowledgeGraphPathDirection::Outgoing,
+        AdjacencyDirection::Incoming => KnowledgeGraphPathDirection::Incoming,
+    }
+}
+
+fn adjacency_direction_name(adjacency_direction: AdjacencyDirection) -> &'static str {
+    match adjacency_direction {
+        AdjacencyDirection::Outgoing => "outgoing",
+        AdjacencyDirection::Incoming => "incoming",
+    }
 }
 
 fn seed_node_by_label_and_external_id<'a>(

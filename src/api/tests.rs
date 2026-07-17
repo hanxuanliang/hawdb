@@ -11,7 +11,7 @@ use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
 };
 use crate::search::{SearchFusionWeights, SearchIndex, SearchMode, SearchRebuildOptions};
-use crate::store::NodeId;
+use crate::store::{NodeId, DENSE_ADJACENCY_DEGREE_THRESHOLD};
 use crate::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Write};
@@ -2063,6 +2063,61 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(missing.diagnostics.path_limit, Some(8));
     assert!(missing.paths.is_empty());
     assert!(missing.fanout_reasons.is_empty());
+}
+
+#[test]
+fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
+        .unwrap();
+    for index in 0..DENSE_ADJACENCY_DEGREE_THRESHOLD {
+        let target = db
+            .store
+            .create_node(
+                &mut db.catalog,
+                "Entity",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String(format!("entity-{index}"))),
+                    ("name".to_string(), Value::String(format!("Entity {index}"))),
+                ]),
+            )
+            .unwrap();
+        db.store
+            .create_relationship(&mut db.catalog, NodeId(0), target, "LINKS", BTreeMap::new())
+            .unwrap();
+    }
+
+    let neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
+        label: "Memory".to_string(),
+        external_id: "root".to_string(),
+        relationship_type: Some("LINKS".to_string()),
+        direction: KnowledgeNeighborDirection::Outgoing,
+        limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
+        max_hops: 1,
+    });
+    assert_eq!(neighbors.paths.len(), DENSE_ADJACENCY_DEGREE_THRESHOLD);
+    assert_eq!(neighbors.diagnostics.fanout_reason_count, 1);
+    assert_eq!(neighbors.fanout_reasons.len(), 1);
+    assert!(neighbors.fanout_reasons[0]
+        .contains("knowledge_neighbors dense_adjacency LINKS outgoing node 0 degree"));
+
+    let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
+        label: "Memory".to_string(),
+        external_id: "root".to_string(),
+        relationship_type: Some("LINKS".to_string()),
+        direction: KnowledgeNeighborDirection::Outgoing,
+        max_hops: 1,
+        node_limit: DENSE_ADJACENCY_DEGREE_THRESHOLD + 1,
+        relationship_limit: DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    });
+    assert_eq!(
+        subgraph.relationships.len(),
+        DENSE_ADJACENCY_DEGREE_THRESHOLD
+    );
+    assert_eq!(subgraph.diagnostics.fanout_reason_count, 1);
+    assert_eq!(subgraph.fanout_reasons.len(), 1);
+    assert!(subgraph.fanout_reasons[0]
+        .contains("knowledge_subgraph dense_adjacency LINKS outgoing node 0 degree"));
 }
 
 #[test]
