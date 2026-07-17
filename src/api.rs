@@ -1802,7 +1802,9 @@ fn knowledge_retrieval_diagnostics(
             empty_reasons
                 .push("search retrievers returned no hits inside filtered scope".to_string());
         }
-        if request.graph_seed_limit > 0 && input.graph_seed_candidate_count == 0 {
+        if request.graph_seed_limit == 0 {
+            empty_reasons.push("graph seed retriever disabled by limit 0".to_string());
+        } else if input.graph_seed_candidate_count == 0 {
             empty_reasons.push("graph seed retriever returned no candidates".to_string());
         }
         empty_reasons.extend(candidate_truncation_reasons.iter().cloned());
@@ -5087,6 +5089,54 @@ mod tests {
             .empty_reasons
             .iter()
             .any(|reason| reason == "graph seed retriever returned no candidates"));
+        assert!(output
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "retrieval produced no candidates"));
+    }
+
+    #[test]
+    fn knowledge_retrieval_diagnostics_explain_disabled_graph_seeds() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem_1', title: 'Graph candidate'})")
+            .unwrap();
+        let search_index = SearchIndex::in_memory();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "Graph candidate".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 0,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert!(output.search.hits.is_empty());
+        assert!(output.graph_seeds.is_empty());
+        assert!(output.candidates.is_empty());
+        assert_eq!(output.diagnostics.graph_seed_limit, 0);
+        assert_eq!(output.diagnostics.candidate_count, 0);
+        assert_eq!(output.diagnostics.candidate_total_count, 0);
+        assert!(output
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "search projection has no documents"));
+        assert!(output
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "graph seed retriever disabled by limit 0"));
         assert!(output
             .diagnostics
             .empty_reasons
