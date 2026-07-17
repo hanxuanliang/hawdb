@@ -2,7 +2,10 @@ use skein::optimizer::{
     CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
     OptimizerConfig, PlanCost,
 };
-use skein::planner::{ComparisonOp, LogicalPlan, Predicate, Projection, ProjectionExpression};
+use skein::planner::{
+    AggregateFunction, AggregateTarget, Aggregation, ComparisonOp, LogicalPlan, Predicate,
+    Projection, ProjectionExpression, SortDirection, SortItem, SortKey,
+};
 use skein::RelationshipDirection;
 use skein::Value;
 use std::time::Instant;
@@ -149,6 +152,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             decision_contains: &[
                 "choose SeqNodeScan",
                 "selected physical plan cost: estimated_rows=500 cost=2504",
+            ],
+        },
+        OptimizerSmokeCase {
+            name: "memory_seed_entity_mentions",
+            logical: memory_seed_entity_mentions_plan(),
+            catalog: memory_seed_entity_mentions_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 15,
+            },
+            fingerprint_contains: "IndexNodeSeek",
+            decision_contains: &[
+                "choose IndexNodeSeek for Memory.id",
+                "estimate AdjacencyExpand",
+                "selected physical plan cost: estimated_rows=1 cost=15",
             ],
         },
     ]
@@ -320,6 +338,97 @@ fn low_selectivity_scan_catalog() -> OptimizerCatalog {
             [],
             [],
             [(("Memory".to_string(), "kind".to_string()), 1)],
+            [],
+        ),
+    )
+}
+
+fn memory_seed_entity_mentions_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(10),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![SortItem {
+                key: SortKey::Column("mention_count".to_string()),
+                direction: SortDirection::Desc,
+            }],
+            input: Box::new(LogicalPlan::Aggregate {
+                group_keys: vec![
+                    Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "e".to_string(),
+                            property: "id".to_string(),
+                        },
+                        name: "entity_id".to_string(),
+                    },
+                    Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "e".to_string(),
+                            property: "name".to_string(),
+                        },
+                        name: "entity_name".to_string(),
+                    },
+                ],
+                items: vec![Aggregation {
+                    function: AggregateFunction::Count,
+                    target: AggregateTarget::Variable("m".to_string()),
+                    distinct: true,
+                    name: "mention_count".to_string(),
+                }],
+                input: Box::new(LogicalPlan::Expand {
+                    source_variable: "m".to_string(),
+                    source_label: "Memory".to_string(),
+                    rel_variable: None,
+                    rel_type: "MENTIONS".to_string(),
+                    rel_properties: Default::default(),
+                    direction: RelationshipDirection::Outgoing,
+                    target_variable: "e".to_string(),
+                    target_label: "Entity".to_string(),
+                    min_hops: 1,
+                    max_hops: 1,
+                    optional: false,
+                    input: Box::new(LogicalPlan::Filter {
+                        predicate: Predicate::PropertyEq {
+                            variable: "m".to_string(),
+                            property: "id".to_string(),
+                            value: Value::String("memory-42".to_string()),
+                        },
+                        input: Box::new(memory_scan()),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn memory_seed_entity_mentions_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Memory".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Memory".to_string(), 10_000),
+                ("Entity".to_string(), 50_000),
+            ],
+            [("MENTIONS".to_string(), 120_000)],
+            [("MENTIONS".to_string(), 40_000)],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                ),
+                40_000,
+            )],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                    1,
+                ),
+                40_000,
+            )],
+            [(("Memory".to_string(), "id".to_string()), 10_000)],
             [],
         ),
     )

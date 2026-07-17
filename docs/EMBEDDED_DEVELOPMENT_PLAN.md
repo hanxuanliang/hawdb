@@ -781,7 +781,8 @@ Current implemented slice:
   that preserves current scan/seek and expand diagnostics
 - `cargo bench --bench optimizer_smoke` covers optimizer-only range-seek plus
   bounded expand stats, composite seek, text seek, low-selectivity scan
-  fallback, selected-plan cost stability, deterministic fingerprints, and
+  fallback, production-shaped selective seed + bounded expand + aggregate +
+  sort/limit, selected-plan cost stability, deterministic fingerprints, and
   budget-fallback paths without depending on a storage fixture
 
 Remaining Phase 4 work:
