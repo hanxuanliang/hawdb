@@ -585,7 +585,10 @@ bounded incremental deltas for ordinary FTS/BM25 row upsert/delete changes:
 without partial index mutation on budget or embedding-dimension errors.
 Internal background callers can use `SearchIndex::apply_background_projection_delta`
 to pass the same delta through `LocalQosPolicy` admission before applying it;
-foreground user-triggered deltas can still use the direct API. Database-owned
+callers that need in-flight background budget tracking can use
+`SearchIndex::apply_scheduled_background_projection_delta` with
+`LocalQosScheduler`. Foreground user-triggered deltas can still use the direct
+API. Database-owned
 derived artifact jobs expose the same split through
 `Database::run_next_background_derived_artifact_job`, which admits internal
 background rebuild work through `LocalQosPolicy` while leaving the direct

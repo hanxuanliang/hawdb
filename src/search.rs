@@ -1,5 +1,7 @@
 use crate::error::{Result, SkeinError};
-use crate::qos::{LocalQosPolicy, LocalQosState, QosAdmission, WorkClass, WorkRequest};
+use crate::qos::{
+    LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+};
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeRecord};
 use crate::value::Value;
@@ -471,6 +473,31 @@ impl SearchIndex {
                 "background search projection delta rejected: {reason}"
             ))),
         }
+    }
+
+    pub fn apply_scheduled_background_projection_delta(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let permit = match scheduler.try_start(delta.background_work_request()) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search projection delta deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search projection delta rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.apply_projection_delta(delta);
+        scheduler.finish(permit);
+        result
     }
 
     pub fn document(&self, id: &str) -> Option<&SearchDocument> {
@@ -3950,6 +3977,129 @@ mod tests {
         assert_eq!(report.operation_count, 2);
         assert!(index.document("memory:old").is_none());
         assert!(index.document("memory:new").is_some());
+    }
+
+    #[test]
+    fn scheduled_background_projection_delta_tracks_running_budget() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("memory:old", "Old projection", "Remove me", [1.0, 0.0]))
+            .unwrap();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(2),
+            max_total_background_operations: Some(2),
+            ..LocalQosPolicy::default()
+        });
+
+        let report = index
+            .apply_scheduled_background_projection_delta(
+                &mut scheduler,
+                SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "new".to_string(),
+                        title: "Scheduled projection".to_string(),
+                        body: "QoS tracked background work".to_string(),
+                        embedding: Some(vec![0.0, 1.0]),
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: vec!["memory:old".to_string()],
+                    max_operations: Some(2),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.operation_count, 2);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert!(index.document("memory:old").is_none());
+        assert!(index.document("memory:new").is_some());
+    }
+
+    #[test]
+    fn scheduled_background_projection_delta_defers_when_scheduler_is_full() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:old",
+                "Old projection",
+                "Should stay",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(4),
+            max_total_background_operations: Some(4),
+            ..LocalQosPolicy::default()
+        });
+        let running = scheduler
+            .try_start(WorkRequest::background(WorkClass::Analytics, 3))
+            .unwrap();
+
+        let error = index
+            .apply_scheduled_background_projection_delta(
+                &mut scheduler,
+                SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "new".to_string(),
+                        title: "Deferred projection".to_string(),
+                        body: "Should not be applied".to_string(),
+                        embedding: Some(vec![0.0, 1.0]),
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: vec!["memory:old".to_string()],
+                    max_operations: Some(2),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        assert_eq!(scheduler.state().running_background_operations, 3);
+        assert!(index.document("memory:old").is_some());
+        assert!(index.document("memory:new").is_none());
+
+        scheduler.finish(running);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+    }
+
+    #[test]
+    fn scheduled_background_projection_delta_releases_budget_on_delta_error() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:old",
+                "Old projection",
+                "Should stay",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+        let error = index
+            .apply_scheduled_background_projection_delta(
+                &mut scheduler,
+                SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "new".to_string(),
+                        title: "Rejected by delta budget".to_string(),
+                        body: "Should not be applied".to_string(),
+                        embedding: Some(vec![0.0, 1.0]),
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: vec!["memory:old".to_string()],
+                    max_operations: Some(1),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("exceeded configured limit"));
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert!(index.document("memory:old").is_some());
+        assert!(index.document("memory:new").is_none());
     }
 
     #[test]
