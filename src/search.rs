@@ -1,6 +1,7 @@
 use crate::error::{Result, SkeinError};
 use crate::qos::{
-    LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+    BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
+    QosAdmission, WorkClass, WorkRequest,
 };
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeRecord};
@@ -323,6 +324,18 @@ impl SearchProjectionDelta {
     pub fn background_work_request(&self) -> WorkRequest {
         WorkRequest::background(WorkClass::Projection, self.operation_count())
     }
+
+    pub fn background_work_plan(&self, hint: BackgroundWorkHint) -> Option<BackgroundWorkPlan> {
+        let operation_count = self.operation_count();
+        if operation_count == 0 {
+            return None;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Projection,
+            operation_count,
+            hint,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -631,6 +644,76 @@ impl SearchIndex {
         })
     }
 
+    pub fn rebuild_background_work_plan(
+        &self,
+        store: &GraphStore,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let estimated_operations = self.rebuild_estimated_operations(store);
+        if estimated_operations == 0 {
+            return None;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Projection,
+            estimated_operations,
+            hint,
+        ))
+    }
+
+    pub fn rebuild_background_derived_artifacts(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        catalog: &Catalog,
+        store: &GraphStore,
+        options: SearchRebuildOptions,
+    ) -> Result<SearchDerivedArtifactReport> {
+        let request = WorkRequest::background(
+            WorkClass::Projection,
+            self.rebuild_estimated_operations(store),
+        );
+        match policy.admit(state, &request) {
+            QosAdmission::Admit => self.rebuild_derived_artifacts(catalog, store, options),
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background search projection rebuild deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background search projection rebuild rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn rebuild_scheduled_background_derived_artifacts(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        catalog: &Catalog,
+        store: &GraphStore,
+        options: SearchRebuildOptions,
+    ) -> Result<SearchDerivedArtifactReport> {
+        let request = WorkRequest::background(
+            WorkClass::Projection,
+            self.rebuild_estimated_operations(store),
+        );
+        let permit = match scheduler.try_start(request) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search projection rebuild deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search projection rebuild rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.rebuild_derived_artifacts(catalog, store, options);
+        scheduler.finish(permit);
+        result
+    }
+
     pub fn repair_metadata_from_graph(
         &mut self,
         catalog: &Catalog,
@@ -682,6 +765,22 @@ impl SearchIndex {
         })
     }
 
+    pub fn metadata_repair_background_work_plan(
+        &self,
+        store: &GraphStore,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let estimated_operations = store.scan_nodes(None).count();
+        if estimated_operations == 0 {
+            return None;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Projection,
+            estimated_operations,
+            hint,
+        ))
+    }
+
     pub fn repair_background_metadata_from_graph(
         &mut self,
         policy: &LocalQosPolicy,
@@ -730,6 +829,10 @@ impl SearchIndex {
         let result = self.repair_metadata_from_graph(catalog, store, options);
         scheduler.finish(permit);
         result
+    }
+
+    fn rebuild_estimated_operations(&self, store: &GraphStore) -> usize {
+        store.scan_nodes(None).count().max(self.documents.len())
     }
 
     pub fn checkpoint(&self) -> Result<()> {
@@ -3906,6 +4009,124 @@ mod tests {
     }
 
     #[test]
+    fn search_rebuild_background_work_plan_uses_projection_lane() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in ["mem_1", "mem_2"] {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    BTreeMap::from([
+                        ("id".to_string(), Value::String(id.to_string())),
+                        ("title".to_string(), Value::String(id.to_string())),
+                    ]),
+                )
+                .unwrap();
+        }
+        let index = SearchIndex::in_memory();
+
+        let plan = index
+            .rebuild_background_work_plan(
+                &store,
+                BackgroundWorkHint {
+                    active_topic: true,
+                    query_probability_per_million: 200_000,
+                    ..BackgroundWorkHint::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(plan.request.class, WorkClass::Projection);
+        assert_eq!(plan.request.estimated_operations, 2);
+        let ranked =
+            LocalQosPolicy::default().rank_background_work(&LocalQosState::default(), &[plan]);
+        assert_eq!(ranked[0].index, 0);
+        assert!(ranked[0]
+            .decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "active topic"));
+    }
+
+    #[test]
+    fn background_search_projection_rebuild_uses_qos_admission() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in ["mem_1", "mem_2"] {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    BTreeMap::from([
+                        ("id".to_string(), Value::String(id.to_string())),
+                        ("title".to_string(), Value::String(id.to_string())),
+                    ]),
+                )
+                .unwrap();
+        }
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("old", "Old projection", "Should stay", [1.0, 0.0]))
+            .unwrap();
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        };
+
+        let error = index
+            .rebuild_background_derived_artifacts(
+                &policy,
+                &LocalQosState::default(),
+                &catalog,
+                &store,
+                SearchRebuildOptions::default(),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        assert_eq!(index.document_count(), 1);
+        assert!(index.document("old").is_some());
+    }
+
+    #[test]
+    fn scheduled_background_search_projection_rebuild_releases_budget_on_rebuild_error() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        for id in ["mem_1", "mem_2"] {
+            store
+                .create_node(
+                    &mut catalog,
+                    "Memory",
+                    BTreeMap::from([
+                        ("id".to_string(), Value::String(id.to_string())),
+                        ("title".to_string(), Value::String(id.to_string())),
+                    ]),
+                )
+                .unwrap();
+        }
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("old", "Old projection", "Should stay", [1.0, 0.0]))
+            .unwrap();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+        let error = index
+            .rebuild_scheduled_background_derived_artifacts(
+                &mut scheduler,
+                &catalog,
+                &store,
+                SearchRebuildOptions { max_rows: Some(1) },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("row limit"));
+        assert_eq!(scheduler.state().running_background_operations, 0);
+        assert_eq!(index.document_count(), 1);
+        assert!(index.document("old").is_some());
+    }
+
+    #[test]
     fn projection_delta_incrementally_updates_search_rows() {
         let mut index = SearchIndex::in_memory();
         index
@@ -3938,6 +4159,43 @@ mod tests {
         assert!(index.document("memory:new").is_some());
         let hits = index.search("embedded search", None, SearchMode::Text, 10);
         assert_eq!(hits[0].id, "memory:new");
+    }
+
+    #[test]
+    fn projection_delta_background_work_plan_is_absent_without_operations() {
+        let delta = SearchProjectionDelta::default();
+
+        assert!(delta
+            .background_work_plan(BackgroundWorkHint::default())
+            .is_none());
+    }
+
+    #[test]
+    fn projection_delta_background_work_plan_uses_projection_lane() {
+        let delta = SearchProjectionDelta {
+            upserts: vec![SearchProjectionRow {
+                kind: SearchProjectionKind::Memory,
+                external_id: "new".to_string(),
+                title: "Incremental FTS".to_string(),
+                body: "Small batches keep embedded search cheap".to_string(),
+                embedding: Some(vec![0.0, 1.0]),
+                source_id: None,
+                metadata: BTreeMap::new(),
+            }],
+            deletes: vec!["memory:old".to_string()],
+            max_operations: Some(2),
+        };
+
+        let plan = delta
+            .background_work_plan(BackgroundWorkHint {
+                recent_delta_operations: 2,
+                ..BackgroundWorkHint::default()
+            })
+            .unwrap();
+
+        assert_eq!(plan.request.class, WorkClass::Projection);
+        assert_eq!(plan.request.estimated_operations, 2);
+        assert_eq!(plan.hint.recent_delta_operations, 2);
     }
 
     #[test]
@@ -4259,6 +4517,41 @@ mod tests {
             document.metadata.get("space_id").map(String::as_str),
             Some("default")
         );
+    }
+
+    #[test]
+    fn metadata_repair_background_work_plan_uses_projection_lane() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("mem_1".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Graph storage".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+        let index = SearchIndex::in_memory();
+
+        let plan = index
+            .metadata_repair_background_work_plan(
+                &store,
+                BackgroundWorkHint {
+                    staleness_millis: 10_000,
+                    staleness_ttl_millis: Some(1_000),
+                    ..BackgroundWorkHint::default()
+                },
+            )
+            .unwrap();
+
+        assert_eq!(plan.request.class, WorkClass::Projection);
+        assert_eq!(plan.request.estimated_operations, 1);
+        assert_eq!(plan.hint.staleness_millis, 10_000);
     }
 
     #[test]

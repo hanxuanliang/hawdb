@@ -383,6 +383,10 @@ typed projection rows from canonical graph nodes into a temporary map, then
 replaces the in-memory projection only after the configured row bound is not
 exceeded. Successful rebuilds clear projection lifecycle markers; failed rebuilds
 leave the previous projection intact and keep a full-reindex marker.
+Caller-owned background loops can rank full search rebuilds, incremental deltas,
+and metadata repair as `Projection` work and then execute them through QoS
+admission or scheduler wrappers; explicit foreground rebuilds continue to use
+the direct APIs.
 Persistent search projection snapshots publish through a synced temporary file,
 atomic rename, and parent-directory sync, while remaining rebuildable projection
 state outside the graph WAL. A graph-derived rebuild records the source graph
