@@ -5580,6 +5580,66 @@ mod tests {
     }
 
     #[test]
+    fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {title: 'Anonymous root'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})")
+            .unwrap();
+
+        let neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "0".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 4,
+            max_hops: 1,
+        });
+        assert_eq!(neighbors.seed_node_id, Some(0));
+        assert_eq!(neighbors.paths.len(), 1);
+        assert_eq!(neighbors.paths[0].source_external_id.as_deref(), Some("0"));
+        assert_eq!(
+            neighbors.paths[0].target_external_id.as_deref(),
+            Some("leaf")
+        );
+
+        let paths = db.knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "0".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        });
+        assert_eq!(paths.source_node_id, Some(0));
+        assert_eq!(paths.target_node_id, Some(1));
+        assert_eq!(paths.paths.len(), 1);
+        assert_eq!(
+            paths.paths[0].segments[0].source_external_id.as_deref(),
+            Some("0")
+        );
+
+        let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "0".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 4,
+            relationship_limit: 4,
+        });
+        assert_eq!(subgraph.seed_node_id, Some(0));
+        assert!(subgraph
+            .nodes
+            .iter()
+            .any(|node| node.external_id.as_deref() == Some("0")));
+        assert!(subgraph
+            .nodes
+            .iter()
+            .any(|node| node.external_id.as_deref() == Some("leaf")));
+    }
+
+    #[test]
     fn knowledge_neighbors_reports_limit_and_missing_seed() {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'left', name: 'Left'})")
