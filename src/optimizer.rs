@@ -2098,6 +2098,28 @@ impl OptimizerCatalog {
             .max(1)
     }
 
+    fn estimate_rel_property_in_rows(
+        &self,
+        rel_type: &str,
+        property: &str,
+        values: &[Value],
+        input_rows: u64,
+    ) -> u64 {
+        if values.is_empty() {
+            return 0;
+        }
+        let distinct_count = self.rel_property_distinct_count(rel_type, property).max(1);
+        let value_count = values
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            .min(distinct_count as usize) as u64;
+        input_rows
+            .saturating_mul(value_count)
+            .div_ceil(distinct_count)
+            .max(1)
+    }
+
     fn estimate_rel_property_range_rows(
         &self,
         rel_type: &str,
@@ -4558,6 +4580,20 @@ fn estimate_relationship_filter_rows(
                 catalog.estimate_rel_property_range_rows(rel_type, property, *op, value, rows)
             },
         ),
+        Predicate::PropertyIn {
+            variable,
+            property,
+            values,
+        } => estimate_relationship_property_filter_rows(
+            input,
+            variable,
+            property,
+            input_rows,
+            catalog,
+            |catalog, rel_type, property, rows| {
+                catalog.estimate_rel_property_in_rows(rel_type, property, values, rows)
+            },
+        ),
         _ => None,
     }
 }
@@ -6435,6 +6471,81 @@ mod tests {
             PlanCost {
                 estimated_rows: 0,
                 cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn residual_relationship_property_in_uses_relationship_distinct_counts() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::PropertyIn {
+                variable: "r".to_string(),
+                property: "kind".to_string(),
+                values: vec![
+                    Value::String("mentioned".to_string()),
+                    Value::String("quoted".to_string()),
+                    Value::String("quoted".to_string()),
+                    Value::String("linked".to_string()),
+                ],
+            },
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "m".to_string(),
+                source_label: "Memory".to_string(),
+                rel_variable: Some("r".to_string()),
+                rel_type: "MENTIONS".to_string(),
+                rel_properties: BTreeMap::new(),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "e".to_string(),
+                target_label: "Entity".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000), ("Entity".to_string(), 1_000)],
+                [("MENTIONS".to_string(), 4_000)],
+                [("MENTIONS".to_string(), 1_000)],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                    ),
+                    4_000,
+                )],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                        1,
+                    ),
+                    4_000,
+                )],
+                [],
+                [],
+            )
+            .with_relationship_property_distinct_counts([(
+                ("MENTIONS".to_string(), "kind".to_string()),
+                10,
+            )]),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1_200,
+                cost: 10_004,
             }
         );
     }

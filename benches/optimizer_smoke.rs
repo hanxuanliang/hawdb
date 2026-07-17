@@ -201,6 +201,20 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "relationship_property_in_filter",
+            logical: relationship_property_in_filter_plan(),
+            catalog: relationship_property_in_filter_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1_200,
+                cost: 10_004,
+            },
+            fingerprint_contains: "PropertyIn",
+            decision_contains: &[
+                "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
+                "selected physical plan cost: estimated_rows=1200 cost=10004",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "source_memory_label_cross_pattern",
             logical: source_memory_label_cross_pattern_plan(),
             catalog: source_memory_label_cross_pattern_catalog(),
@@ -755,6 +769,69 @@ fn relationship_status_range_filter_catalog() -> OptimizerCatalog {
         .with_relationship_property_histograms([(
             ("MENTIONS".to_string(), "created_at".to_string()),
             (0..10).map(|bucket| Value::Int(bucket * 10)).collect(),
+        )]),
+    )
+}
+
+fn relationship_property_in_filter_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::PropertyIn {
+            variable: "r".to_string(),
+            property: "kind".to_string(),
+            values: vec![
+                Value::String("mentioned".to_string()),
+                Value::String("quoted".to_string()),
+                Value::String("quoted".to_string()),
+                Value::String("linked".to_string()),
+            ],
+        },
+        input: Box::new(LogicalPlan::Expand {
+            source_variable: "m".to_string(),
+            source_label: "Memory".to_string(),
+            rel_variable: Some("r".to_string()),
+            rel_type: "MENTIONS".to_string(),
+            rel_properties: BTreeMap::new(),
+            direction: RelationshipDirection::Outgoing,
+            target_variable: "e".to_string(),
+            target_label: "Entity".to_string(),
+            min_hops: 1,
+            max_hops: 1,
+            optional: false,
+            input: Box::new(memory_scan()),
+        }),
+    }
+}
+
+fn relationship_property_in_filter_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 1_000), ("Entity".to_string(), 1_000)],
+            [("MENTIONS".to_string(), 4_000)],
+            [("MENTIONS".to_string(), 1_000)],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                ),
+                4_000,
+            )],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                    1,
+                ),
+                4_000,
+            )],
+            [],
+            [],
+        )
+        .with_relationship_property_distinct_counts([(
+            ("MENTIONS".to_string(), "kind".to_string()),
+            10,
         )]),
     )
 }
