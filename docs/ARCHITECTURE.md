@@ -488,14 +488,15 @@ canonical node snapshot by label and external ID, including node id, labels,
 external ID, graph commit epoch, and scalar properties. `Database::knowledge_neighbors`
 accepts the same identity plus optional relationship type, direction, hop bound,
 and result limit, then returns the same path evidence structure plus fan-out
-reasons. `Database::knowledge_paths` accepts source and target identities plus
-the same traversal budget and returns bounded graph paths as ordered evidence
-segments. `Database::knowledge_subgraph` expands a bounded typed subgraph from
-one identity, returning canonical node snapshots, relationship evidence
-segments, and node/relationship fan-out reasons. `DatabaseReadTransaction`
-exposes the same typed knowledge operations over its pinned catalog and graph
-snapshot, so callers can perform stable knowledge navigation without falling
-back to ad hoc Cypher. This makes common
+reasons and typed traversal diagnostics. `Database::knowledge_paths` accepts
+source and target identities plus the same traversal budget and returns bounded
+graph paths as ordered evidence segments with source/target presence and path
+count diagnostics. `Database::knowledge_subgraph` expands a bounded typed
+subgraph from one identity, returning canonical node snapshots, relationship
+evidence segments, node/relationship fan-out reasons, and node/relationship
+count diagnostics. `DatabaseReadTransaction` exposes the same typed knowledge
+operations over its pinned catalog and graph snapshot, so callers can perform
+stable knowledge navigation without falling back to ad hoc Cypher. This makes common
 knowledge-application navigation a first-class API instead of forcing
 application code to construct ad hoc Cypher for every entity lookup,
 neighborhood lookup, path query, or local subgraph expansion.

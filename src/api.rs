@@ -490,6 +490,7 @@ pub struct KnowledgeNeighborsOutput {
     pub seed_node_id: Option<u64>,
     pub paths: Vec<KnowledgeGraphContextPath>,
     pub fanout_reasons: Vec<String>,
+    pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -511,6 +512,7 @@ pub struct KnowledgePathOutput {
     pub target_node_id: Option<u64>,
     pub paths: Vec<KnowledgeGraphPath>,
     pub fanout_reasons: Vec<String>,
+    pub diagnostics: KnowledgeTraversalDiagnostics,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -536,6 +538,21 @@ pub struct KnowledgeSubgraphOutput {
     pub nodes: Vec<KnowledgeEntity>,
     pub relationships: Vec<KnowledgeGraphContextPath>,
     pub fanout_reasons: Vec<String>,
+    pub diagnostics: KnowledgeTraversalDiagnostics,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeTraversalDiagnostics {
+    pub seed_found: bool,
+    pub target_found: Option<bool>,
+    pub path_count: usize,
+    pub node_count: usize,
+    pub relationship_count: usize,
+    pub fanout_reason_count: usize,
+    pub max_hops: usize,
+    pub path_limit: Option<usize>,
+    pub node_limit: Option<usize>,
+    pub relationship_limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1791,6 +1808,18 @@ fn knowledge_neighbors_for(
             seed_node_id: None,
             paths: Vec::new(),
             fanout_reasons: Vec::new(),
+            diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                seed_found: false,
+                target_found: None,
+                path_count: 0,
+                node_count: 0,
+                relationship_count: 0,
+                fanout_reason_count: 0,
+                max_hops: request.max_hops,
+                path_limit: Some(request.limit),
+                node_limit: None,
+                relationship_limit: None,
+            }),
         };
     };
 
@@ -1813,6 +1842,18 @@ fn knowledge_neighbors_for(
     KnowledgeNeighborsOutput {
         graph_commit_epoch: store.commit_epoch(),
         seed_node_id: Some(seed.id.0),
+        diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            seed_found: true,
+            target_found: None,
+            path_count: paths.len(),
+            node_count: 0,
+            relationship_count: paths.len(),
+            fanout_reason_count: fanout_reasons.len(),
+            max_hops: request.max_hops,
+            path_limit: Some(request.limit),
+            node_limit: None,
+            relationship_limit: None,
+        }),
         paths,
         fanout_reasons,
     }
@@ -1845,6 +1886,18 @@ fn knowledge_paths_for(
             target_node_id,
             paths: Vec::new(),
             fanout_reasons: Vec::new(),
+            diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                seed_found: false,
+                target_found: target_node_id.map(|_| true),
+                path_count: 0,
+                node_count: 0,
+                relationship_count: 0,
+                fanout_reason_count: 0,
+                max_hops: request.max_hops,
+                path_limit: Some(request.limit),
+                node_limit: None,
+                relationship_limit: None,
+            }),
         };
     };
     let Some(target) = target else {
@@ -1854,6 +1907,18 @@ fn knowledge_paths_for(
             target_node_id,
             paths: Vec::new(),
             fanout_reasons: Vec::new(),
+            diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                seed_found: true,
+                target_found: Some(false),
+                path_count: 0,
+                node_count: 0,
+                relationship_count: 0,
+                fanout_reason_count: 0,
+                max_hops: request.max_hops,
+                path_limit: Some(request.limit),
+                node_limit: None,
+                relationship_limit: None,
+            }),
         };
     };
     let relationship_type = match request.relationship_type.as_deref() {
@@ -1866,6 +1931,20 @@ fn knowledge_paths_for(
                     target_node_id,
                     paths: Vec::new(),
                     fanout_reasons: Vec::new(),
+                    diagnostics: knowledge_traversal_diagnostics(
+                        KnowledgeTraversalDiagnosticInput {
+                            seed_found: true,
+                            target_found: Some(true),
+                            path_count: 0,
+                            node_count: 0,
+                            relationship_count: 0,
+                            fanout_reason_count: 0,
+                            max_hops: request.max_hops,
+                            path_limit: Some(request.limit),
+                            node_limit: None,
+                            relationship_limit: None,
+                        },
+                    ),
                 };
             }
         },
@@ -1888,6 +1967,18 @@ fn knowledge_paths_for(
         graph_commit_epoch: store.commit_epoch(),
         source_node_id,
         target_node_id,
+        diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            seed_found: true,
+            target_found: Some(true),
+            path_count: paths.len(),
+            node_count: 0,
+            relationship_count: paths.iter().map(|path| path.segments.len()).sum::<usize>(),
+            fanout_reason_count: fanout_reasons.len(),
+            max_hops: request.max_hops,
+            path_limit: Some(request.limit),
+            node_limit: None,
+            relationship_limit: None,
+        }),
         paths,
         fanout_reasons,
     }
@@ -1910,6 +2001,18 @@ fn knowledge_subgraph_for(
             nodes: Vec::new(),
             relationships: Vec::new(),
             fanout_reasons: Vec::new(),
+            diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                seed_found: false,
+                target_found: None,
+                path_count: 0,
+                node_count: 0,
+                relationship_count: 0,
+                fanout_reason_count: 0,
+                max_hops: request.max_hops,
+                path_limit: None,
+                node_limit: Some(request.node_limit),
+                relationship_limit: Some(request.relationship_limit),
+            }),
         };
     };
     let relationship_type = match request.relationship_type.as_deref() {
@@ -1922,6 +2025,20 @@ fn knowledge_subgraph_for(
                     nodes: vec![knowledge_entity_from_node(catalog, seed)],
                     relationships: Vec::new(),
                     fanout_reasons: Vec::new(),
+                    diagnostics: knowledge_traversal_diagnostics(
+                        KnowledgeTraversalDiagnosticInput {
+                            seed_found: true,
+                            target_found: None,
+                            path_count: 0,
+                            node_count: 1,
+                            relationship_count: 0,
+                            fanout_reason_count: 0,
+                            max_hops: request.max_hops,
+                            path_limit: None,
+                            node_limit: Some(request.node_limit),
+                            relationship_limit: Some(request.relationship_limit),
+                        },
+                    ),
                 };
             }
         },
@@ -1942,9 +2059,51 @@ fn knowledge_subgraph_for(
     KnowledgeSubgraphOutput {
         graph_commit_epoch: store.commit_epoch(),
         seed_node_id: Some(seed.id.0),
+        diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            seed_found: true,
+            target_found: None,
+            path_count: relationships.len(),
+            node_count: nodes.len(),
+            relationship_count: relationships.len(),
+            fanout_reason_count: fanout_reasons.len(),
+            max_hops: request.max_hops,
+            path_limit: None,
+            node_limit: Some(request.node_limit),
+            relationship_limit: Some(request.relationship_limit),
+        }),
         nodes,
         relationships,
         fanout_reasons,
+    }
+}
+
+struct KnowledgeTraversalDiagnosticInput {
+    seed_found: bool,
+    target_found: Option<bool>,
+    path_count: usize,
+    node_count: usize,
+    relationship_count: usize,
+    fanout_reason_count: usize,
+    max_hops: usize,
+    path_limit: Option<usize>,
+    node_limit: Option<usize>,
+    relationship_limit: Option<usize>,
+}
+
+fn knowledge_traversal_diagnostics(
+    input: KnowledgeTraversalDiagnosticInput,
+) -> KnowledgeTraversalDiagnostics {
+    KnowledgeTraversalDiagnostics {
+        seed_found: input.seed_found,
+        target_found: input.target_found,
+        path_count: input.path_count,
+        node_count: input.node_count,
+        relationship_count: input.relationship_count,
+        fanout_reason_count: input.fanout_reason_count,
+        max_hops: input.max_hops,
+        path_limit: input.path_limit,
+        node_limit: input.node_limit,
+        relationship_limit: input.relationship_limit,
     }
 }
 
@@ -4473,6 +4632,13 @@ mod tests {
         assert_eq!(outgoing.seed_node_id, Some(0));
         assert_eq!(outgoing.graph_commit_epoch, 5);
         assert_eq!(outgoing.paths.len(), 2);
+        assert!(outgoing.diagnostics.seed_found);
+        assert_eq!(outgoing.diagnostics.target_found, None);
+        assert_eq!(outgoing.diagnostics.path_count, 2);
+        assert_eq!(outgoing.diagnostics.relationship_count, 2);
+        assert_eq!(outgoing.diagnostics.fanout_reason_count, 0);
+        assert_eq!(outgoing.diagnostics.max_hops, 2);
+        assert_eq!(outgoing.diagnostics.path_limit, Some(8));
         assert!(outgoing.fanout_reasons.is_empty());
         assert!(outgoing
             .paths
@@ -4531,6 +4697,11 @@ mod tests {
             max_hops: 1,
         });
         assert_eq!(limited.paths.len(), 1);
+        assert!(limited.diagnostics.seed_found);
+        assert_eq!(limited.diagnostics.path_count, 1);
+        assert_eq!(limited.diagnostics.relationship_count, 1);
+        assert_eq!(limited.diagnostics.fanout_reason_count, 1);
+        assert_eq!(limited.diagnostics.path_limit, Some(1));
         assert_eq!(limited.fanout_reasons.len(), 1);
         assert!(limited.fanout_reasons[0].contains("knowledge_neighbors limit 1"));
 
@@ -4543,6 +4714,10 @@ mod tests {
             max_hops: 1,
         });
         assert_eq!(missing.seed_node_id, None);
+        assert!(!missing.diagnostics.seed_found);
+        assert_eq!(missing.diagnostics.path_count, 0);
+        assert_eq!(missing.diagnostics.fanout_reason_count, 0);
+        assert_eq!(missing.diagnostics.path_limit, Some(8));
         assert!(missing.paths.is_empty());
         assert!(missing.fanout_reasons.is_empty());
     }
@@ -4582,6 +4757,13 @@ mod tests {
         assert_eq!(output.source_node_id, Some(0));
         assert_eq!(output.target_node_id, Some(2));
         assert_eq!(output.paths.len(), 1);
+        assert!(output.diagnostics.seed_found);
+        assert_eq!(output.diagnostics.target_found, Some(true));
+        assert_eq!(output.diagnostics.path_count, 1);
+        assert_eq!(output.diagnostics.relationship_count, 2);
+        assert_eq!(output.diagnostics.fanout_reason_count, 0);
+        assert_eq!(output.diagnostics.max_hops, 2);
+        assert_eq!(output.diagnostics.path_limit, Some(4));
         assert!(output.fanout_reasons.is_empty());
         let path = &output.paths[0];
         assert_eq!(path.segments.len(), 2);
@@ -4635,6 +4817,9 @@ mod tests {
             limit: 4,
         });
         assert!(wrong_direction.paths.is_empty());
+        assert!(wrong_direction.diagnostics.seed_found);
+        assert_eq!(wrong_direction.diagnostics.target_found, Some(true));
+        assert_eq!(wrong_direction.diagnostics.path_count, 0);
 
         let limited = db.knowledge_paths(&KnowledgePathRequest {
             source_label: "Memory".to_string(),
@@ -4647,6 +4832,10 @@ mod tests {
             limit: 1,
         });
         assert_eq!(limited.paths.len(), 1);
+        assert_eq!(limited.diagnostics.path_count, 1);
+        assert_eq!(limited.diagnostics.relationship_count, 1);
+        assert_eq!(limited.diagnostics.fanout_reason_count, 1);
+        assert_eq!(limited.diagnostics.path_limit, Some(1));
         assert_eq!(limited.fanout_reasons.len(), 1);
         assert!(limited.fanout_reasons[0].contains("knowledge_paths limit 1"));
 
@@ -4662,6 +4851,9 @@ mod tests {
         });
         assert_eq!(missing.source_node_id, Some(0));
         assert_eq!(missing.target_node_id, None);
+        assert!(missing.diagnostics.seed_found);
+        assert_eq!(missing.diagnostics.target_found, Some(false));
+        assert_eq!(missing.diagnostics.path_count, 0);
         assert!(missing.paths.is_empty());
     }
 
@@ -4719,6 +4911,15 @@ mod tests {
         assert_eq!(output.seed_node_id, Some(0));
         assert_eq!(output.nodes.len(), 3);
         assert_eq!(output.relationships.len(), 2);
+        assert!(output.diagnostics.seed_found);
+        assert_eq!(output.diagnostics.target_found, None);
+        assert_eq!(output.diagnostics.node_count, 3);
+        assert_eq!(output.diagnostics.relationship_count, 2);
+        assert_eq!(output.diagnostics.path_count, 2);
+        assert_eq!(output.diagnostics.fanout_reason_count, 0);
+        assert_eq!(output.diagnostics.max_hops, 2);
+        assert_eq!(output.diagnostics.node_limit, Some(8));
+        assert_eq!(output.diagnostics.relationship_limit, Some(8));
         assert!(output.fanout_reasons.is_empty());
         assert!(output
             .nodes
@@ -4768,6 +4969,11 @@ mod tests {
             relationship_limit: 8,
         });
         assert_eq!(node_limited.nodes.len(), 1);
+        assert!(node_limited.diagnostics.seed_found);
+        assert_eq!(node_limited.diagnostics.node_count, 1);
+        assert_eq!(node_limited.diagnostics.relationship_count, 0);
+        assert_eq!(node_limited.diagnostics.fanout_reason_count, 1);
+        assert_eq!(node_limited.diagnostics.node_limit, Some(1));
         assert!(node_limited.relationships.is_empty());
         assert!(node_limited.fanout_reasons[0].contains("node_limit 1"));
 
@@ -4781,6 +4987,10 @@ mod tests {
             relationship_limit: 1,
         });
         assert_eq!(relationship_limited.relationships.len(), 1);
+        assert_eq!(relationship_limited.diagnostics.node_count, 2);
+        assert_eq!(relationship_limited.diagnostics.relationship_count, 1);
+        assert_eq!(relationship_limited.diagnostics.fanout_reason_count, 1);
+        assert_eq!(relationship_limited.diagnostics.relationship_limit, Some(1));
         assert!(relationship_limited.fanout_reasons[0].contains("relationship_limit 1"));
 
         let missing = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
@@ -4793,6 +5003,10 @@ mod tests {
             relationship_limit: 8,
         });
         assert_eq!(missing.seed_node_id, None);
+        assert!(!missing.diagnostics.seed_found);
+        assert_eq!(missing.diagnostics.node_count, 0);
+        assert_eq!(missing.diagnostics.relationship_count, 0);
+        assert_eq!(missing.diagnostics.fanout_reason_count, 0);
         assert!(missing.nodes.is_empty());
         assert!(missing.relationships.is_empty());
         assert!(missing.fanout_reasons.is_empty());
