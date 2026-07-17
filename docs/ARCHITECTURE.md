@@ -501,11 +501,12 @@ count, final candidate count, pre-limit merged candidate count, response-level
 candidate truncation flag and reasons, graph-context truncation flag and
 reasons, projection source graph commit epoch, stale projection warnings,
 projection marker warnings, and empty-result reasons. Empty-result reasons
-distinguish no matching projection rows from request-budget causes such as a
-disabled graph seed retriever, search limit zero, or response-level candidate
-limit zero. This keeps Knowledge
-Retrieval as the primary application-facing path while preserving the rule that
-search artifacts are rebuildable and outside the graph WAL.
+reuse the search projection report's own empty-result reasons, distinguishing
+empty projections, metadata-filter misses, no matching rows, and request-budget
+causes such as search limit zero, disabled graph seed retrievers, or
+response-level candidate limit zero. This keeps Knowledge Retrieval as the
+primary application-facing path while preserving the rule that search artifacts
+are rebuildable and outside the graph WAL.
 
 `Database::retrieve_knowledge` also includes a bounded graph-native seed
 retriever over canonical nodes. `KnowledgeRetrievalRequest::graph_seed_limit`

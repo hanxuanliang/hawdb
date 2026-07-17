@@ -1933,16 +1933,7 @@ fn knowledge_retrieval_diagnostics(
         request.candidate_limit,
     );
     if input.candidate_count == 0 {
-        if search.document_count == 0 {
-            empty_reasons.push("search projection has no documents".to_string());
-        } else if search.filtered_document_count == 0 {
-            empty_reasons.push("metadata filters matched no search documents".to_string());
-        } else if search.total_hits == 0 {
-            empty_reasons
-                .push("search retrievers returned no hits inside filtered scope".to_string());
-        } else if search.hits.is_empty() && search.truncated {
-            empty_reasons.extend(search.truncation_reasons.iter().cloned());
-        }
+        empty_reasons.extend(search.empty_reasons.iter().cloned());
         if input.candidate_total_count == 0 {
             if request.graph_seed_limit == 0 {
                 empty_reasons.push("graph seed retriever disabled by limit 0".to_string());

@@ -150,6 +150,7 @@ pub struct SearchResultSet {
     pub limit: usize,
     pub truncated: bool,
     pub truncation_reasons: Vec<String>,
+    pub empty_reasons: Vec<String>,
     pub retrievers: Vec<SearchRetrieverReport>,
     pub candidate_set: SearchCandidateSetReport,
     pub rank_window: Option<usize>,
@@ -1081,12 +1082,20 @@ impl SearchIndex {
         } else {
             Vec::new()
         };
+        let empty_reasons = search_empty_reasons(
+            hits.is_empty(),
+            document_count,
+            filtered_document_count,
+            total_hits,
+            &truncation_reasons,
+        );
         SearchResultSet {
             hits,
             total_hits,
             limit,
             truncated,
             truncation_reasons,
+            empty_reasons,
             retrievers,
             candidate_set,
             rank_window: options.rank_window,
@@ -1401,6 +1410,28 @@ fn ranked_scores(scores: &BTreeMap<String, f64>) -> BTreeMap<String, usize> {
         .enumerate()
         .map(|(index, (id, _score))| (id, index + 1))
         .collect()
+}
+
+fn search_empty_reasons(
+    returned_empty: bool,
+    document_count: usize,
+    filtered_document_count: usize,
+    total_hits: usize,
+    truncation_reasons: &[String],
+) -> Vec<String> {
+    if !returned_empty {
+        return Vec::new();
+    }
+    if document_count == 0 {
+        return vec!["search projection has no documents".to_string()];
+    }
+    if filtered_document_count == 0 {
+        return vec!["metadata filters matched no search documents".to_string()];
+    }
+    if total_hits == 0 {
+        return vec!["search retrievers returned no hits inside filtered scope".to_string()];
+    }
+    truncation_reasons.to_vec()
 }
 
 fn window_ranks(
@@ -3428,6 +3459,98 @@ mod tests {
         assert_eq!(result.truncation_reasons.len(), 1);
         assert!(result.truncation_reasons[0].contains("limit 2"));
         assert!(result.truncation_reasons[0].contains("3 matching hits"));
+    }
+
+    #[test]
+    fn search_report_exposes_empty_projection_reason() {
+        let index = SearchIndex::in_memory();
+
+        let result = index.search_with_report("graph", None, SearchMode::Text, 10);
+
+        assert!(result.hits.is_empty());
+        assert_eq!(
+            result.empty_reasons,
+            vec!["search projection has no documents".to_string()]
+        );
+    }
+
+    #[test]
+    fn search_report_exposes_metadata_filter_empty_reason() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "a".to_string(),
+                title: "Graph retrieval".to_string(),
+                content: "projection evidence".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("space_id".to_string(), "archive".to_string())]),
+                policy_epoch: None,
+            },
+        );
+
+        assert!(result.hits.is_empty());
+        assert_eq!(
+            result.empty_reasons,
+            vec!["metadata filters matched no search documents".to_string()]
+        );
+    }
+
+    #[test]
+    fn search_report_exposes_no_matching_rows_empty_reason() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "a".to_string(),
+                title: "Graph retrieval".to_string(),
+                content: "projection evidence".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let result = index.search_with_report("unmatched needle", None, SearchMode::Text, 10);
+
+        assert!(result.hits.is_empty());
+        assert_eq!(
+            result.empty_reasons,
+            vec!["search retrievers returned no hits inside filtered scope".to_string()]
+        );
+    }
+
+    #[test]
+    fn search_report_exposes_limit_zero_empty_reason() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "a".to_string(),
+                title: "Graph retrieval".to_string(),
+                content: "projection evidence".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let result = index.search_with_report("graph", None, SearchMode::Text, 0);
+
+        assert!(result.hits.is_empty());
+        assert_eq!(result.total_hits, 1);
+        assert!(result.truncated);
+        assert_eq!(
+            result.empty_reasons,
+            vec!["limit 0 returned from 1 matching hits".to_string()]
+        );
     }
 
     #[test]
