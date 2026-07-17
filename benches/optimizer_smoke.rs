@@ -319,6 +319,20 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "bounded_path_distinct_target_aggregate",
+            logical: bounded_path_distinct_target_aggregate_plan(),
+            catalog: bounded_path_distinct_target_aggregate_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 5,
+                cost: 5_044,
+            },
+            fingerprint_contains: "count(distinct 1:e)",
+            decision_contains: &[
+                "estimate AdjacencyExpand for Memory-[:RELATES_TO*2..2]->Entity",
+                "selected physical plan cost: estimated_rows=5 cost=5044",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "thread_cleanup_optional_count",
             logical: thread_cleanup_optional_count_plan(),
             catalog: thread_cleanup_optional_count_catalog(),
@@ -1567,6 +1581,77 @@ fn entity_bridge_span_aggregate_catalog() -> OptimizerCatalog {
             ],
             [],
         ),
+    )
+}
+
+fn bounded_path_distinct_target_aggregate_plan() -> LogicalPlan {
+    LogicalPlan::Aggregate {
+        group_keys: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "unit_type".to_string(),
+            },
+            name: "unit_type".to_string(),
+        }],
+        items: vec![Aggregation {
+            function: AggregateFunction::Count,
+            target: AggregateTarget::Variable("e".to_string()),
+            distinct: true,
+            name: "two_hop_entities".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Expand {
+            source_variable: "m".to_string(),
+            source_label: "Memory".to_string(),
+            rel_variable: None,
+            rel_type: "RELATES_TO".to_string(),
+            rel_properties: BTreeMap::new(),
+            direction: RelationshipDirection::Outgoing,
+            target_variable: "e".to_string(),
+            target_label: "Entity".to_string(),
+            min_hops: 2,
+            max_hops: 2,
+            optional: false,
+            input: Box::new(memory_scan()),
+        }),
+    }
+}
+
+fn bounded_path_distinct_target_aggregate_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 1_000), ("Entity".to_string(), 5_000)],
+            [("RELATES_TO".to_string(), 10_000)],
+            [("RELATES_TO".to_string(), 1_000)],
+            [(
+                (
+                    "Memory".to_string(),
+                    "RELATES_TO".to_string(),
+                    "Entity".to_string(),
+                ),
+                2_000,
+            )],
+            [(
+                (
+                    "Memory".to_string(),
+                    "RELATES_TO".to_string(),
+                    "Entity".to_string(),
+                    2,
+                ),
+                1_500,
+            )],
+            [(("Memory".to_string(), "unit_type".to_string()), 5)],
+            [],
+        )
+        .with_bounded_path_target_distinct_counts([(
+            (
+                "Memory".to_string(),
+                "RELATES_TO".to_string(),
+                "Entity".to_string(),
+                2,
+            ),
+            40,
+        )]),
     )
 }
 

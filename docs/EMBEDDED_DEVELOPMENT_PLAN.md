@@ -937,7 +937,9 @@ Current implemented slice:
   parameter filters, grouped node-property aggregate cardinality, selected-plan
   cost stability, deterministic fingerprints, budget-fallback paths, one-hop
   and bounded multi-hop path source/target coverage distinct statistics for
-  distinct variable aggregate costing without depending on a storage fixture
+  distinct variable aggregate costing without depending on a storage fixture,
+  plus optimizer smoke coverage for bounded multi-hop distinct-target
+  aggregates
 
 Remaining Phase 4 work:
 
