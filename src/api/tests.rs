@@ -1122,6 +1122,7 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
     assert_eq!(output.diagnostics.search_document_count, 1);
     assert_eq!(output.diagnostics.search_filtered_document_count, 0);
     assert_eq!(output.diagnostics.search_total_hits, 0);
+    assert_eq!(output.diagnostics.search_candidate_filtered_out_count, 1);
     assert_eq!(output.diagnostics.search_limit, 10);
     assert_eq!(output.diagnostics.rank_window, None);
     assert_eq!(output.diagnostics.graph_seed_candidate_count, 0);
