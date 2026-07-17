@@ -384,6 +384,8 @@ report-oriented orchestration API with document counts, scanned nodes, indexed
 documents, lifecycle-marker state, and lifecycle-marker reasons. Projection
 freshness carries the current full-reindex and metadata-repair marker reasons so
 retrieval diagnostics can explain why a projection is stale or requires repair.
+In-memory projections retain the same marker state for diagnostics; path-backed
+projections also persist markers as files.
 
 Metadata-only repairs use the same graph-derived projection row mapping but only
 replace document metadata for already-present projection rows. They preserve

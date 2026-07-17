@@ -2,6 +2,7 @@ use crate::error::{Result, SkeinError};
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeRecord};
 use crate::value::Value;
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -246,6 +247,7 @@ pub struct SearchIndex {
     embedding_dimension: Option<usize>,
     embedding_manifest: Option<SearchEmbeddingManifest>,
     source_graph_commit_epoch: Option<u64>,
+    marker_lines: RefCell<BTreeMap<String, Vec<String>>>,
 }
 
 impl SearchIndex {
@@ -261,6 +263,7 @@ impl SearchIndex {
             embedding_dimension: None,
             embedding_manifest: None,
             source_graph_commit_epoch: None,
+            marker_lines: RefCell::new(BTreeMap::new()),
         };
         index.load_snapshot()?;
         Ok(index)
@@ -727,8 +730,8 @@ impl SearchIndex {
     }
 
     pub fn metadata_repair_needed(&self) -> bool {
-        self.marker_path(METADATA_REPAIR_MARKER)
-            .map(|path| path.exists())
+        self.read_marker_lines(METADATA_REPAIR_MARKER)
+            .map(|lines| !lines.is_empty())
             .unwrap_or(false)
     }
 
@@ -835,6 +838,13 @@ impl SearchIndex {
     }
 
     fn append_marker(&self, name: &str, reason: &str) -> Result<()> {
+        {
+            let mut marker_lines = self.marker_lines.borrow_mut();
+            let lines = marker_lines.entry(name.to_string()).or_default();
+            if !lines.iter().any(|line| line == reason) {
+                lines.push(reason.to_string());
+            }
+        }
         let Some(path) = self.marker_path(name) else {
             return Ok(());
         };
@@ -852,6 +862,9 @@ impl SearchIndex {
     }
 
     fn write_marker(&self, name: &str, reason: &str) -> Result<()> {
+        self.marker_lines
+            .borrow_mut()
+            .insert(name.to_string(), vec![reason.to_string()]);
         let Some(path) = self.marker_path(name) else {
             return Ok(());
         };
@@ -860,6 +873,7 @@ impl SearchIndex {
     }
 
     fn clear_marker(&self, name: &str) -> Result<()> {
+        self.marker_lines.borrow_mut().remove(name);
         let Some(path) = self.marker_path(name) else {
             return Ok(());
         };
@@ -872,7 +886,12 @@ impl SearchIndex {
 
     fn read_marker_lines(&self, name: &str) -> Result<Vec<String>> {
         let Some(path) = self.marker_path(name) else {
-            return Ok(Vec::new());
+            return Ok(self
+                .marker_lines
+                .borrow()
+                .get(name)
+                .cloned()
+                .unwrap_or_default());
         };
         let content = fs::read_to_string(path).unwrap_or_default();
         Ok(content
@@ -3226,6 +3245,12 @@ mod tests {
         assert!(error.to_string().contains("row limit"));
         assert_eq!(index.document_count(), 1);
         assert!(index.document("old").is_some());
+        let freshness = index.projection_freshness();
+        assert!(freshness.full_reindex_needed);
+        assert_eq!(
+            freshness.full_reindex_reasons,
+            vec!["full rebuild exceeded configured row limit".to_string()]
+        );
     }
 
     #[test]
@@ -3504,6 +3529,12 @@ mod tests {
                 .get("kind")
                 .map(String::as_str),
             Some("stale")
+        );
+        let freshness = index.projection_freshness();
+        assert!(freshness.metadata_repair_needed);
+        assert_eq!(
+            freshness.metadata_repair_reasons,
+            vec!["metadata repair exceeded configured row limit".to_string()]
         );
     }
 
