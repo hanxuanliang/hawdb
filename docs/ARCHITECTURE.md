@@ -437,9 +437,10 @@ projection metadata:
 `kind` maps to canonical node labels, `external_id` maps to node `id`, and other
 keys map to same-name scalar node properties. Returned diagnostics preserve the
 rank window, filtered candidate counts, search document scope, search hit count,
-graph seed counts, final candidate count, and empty-result reasons. This keeps
-Knowledge Retrieval as the primary application-facing path while preserving the
-rule that search artifacts are rebuildable and outside the graph WAL.
+graph seed counts, graph context path count, fan-out reason count, final
+candidate count, and empty-result reasons. This keeps Knowledge Retrieval as
+the primary application-facing path while preserving the rule that search
+artifacts are rebuildable and outside the graph WAL.
 
 `Database::retrieve_knowledge` also includes a bounded graph-native seed
 retriever over canonical nodes. `KnowledgeRetrievalRequest::graph_seed_limit`

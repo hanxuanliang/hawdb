@@ -393,6 +393,8 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_total_hits: usize,
     pub graph_seed_candidate_count: usize,
     pub graph_seed_returned_count: usize,
+    pub graph_context_path_count: usize,
+    pub fanout_reason_count: usize,
     pub candidate_count: usize,
     pub empty_reasons: Vec<String>,
 }
@@ -1031,6 +1033,8 @@ impl Database {
             &search,
             graph_seed_candidate_count,
             graph_seeds.len(),
+            graph_context_paths.len(),
+            fanout_reasons.len(),
             candidates.len(),
             request.graph_seed_limit,
         );
@@ -1594,6 +1598,8 @@ fn knowledge_retrieval_diagnostics(
     search: &SearchResultSet,
     graph_seed_candidate_count: usize,
     graph_seed_returned_count: usize,
+    graph_context_path_count: usize,
+    fanout_reason_count: usize,
     candidate_count: usize,
     graph_seed_limit: usize,
 ) -> KnowledgeRetrievalDiagnostics {
@@ -1617,6 +1623,8 @@ fn knowledge_retrieval_diagnostics(
         search_total_hits: search.total_hits,
         graph_seed_candidate_count,
         graph_seed_returned_count,
+        graph_context_path_count,
+        fanout_reason_count,
         candidate_count,
         empty_reasons,
     }
@@ -3926,6 +3934,8 @@ mod tests {
             .matched_properties
             .contains(&"content".to_string()));
         assert!(output.graph_seeds[0].score >= output.graph_seeds[1].score);
+        assert_eq!(output.diagnostics.graph_context_path_count, 1);
+        assert_eq!(output.diagnostics.fanout_reason_count, 1);
         assert_eq!(output.fanout_reasons.len(), 1);
         assert!(output.fanout_reasons[0].contains("graph_context_limit 1"));
     }
@@ -3968,6 +3978,8 @@ mod tests {
         assert_eq!(output.diagnostics.search_total_hits, 1);
         assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
         assert_eq!(output.diagnostics.graph_seed_returned_count, 1);
+        assert_eq!(output.diagnostics.graph_context_path_count, 0);
+        assert_eq!(output.diagnostics.fanout_reason_count, 0);
         assert_eq!(output.diagnostics.candidate_count, 1);
         assert!(output.diagnostics.empty_reasons.is_empty());
         assert_eq!(output.search.hits[0].external_id.as_deref(), Some("mem_1"));
@@ -4034,6 +4046,8 @@ mod tests {
         assert_eq!(output.diagnostics.search_total_hits, 0);
         assert_eq!(output.diagnostics.graph_seed_candidate_count, 0);
         assert_eq!(output.diagnostics.graph_seed_returned_count, 0);
+        assert_eq!(output.diagnostics.graph_context_path_count, 0);
+        assert_eq!(output.diagnostics.fanout_reason_count, 0);
         assert_eq!(output.diagnostics.candidate_count, 0);
         assert!(output
             .diagnostics
