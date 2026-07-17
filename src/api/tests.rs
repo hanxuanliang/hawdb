@@ -6431,6 +6431,55 @@ fn undirected_one_hop_relationship_patterns_match_both_directions() {
 }
 
 #[test]
+fn one_hop_relationship_patterns_follow_ordered_adjacency_view() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 0})").unwrap();
+    db.query("CREATE (:Memory {id: 10})").unwrap();
+    db.query("CREATE (:Memory {id: 11})").unwrap();
+    db.query("CREATE (:Memory {id: 12})").unwrap();
+    db.query("CREATE (:Entity {id: 1})").unwrap();
+    db.query("CREATE (:Entity {id: 2})").unwrap();
+    db.query("CREATE (:Entity {id: 3})").unwrap();
+    db.query("CREATE (:Entity {id: 99})").unwrap();
+    db.query("MATCH (m:Memory {id: 0}), (e:Entity {id: 3}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 0}), (e:Entity {id: 1}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 0}), (e:Entity {id: 2}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 12}), (e:Entity {id: 99}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 10}), (e:Entity {id: 99}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 11}), (e:Entity {id: 99}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+
+    let outgoing = db
+        .query("MATCH (m:Memory {id: 0})-[:MENTIONS]->(e:Entity) RETURN e.id AS id")
+        .unwrap();
+    let incoming = db
+        .query("MATCH (e:Entity {id: 99})<-[:MENTIONS]-(m:Memory) RETURN m.id AS id")
+        .unwrap();
+
+    assert_eq!(
+        outgoing
+            .rows
+            .iter()
+            .map(|row| row.get("id").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![Value::Int(1), Value::Int(2), Value::Int(3)]
+    );
+    assert_eq!(
+        incoming
+            .rows
+            .iter()
+            .map(|row| row.get("id").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![Value::Int(10), Value::Int(11), Value::Int(12)]
+    );
+}
+
+#[test]
 fn incoming_one_hop_relationship_patterns_match_nowledge_reads() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1})-[:MENTIONS {weight: 3}]->(:Entity {id: 10})")

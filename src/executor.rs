@@ -11,12 +11,13 @@ use crate::planner::{
 };
 use crate::schema::{Catalog, PropertyType, TableKind};
 use crate::store::{
-    ConnectedNodesCreate, GraphMutation, GraphStore, MatchedRelationshipCopyMerge,
-    MatchedRelationshipCreate, MatchedRelationshipMerge, MatchedRelationshipRetargetMerge,
-    MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord, NodeSetAssignment, NodeSetValue,
-    ProjectedGraphDefinition, PropertyFilter, RelRecord, RelationshipDeleteRequest,
-    RelationshipOnCreatePropertyValue, RelationshipPropertiesUpdate, RelationshipPropertyUpdate,
-    RelationshipSetAssignment, RelationshipTargetNodeDelete,
+    AdjacencyDirection, ConnectedNodesCreate, GraphMutation, GraphStore,
+    MatchedRelationshipCopyMerge, MatchedRelationshipCreate, MatchedRelationshipMerge,
+    MatchedRelationshipRetargetMerge, MatchedRelationshipSourceRetargetMerge, NodeId, NodeRecord,
+    NodeSetAssignment, NodeSetValue, OrderedAdjacencyEntry, ProjectedGraphDefinition,
+    PropertyFilter, RelRecord, RelationshipDeleteRequest, RelationshipOnCreatePropertyValue,
+    RelationshipPropertiesUpdate, RelationshipPropertyUpdate, RelationshipSetAssignment,
+    RelationshipTargetNodeDelete,
 };
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -2804,12 +2805,11 @@ fn one_hop_relationships<'a>(
             direction,
             RelationshipDirection::Outgoing | RelationshipDirection::Undirected
         ) {
-            collect_one_hop_relationships(
-                store.outgoing_relationships(source, rel_type_id),
+            collect_ordered_one_hop_relationships(
+                store.ordered_adjacency_entries(source, rel_type_id, AdjacencyDirection::Outgoing),
                 store,
                 target_label_ids,
                 rel_properties,
-                |relationship| relationship.target,
                 &mut seen,
                 &mut matches,
             );
@@ -2818,16 +2818,16 @@ fn one_hop_relationships<'a>(
             direction,
             RelationshipDirection::Incoming | RelationshipDirection::Undirected
         ) {
-            collect_one_hop_relationships(
-                store.incoming_relationships(source, rel_type_id),
+            collect_ordered_one_hop_relationships(
+                store.ordered_adjacency_entries(source, rel_type_id, AdjacencyDirection::Incoming),
                 store,
                 target_label_ids,
                 rel_properties,
-                |relationship| relationship.source,
                 &mut seen,
                 &mut matches,
             );
         }
+        matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
         return matches;
     }
 
@@ -2863,6 +2863,7 @@ fn one_hop_relationships<'a>(
             &mut matches,
         );
     }
+    matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
     matches
 }
 
@@ -3024,6 +3025,33 @@ fn thread_repair_stats_rows(
         .collect()
 }
 
+fn collect_ordered_one_hop_relationships<'a>(
+    entries: Vec<OrderedAdjacencyEntry>,
+    store: &'a GraphStore,
+    target_label_ids: Option<&[crate::schema::LabelId]>,
+    rel_properties: &BTreeMap<String, Value>,
+    seen: &mut std::collections::BTreeSet<crate::store::RelId>,
+    matches: &mut Vec<(&'a RelRecord, &'a NodeRecord)>,
+) {
+    for entry in entries {
+        if !seen.insert(entry.relationship_id) {
+            continue;
+        }
+        let Some(relationship) = store.relationship(entry.relationship_id) else {
+            continue;
+        };
+        if !relationship_properties_match(relationship, rel_properties) {
+            continue;
+        }
+        let Some(target) = store.node(entry.neighbor_id) else {
+            continue;
+        };
+        if node_matches_label_pattern(target, target_label_ids) {
+            matches.push((relationship, target));
+        }
+    }
+}
+
 fn collect_one_hop_relationships<'a>(
     relationships: impl Iterator<Item = &'a RelRecord>,
     store: &'a GraphStore,
@@ -3098,8 +3126,12 @@ impl<'a> BoundedExpand<'a> {
         if depth == self.max_hops {
             return;
         }
-        for relationship in self.store.outgoing_relationships(current, self.rel_type_id) {
-            self.collect(relationship.target, depth + 1, targets);
+        for entry in self.store.ordered_adjacency_entries(
+            current,
+            self.rel_type_id,
+            AdjacencyDirection::Outgoing,
+        ) {
+            self.collect(entry.neighbor_id, depth + 1, targets);
         }
     }
 }
