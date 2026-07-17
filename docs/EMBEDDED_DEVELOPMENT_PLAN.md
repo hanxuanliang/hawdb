@@ -582,7 +582,10 @@ projection artifacts expose the same report-oriented rebuild shape through
 `SearchIndex::rebuild_derived_artifacts`. Search projections also expose
 bounded incremental deltas for ordinary FTS/BM25 row upsert/delete changes:
 `SearchIndex::apply_projection_delta` accepts an operation budget and fails
-without partial index mutation on budget or embedding-dimension errors. Content
+without partial index mutation on budget or embedding-dimension errors.
+Internal background callers can use `SearchIndex::apply_background_projection_delta`
+to pass the same delta through `LocalQosPolicy` admission before applying it;
+foreground user-triggered deltas can still use the direct API. Content
 artifact jobs are scheduled at
 the same boundary; callers can attach structured job payloads for object
 references, checksums, parser hints, and projection targets. The default

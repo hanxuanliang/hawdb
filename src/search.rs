@@ -1,4 +1,5 @@
 use crate::error::{Result, SkeinError};
+use crate::qos::{LocalQosPolicy, LocalQosState, QosAdmission, WorkClass, WorkRequest};
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeRecord};
 use crate::value::Value;
@@ -311,6 +312,16 @@ pub struct SearchProjectionDelta {
     pub max_operations: Option<usize>,
 }
 
+impl SearchProjectionDelta {
+    pub fn operation_count(&self) -> usize {
+        self.upserts.len() + self.deletes.len()
+    }
+
+    pub fn background_work_request(&self) -> WorkRequest {
+        WorkRequest::background(WorkClass::Projection, self.operation_count())
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchProjectionDeltaReport {
     pub artifact_type: String,
@@ -383,7 +394,7 @@ impl SearchIndex {
         &mut self,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
-        let operation_count = delta.upserts.len() + delta.deletes.len();
+        let operation_count = delta.operation_count();
         if let Some(limit) = delta.max_operations {
             if operation_count > limit {
                 return Err(SkeinError::Storage(format!(
@@ -443,6 +454,23 @@ impl SearchIndex {
             deleted_documents,
             operation_count,
         })
+    }
+
+    pub fn apply_background_projection_delta(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        match policy.admit(state, &delta.background_work_request()) {
+            QosAdmission::Admit => self.apply_projection_delta(delta),
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background search projection delta deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background search projection delta rejected: {reason}"
+            ))),
+        }
     }
 
     pub fn document(&self, id: &str) -> Option<&SearchDocument> {
@@ -3848,6 +3876,80 @@ mod tests {
         assert_eq!(index.document_count(), 1);
         assert!(index.document("memory:old").is_some());
         assert!(index.document("memory:new").is_none());
+    }
+
+    #[test]
+    fn background_projection_delta_uses_qos_admission() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:old",
+                "Old projection",
+                "Should stay",
+                [1.0, 0.0],
+            ))
+            .unwrap();
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        };
+
+        let error = index
+            .apply_background_projection_delta(
+                &policy,
+                &LocalQosState::default(),
+                SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "new".to_string(),
+                        title: "Deferred projection".to_string(),
+                        body: "Should not be applied".to_string(),
+                        embedding: Some(vec![0.0, 1.0]),
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: vec!["memory:old".to_string()],
+                    max_operations: Some(2),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        assert_eq!(index.document_count(), 1);
+        assert!(index.document("memory:old").is_some());
+        assert!(index.document("memory:new").is_none());
+    }
+
+    #[test]
+    fn background_projection_delta_applies_when_qos_admits() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc("memory:old", "Old projection", "Remove me", [1.0, 0.0]))
+            .unwrap();
+
+        let report = index
+            .apply_background_projection_delta(
+                &LocalQosPolicy::default(),
+                &LocalQosState::default(),
+                SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "new".to_string(),
+                        title: "Admitted projection".to_string(),
+                        body: "QoS admitted background work".to_string(),
+                        embedding: Some(vec![0.0, 1.0]),
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: vec!["memory:old".to_string()],
+                    max_operations: Some(2),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(report.operation_count, 2);
+        assert!(index.document("memory:old").is_none());
+        assert!(index.document("memory:new").is_some());
     }
 
     #[test]
