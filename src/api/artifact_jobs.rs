@@ -171,31 +171,20 @@ impl Database {
             .iter()
             .filter(|job| is_external_content_artifact_job(&job.artifact_type))
         {
-            summary.total += 1;
-            match job.status {
-                DerivedArtifactJobStatus::Pending => {
-                    summary.pending += 1;
-                    *summary
-                        .pending_by_action
-                        .entry(job.action.clone())
-                        .or_default() += 1;
-                    summary.next_pending_job_id.get_or_insert(job.id);
-                }
-                DerivedArtifactJobStatus::Running => {
-                    summary.running += 1;
-                }
-                DerivedArtifactJobStatus::Succeeded => {
-                    summary.succeeded += 1;
-                }
-                DerivedArtifactJobStatus::Failed => {
-                    summary.failed += 1;
-                    *summary
-                        .failed_by_action
-                        .entry(job.action.clone())
-                        .or_default() += 1;
-                    summary.oldest_failed_job_id.get_or_insert(job.id);
-                }
-            }
+            summarize_external_content_artifact_job(&mut summary, job);
+        }
+        summary
+    }
+
+    pub fn external_content_artifact_job_summary_for_action(
+        &self,
+        action: &str,
+    ) -> ExternalContentArtifactJobSummary {
+        let mut summary = ExternalContentArtifactJobSummary::default();
+        for job in self.derived_artifact_jobs.iter().filter(|job| {
+            job.action == action && is_external_content_artifact_job(&job.artifact_type)
+        }) {
+            summarize_external_content_artifact_job(&mut summary, job);
         }
         summary
     }
@@ -746,4 +735,35 @@ fn is_external_content_artifact_job(artifact_type: &str) -> bool {
         artifact_type,
         "content_artifact" | "artifact_parse" | "content_parse" | "blob_parse" | "crawler"
     )
+}
+
+fn summarize_external_content_artifact_job(
+    summary: &mut ExternalContentArtifactJobSummary,
+    job: &DerivedArtifactJob,
+) {
+    summary.total += 1;
+    match job.status {
+        DerivedArtifactJobStatus::Pending => {
+            summary.pending += 1;
+            *summary
+                .pending_by_action
+                .entry(job.action.clone())
+                .or_default() += 1;
+            summary.next_pending_job_id.get_or_insert(job.id);
+        }
+        DerivedArtifactJobStatus::Running => {
+            summary.running += 1;
+        }
+        DerivedArtifactJobStatus::Succeeded => {
+            summary.succeeded += 1;
+        }
+        DerivedArtifactJobStatus::Failed => {
+            summary.failed += 1;
+            *summary
+                .failed_by_action
+                .entry(job.action.clone())
+                .or_default() += 1;
+            summary.oldest_failed_job_id.get_or_insert(job.id);
+        }
+    }
 }

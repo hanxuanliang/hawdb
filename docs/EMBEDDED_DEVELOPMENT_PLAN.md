@@ -652,7 +652,10 @@ same Import-lane admission to that concrete job. Action-specific runtimes can
 also poll failed jobs for their own action through
 `Database::failed_external_content_artifact_jobs_for_action` and requeue only
 their own failed work through
-`Database::retry_failed_external_content_artifact_job_for_action`.
+`Database::retry_failed_external_content_artifact_job_for_action`. They can also
+read `Database::external_content_artifact_job_summary_for_action` before
+claiming work, so resource-constrained parser/crawler loops can account for
+only their own pending and failed queue pressure.
 
 An internal compatibility fixture harness is implemented for Nowledge-shaped
 query families. It runs setup statements, parameterized Cypher checks, expected

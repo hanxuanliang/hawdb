@@ -6863,6 +6863,26 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
     assert_eq!(initial.next_pending_job_id, Some(first.id));
     assert_eq!(initial.oldest_failed_job_id, None);
 
+    let initial_parse = db.external_content_artifact_job_summary_for_action("parse");
+    assert_eq!(initial_parse.total, 1);
+    assert_eq!(initial_parse.pending, 1);
+    assert_eq!(initial_parse.failed, 0);
+    assert_eq!(
+        initial_parse.pending_by_action,
+        BTreeMap::from([("parse".to_string(), 1)])
+    );
+    assert!(initial_parse.failed_by_action.is_empty());
+    assert_eq!(initial_parse.next_pending_job_id, Some(first.id));
+    assert_eq!(initial_parse.oldest_failed_job_id, None);
+
+    let initial_crawl = db.external_content_artifact_job_summary_for_action("crawl");
+    assert_eq!(initial_crawl.total, 1);
+    assert_eq!(initial_crawl.pending, 1);
+    assert_eq!(initial_crawl.next_pending_job_id, Some(second.id));
+    let initial_embed = db.external_content_artifact_job_summary_for_action("embed");
+    assert_eq!(initial_embed.total, 0);
+    assert!(initial_embed.pending_by_action.is_empty());
+
     let failed = db
         .run_external_content_artifact_job_with(first.id, |_| {
             Err(crate::error::SkeinError::Execution(
@@ -6899,6 +6919,26 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
     assert_eq!(after_run.next_pending_job_id, None);
     assert_eq!(after_run.oldest_failed_job_id, Some(first.id));
 
+    let parse_after_run = db.external_content_artifact_job_summary_for_action("parse");
+    assert_eq!(parse_after_run.total, 1);
+    assert_eq!(parse_after_run.pending, 0);
+    assert_eq!(parse_after_run.failed, 1);
+    assert!(parse_after_run.pending_by_action.is_empty());
+    assert_eq!(
+        parse_after_run.failed_by_action,
+        BTreeMap::from([("parse".to_string(), 1)])
+    );
+    assert_eq!(parse_after_run.next_pending_job_id, None);
+    assert_eq!(parse_after_run.oldest_failed_job_id, Some(first.id));
+
+    let crawl_after_run = db.external_content_artifact_job_summary_for_action("crawl");
+    assert_eq!(crawl_after_run.total, 1);
+    assert_eq!(crawl_after_run.pending, 0);
+    assert_eq!(crawl_after_run.succeeded, 1);
+    assert_eq!(crawl_after_run.failed, 0);
+    assert_eq!(crawl_after_run.next_pending_job_id, None);
+    assert_eq!(crawl_after_run.oldest_failed_job_id, None);
+
     db.retry_failed_external_content_artifact_job(first.id)
         .unwrap();
     let after_retry = db.external_content_artifact_job_summary();
@@ -6913,6 +6953,13 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
     assert!(after_retry.failed_by_action.is_empty());
     assert_eq!(after_retry.next_pending_job_id, Some(first.id));
     assert_eq!(after_retry.oldest_failed_job_id, None);
+
+    let parse_after_retry = db.external_content_artifact_job_summary_for_action("parse");
+    assert_eq!(parse_after_retry.total, 1);
+    assert_eq!(parse_after_retry.pending, 1);
+    assert_eq!(parse_after_retry.failed, 0);
+    assert_eq!(parse_after_retry.next_pending_job_id, Some(first.id));
+    assert_eq!(parse_after_retry.oldest_failed_job_id, None);
 }
 
 #[test]
