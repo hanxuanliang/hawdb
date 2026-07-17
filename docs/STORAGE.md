@@ -294,10 +294,12 @@ for these projected graph artifacts. Jobs expose pending/running/succeeded/faile
 state, attempts, and last error without adding threads or hiding rebuild
 failures.
 `Database::schedule_external_content_artifact_job` records content/blob parser
-work at the same orchestration boundary, but running that job explicitly fails
-with a graph-kernel-external error. Content parsing, crawling, chunking, and
-large-value runtime work must execute in the caller-owned content artifact job
-runtime and publish rebuildable projections back to Skein.
+work at the same orchestration boundary. The graph-kernel job runner still
+rejects those jobs with a graph-kernel-external error, while
+`Database::run_next_external_content_artifact_job_with` lets the caller supply
+the content artifact runtime and complete the job status without embedding
+parsing, crawling, chunking, or large-value runtime logic in Skein. That runtime
+publishes rebuildable projections back to Skein through caller-owned output.
 
 Search projection rebuild has the same orchestration shape at the search layer:
 `SearchIndex::rebuild_derived_artifacts` reports the search projection artifact
@@ -354,7 +356,7 @@ This is not a production page store yet:
 - no property spill blocks
 - no cost model that consumes persistent statistics for join ordering
 - no columnar property segments
-- no blob/content parser job runtime
+- no database-owned blob/content parser runtime
 
 It is a correctness-first recovery slice that keeps the public direction
 aligned with the intended Adaptive Native Graph Store.
@@ -366,5 +368,5 @@ aligned with the intended Adaptive Native Graph Store.
 3. Add sparse adjacency blocks before dense adjacency segments.
 4. Add property spill blocks for large values.
 5. Add richer index statistics and text analyzer parity.
-6. Add blob/content parser job integration at the boundary outside the graph
-   kernel.
+6. Add richer caller-owned blob/content parser integration at the boundary
+   outside the graph kernel.

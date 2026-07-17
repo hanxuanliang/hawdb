@@ -1204,6 +1204,47 @@ impl Database {
         }
     }
 
+    pub fn run_next_external_content_artifact_job_with(
+        &mut self,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.status == DerivedArtifactJobStatus::Pending
+                && is_external_content_artifact_job(&job.artifact_type)
+        }) else {
+            return Ok(None);
+        };
+
+        self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Running;
+        self.derived_artifact_jobs[index].attempts += 1;
+        self.derived_artifact_jobs[index].last_error = None;
+
+        let runtime_job = self.derived_artifact_jobs[index].clone();
+        match runtime(&runtime_job) {
+            Ok(output) => {
+                self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Succeeded;
+                Ok(Some(DerivedArtifactJobReport {
+                    job: self.derived_artifact_jobs[index].clone(),
+                    output,
+                }))
+            }
+            Err(error) => {
+                self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Failed;
+                self.derived_artifact_jobs[index].last_error = Some(error.to_string());
+                Ok(Some(DerivedArtifactJobReport {
+                    job: self.derived_artifact_jobs[index].clone(),
+                    output: QueryOutput {
+                        rows: vec![derived_artifact_job_failure_row(
+                            &self.derived_artifact_jobs[index],
+                            &error.to_string(),
+                        )],
+                    },
+                }))
+            }
+        }
+    }
+
     pub fn rebuild_derived_artifacts(&mut self) -> Result<QueryOutput> {
         self.ensure_writable()?;
         let before = self
@@ -4135,8 +4176,8 @@ mod tests {
         DerivedArtifactJobStatus, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
         KnowledgeEntityRequest, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
         KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgeRetrievalRequest,
-        KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, RecoveryMode,
-        GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+        KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+        RecoveryMode, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
     };
     use crate::optimizer::PlanCost;
     use crate::schema::{
@@ -8584,6 +8625,51 @@ mod tests {
             report.output.rows[0].get("error"),
             Some(&Value::String(error.to_string()))
         );
+    }
+
+    #[test]
+    fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
+        let mut db = Database::new();
+        db.schedule_external_content_artifact_job("source-1", "parse");
+
+        let report = db
+            .run_next_external_content_artifact_job_with(|job| {
+                assert_eq!(job.status, DerivedArtifactJobStatus::Running);
+                assert_eq!(job.attempts, 1);
+                Ok(QueryOutput {
+                    rows: vec![BTreeMap::from([
+                        ("job_id".to_string(), Value::Int(job.id as i64)),
+                        (
+                            "artifact_type".to_string(),
+                            Value::String(job.artifact_type.clone()),
+                        ),
+                        ("name".to_string(), Value::String(job.name.clone())),
+                        ("action".to_string(), Value::String(job.action.clone())),
+                        (
+                            "published_projection".to_string(),
+                            Value::String("search".to_string()),
+                        ),
+                    ])],
+                })
+            })
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+        assert_eq!(report.job.attempts, 1);
+        assert!(report.job.last_error.is_none());
+        assert_eq!(
+            report.output.rows[0].get("published_projection"),
+            Some(&Value::String("search".to_string()))
+        );
+        assert_eq!(
+            db.derived_artifact_jobs()[0].status,
+            DerivedArtifactJobStatus::Succeeded
+        );
+        assert!(db
+            .run_next_external_content_artifact_job_with(|_| unreachable!())
+            .unwrap()
+            .is_none());
     }
 
     #[test]

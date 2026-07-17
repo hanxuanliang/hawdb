@@ -569,8 +569,11 @@ before advancing them to `PUBLIC`, and removes `GC` descriptors through a single
 grouped WAL batch. Projected graph derived artifacts can be refreshed through a
 report-oriented `Database::rebuild_derived_artifacts` entry point; search
 projection artifacts expose the same report-oriented rebuild shape through
-`SearchIndex::rebuild_derived_artifacts`. Content artifact job orchestration
-remains future work.
+`SearchIndex::rebuild_derived_artifacts`. Content artifact jobs are scheduled at
+the same boundary; the default graph-kernel runner rejects them, while
+`Database::run_next_external_content_artifact_job_with` lets a caller-owned
+content runtime complete parsing/crawling/chunking jobs without embedding that
+runtime in Skein.
 
 An internal compatibility fixture harness is implemented for Nowledge-shaped
 query families. It runs setup statements, parameterized Cypher checks, expected
@@ -897,7 +900,8 @@ Current implemented slice:
 
 Remaining Phase 5 work:
 
-- blob/content parser job runtime integration outside the graph kernel
+- richer caller-owned blob/content parser runtime integration outside the graph
+  kernel
 - optional `ExternalShadowCommand` wiring to the previous local graph wrapper
   when a specific migration gate needs compatibility evidence
 
