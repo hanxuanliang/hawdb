@@ -241,15 +241,23 @@ impl LocalQosPolicy {
         state: &LocalQosState,
         plan: &BackgroundWorkPlan,
     ) -> BackgroundWorkDecision {
-        let admission = self.admit(state, &plan.request);
+        let policy_admission = self.admit(state, &plan.request);
         if plan.request.priority != WorkPriority::Background {
             return BackgroundWorkDecision {
-                admission,
+                admission: policy_admission,
                 score: 0,
                 reasons: vec!["foreground work is not background-ranked".to_string()],
             };
         }
 
+        let admission = match (
+            policy_admission,
+            plan.hint
+                .tenant_budget_defer_reason(plan.request.estimated_operations),
+        ) {
+            (QosAdmission::Admit, Some(reason)) => QosAdmission::Defer { reason },
+            (admission, _) => admission,
+        };
         let (score, mut reasons) = plan
             .hint
             .score_with_reasons(plan.request.estimated_operations);
@@ -335,6 +343,18 @@ impl LocalQosPolicy {
             }
         }
         QosAdmission::Admit
+    }
+}
+
+impl BackgroundWorkHint {
+    fn tenant_budget_defer_reason(&self, estimated_operations: usize) -> Option<String> {
+        self.tenant_budget_remaining_operations
+            .filter(|remaining| *remaining < estimated_operations)
+            .map(|remaining| {
+                format!(
+                    "tenant budget remaining {remaining} below estimated operations {estimated_operations}"
+                )
+            })
     }
 }
 
@@ -572,7 +592,7 @@ mod tests {
     }
 
     #[test]
-    fn tenant_budget_can_zero_background_work_score_without_rejecting_admission() {
+    fn tenant_budget_defers_background_work_without_rejecting_it() {
         let decision = LocalQosPolicy::default().evaluate_background_work(
             &LocalQosState::default(),
             &BackgroundWorkPlan::background(
@@ -587,7 +607,10 @@ mod tests {
             ),
         );
 
-        assert_eq!(decision.admission, QosAdmission::Admit);
+        assert!(matches!(
+            decision.admission,
+            QosAdmission::Defer { reason } if reason.contains("tenant budget remaining 4")
+        ));
         assert_eq!(decision.score, 0);
         assert!(decision
             .reasons
