@@ -496,7 +496,7 @@ node properties. `space_id` follows the Nowledge normalized-space rule: missing,
 `NULL`, and empty-string values are scoped as `default`. Returned diagnostics
 preserve the search limit, rank window, search fusion weights, graph seed budget, graph
 context budget, candidate budget, filtered candidate counts, search document
-scope, search hit count, search truncation flag and reasons, search fallback reasons, graph seed counts,
+scope, exact search candidate-set report, search hit count, search truncation flag and reasons, search fallback reasons, graph seed counts,
 graph-seed truncation flag and reasons, graph context path count, fan-out reason
 count, final candidate count, pre-limit merged candidate count, response-level
 candidate truncation flag and reasons, graph-context truncation flag and

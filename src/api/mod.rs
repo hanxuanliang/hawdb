@@ -16,9 +16,9 @@ use crate::schema::{
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
-    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionDelta,
-    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
-    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
+    SearchCandidateSetReport, SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode,
+    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -413,6 +413,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_document_count: usize,
     pub search_filtered_document_count: usize,
     pub search_total_hits: usize,
+    pub search_candidate_set: SearchCandidateSetReport,
     pub search_candidate_filtered_out_count: usize,
     pub search_limit: usize,
     pub search_truncated: bool,
@@ -1977,6 +1978,7 @@ fn knowledge_retrieval_diagnostics(
         search_document_count: search.document_count,
         search_filtered_document_count: search.filtered_document_count,
         search_total_hits: search.total_hits,
+        search_candidate_set: search.candidate_set.clone(),
         search_candidate_filtered_out_count: search.candidate_set.filtered_out_count,
         search_limit: search.limit,
         search_truncated: search.truncated,

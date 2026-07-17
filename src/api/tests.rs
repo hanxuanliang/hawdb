@@ -150,6 +150,19 @@ fn nowledge_graph_adapter_retrieves_knowledge_with_external_projection() {
     assert_eq!(output.graph_commit_epoch, 1);
     assert_eq!(output.projection_freshness.document_count, 2);
     assert_eq!(output.diagnostics.search_total_hits, 1);
+    assert_eq!(
+        output.diagnostics.search_candidate_set,
+        output.search.candidate_set
+    );
+    assert_eq!(
+        output.diagnostics.search_candidate_set.id_space,
+        "search_projection_document_id"
+    );
+    assert_eq!(
+        output.diagnostics.search_candidate_set.representation,
+        "sorted_document_ids"
+    );
+    assert!(output.diagnostics.search_candidate_set.exact);
     assert_eq!(output.diagnostics.search_limit, 4);
     assert!(!output.diagnostics.search_truncated);
     assert!(output.diagnostics.search_truncation_reasons.is_empty());
@@ -1081,6 +1094,19 @@ fn knowledge_retrieval_applies_metadata_filters_to_search_and_graph_seeds() {
     assert_eq!(output.diagnostics.search_document_count, 2);
     assert_eq!(output.diagnostics.search_filtered_document_count, 1);
     assert_eq!(output.diagnostics.search_total_hits, 1);
+    assert_eq!(
+        output.diagnostics.search_candidate_set,
+        output.search.candidate_set
+    );
+    assert_eq!(output.diagnostics.search_candidate_set.cardinality, 1);
+    assert_eq!(
+        output.diagnostics.search_candidate_set.filtered_out_count,
+        1
+    );
+    assert_eq!(
+        output.diagnostics.search_candidate_set.metadata_filters,
+        BTreeMap::from([("source_id".to_string(), "thread_1".to_string())])
+    );
     assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
     assert_eq!(output.diagnostics.graph_seed_returned_count, 1);
     assert_eq!(output.diagnostics.graph_context_path_count, 0);
