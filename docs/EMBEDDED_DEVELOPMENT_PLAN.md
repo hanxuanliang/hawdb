@@ -611,7 +611,10 @@ embedding that runtime in Skein. Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` or
 `Database::run_next_scheduled_background_external_content_artifact_job_with` to
 charge that work to the `Import` background lane while leaving explicit runtime
-calls ungated.
+calls ungated. If the runtime first polls a bounded pending list and chooses a
+specific job, `Database::run_background_external_content_artifact_job_with` and
+`Database::run_scheduled_background_external_content_artifact_job_with` apply the
+same Import-lane admission to that concrete job.
 
 An internal compatibility fixture harness is implemented for Nowledge-shaped
 query families. It runs setup statements, parameterized Cypher checks, expected

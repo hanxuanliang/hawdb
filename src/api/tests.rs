@@ -5298,6 +5298,109 @@ fn scheduled_background_external_content_artifact_job_releases_budget_on_runtime
 }
 
 #[test]
+fn background_external_content_artifact_job_can_run_specific_pending_job() {
+    let mut db = Database::new();
+    let first = db.schedule_external_content_artifact_job("source-1", "parse");
+    let second = db.schedule_external_content_artifact_job("source-2", "parse");
+    let policy = LocalQosPolicy::default();
+
+    let report = db
+        .run_background_external_content_artifact_job_with(
+            &policy,
+            &LocalQosState::default(),
+            second.id,
+            |job| {
+                assert_eq!(job.id, second.id);
+                assert_eq!(job.status, DerivedArtifactJobStatus::Running);
+                Ok(QueryOutput {
+                    rows: vec![BTreeMap::from([(
+                        "job_id".to_string(),
+                        Value::Int(job.id as i64),
+                    )])],
+                })
+            },
+            1,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.job.id, second.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+    let pending = db.pending_external_content_artifact_jobs(8);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, first.id);
+}
+
+#[test]
+fn scheduled_background_external_content_artifact_job_defers_specific_pending_job() {
+    let mut db = Database::new();
+    let job = db.schedule_external_content_artifact_job("source-1", "parse");
+    let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+    class_limits[crate::WorkClass::Import.as_index()] = Some(4);
+    let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+        max_background_operations: Some(8),
+        max_total_background_operations: Some(8),
+        max_background_operations_by_class: class_limits,
+        ..LocalQosPolicy::default()
+    });
+    let running = scheduler
+        .try_start(crate::WorkRequest::background(crate::WorkClass::Import, 3))
+        .unwrap();
+
+    let error = db
+        .run_scheduled_background_external_content_artifact_job_with(
+            &mut scheduler,
+            job.id,
+            |_| unreachable!(),
+            2,
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("class limit 4"));
+    assert_eq!(
+        scheduler.state().running_background_operations_by_class
+            [crate::WorkClass::Import.as_index()],
+        3
+    );
+    let jobs = db.derived_artifact_jobs();
+    assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[0].attempts, 0);
+
+    scheduler.finish(running);
+}
+
+#[test]
+fn scheduled_background_external_content_artifact_job_releases_budget_on_specific_runtime_error() {
+    let mut db = Database::new();
+    let job = db.schedule_external_content_artifact_job("source-1", "parse");
+    let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+    let report = db
+        .run_scheduled_background_external_content_artifact_job_with(
+            &mut scheduler,
+            job.id,
+            |_| {
+                Err(crate::error::SkeinError::Execution(
+                    "parser failed".to_string(),
+                ))
+            },
+            1,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.job.id, job.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Failed);
+    assert_eq!(report.job.attempts, 1);
+    assert_eq!(scheduler.state().running_background_operations, 0);
+    assert_eq!(
+        scheduler.state().running_background_operations_by_class
+            [crate::WorkClass::Import.as_index()],
+        0
+    );
+}
+
+#[test]
 fn caller_owned_content_artifact_runtime_can_run_specific_pending_job() {
     let mut db = Database::new();
     let first = db.schedule_external_content_artifact_job("source-1", "parse");

@@ -348,7 +348,11 @@ Internal parser/crawler loops can use
 `Database::run_next_scheduled_background_external_content_artifact_job_with` for
 `LocalQosScheduler` accounting. These paths charge external content work to the
 `Import` class and keep direct caller-owned runtime APIs available for explicit
-foreground work. Action-specific runtimes can use
+foreground work. Runtimes that choose a concrete pending job from the bounded
+poll result can use `Database::run_background_external_content_artifact_job_with`
+or `Database::run_scheduled_background_external_content_artifact_job_with` for
+the same Import-lane accounting without falling back to a global next-job claim.
+Action-specific runtimes can use
 `Database::run_next_scheduled_background_external_content_artifact_job_for_action_with`
 for the same accounting without claiming unrelated pending work.
 Runtimes that only support a subset of content actions can use

@@ -457,6 +457,77 @@ impl Database {
         self.run_external_content_artifact_job_at_index(index, &mut runtime)
     }
 
+    pub fn run_background_external_content_artifact_job_with(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        job_id: u64,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.id == job_id
+                && job.status == DerivedArtifactJobStatus::Pending
+                && is_external_content_artifact_job(&job.artifact_type)
+        }) else {
+            return Ok(None);
+        };
+
+        match policy.admit(
+            state,
+            &self.derived_artifact_jobs[index].background_work_request(estimated_operations),
+        ) {
+            QosAdmission::Admit => {
+                self.run_external_content_artifact_job_at_index(index, &mut runtime)
+            }
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background external content artifact job deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background external content artifact job rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn run_scheduled_background_external_content_artifact_job_with(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        job_id: u64,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.id == job_id
+                && job.status == DerivedArtifactJobStatus::Pending
+                && is_external_content_artifact_job(&job.artifact_type)
+        }) else {
+            return Ok(None);
+        };
+
+        let permit = match scheduler.try_start(
+            self.derived_artifact_jobs[index].background_work_request(estimated_operations),
+        ) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background external content artifact job deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background external content artifact job rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.run_external_content_artifact_job_at_index(index, &mut runtime);
+        scheduler.finish(permit);
+        result
+    }
+
     fn run_external_content_artifact_job_at_index(
         &mut self,
         index: usize,
