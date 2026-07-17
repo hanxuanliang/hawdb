@@ -754,7 +754,8 @@ Current implemented slice:
 - checkpointed graph statistics for total nodes, total relationships,
   per-label counts, per-relationship-type counts, relationship-type source
   counts, label/type/label one-hop path cardinalities, bounded exact multi-hop
-  path cardinalities, and per-label/property distinct-value counts
+  path cardinalities, per-label/property distinct-value counts, and
+  per-relationship-type/property distinct-value counts
 - statistics freshness metadata with the commit epoch used to compute the
   snapshot, plus histogram sample-limit and per-histogram sampled/exact markers
 - public facade access to index descriptors and statistics for compatibility
@@ -765,7 +766,8 @@ Current implemented slice:
   explainable optimizer trace decision
 - metadata-aware expand cardinality estimates for bounded outgoing patterns:
   the optimizer consumes label/type/label path counts and relationship fanout
-  summaries, then records per-hop exact/fallback row estimates and total
+  summaries, applies relationship-property distinct counts for property pattern
+  filters, then records per-hop exact/fallback row estimates and total
   estimated rows in the explain trace while keeping the current
   `AdjacencyExpandExec` implementation stable
 - `OptimizerTrace::selected_plan_cost` exposes recursive output-row and cost

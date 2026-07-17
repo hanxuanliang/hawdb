@@ -3525,6 +3525,13 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
                     .label_name(*label_id)
                     .map(|label| ((label.to_string(), property.clone()), values.clone()))
             });
+    let rel_property_distinct_counts = statistics.rel_property_distinct_counts.iter().filter_map(
+        |((rel_type_id, property), count)| {
+            catalog
+                .rel_type_name(*rel_type_id)
+                .map(|rel_type| ((rel_type.to_string(), property.clone()), *count))
+        },
+    );
     OptimizerCatalog::new(
         OptimizerCatalogIndexes::new(
             equality_property_indexes,
@@ -3540,7 +3547,8 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
             bounded_path_counts,
             property_distinct_counts,
             property_histograms,
-        ),
+        )
+        .with_relationship_property_distinct_counts(rel_property_distinct_counts),
     )
 }
 
@@ -4020,6 +4028,7 @@ mod tests {
         KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, RecoveryMode,
         GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
     };
+    use crate::optimizer::PlanCost;
     use crate::schema::{
         ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
     };
@@ -6689,6 +6698,38 @@ mod tests {
     }
 
     #[test]
+    fn relationship_property_statistics_drive_expand_costing() {
+        let mut db = Database::new();
+        for id in 0..10 {
+            db.query(&format!(
+                "CREATE (:Memory {{id: {id}}})-[:MENTIONS {{weight: {id}}}]->(:Entity {{id: {}}})",
+                id + 100
+            ))
+            .unwrap();
+        }
+        db.query("CREATE INDEX ON :Memory(id)").unwrap();
+
+        let explain = db
+            .explain_query(
+                "MATCH (m:Memory {id: 1})-[r:MENTIONS {weight: 1}]->(e:Entity) RETURN r.weight AS weight",
+            )
+            .unwrap();
+
+        assert!(explain.trace.decisions.iter().any(|decision| {
+            decision.contains("estimate AdjacencyExpand")
+                && decision.contains("rel_property_distinct_product=10")
+                && decision.contains("estimated_rows=1")
+        }));
+        assert_eq!(
+            explain.trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 27,
+            }
+        );
+    }
+
+    #[test]
     fn property_histograms_are_bounded_deterministic_samples() {
         let mut db = Database::new();
         for id in 0..200 {
@@ -7838,7 +7879,7 @@ mod tests {
         {
             let mut db = Database::open(&path).unwrap();
             db.query("CREATE (:Memory {id: 1, kind: 'note'})").unwrap();
-            db.query("CREATE (:Memory {id: 2, kind: 'decision'})-[:MENTIONS]->(:Entity {id: 10, name: 'Rust'})")
+            db.query("CREATE (:Memory {id: 2, kind: 'decision'})-[:MENTIONS {weight: 4}]->(:Entity {id: 10, name: 'Rust'})")
                 .unwrap();
             db.checkpoint().unwrap();
         }
@@ -7853,6 +7894,7 @@ mod tests {
         assert!(checkpoint.contains("stat_path_count"));
         assert!(checkpoint.contains("stat_bounded_path_count"));
         assert!(checkpoint.contains("stat_property_distinct_count"));
+        assert!(checkpoint.contains("stat_rel_property_distinct_count"));
         assert!(checkpoint.contains("stat_property_histogram"));
         assert!(checkpoint.contains("stat_property_histogram_sampled"));
 

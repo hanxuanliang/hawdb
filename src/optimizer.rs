@@ -1891,6 +1891,7 @@ pub struct OptimizerCatalog {
     path_counts: BTreeMap<(String, String, String), u64>,
     bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     property_distinct_counts: BTreeMap<(String, String), u64>,
+    rel_property_distinct_counts: BTreeMap<(String, String), u64>,
     property_histograms: BTreeMap<(String, String), Vec<Value>>,
 }
 
@@ -1910,6 +1911,7 @@ pub struct OptimizerCatalogStatistics {
     path_counts: BTreeMap<(String, String, String), u64>,
     bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     property_distinct_counts: BTreeMap<(String, String), u64>,
+    rel_property_distinct_counts: BTreeMap<(String, String), u64>,
     property_histograms: BTreeMap<(String, String), Vec<Value>>,
 }
 
@@ -1990,6 +1992,7 @@ impl OptimizerCatalog {
             path_counts: statistics.path_counts,
             bounded_path_counts: statistics.bounded_path_counts,
             property_distinct_counts: statistics.property_distinct_counts,
+            rel_property_distinct_counts: statistics.rel_property_distinct_counts,
             property_histograms: statistics.property_histograms,
         }
     }
@@ -2056,6 +2059,19 @@ impl OptimizerCatalog {
             .unwrap_or_else(|| self.label_count(label).max(1))
     }
 
+    fn rel_property_distinct_count(&self, rel_type: &str, property: &str) -> u64 {
+        self.rel_property_distinct_counts
+            .get(&(rel_type.to_string(), property.to_string()))
+            .copied()
+            .unwrap_or_else(|| {
+                self.rel_type_counts
+                    .get(rel_type)
+                    .copied()
+                    .unwrap_or(1)
+                    .max(1)
+            })
+    }
+
     fn estimate_range_rows(
         &self,
         label: &str,
@@ -2112,6 +2128,7 @@ impl OptimizerCatalog {
         &self,
         source_label: &str,
         rel_type: &str,
+        rel_properties: &BTreeMap<String, Value>,
         target_label: &str,
         min_hops: usize,
         max_hops: usize,
@@ -2136,6 +2153,11 @@ impl OptimizerCatalog {
                 .min(self.label_count(target_label))
                 .max(1)
         });
+        let property_distinct_product = rel_properties
+            .keys()
+            .map(|property| self.rel_property_distinct_count(rel_type, property).max(1))
+            .fold(1_u64, |acc, value| acc.saturating_mul(value))
+            .max(1);
         let mut estimated_rows = 0_u64;
         let mut hop_rows = one_hop.max(1);
         let mut hop_estimates = Vec::new();
@@ -2149,7 +2171,10 @@ impl OptimizerCatalog {
                     hop,
                 ))
                 .copied();
-            let current_hop_rows = exact_hop_rows.unwrap_or(hop_rows);
+            let current_hop_rows = exact_hop_rows
+                .unwrap_or(hop_rows)
+                .div_ceil(property_distinct_product)
+                .max(1);
             hop_estimates.push(HopEstimate {
                 hop,
                 rows: current_hop_rows,
@@ -2165,6 +2190,7 @@ impl OptimizerCatalog {
             rel_count,
             source_count,
             average_fanout,
+            property_distinct_product,
             estimated_rows: estimated_rows.max(1),
             hop_estimates,
         }
@@ -2204,8 +2230,17 @@ impl OptimizerCatalogStatistics {
             path_counts: path_counts.into_iter().collect(),
             bounded_path_counts: bounded_path_counts.into_iter().collect(),
             property_distinct_counts: property_distinct_counts.into_iter().collect(),
+            rel_property_distinct_counts: BTreeMap::new(),
             property_histograms: property_histograms.into_iter().collect(),
         }
+    }
+
+    pub fn with_relationship_property_distinct_counts(
+        mut self,
+        rel_property_distinct_counts: impl IntoIterator<Item = ((String, String), u64)>,
+    ) -> Self {
+        self.rel_property_distinct_counts = rel_property_distinct_counts.into_iter().collect();
+        self
     }
 }
 
@@ -2215,6 +2250,7 @@ struct ExpandEstimate {
     rel_count: u64,
     source_count: u64,
     average_fanout: u64,
+    property_distinct_product: u64,
     estimated_rows: u64,
     hop_estimates: Vec<HopEstimate>,
 }
@@ -2763,11 +2799,14 @@ impl GroupExpr {
                 push_expand_estimate_decision(
                     catalog,
                     decisions,
-                    source_label,
-                    rel_type,
-                    target_label,
-                    *min_hops,
-                    *max_hops,
+                    ExpandEstimateRequest {
+                        source_label,
+                        rel_type,
+                        rel_properties,
+                        target_label,
+                        min_hops: *min_hops,
+                        max_hops: *max_hops,
+                    },
                 );
                 PhysicalPlan::AdjacencyExpandExec {
                     source_variable: source_variable.clone(),
@@ -3402,11 +3441,14 @@ fn logical_to_physical_direct(
             push_expand_estimate_decision(
                 catalog,
                 decisions,
-                source_label,
-                rel_type,
-                target_label,
-                *min_hops,
-                *max_hops,
+                ExpandEstimateRequest {
+                    source_label,
+                    rel_type,
+                    rel_properties,
+                    target_label,
+                    min_hops: *min_hops,
+                    max_hops: *max_hops,
+                },
             );
             PhysicalPlan::AdjacencyExpandExec {
                 source_variable: source_variable.clone(),
@@ -3541,17 +3583,28 @@ fn logical_to_physical_direct(
     }
 }
 
+struct ExpandEstimateRequest<'a> {
+    source_label: &'a str,
+    rel_type: &'a str,
+    rel_properties: &'a BTreeMap<String, Value>,
+    target_label: &'a str,
+    min_hops: usize,
+    max_hops: usize,
+}
+
 fn push_expand_estimate_decision(
     catalog: &OptimizerCatalog,
     decisions: &mut Vec<String>,
-    source_label: &str,
-    rel_type: &str,
-    target_label: &str,
-    min_hops: usize,
-    max_hops: usize,
+    request: ExpandEstimateRequest<'_>,
 ) {
-    let estimate =
-        catalog.estimate_expand_rows(source_label, rel_type, target_label, min_hops, max_hops);
+    let estimate = catalog.estimate_expand_rows(
+        request.source_label,
+        request.rel_type,
+        request.rel_properties,
+        request.target_label,
+        request.min_hops,
+        request.max_hops,
+    );
     let path_count = estimate
         .path_count
         .map(|count| count.to_string())
@@ -3570,10 +3623,16 @@ fn push_expand_estimate_decision(
         .collect::<Vec<_>>()
         .join(",");
     decisions.push(format!(
-        "estimate AdjacencyExpand for {source_label}-[:{rel_type}*{min_hops}..{max_hops}]->{target_label}: path_count={path_count} rel_count={} rel_type_sources={} average_fanout={} hop_rows=[{}] estimated_rows={}",
+        "estimate AdjacencyExpand for {}-[:{}*{}..{}]->{}: path_count={path_count} rel_count={} rel_type_sources={} average_fanout={} rel_property_distinct_product={} hop_rows=[{}] estimated_rows={}",
+        request.source_label,
+        request.rel_type,
+        request.min_hops,
+        request.max_hops,
+        request.target_label,
         estimate.rel_count,
         estimate.source_count,
         estimate.average_fanout,
+        estimate.property_distinct_product,
         hop_rows,
         estimate.estimated_rows
     ));
@@ -3672,6 +3731,7 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
         PhysicalPlan::AdjacencyExpandExec {
             source_label,
             rel_type,
+            rel_properties,
             target_label,
             min_hops,
             max_hops,
@@ -3682,6 +3742,7 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
             let expand_estimate = catalog.estimate_expand_rows(
                 source_label,
                 rel_type,
+                rel_properties,
                 target_label,
                 *min_hops,
                 *max_hops,
@@ -5150,6 +5211,7 @@ mod tests {
     use crate::cypher::RelationshipDirection;
     use crate::planner::{LogicalPlan, Predicate, Projection, ProjectionExpression};
     use crate::value::Value;
+    use std::collections::BTreeMap;
 
     #[test]
     fn optimizer_budget_uses_direct_fallback_with_trace_warning() {
@@ -5354,5 +5416,81 @@ mod tests {
             .decisions
             .iter()
             .any(|decision| decision == "selected physical plan cost: estimated_rows=1 cost=6"));
+    }
+
+    #[test]
+    fn expand_cost_uses_relationship_property_distinct_counts() {
+        let logical = LogicalPlan::Project {
+            items: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "r".to_string(),
+                    property: "weight".to_string(),
+                },
+                name: "weight".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "m".to_string(),
+                source_label: "Memory".to_string(),
+                rel_variable: Some("r".to_string()),
+                rel_type: "MENTIONS".to_string(),
+                rel_properties: BTreeMap::from([("weight".to_string(), Value::Int(4))]),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "e".to_string(),
+                target_label: "Entity".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyEq {
+                        variable: "m".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("memory-42".to_string()),
+                    },
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "m".to_string(),
+                        label: "Memory".to_string(),
+                    }),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([("Memory".to_string(), "id".to_string())], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1000), ("Entity".to_string(), 1000)],
+                [("MENTIONS".to_string(), 1000)],
+                [("MENTIONS".to_string(), 1000)],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                    ),
+                    1000,
+                )],
+                [],
+                [(("Memory".to_string(), "id".to_string()), 1000)],
+                [],
+            )
+            .with_relationship_property_distinct_counts([(
+                ("MENTIONS".to_string(), "weight".to_string()),
+                10,
+            )]),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert!(trace.decisions.iter().any(|decision| {
+            decision.contains("estimate AdjacencyExpand")
+                && decision.contains("rel_property_distinct_product=10")
+                && decision.contains("estimated_rows=100")
+        }));
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 6,
+            }
+        );
     }
 }

@@ -4778,6 +4778,7 @@ impl GraphStore {
                 | ["stat_path_count", _, _, _, _]
                 | ["stat_bounded_path_count", _, _, _, _, _]
                 | ["stat_property_distinct_count", _, _, _]
+                | ["stat_rel_property_distinct_count", _, _, _]
                 | ["stat_property_histogram", _, _, _]
                 | ["stat_property_histogram_sampled", _, _, _] => {}
                 ["project_graph", raw_name, raw_node_labels, raw_rel_types] => {
@@ -5376,6 +5377,14 @@ impl DurableStore {
             body.push_str(&format!(
                 "stat_property_distinct_count\t{}\t{}\t{}\n",
                 label_id.0,
+                encode_string(property),
+                count
+            ));
+        }
+        for ((rel_type_id, property), count) in &statistics.rel_property_distinct_counts {
+            body.push_str(&format!(
+                "stat_rel_property_distinct_count\t{}\t{}\t{}\n",
+                rel_type_id.0,
                 encode_string(property),
                 count
             ));
@@ -7297,6 +7306,7 @@ fn compute_statistics(
         ..GraphStatistics::default()
     };
     let mut property_values = BTreeMap::<(LabelId, String), BTreeSet<Value>>::new();
+    let mut rel_property_values = BTreeMap::<(RelTypeId, String), BTreeSet<Value>>::new();
     let mut rel_type_sources = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
     let mut outgoing_by_source_type = BTreeMap::<(NodeId, RelTypeId), Vec<NodeId>>::new();
 
@@ -7324,6 +7334,12 @@ fn compute_statistics(
             .entry((relationship.source, relationship.rel_type))
             .or_default()
             .push(relationship.target);
+        for (property, value) in &relationship.properties {
+            rel_property_values
+                .entry((relationship.rel_type, property.clone()))
+                .or_default()
+                .insert(value.clone());
+        }
         if let (Some(source), Some(target)) = (
             nodes.get(&relationship.source),
             nodes.get(&relationship.target),
@@ -7355,6 +7371,10 @@ fn compute_statistics(
             .sampled_property_histograms
             .insert(key, is_sampled);
     }
+    statistics.rel_property_distinct_counts = rel_property_values
+        .into_iter()
+        .map(|(key, values)| (key, values.len() as u64))
+        .collect();
     statistics.bounded_path_counts =
         compute_bounded_path_counts(nodes, &outgoing_by_source_type, MAX_BOUNDED_PATH_STAT_HOPS);
     statistics
@@ -8375,7 +8395,7 @@ mod tests {
     use super::{
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text,
         ConnectedNodesCreate, DurableCompression, GraphStore, NodeId, NodeRecord,
-        ProjectedGraphDefinition, DURABLE_COMPRESSION_HEADER,
+        ProjectedGraphDefinition, RelId, RelRecord, RelTypeId, DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -8915,6 +8935,33 @@ mod tests {
         assert_eq!(histogram.len(), 512);
         assert_eq!(histogram.first(), Some(&Value::Int(0)));
         assert_eq!(histogram.last(), Some(&Value::Int(4_999)));
+    }
+
+    #[test]
+    fn statistics_track_relationship_property_distinct_counts() {
+        let relationships = (0..10)
+            .map(|id| {
+                (
+                    RelId(id),
+                    RelRecord {
+                        id: RelId(id),
+                        source: NodeId(id),
+                        target: NodeId(id + 100),
+                        rel_type: RelTypeId(0),
+                        properties: properties([("weight", Value::Int((id % 4) as i64))]),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let statistics = compute_statistics(&BTreeMap::new(), &relationships, 1);
+
+        assert_eq!(
+            statistics
+                .rel_property_distinct_counts
+                .get(&(RelTypeId(0), "weight".to_string())),
+            Some(&4)
+        );
     }
 
     fn properties<const N: usize>(entries: [(&str, Value); N]) -> BTreeMap<String, Value> {

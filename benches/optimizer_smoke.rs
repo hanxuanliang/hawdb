@@ -175,14 +175,14 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             logical: relationship_property_expand_plan(),
             catalog: relationship_property_expand_catalog(),
             expected_cost: PlanCost {
-                estimated_rows: 4,
-                cost: 12,
+                estimated_rows: 1,
+                cost: 6,
             },
             fingerprint_contains: "AdjacencyExpandExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Memory.id",
-                "estimate AdjacencyExpand",
-                "selected physical plan cost: estimated_rows=4 cost=12",
+                "rel_property_distinct_product=10",
+                "selected physical plan cost: estimated_rows=1 cost=6",
             ],
         },
     ]
@@ -493,7 +493,40 @@ fn relationship_property_expand_plan() -> LogicalPlan {
 }
 
 fn relationship_property_expand_catalog() -> OptimizerCatalog {
-    memory_seed_entity_mentions_catalog()
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Memory".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Memory".to_string(), 10_000),
+                ("Entity".to_string(), 50_000),
+            ],
+            [("MENTIONS".to_string(), 120_000)],
+            [("MENTIONS".to_string(), 40_000)],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                ),
+                40_000,
+            )],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                    1,
+                ),
+                40_000,
+            )],
+            [(("Memory".to_string(), "id".to_string()), 10_000)],
+            [],
+        )
+        .with_relationship_property_distinct_counts([(
+            ("MENTIONS".to_string(), "weight".to_string()),
+            10,
+        )]),
+    )
 }
 
 fn project_memory_title(input: LogicalPlan) -> LogicalPlan {
