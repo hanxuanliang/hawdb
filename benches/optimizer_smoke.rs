@@ -200,6 +200,22 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=1 cost=9",
             ],
         },
+        OptimizerSmokeCase {
+            name: "source_memory_label_cross_pattern",
+            logical: source_memory_label_cross_pattern_plan(),
+            catalog: source_memory_label_cross_pattern_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 20,
+                cost: 1650,
+            },
+            fingerprint_contains: "AdjacencyExpandExec",
+            decision_contains: &[
+                "choose IndexNodeSeek for Source.id",
+                "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
+                "estimate AdjacencyExpand for Memory-[:HAS_LABEL*1..1]->Label",
+                "selected physical plan cost: estimated_rows=20 cost=1650",
+            ],
+        },
     ]
 }
 
@@ -635,6 +651,132 @@ fn relationship_status_range_filter_catalog() -> OptimizerCatalog {
             ("MENTIONS".to_string(), "created_at".to_string()),
             (0..10).map(|bucket| Value::Int(bucket * 10)).collect(),
         )]),
+    )
+}
+
+fn source_memory_label_cross_pattern_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(20),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![SortItem {
+                key: SortKey::Column("memory_count".to_string()),
+                direction: SortDirection::Desc,
+            }],
+            input: Box::new(LogicalPlan::Aggregate {
+                group_keys: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "l".to_string(),
+                        property: "name".to_string(),
+                    },
+                    name: "label_name".to_string(),
+                }],
+                items: vec![Aggregation {
+                    function: AggregateFunction::Count,
+                    target: AggregateTarget::Variable("m".to_string()),
+                    distinct: true,
+                    name: "memory_count".to_string(),
+                }],
+                input: Box::new(LogicalPlan::Expand {
+                    source_variable: "m".to_string(),
+                    source_label: "Memory".to_string(),
+                    rel_variable: None,
+                    rel_type: "HAS_LABEL".to_string(),
+                    rel_properties: Default::default(),
+                    direction: RelationshipDirection::Outgoing,
+                    target_variable: "l".to_string(),
+                    target_label: "Label".to_string(),
+                    min_hops: 1,
+                    max_hops: 1,
+                    optional: false,
+                    input: Box::new(LogicalPlan::Expand {
+                        source_variable: "s".to_string(),
+                        source_label: "Source".to_string(),
+                        rel_variable: None,
+                        rel_type: "SOURCED_FROM".to_string(),
+                        rel_properties: Default::default(),
+                        direction: RelationshipDirection::Incoming,
+                        target_variable: "m".to_string(),
+                        target_label: "Memory".to_string(),
+                        min_hops: 1,
+                        max_hops: 1,
+                        optional: false,
+                        input: Box::new(LogicalPlan::Filter {
+                            predicate: Predicate::PropertyEq {
+                                variable: "s".to_string(),
+                                property: "id".to_string(),
+                                value: Value::String("source-42".to_string()),
+                            },
+                            input: Box::new(LogicalPlan::NodeScan {
+                                variable: "s".to_string(),
+                                label: "Source".to_string(),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn source_memory_label_cross_pattern_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Source".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Source".to_string(), 1_000),
+                ("Memory".to_string(), 100_000),
+                ("Label".to_string(), 2_000),
+            ],
+            [
+                ("SOURCED_FROM".to_string(), 250_000),
+                ("HAS_LABEL".to_string(), 180_000),
+            ],
+            [
+                ("SOURCED_FROM".to_string(), 50_000),
+                ("HAS_LABEL".to_string(), 80_000),
+            ],
+            [
+                (
+                    (
+                        "Source".to_string(),
+                        "SOURCED_FROM".to_string(),
+                        "Memory".to_string(),
+                    ),
+                    250_000,
+                ),
+                (
+                    (
+                        "Memory".to_string(),
+                        "HAS_LABEL".to_string(),
+                        "Label".to_string(),
+                    ),
+                    180_000,
+                ),
+            ],
+            [
+                (
+                    (
+                        "Source".to_string(),
+                        "SOURCED_FROM".to_string(),
+                        "Memory".to_string(),
+                        1,
+                    ),
+                    250_000,
+                ),
+                (
+                    (
+                        "Memory".to_string(),
+                        "HAS_LABEL".to_string(),
+                        "Label".to_string(),
+                        1,
+                    ),
+                    180_000,
+                ),
+            ],
+            [(("Source".to_string(), "id".to_string()), 1_000)],
+            [],
+        ),
     )
 }
 
