@@ -2105,7 +2105,7 @@ fn knowledge_neighbors_for(
             seed_found: true,
             target_found: None,
             path_count: paths.len(),
-            node_count: 0,
+            node_count: knowledge_context_path_node_count(&paths),
             relationship_count: paths.len(),
             fanout_reason_count: fanout_reasons.len(),
             max_hops: request.max_hops,
@@ -2230,7 +2230,7 @@ fn knowledge_paths_for(
             seed_found: true,
             target_found: Some(true),
             path_count: paths.len(),
-            node_count: 0,
+            node_count: knowledge_graph_path_node_count(&paths),
             relationship_count: paths.iter().map(|path| path.segments.len()).sum::<usize>(),
             fanout_reason_count: fanout_reasons.len(),
             max_hops: request.max_hops,
@@ -2364,6 +2364,23 @@ fn knowledge_traversal_diagnostics(
         node_limit: input.node_limit,
         relationship_limit: input.relationship_limit,
     }
+}
+
+fn knowledge_context_path_node_count(paths: &[KnowledgeGraphContextPath]) -> usize {
+    paths
+        .iter()
+        .flat_map(|path| [path.source_node_id, path.target_node_id])
+        .collect::<BTreeSet<_>>()
+        .len()
+}
+
+fn knowledge_graph_path_node_count(paths: &[KnowledgeGraphPath]) -> usize {
+    paths
+        .iter()
+        .flat_map(|path| path.segments.iter())
+        .flat_map(|segment| [segment.source_node_id, segment.target_node_id])
+        .collect::<BTreeSet<_>>()
+        .len()
 }
 
 struct KnowledgeNeighborExpansion<'a> {
@@ -5741,6 +5758,7 @@ mod tests {
         assert!(outgoing.diagnostics.seed_found);
         assert_eq!(outgoing.diagnostics.target_found, None);
         assert_eq!(outgoing.diagnostics.path_count, 2);
+        assert_eq!(outgoing.diagnostics.node_count, 3);
         assert_eq!(outgoing.diagnostics.relationship_count, 2);
         assert_eq!(outgoing.diagnostics.fanout_reason_count, 0);
         assert_eq!(outgoing.diagnostics.max_hops, 2);
@@ -5865,6 +5883,7 @@ mod tests {
         assert_eq!(limited.paths.len(), 1);
         assert!(limited.diagnostics.seed_found);
         assert_eq!(limited.diagnostics.path_count, 1);
+        assert_eq!(limited.diagnostics.node_count, 2);
         assert_eq!(limited.diagnostics.relationship_count, 1);
         assert_eq!(limited.diagnostics.fanout_reason_count, 1);
         assert_eq!(limited.diagnostics.path_limit, Some(1));
@@ -5926,6 +5945,7 @@ mod tests {
         assert!(output.diagnostics.seed_found);
         assert_eq!(output.diagnostics.target_found, Some(true));
         assert_eq!(output.diagnostics.path_count, 1);
+        assert_eq!(output.diagnostics.node_count, 3);
         assert_eq!(output.diagnostics.relationship_count, 2);
         assert_eq!(output.diagnostics.fanout_reason_count, 0);
         assert_eq!(output.diagnostics.max_hops, 2);
@@ -5999,6 +6019,7 @@ mod tests {
         });
         assert_eq!(limited.paths.len(), 1);
         assert_eq!(limited.diagnostics.path_count, 1);
+        assert_eq!(limited.diagnostics.node_count, 2);
         assert_eq!(limited.diagnostics.relationship_count, 1);
         assert_eq!(limited.diagnostics.fanout_reason_count, 1);
         assert_eq!(limited.diagnostics.path_limit, Some(1));
