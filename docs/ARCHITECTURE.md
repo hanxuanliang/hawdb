@@ -579,8 +579,10 @@ caller-owned search projection incrementally from canonical graph changes.
 `SearchProjectionGraphDeltaRequest` maps bounded canonical node IDs into
 projection rows, carries delete document IDs, and exposes the same foreground,
 background-QoS, and scheduled-background facades as lower-level
-`SearchProjectionDelta`. This keeps FTS/vector projection maintenance
-incremental without writing search state into the graph WAL.
+`SearchProjectionDelta`. Graph-derived deltas stamp the caller-owned projection
+with the current graph commit epoch, so retrieval diagnostics can distinguish a
+fresh incremental projection from a stale one. This keeps FTS/vector projection
+maintenance incremental without writing search state into the graph WAL.
 
 Typed knowledge operations can bypass the search projection entirely when the
 caller already has graph identity. `Database::knowledge_entity` returns a

@@ -3202,6 +3202,7 @@ fn search_projection_graph_delta_for(
         upserts,
         deletes: request.delete_document_ids.clone(),
         max_operations: request.max_operations,
+        source_graph_commit_epoch: Some(store.commit_epoch()),
     })
 }
 

@@ -328,6 +328,7 @@ pub struct SearchProjectionDelta {
     pub upserts: Vec<SearchProjectionRow>,
     pub deletes: Vec<String>,
     pub max_operations: Option<usize>,
+    pub source_graph_commit_epoch: Option<u64>,
 }
 
 impl SearchProjectionDelta {
@@ -474,6 +475,9 @@ impl SearchIndex {
 
         self.documents = next_documents;
         self.embedding_dimension = next_embedding_dimension;
+        if let Some(epoch) = delta.source_graph_commit_epoch {
+            self.source_graph_commit_epoch = Some(epoch);
+        }
         Ok(SearchProjectionDeltaReport {
             artifact_type: "search_projection".to_string(),
             name: "search_projection".to_string(),
@@ -4453,6 +4457,7 @@ mod tests {
                 }],
                 deletes: vec!["memory:old".to_string()],
                 max_operations: Some(2),
+                source_graph_commit_epoch: None,
             })
             .unwrap();
 
@@ -4466,6 +4471,32 @@ mod tests {
         assert!(index.document("memory:new").is_some());
         let hits = index.search("embedded search", None, SearchMode::Text, 10);
         assert_eq!(hits[0].id, "memory:new");
+    }
+
+    #[test]
+    fn projection_delta_updates_source_graph_commit_epoch_when_provided() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: vec![SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "new".to_string(),
+                    title: "Fresh graph delta".to_string(),
+                    body: "Graph derived projection delta advances freshness".to_string(),
+                    embedding: None,
+                    source_id: None,
+                    metadata: BTreeMap::new(),
+                }],
+                deletes: Vec::new(),
+                max_operations: Some(1),
+                source_graph_commit_epoch: Some(7),
+            })
+            .unwrap();
+
+        assert_eq!(
+            index.projection_freshness().source_graph_commit_epoch,
+            Some(7)
+        );
     }
 
     #[test]
@@ -4491,6 +4522,7 @@ mod tests {
             }],
             deletes: vec!["memory:old".to_string()],
             max_operations: Some(2),
+            source_graph_commit_epoch: None,
         };
 
         let plan = delta
@@ -4530,6 +4562,7 @@ mod tests {
                 }],
                 deletes: vec!["memory:old".to_string()],
                 max_operations: Some(1),
+                source_graph_commit_epoch: None,
             })
             .unwrap_err();
 
@@ -4564,6 +4597,7 @@ mod tests {
                 }],
                 deletes: vec!["memory:old".to_string()],
                 max_operations: Some(2),
+                source_graph_commit_epoch: None,
             })
             .unwrap_err();
 
@@ -4605,6 +4639,7 @@ mod tests {
                     }],
                     deletes: vec!["memory:old".to_string()],
                     max_operations: Some(2),
+                    source_graph_commit_epoch: None,
                 },
             )
             .unwrap_err();
@@ -4638,6 +4673,7 @@ mod tests {
                     }],
                     deletes: vec!["memory:old".to_string()],
                     max_operations: Some(2),
+                    source_graph_commit_epoch: None,
                 },
             )
             .unwrap();
@@ -4674,6 +4710,7 @@ mod tests {
                     }],
                     deletes: vec!["memory:old".to_string()],
                     max_operations: Some(2),
+                    source_graph_commit_epoch: None,
                 },
             )
             .unwrap();
@@ -4719,6 +4756,7 @@ mod tests {
                     }],
                     deletes: vec!["memory:old".to_string()],
                     max_operations: Some(2),
+                    source_graph_commit_epoch: None,
                 },
             )
             .unwrap_err();
@@ -4760,6 +4798,7 @@ mod tests {
                     }],
                     deletes: vec!["memory:old".to_string()],
                     max_operations: Some(1),
+                    source_graph_commit_epoch: None,
                 },
             )
             .unwrap_err();

@@ -223,6 +223,7 @@ fn database_facade_applies_search_projection_delta_without_background_admission(
                 )],
                 deletes: vec!["memory:old".to_string()],
                 max_operations: Some(2),
+                source_graph_commit_epoch: None,
             },
         )
         .unwrap();
@@ -248,6 +249,7 @@ fn database_facade_background_search_projection_delta_uses_qos_admission() {
         )],
         deletes: vec!["memory:old".to_string()],
         max_operations: Some(2),
+        source_graph_commit_epoch: None,
     };
 
     let plan = db
@@ -301,6 +303,7 @@ fn database_facade_scheduled_search_projection_delta_releases_background_budget(
                 )],
                 deletes: vec!["memory:old".to_string()],
                 max_operations: Some(1),
+                source_graph_commit_epoch: None,
             },
         )
         .unwrap_err();
@@ -361,6 +364,12 @@ fn database_facade_builds_search_projection_delta_from_graph_nodes() {
     assert_eq!(report.operation_count, 2);
     assert_eq!(report.upserted_documents, 1);
     assert_eq!(report.deleted_documents, 1);
+    assert_eq!(
+        search_index
+            .projection_freshness()
+            .source_graph_commit_epoch,
+        Some(db.store.commit_epoch())
+    );
     assert!(search_index.document("memory:old").is_none());
     assert!(search_index.document("memory:new").is_some());
     let hits = search_index.search("bounded FTS", None, SearchMode::Text, 10);
