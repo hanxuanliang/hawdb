@@ -91,6 +91,18 @@ impl Database {
             .collect()
     }
 
+    pub fn failed_external_content_artifact_jobs(&self, limit: usize) -> Vec<DerivedArtifactJob> {
+        self.derived_artifact_jobs
+            .iter()
+            .filter(|job| {
+                job.status == DerivedArtifactJobStatus::Failed
+                    && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
     pub fn retry_failed_external_content_artifact_job(
         &mut self,
         job_id: u64,

@@ -300,9 +300,11 @@ to attach object references, checksums, content type, target projection, or
 other application-owned metadata as a `Value::Map`.
 `Database::pending_external_content_artifact_jobs` returns a bounded pending
 view for caller-owned runtimes that poll parser work without scanning the whole
-embedded job history. The graph-kernel job runner still rejects those jobs with
-a graph-kernel-external error and preserves the payload in the failed job
-report, while
+embedded job history. `Database::failed_external_content_artifact_jobs` returns
+the matching bounded failed view for recovery queues and operator-facing parser
+diagnostics. The graph-kernel job runner still rejects those jobs with a
+graph-kernel-external error and preserves the payload in the failed job report,
+while
 `Database::run_next_external_content_artifact_job_with` lets the caller supply
 the content artifact runtime and complete the job status without embedding
 parsing, crawling, chunking, or large-value runtime logic in Skein. That runtime
