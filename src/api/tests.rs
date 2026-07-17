@@ -580,6 +580,18 @@ fn retrieves_knowledge_through_database_facade() {
     assert_eq!(text_retriever.limit, Some(1));
     assert_eq!(text_retriever.rank_window, None);
     assert_eq!(text_retriever.fusion_weight, Some(1.0));
+    assert_eq!(
+        text_retriever.top_candidates[0].kind.as_deref(),
+        Some("memory")
+    );
+    assert_eq!(
+        text_retriever.top_candidates[0].external_id.as_deref(),
+        Some("mem_1")
+    );
+    assert_eq!(
+        text_retriever.top_candidates[0].source_id.as_deref(),
+        Some("thread_1")
+    );
     assert_eq!(text_retriever.top_candidates[0].canonical_node_id, Some(0));
     assert_eq!(text_retriever.top_candidates[0].graph_context_path_count, 1);
     assert_eq!(
@@ -645,6 +657,15 @@ fn retrieves_knowledge_through_database_facade() {
     assert!(graph_seed_report.fallback_reasons.is_empty());
     assert_eq!(graph_seed_report.top_candidates.len(), 2);
     assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
+    assert_eq!(
+        graph_seed_report.top_candidates[0].kind.as_deref(),
+        Some("Memory")
+    );
+    assert_eq!(
+        graph_seed_report.top_candidates[0].external_id.as_deref(),
+        Some("mem_1")
+    );
+    assert_eq!(graph_seed_report.top_candidates[0].source_id, None);
     assert_eq!(
         graph_seed_report.top_candidates[0].canonical_node_id,
         Some(0)

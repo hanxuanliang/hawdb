@@ -524,8 +524,8 @@ At the knowledge facade level, `KnowledgeRetrieverReport` normalizes child
 retriever diagnostics for vector, text, and graph seed legs: availability,
 candidate count, optional limit, optional rank window, optional fusion weight,
 fallback reasons, truncation flag, truncation reasons, and top candidate rank,
-score, canonical node ID, matched spans, and graph context path count are exposed
-in one place.
+score, provenance metadata, canonical node ID, matched spans, and graph context
+path count are exposed in one place.
 Search child top candidates also carry projection freshness, while graph seed
 top candidates leave it empty because they are read directly from canonical
 graph state. Search child reports distinguish rank-window trimming from

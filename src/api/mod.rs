@@ -459,6 +459,9 @@ pub struct KnowledgeRetrieverReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeRetrieverCandidate {
     pub id: String,
+    pub kind: Option<String>,
+    pub external_id: Option<String>,
+    pub source_id: Option<String>,
     pub canonical_node_id: Option<u64>,
     pub rank: usize,
     pub score: f64,
@@ -1808,6 +1811,9 @@ fn knowledge_retriever_reports(
                     let evidence = evidence_by_hit.get(candidate.id.as_str()).copied();
                     KnowledgeRetrieverCandidate {
                         id: candidate.id.clone(),
+                        kind: evidence.and_then(|evidence| evidence.kind.clone()),
+                        external_id: evidence.and_then(|evidence| evidence.external_id.clone()),
+                        source_id: evidence.and_then(|evidence| evidence.source_id.clone()),
                         canonical_node_id: evidence.and_then(|evidence| evidence.canonical_node_id),
                         rank: candidate.rank,
                         score: candidate.score,
@@ -1848,6 +1854,9 @@ fn knowledge_retriever_reports(
                     .count();
                 KnowledgeRetrieverCandidate {
                     id,
+                    kind: seed.entity.labels.first().cloned(),
+                    external_id: seed.entity.external_id.clone(),
+                    source_id: None,
                     canonical_node_id: Some(seed.entity.node_id),
                     rank: index + 1,
                     score: seed.score,
