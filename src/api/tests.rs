@@ -737,6 +737,53 @@ fn knowledge_retrieval_diagnostics_expose_search_fallback_reasons() {
 }
 
 #[test]
+fn knowledge_retrieval_empty_reasons_include_search_fallback_reasons() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem_1', title: 'Vector-only fallback', content: 'search fallback should explain empty retrieval'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "".to_string(),
+            query_embedding: Some(vec![1.0, 0.0]),
+            mode: SearchMode::Vector,
+            limit: 10,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 0,
+            graph_context_limit: 0,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert!(output.search.hits.is_empty());
+    assert!(output.candidates.is_empty());
+    assert!(output
+        .diagnostics
+        .search_fallback_reasons
+        .iter()
+        .any(|reason| reason == "index has no vector rows"));
+    assert!(output
+        .diagnostics
+        .empty_reasons
+        .iter()
+        .any(|reason| reason == "index has no vector rows"));
+    assert!(output
+        .diagnostics
+        .empty_reasons
+        .iter()
+        .any(|reason| reason == "retrieval produced no candidates"));
+}
+
+#[test]
 fn knowledge_retrieval_expands_graph_context_by_ordered_adjacency() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'root', title: 'Ordered retrieval context'})")

@@ -1092,6 +1092,7 @@ impl SearchIndex {
             filtered_document_count,
             total_hits,
             &truncation_reasons,
+            &fallback_reasons,
         );
         SearchResultSet {
             hits,
@@ -1423,6 +1424,7 @@ fn search_empty_reasons(
     filtered_document_count: usize,
     total_hits: usize,
     truncation_reasons: &[String],
+    fallback_reasons: &[String],
 ) -> Vec<String> {
     if !returned_empty {
         return Vec::new();
@@ -1434,7 +1436,10 @@ fn search_empty_reasons(
         return vec!["metadata filters matched no search documents".to_string()];
     }
     if total_hits == 0 {
-        return vec!["search retrievers returned no hits inside filtered scope".to_string()];
+        let mut reasons =
+            vec!["search retrievers returned no hits inside filtered scope".to_string()];
+        reasons.extend(fallback_reasons.iter().cloned());
+        return reasons;
     }
     truncation_reasons.to_vec()
 }
@@ -2899,6 +2904,10 @@ mod tests {
         assert!(result.hits.is_empty());
         assert!(result
             .fallback_reasons
+            .iter()
+            .any(|reason| reason.contains("query embedding dimension 3")));
+        assert!(result
+            .empty_reasons
             .iter()
             .any(|reason| reason.contains("query embedding dimension 3")));
     }
