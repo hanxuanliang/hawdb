@@ -652,7 +652,11 @@ references, checksums, parser hints, and projection targets. The default
 graph-kernel runner rejects those jobs while preserving the payload in the job
 report, and `Database::run_next_external_content_artifact_job_with` lets a
 caller-owned content runtime complete parsing/crawling/chunking jobs without
-embedding that runtime in Skein. Internal parser/crawler loops can use
+embedding that runtime in Skein. Successful external content jobs retain the
+runtime's last structured `QueryOutput` on the job ledger so callers can audit
+published projection refs, parser versions, checksums, chunk counts, and other
+small lineage fields without storing large parsed content in the graph kernel.
+Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` or
 `Database::run_next_scheduled_background_external_content_artifact_job_with` to
 charge that work to the `Import` background lane while leaving explicit runtime

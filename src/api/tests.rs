@@ -7141,6 +7141,7 @@ fn failed_external_content_artifact_jobs_can_be_retried() {
         .unwrap();
     assert_eq!(failed.job.status, DerivedArtifactJobStatus::Failed);
     assert_eq!(failed.job.attempts, 1);
+    assert!(failed.job.last_output.is_none());
     assert!(failed
         .job
         .last_error
@@ -7154,6 +7155,7 @@ fn failed_external_content_artifact_jobs_can_be_retried() {
     assert_eq!(retried.status, DerivedArtifactJobStatus::Pending);
     assert_eq!(retried.attempts, 1);
     assert!(retried.last_error.is_none());
+    assert!(retried.last_output.is_none());
     assert_eq!(
         retried.payload.get("content_uri"),
         Some(&Value::String("file:///nowledge/source-1.md".to_string()))
@@ -7174,6 +7176,7 @@ fn failed_external_content_artifact_jobs_can_be_retried() {
     assert_eq!(succeeded.job.status, DerivedArtifactJobStatus::Succeeded);
     assert_eq!(succeeded.job.attempts, 2);
     assert!(succeeded.job.last_error.is_none());
+    assert_eq!(succeeded.job.last_output, Some(succeeded.output.clone()));
     assert_eq!(
         succeeded.output.rows[0].get("attempts"),
         Some(&Value::Int(2))
@@ -7334,6 +7337,7 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
     assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
     assert_eq!(report.job.attempts, 1);
     assert!(report.job.last_error.is_none());
+    assert_eq!(report.job.last_output, Some(report.output.clone()));
     assert_eq!(
         report.output.rows[0].get("published_projection"),
         Some(&Value::String("search".to_string()))
@@ -7345,6 +7349,25 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
     assert_eq!(
         db.derived_artifact_jobs()[0].status,
         DerivedArtifactJobStatus::Succeeded
+    );
+    assert_eq!(
+        db.derived_artifact_jobs()[0].last_output,
+        Some(QueryOutput {
+            rows: vec![BTreeMap::from([
+                ("job_id".to_string(), Value::Int(job.id as i64)),
+                (
+                    "artifact_type".to_string(),
+                    Value::String("content_artifact".to_string()),
+                ),
+                ("name".to_string(), Value::String("source-1".to_string())),
+                ("action".to_string(), Value::String("parse".to_string())),
+                (
+                    "published_projection".to_string(),
+                    Value::String("search".to_string()),
+                ),
+                ("parsed_chunks".to_string(), Value::Int(2)),
+            ])],
+        })
     );
     assert!(db
         .run_next_external_content_artifact_job_with(|_| unreachable!())

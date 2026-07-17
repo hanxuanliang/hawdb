@@ -384,7 +384,10 @@ content artifact runtime and complete either the next pending job or a specific
 pending job selected from a bounded poll result. Skein records the state
 transition without embedding parsing, crawling, chunking, or large-value runtime
 logic. That runtime reads the payload and publishes rebuildable projections back
-to Skein through caller-owned output.
+to Skein through caller-owned output. Successful external content jobs keep the
+last structured output rows on the job ledger for lightweight lineage and
+operator audit; large parser results, raw bytes, chunks, and projection payloads
+remain caller-owned artifacts outside the graph kernel.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` for stateless
 `LocalQosPolicy` admission or

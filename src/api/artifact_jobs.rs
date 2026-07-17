@@ -37,6 +37,7 @@ pub struct DerivedArtifactJob {
     pub status: DerivedArtifactJobStatus,
     pub attempts: u32,
     pub last_error: Option<String>,
+    pub last_output: Option<QueryOutput>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,6 +237,7 @@ impl Database {
 
         job.status = DerivedArtifactJobStatus::Pending;
         job.last_error = None;
+        job.last_output = None;
         Some(job.clone())
     }
 
@@ -257,6 +259,7 @@ impl Database {
 
         job.status = DerivedArtifactJobStatus::Pending;
         job.last_error = None;
+        job.last_output = None;
         Some(job.clone())
     }
 
@@ -273,6 +276,7 @@ impl Database {
         self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Running;
         self.derived_artifact_jobs[index].attempts += 1;
         self.derived_artifact_jobs[index].last_error = None;
+        self.derived_artifact_jobs[index].last_output = None;
 
         let artifact_type = self.derived_artifact_jobs[index].artifact_type.clone();
         let name = self.derived_artifact_jobs[index].name.clone();
@@ -282,6 +286,7 @@ impl Database {
         match result {
             Ok(output) => {
                 self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Succeeded;
+                self.derived_artifact_jobs[index].last_output = Some(output.clone());
                 Ok(Some(DerivedArtifactJobReport {
                     job: self.derived_artifact_jobs[index].clone(),
                     output,
@@ -290,6 +295,7 @@ impl Database {
             Err(error) => {
                 self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Failed;
                 self.derived_artifact_jobs[index].last_error = Some(error.to_string());
+                self.derived_artifact_jobs[index].last_output = None;
                 Ok(Some(DerivedArtifactJobReport {
                     job: self.derived_artifact_jobs[index].clone(),
                     output: QueryOutput {
@@ -627,11 +633,13 @@ impl Database {
         self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Running;
         self.derived_artifact_jobs[index].attempts += 1;
         self.derived_artifact_jobs[index].last_error = None;
+        self.derived_artifact_jobs[index].last_output = None;
 
         let runtime_job = self.derived_artifact_jobs[index].clone();
         match runtime(&runtime_job) {
             Ok(output) => {
                 self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Succeeded;
+                self.derived_artifact_jobs[index].last_output = Some(output.clone());
                 Ok(Some(DerivedArtifactJobReport {
                     job: self.derived_artifact_jobs[index].clone(),
                     output,
@@ -640,6 +648,7 @@ impl Database {
             Err(error) => {
                 self.derived_artifact_jobs[index].status = DerivedArtifactJobStatus::Failed;
                 self.derived_artifact_jobs[index].last_error = Some(error.to_string());
+                self.derived_artifact_jobs[index].last_output = None;
                 Ok(Some(DerivedArtifactJobReport {
                     job: self.derived_artifact_jobs[index].clone(),
                     output: QueryOutput {
@@ -728,6 +737,7 @@ impl Database {
             status: DerivedArtifactJobStatus::Pending,
             attempts: 0,
             last_error: None,
+            last_output: None,
         };
         self.next_derived_artifact_job_id += 1;
         self.derived_artifact_jobs.push(job.clone());
