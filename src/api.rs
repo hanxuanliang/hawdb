@@ -426,6 +426,8 @@ pub struct KnowledgeRetrieverCandidate {
     pub canonical_node_id: Option<u64>,
     pub rank: usize,
     pub score: f64,
+    pub matched_spans: Vec<SearchMatchedSpan>,
+    pub graph_context_path_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1052,6 +1054,7 @@ impl Database {
             &search,
             &evidence,
             &graph_seeds,
+            &graph_context_paths,
             request.graph_seed_limit,
             graph_seed_candidate_count,
         );
@@ -1605,12 +1608,13 @@ fn knowledge_retriever_reports(
     search: &SearchResultSet,
     evidence: &[KnowledgeEvidence],
     graph_seeds: &[KnowledgeGraphSeed],
+    graph_context_paths: &[KnowledgeGraphContextPath],
     graph_seed_limit: usize,
     graph_seed_candidate_count: usize,
 ) -> Vec<KnowledgeRetrieverReport> {
-    let canonical_node_ids_by_hit = evidence
+    let evidence_by_hit = evidence
         .iter()
-        .map(|evidence| (evidence.hit_id.as_str(), evidence.canonical_node_id))
+        .map(|evidence| (evidence.hit_id.as_str(), evidence))
         .collect::<BTreeMap<_, _>>();
     let mut reports = search
         .retrievers
@@ -1631,14 +1635,20 @@ fn knowledge_retriever_reports(
             top_candidates: report
                 .top_candidates
                 .iter()
-                .map(|candidate| KnowledgeRetrieverCandidate {
-                    id: candidate.id.clone(),
-                    canonical_node_id: canonical_node_ids_by_hit
-                        .get(candidate.id.as_str())
-                        .copied()
-                        .flatten(),
-                    rank: candidate.rank,
-                    score: candidate.score,
+                .map(|candidate| {
+                    let evidence = evidence_by_hit.get(candidate.id.as_str()).copied();
+                    KnowledgeRetrieverCandidate {
+                        id: candidate.id.clone(),
+                        canonical_node_id: evidence.and_then(|evidence| evidence.canonical_node_id),
+                        rank: candidate.rank,
+                        score: candidate.score,
+                        matched_spans: evidence
+                            .map(|evidence| evidence.matched_spans.clone())
+                            .unwrap_or_default(),
+                        graph_context_path_count: evidence
+                            .map(|evidence| evidence.graph_context_path_count)
+                            .unwrap_or_default(),
+                    }
                 })
                 .collect(),
         })
@@ -1657,11 +1667,20 @@ fn knowledge_retriever_reports(
         top_candidates: graph_seeds
             .iter()
             .enumerate()
-            .map(|(index, seed)| KnowledgeRetrieverCandidate {
-                id: graph_seed_candidate_id(seed),
-                canonical_node_id: Some(seed.entity.node_id),
-                rank: index + 1,
-                score: seed.score,
+            .map(|(index, seed)| {
+                let id = graph_seed_candidate_id(seed);
+                let graph_context_path_count = graph_context_paths
+                    .iter()
+                    .filter(|path| path.seed_hit_id == id)
+                    .count();
+                KnowledgeRetrieverCandidate {
+                    id,
+                    canonical_node_id: Some(seed.entity.node_id),
+                    rank: index + 1,
+                    score: seed.score,
+                    matched_spans: Vec::new(),
+                    graph_context_path_count,
+                }
             })
             .collect(),
     });
@@ -4315,10 +4334,18 @@ mod tests {
         assert!(output.candidates[0]
             .matched_properties
             .contains(&"content".to_string()));
-        assert!(output
+        let text_retriever = output
             .retrievers
             .iter()
-            .any(|report| report.name == "text" && report.candidate_count == 2));
+            .find(|report| report.name == "text")
+            .expect("text knowledge retriever report");
+        assert_eq!(text_retriever.candidate_count, 2);
+        assert_eq!(text_retriever.top_candidates[0].canonical_node_id, Some(0));
+        assert_eq!(text_retriever.top_candidates[0].graph_context_path_count, 1);
+        assert!(text_retriever.top_candidates[0]
+            .matched_spans
+            .iter()
+            .any(|span| span.field == "content" && span.term == "projection"));
         assert!(output.search.truncated);
         assert!(output.search.truncation_reasons[0].contains("limit 1"));
         assert_eq!(
@@ -4373,6 +4400,11 @@ mod tests {
         assert_eq!(
             graph_seed_report.top_candidates[0].canonical_node_id,
             Some(0)
+        );
+        assert!(graph_seed_report.top_candidates[0].matched_spans.is_empty());
+        assert_eq!(
+            graph_seed_report.top_candidates[0].graph_context_path_count,
+            0
         );
         assert_eq!(
             graph_seed_report.top_candidates[0].id.as_str(),
@@ -4929,6 +4961,11 @@ mod tests {
         assert_eq!(
             graph_seed_report.top_candidates[0].canonical_node_id,
             Some(1)
+        );
+        assert!(graph_seed_report.top_candidates[0].matched_spans.is_empty());
+        assert_eq!(
+            graph_seed_report.top_candidates[0].graph_context_path_count,
+            1
         );
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
         assert_eq!(graph_seed_report.limit, Some(1));
