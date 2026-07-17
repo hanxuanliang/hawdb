@@ -402,6 +402,8 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_context_path_count: usize,
     pub graph_context_limit: usize,
     pub graph_context_max_hops: usize,
+    pub graph_context_truncated: bool,
+    pub graph_context_truncation_reasons: Vec<String>,
     pub fanout_reason_count: usize,
     pub candidate_count: usize,
     pub candidate_total_count: usize,
@@ -1073,6 +1075,7 @@ impl Database {
                 request.candidate_limit,
                 request.candidate_scoring,
             );
+        let graph_context_truncation_reasons = fanout_reasons.clone();
         let mut fanout_reasons = fanout_reasons;
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
@@ -1086,6 +1089,7 @@ impl Database {
                 graph_seed_candidate_count,
                 graph_seed_returned_count: graph_seeds.len(),
                 graph_context_path_count: graph_context_paths.len(),
+                graph_context_truncation_reasons,
                 fanout_reason_count: fanout_reasons.len(),
                 candidate_count: candidates.len(),
                 candidate_total_count,
@@ -1742,11 +1746,12 @@ fn knowledge_graph_seed_truncation_reasons(
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct KnowledgeRetrievalDiagnosticsInput {
     graph_seed_candidate_count: usize,
     graph_seed_returned_count: usize,
     graph_context_path_count: usize,
+    graph_context_truncation_reasons: Vec<String>,
     fanout_reason_count: usize,
     candidate_count: usize,
     candidate_total_count: usize,
@@ -1792,6 +1797,8 @@ fn knowledge_retrieval_diagnostics(
         graph_context_path_count: input.graph_context_path_count,
         graph_context_limit: request.graph_context_limit,
         graph_context_max_hops: request.graph_context_max_hops,
+        graph_context_truncated: !input.graph_context_truncation_reasons.is_empty(),
+        graph_context_truncation_reasons: input.graph_context_truncation_reasons,
         fanout_reason_count: input.fanout_reason_count,
         candidate_count: input.candidate_count,
         candidate_total_count: input.candidate_total_count,
@@ -4122,6 +4129,11 @@ mod tests {
         assert_eq!(output.diagnostics.graph_seed_limit, 2);
         assert_eq!(output.diagnostics.graph_context_limit, 4);
         assert_eq!(output.diagnostics.graph_context_max_hops, 1);
+        assert!(!output.diagnostics.graph_context_truncated);
+        assert!(output
+            .diagnostics
+            .graph_context_truncation_reasons
+            .is_empty());
         assert_eq!(output.diagnostics.candidate_limit, None);
         assert_eq!(
             output.diagnostics.candidate_total_count,
@@ -4346,6 +4358,11 @@ mod tests {
         assert_eq!(output.diagnostics.graph_seed_limit, 2);
         assert_eq!(output.diagnostics.graph_context_limit, 1);
         assert_eq!(output.diagnostics.graph_context_max_hops, 1);
+        assert!(output.diagnostics.graph_context_truncated);
+        assert_eq!(
+            output.diagnostics.graph_context_truncation_reasons,
+            vec!["graph_context_limit 1 reached while expanding hit memory:mem_1".to_string()]
+        );
         assert_eq!(output.diagnostics.candidate_limit, None);
         assert_eq!(output.evidence.len(), 1);
         assert_eq!(output.candidates.len(), 2);
