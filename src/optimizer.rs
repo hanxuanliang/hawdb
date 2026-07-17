@@ -4585,7 +4585,20 @@ fn estimate_relationship_count_leg_rows(
         .copied()
         .unwrap_or(seed_rows)
         .max(1);
-    let fanout = rel_count.div_ceil(source_count).max(1);
+    let target_count = catalog
+        .rel_type_target_counts
+        .get(&leg.rel_type)
+        .copied()
+        .unwrap_or(seed_rows)
+        .max(1);
+    let fanout = match leg.direction {
+        RelationshipDirection::Outgoing => rel_count.div_ceil(source_count).max(1),
+        RelationshipDirection::Incoming => rel_count.div_ceil(target_count).max(1),
+        RelationshipDirection::Undirected => rel_count
+            .div_ceil(source_count)
+            .saturating_add(rel_count.div_ceil(target_count))
+            .max(1),
+    };
     let mut rows = seed_rows.saturating_mul(fanout).max(1);
     if let Some(RelationshipCountFilter::PropertyNotEqOrEmpty { property, .. }) = &leg.filter {
         let distinct = catalog
@@ -7423,6 +7436,57 @@ mod tests {
         assert!(trace.decisions.iter().any(|decision| {
             decision.contains(
                 "estimate OptionalRelationshipCountSum for Thread: seed_rows=1 leg_rows=[CONTAINS:out:5] estimated_rows=1 cost=11",
+            )
+        }));
+    }
+
+    #[test]
+    fn incoming_optional_relationship_count_sum_uses_target_statistics() {
+        let logical = LogicalPlan::OptionalRelationshipCountSum {
+            variable: "e".to_string(),
+            label: "Entity".to_string(),
+            properties: BTreeMap::from([(
+                "id".to_string(),
+                Value::String("entity-42".to_string()),
+            )]),
+            legs: vec![RelationshipCountLeg {
+                rel_type: "MENTIONS".to_string(),
+                direction: RelationshipDirection::Incoming,
+                distinct: false,
+                filter: None,
+            }],
+            output: "mention_count".to_string(),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Memory".to_string(), 10_000),
+                    ("Entity".to_string(), 1_000),
+                ],
+                [("MENTIONS".to_string(), 5_000)],
+                [("MENTIONS".to_string(), 5_000)],
+                [],
+                [],
+                [(("Entity".to_string(), "id".to_string()), 1_000)],
+                [],
+            )
+            .with_relationship_type_target_counts([("MENTIONS".to_string(), 500)]),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 16,
+            }
+        );
+        assert!(trace.decisions.iter().any(|decision| {
+            decision.contains(
+                "estimate OptionalRelationshipCountSum for Entity: seed_rows=1 leg_rows=[MENTIONS:in:10] estimated_rows=1 cost=16",
             )
         }));
     }

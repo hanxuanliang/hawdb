@@ -872,8 +872,10 @@ Current implemented slice:
   variable targets such as `COUNT(DISTINCT m)`, while non-property or
   missing-statistics grouping keeps the conservative fallback estimate
 - optional relationship count-sum costing uses source label/property
-  distinct counts plus relationship type/source counts for Nowledge cleanup
-  and extracted-reference count paths instead of a fixed leg-count constant
+  distinct counts plus relationship type/source counts for outgoing legs and
+  relationship type/target counts for incoming legs in Nowledge cleanup,
+  extracted-reference, and mention-count paths instead of a fixed leg-count
+  constant
 - deterministic physical plan fingerprints are exposed through
   `OptimizerTrace::selected_plan_fingerprint` and `PhysicalPlan::fingerprint`
   for regression tests and future compatibility/shadow comparisons
