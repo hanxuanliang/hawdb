@@ -1398,11 +1398,9 @@ impl Database {
         let external_id = external_id?;
         let label = kind.and_then(search_kind_to_label)?;
         let label_id = self.catalog.label_id(label)?;
-        self.store.scan_nodes(Some(label_id)).find(|node| {
-            node.properties
-                .get("id")
-                .is_some_and(|value| value_to_external_id(value) == external_id)
-        })
+        self.store
+            .scan_nodes(Some(label_id))
+            .find(|node| projected_node_external_id(node) == external_id)
     }
 
     fn context_path_for_relationship(
@@ -2593,11 +2591,9 @@ fn seed_node_by_label_and_external_id<'a>(
     external_id: &str,
 ) -> Option<&'a NodeRecord> {
     let label_id = catalog.label_id(label)?;
-    store.scan_nodes(Some(label_id)).find(|node| {
-        node.properties
-            .get("id")
-            .is_some_and(|value| value_to_external_id(value) == external_id)
-    })
+    store
+        .scan_nodes(Some(label_id))
+        .find(|node| projected_node_external_id(node) == external_id)
 }
 
 fn context_path_for_relationship(
@@ -3599,6 +3595,10 @@ fn node_label_names(catalog: &Catalog, node: &NodeRecord) -> Vec<String> {
 
 fn node_external_id(node: &NodeRecord) -> Option<String> {
     node.properties.get("id").map(value_to_external_id)
+}
+
+fn projected_node_external_id(node: &NodeRecord) -> String {
+    node_external_id(node).unwrap_or_else(|| node.id.0.to_string())
 }
 
 fn value_to_external_id(value: &Value) -> String {
@@ -4697,6 +4697,49 @@ mod tests {
         assert_eq!(
             output.graph_seeds[0].entity.external_id.as_deref(),
             Some("mem_1")
+        );
+    }
+
+    #[test]
+    fn knowledge_retrieval_binds_idless_search_hits_to_canonical_nodes() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {title: 'Anonymous graph', content: 'idless projection retrieval'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Skein'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "idless projection retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 0,
+                graph_context_limit: 4,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.search.hits[0].external_id.as_deref(), Some("0"));
+        assert_eq!(output.evidence[0].canonical_node_id, Some(0));
+        assert_eq!(output.evidence[0].graph_context_path_count, 1);
+        assert_eq!(output.graph_context_paths.len(), 1);
+        assert_eq!(
+            output.graph_context_paths[0].source_external_id.as_deref(),
+            None
+        );
+        assert_eq!(
+            output.graph_context_paths[0].target_external_id.as_deref(),
+            Some("entity_1")
         );
     }
 

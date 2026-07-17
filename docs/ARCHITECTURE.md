@@ -459,7 +459,8 @@ search fusion weights to bias vector or text child retrievers before graph
 context expansion, and pass metadata filters that scope both search hits and
 graph-native seed candidates. Filter keys align with graph-derived
 projection metadata:
-`kind` maps to canonical node labels, `external_id` maps to node `id`,
+`kind` maps to canonical node labels, `external_id` maps to the projected node
+identity (`id` when present, otherwise the canonical node id string),
 `source_id` maps through the same `source_id`/`thread_id`/`source` projection
 fallback as search documents, and other keys map to same-name scalar node
 properties. `space_id` follows the Nowledge normalized-space rule: missing,
