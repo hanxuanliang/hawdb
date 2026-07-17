@@ -4144,6 +4144,42 @@ fn bounded_background_property_index_projection_rebuild_defers_without_rebuildin
 }
 
 #[test]
+fn bounded_background_property_index_projection_rebuild_admits_actual_batch_estimate() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'Graph foundations'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'note', source_id: 'b', title: 'Vector search'})")
+        .unwrap();
+    db.query("CREATE (:Memory {kind: 'task', source_id: 'a', title: 'Graph query planning'})")
+        .unwrap();
+    db.query("CREATE INDEX ON :Memory(kind, source_id)")
+        .unwrap();
+    db.query("CREATE FULLTEXT INDEX ON :Memory(title)").unwrap();
+    let policy = LocalQosPolicy {
+        max_background_operations: Some(3),
+        ..LocalQosPolicy::default()
+    };
+
+    let output = db
+        .rebuild_bounded_background_property_index_projections(
+            &policy,
+            &LocalQosState::default(),
+            4,
+        )
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("index_kind"),
+        Some(&Value::String("composite".to_string()))
+    );
+    assert_eq!(
+        output.rows[0].get("estimated_operations"),
+        Some(&Value::Int(3))
+    );
+}
+
+#[test]
 fn bounded_scheduled_background_property_index_projection_rebuild_releases_budget() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'Graph foundations'})")

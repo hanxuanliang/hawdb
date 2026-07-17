@@ -1423,6 +1423,37 @@ impl GraphStore {
         actions
     }
 
+    pub fn bounded_property_index_projection_estimated_operations(
+        &self,
+        catalog: &Catalog,
+        max_estimated_operations: usize,
+    ) -> usize {
+        let mut used_estimated_operations = 0usize;
+
+        for index in catalog.composite_property_indexes() {
+            let estimated_operations = self.index_label_record_count(index.label_id).max(1);
+            let _ = reserve_schema_maintenance_budget(
+                &mut used_estimated_operations,
+                Some(max_estimated_operations),
+                estimated_operations,
+            );
+        }
+
+        for index in catalog.property_indexes() {
+            if index.kind != IndexKind::FullText {
+                continue;
+            }
+            let estimated_operations = self.index_label_record_count(index.label_id).max(1);
+            let _ = reserve_schema_maintenance_budget(
+                &mut used_estimated_operations,
+                Some(max_estimated_operations),
+                estimated_operations,
+            );
+        }
+
+        used_estimated_operations
+    }
+
     pub fn property_index_projection_estimated_operations(&self, catalog: &Catalog) -> usize {
         let composite_operations = catalog
             .composite_property_indexes()

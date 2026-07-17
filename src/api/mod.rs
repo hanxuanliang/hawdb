@@ -971,7 +971,16 @@ impl Database {
         state: &LocalQosState,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
-        let request = WorkRequest::background(WorkClass::Projection, max_estimated_operations);
+        let estimated_operations = self
+            .store
+            .bounded_property_index_projection_estimated_operations(
+                &self.catalog,
+                max_estimated_operations,
+            );
+        if estimated_operations == 0 {
+            return Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations));
+        }
+        let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
         match policy.admit(state, &request) {
             QosAdmission::Admit => {
                 Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations))
@@ -990,9 +999,18 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        let estimated_operations = self
+            .store
+            .bounded_property_index_projection_estimated_operations(
+                &self.catalog,
+                max_estimated_operations,
+            );
+        if estimated_operations == 0 {
+            return Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations));
+        }
         let permit = match scheduler.try_start(WorkRequest::background(
             WorkClass::Projection,
-            max_estimated_operations,
+            estimated_operations,
         )) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason }) => {
