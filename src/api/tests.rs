@@ -546,6 +546,7 @@ fn retrieves_knowledge_through_database_facade() {
     assert!(output.diagnostics.warnings.is_empty());
     assert_eq!(output.fanout_reasons.len(), 1);
     assert!(output.fanout_reasons[0].contains("graph_context_limit 1"));
+    assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
 }
 
 #[test]
@@ -1718,6 +1719,7 @@ fn knowledge_retrieval_returns_graph_seeds_without_search_hits() {
     );
     assert_eq!(output.fanout_reasons.len(), 1);
     assert!(output.fanout_reasons[0].contains("knowledge_graph_seed_limit 1"));
+    assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
 }
 
 #[test]
@@ -1829,6 +1831,7 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
     );
     assert_eq!(output.fanout_reasons.len(), 1);
     assert!(output.fanout_reasons[0].contains("knowledge_candidate_limit 1"));
+    assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
 
     let empty_by_limit = db.retrieve_knowledge(
         &search_index,
