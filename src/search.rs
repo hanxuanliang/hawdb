@@ -70,6 +70,7 @@ pub struct SearchEmbeddingManifest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchProjectionFreshness {
     pub document_count: usize,
+    pub source_graph_commit_epoch: Option<u64>,
     pub full_reindex_needed: bool,
     pub metadata_repair_needed: bool,
     pub embedding_model: Option<String>,
@@ -198,6 +199,7 @@ pub struct SearchIndex {
     path: Option<PathBuf>,
     embedding_dimension: Option<usize>,
     embedding_manifest: Option<SearchEmbeddingManifest>,
+    source_graph_commit_epoch: Option<u64>,
 }
 
 impl SearchIndex {
@@ -212,6 +214,7 @@ impl SearchIndex {
             path: Some(path.as_ref().to_path_buf()),
             embedding_dimension: None,
             embedding_manifest: None,
+            source_graph_commit_epoch: None,
         };
         index.load_snapshot()?;
         Ok(index)
@@ -248,6 +251,7 @@ impl SearchIndex {
     pub fn projection_freshness(&self) -> SearchProjectionFreshness {
         SearchProjectionFreshness {
             document_count: self.documents.len(),
+            source_graph_commit_epoch: self.source_graph_commit_epoch,
             full_reindex_needed: self.full_reindex_needed(),
             metadata_repair_needed: self.metadata_repair_needed(),
             embedding_model: self
@@ -317,6 +321,7 @@ impl SearchIndex {
         }
 
         self.documents = next_documents;
+        self.source_graph_commit_epoch = Some(store.commit_epoch());
         self.embedding_dimension = self
             .embedding_manifest
             .as_ref()
@@ -408,6 +413,9 @@ impl SearchIndex {
         let snapshot_path = path.join(SEARCH_SNAPSHOT_FILE);
         let mut body = String::new();
         body.push_str("SKEIN_SEARCH_PROJECTION_V1\n");
+        if let Some(epoch) = self.source_graph_commit_epoch {
+            body.push_str(&format!("source_graph_commit_epoch\t{epoch}\n"));
+        }
         if let Some(manifest) = &self.embedding_manifest {
             body.push_str(&format!(
                 "embedding_manifest\t{}\t{}\t{}\n",
@@ -691,6 +699,10 @@ impl SearchIndex {
             }
             let fields = line.split('\t').collect::<Vec<_>>();
             match fields.as_slice() {
+                ["source_graph_commit_epoch", raw] => {
+                    self.source_graph_commit_epoch =
+                        Some(parse_u64(raw, "source graph commit epoch")?);
+                }
                 ["embedding_manifest", raw_model, raw_version, raw_dimension] => {
                     let version = decode_string(raw_version)?;
                     let manifest = SearchEmbeddingManifest {
@@ -2199,6 +2211,49 @@ mod tests {
             let hits = index.search("adjacency", Some(&[1.0, 0.0]), SearchMode::Hybrid, 10);
             assert_eq!(hits[0].id, "a");
         }
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn graph_rebuild_records_source_commit_epoch() {
+        let path = unique_test_dir("search_source_graph_epoch");
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String("mem_1".to_string())),
+                    (
+                        "title".to_string(),
+                        Value::String("Graph storage".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .rebuild_from_graph(&catalog, &store, SearchRebuildOptions::default())
+                .unwrap();
+            assert_eq!(
+                index.projection_freshness().source_graph_commit_epoch,
+                Some(store.commit_epoch())
+            );
+            index.checkpoint().unwrap();
+        }
+        {
+            let index = SearchIndex::open(&path).unwrap();
+            assert_eq!(
+                index.projection_freshness().source_graph_commit_epoch,
+                Some(store.commit_epoch())
+            );
+        }
+
+        let snapshot = read_search_snapshot_text(&path.join(SEARCH_SNAPSHOT_FILE)).unwrap();
+        assert!(snapshot.contains("source_graph_commit_epoch\t1\n"));
         std::fs::remove_dir_all(path).unwrap();
     }
 

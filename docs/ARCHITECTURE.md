@@ -375,7 +375,10 @@ exceeded. Successful rebuilds clear projection lifecycle markers; failed rebuild
 leave the previous projection intact and keep a full-reindex marker.
 Persistent search projection snapshots publish through a synced temporary file,
 atomic rename, and parent-directory sync, while remaining rebuildable projection
-state outside the graph WAL.
+state outside the graph WAL. A graph-derived rebuild records the source graph
+commit epoch inside the caller-owned search projection snapshot so retrieval can
+compare projection freshness with the live graph snapshot without moving search
+state into the graph WAL.
 `SearchIndex::rebuild_derived_artifacts` wraps the full rebuild path in a
 report-oriented orchestration API with document counts, scanned nodes, indexed
 documents, and lifecycle-marker state.
@@ -411,12 +414,13 @@ keeps text fallback useful while the projection remains rebuildable.
 Search hits expose the information needed by a knowledge retrieval surface:
 fused RRF score, vector score, text score, vector rank, text rank, fallback
 reasons, projection kind, external ID, source ID, matched analyzer terms, and
-projection freshness derived from the current projection marker and embedding
-manifest state. Hybrid ranking uses reciprocal-rank fusion over the vector and
-text child retrievers, preserving each child position for explainability. Callers
-that need bounded candidate growth can use `SearchIndex::search_with_options`
-with a rank window, which limits which child candidates participate in RRF while
-still reporting each child's total candidate count. The same options also carry
+projection freshness derived from the recorded source graph commit epoch, current
+projection markers, and embedding manifest state. Hybrid ranking uses
+reciprocal-rank fusion over the vector and text child retrievers, preserving each
+child position for explainability. Callers that need bounded candidate growth can
+use `SearchIndex::search_with_options` with a rank window, which limits which
+child candidates participate in RRF while still reporting each child's total
+candidate count. The same options also carry
 exact-match metadata filters such as `kind` or `source_id`; filters are applied
 before vector scoring, BM25 corpus statistics, retriever candidate counts, and
 final truncation so scoped retrieval does not leak unscoped candidates into
@@ -443,10 +447,10 @@ keys map to same-name scalar node properties. Returned diagnostics preserve the
 search limit, rank window, graph seed budget, graph context budget, candidate
 budget, filtered candidate counts, search document scope, search hit count,
 graph seed counts, graph context path count, fan-out reason count, final
-candidate count, projection marker warnings, and empty-result reasons. This
-keeps Knowledge Retrieval as the primary application-facing path while
-preserving the rule that search artifacts are rebuildable and outside the graph
-WAL.
+candidate count, projection source graph commit epoch, stale projection
+warnings, projection marker warnings, and empty-result reasons. This keeps
+Knowledge Retrieval as the primary application-facing path while preserving the
+rule that search artifacts are rebuildable and outside the graph WAL.
 
 `Database::retrieve_knowledge` also includes a bounded graph-native seed
 retriever over canonical nodes. `KnowledgeRetrievalRequest::graph_seed_limit`

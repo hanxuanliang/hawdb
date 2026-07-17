@@ -388,6 +388,8 @@ pub struct KnowledgeRetrievalOutput {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRetrievalDiagnostics {
+    pub graph_commit_epoch: u64,
+    pub projection_source_graph_commit_epoch: Option<u64>,
     pub search_document_count: usize,
     pub search_filtered_document_count: usize,
     pub search_total_hits: usize,
@@ -1053,11 +1055,13 @@ impl Database {
         let mut fanout_reasons = fanout_reasons;
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
+        let graph_commit_epoch = self.store.commit_epoch();
         let projection_freshness = search_index.projection_freshness();
         let diagnostics = knowledge_retrieval_diagnostics(
             &search,
             request,
             &projection_freshness,
+            graph_commit_epoch,
             KnowledgeRetrievalDiagnosticsInput {
                 graph_seed_candidate_count,
                 graph_seed_returned_count: graph_seeds.len(),
@@ -1067,7 +1071,7 @@ impl Database {
             },
         );
         KnowledgeRetrievalOutput {
-            graph_commit_epoch: self.store.commit_epoch(),
+            graph_commit_epoch,
             projection_freshness,
             search,
             retrievers,
@@ -1635,6 +1639,7 @@ fn knowledge_retrieval_diagnostics(
     search: &SearchResultSet,
     request: &KnowledgeRetrievalRequest,
     projection_freshness: &SearchProjectionFreshness,
+    graph_commit_epoch: u64,
     input: KnowledgeRetrievalDiagnosticsInput,
 ) -> KnowledgeRetrievalDiagnostics {
     let mut empty_reasons = Vec::new();
@@ -1652,6 +1657,8 @@ fn knowledge_retrieval_diagnostics(
         empty_reasons.push("retrieval produced no candidates".to_string());
     }
     KnowledgeRetrievalDiagnostics {
+        graph_commit_epoch,
+        projection_source_graph_commit_epoch: projection_freshness.source_graph_commit_epoch,
         search_document_count: search.document_count,
         search_filtered_document_count: search.filtered_document_count,
         search_total_hits: search.total_hits,
@@ -1666,13 +1673,23 @@ fn knowledge_retrieval_diagnostics(
         fanout_reason_count: input.fanout_reason_count,
         candidate_count: input.candidate_count,
         candidate_limit: request.candidate_limit,
-        warnings: knowledge_retrieval_warnings(projection_freshness),
+        warnings: knowledge_retrieval_warnings(projection_freshness, graph_commit_epoch),
         empty_reasons,
     }
 }
 
-fn knowledge_retrieval_warnings(projection_freshness: &SearchProjectionFreshness) -> Vec<String> {
+fn knowledge_retrieval_warnings(
+    projection_freshness: &SearchProjectionFreshness,
+    graph_commit_epoch: u64,
+) -> Vec<String> {
     let mut warnings = Vec::new();
+    if projection_freshness
+        .source_graph_commit_epoch
+        .map(|projection_epoch| projection_epoch < graph_commit_epoch)
+        .unwrap_or(false)
+    {
+        warnings.push("search projection is older than graph snapshot".to_string());
+    }
     if projection_freshness.full_reindex_needed {
         warnings.push("search projection requires full reindex".to_string());
     }
@@ -4167,8 +4184,17 @@ mod tests {
         assert_eq!(rebuild.indexed_documents, 4);
         assert_eq!(output.graph_commit_epoch, 4);
         assert_eq!(output.projection_freshness.document_count, 4);
+        assert_eq!(
+            output.projection_freshness.source_graph_commit_epoch,
+            Some(4)
+        );
         assert_eq!(output.search.total_hits, 2);
         assert_eq!(output.search.hits.len(), 1);
+        assert_eq!(output.diagnostics.graph_commit_epoch, 4);
+        assert_eq!(
+            output.diagnostics.projection_source_graph_commit_epoch,
+            Some(4)
+        );
         assert_eq!(output.diagnostics.search_limit, 1);
         assert_eq!(output.diagnostics.rank_window, None);
         assert_eq!(output.diagnostics.graph_seed_limit, 2);
@@ -4272,6 +4298,7 @@ mod tests {
         assert!(output.graph_seeds[0].score >= output.graph_seeds[1].score);
         assert_eq!(output.diagnostics.graph_context_path_count, 1);
         assert_eq!(output.diagnostics.fanout_reason_count, 1);
+        assert!(output.diagnostics.warnings.is_empty());
         assert_eq!(output.fanout_reasons.len(), 1);
         assert!(output.fanout_reasons[0].contains("graph_context_limit 1"));
     }
@@ -4455,6 +4482,52 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning == "search projection metadata repair is needed"));
+    }
+
+    #[test]
+    fn knowledge_retrieval_diagnostics_report_stale_projection_epoch() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem_1', title: 'Fresh projection', content: 'projection epoch retrieval'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem_2', title: 'Newer graph', content: 'new graph data'})")
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "projection epoch".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 10,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(output.graph_commit_epoch, 2);
+        assert_eq!(
+            output.projection_freshness.source_graph_commit_epoch,
+            Some(1)
+        );
+        assert_eq!(output.diagnostics.graph_commit_epoch, 2);
+        assert_eq!(
+            output.diagnostics.projection_source_graph_commit_epoch,
+            Some(1)
+        );
+        assert!(output
+            .diagnostics
+            .warnings
+            .iter()
+            .any(|warning| warning == "search projection is older than graph snapshot"));
     }
 
     #[test]
