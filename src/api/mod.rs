@@ -16,10 +16,11 @@ use crate::schema::{
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
-    projection_row_from_node, SearchCandidateSetReport, SearchDerivedArtifactReport,
-    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionDelta,
-    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
-    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    projection_row_from_node, MetadataRepairOptions, MetadataRepairSummary,
+    SearchCandidateSetReport, SearchDerivedArtifactReport, SearchFusionWeights, SearchIndex,
+    SearchMatchedSpan, SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary,
+    SearchResultSet, SearchRetrieverCandidateSetReport,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -1347,6 +1348,56 @@ impl Database {
             &self.catalog,
             &self.store,
             options,
+        )
+    }
+
+    pub fn repair_search_projection_metadata(
+        &self,
+        search_index: &mut SearchIndex,
+        options: MetadataRepairOptions,
+    ) -> Result<MetadataRepairSummary> {
+        search_index.repair_metadata_from_graph(&self.catalog, &self.store, options)
+    }
+
+    pub fn search_projection_metadata_repair_background_work_plan(
+        &self,
+        search_index: &SearchIndex,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        search_index.metadata_repair_background_work_plan(&self.store, hint)
+    }
+
+    pub fn repair_background_search_projection_metadata(
+        &self,
+        search_index: &mut SearchIndex,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: MetadataRepairOptions,
+        estimated_operations: usize,
+    ) -> Result<MetadataRepairSummary> {
+        search_index.repair_background_metadata_from_graph(
+            policy,
+            state,
+            &self.catalog,
+            &self.store,
+            options,
+            estimated_operations,
+        )
+    }
+
+    pub fn repair_scheduled_background_search_projection_metadata(
+        &self,
+        search_index: &mut SearchIndex,
+        scheduler: &mut LocalQosScheduler,
+        options: MetadataRepairOptions,
+        estimated_operations: usize,
+    ) -> Result<MetadataRepairSummary> {
+        search_index.repair_scheduled_background_metadata_from_graph(
+            scheduler,
+            &self.catalog,
+            &self.store,
+            options,
+            estimated_operations,
         )
     }
 
