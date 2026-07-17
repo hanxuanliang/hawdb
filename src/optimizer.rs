@@ -4038,10 +4038,12 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
                     .saturating_add(input_cost.estimated_rows.saturating_mul(2)),
             }
         }
-        PhysicalPlan::OptionalRelationshipCountSumExec { legs, .. } => PlanCost {
-            estimated_rows: 1,
-            cost: (legs.len() as u64).saturating_mul(8).saturating_add(4),
-        },
+        PhysicalPlan::OptionalRelationshipCountSumExec {
+            label,
+            properties,
+            legs,
+            ..
+        } => estimate_optional_relationship_count_sum_cost(label, properties, legs, catalog),
         PhysicalPlan::ThreadRepairStatsExec { .. } => PlanCost {
             estimated_rows: 1,
             cost: 32,
@@ -4225,6 +4227,68 @@ fn estimate_node_property_filter_rows(
             .map(|label| catalog.estimate_property_in_rows(label, property, values, input_rows)),
         _ => None,
     }
+}
+
+fn estimate_optional_relationship_count_sum_cost(
+    label: &str,
+    properties: &BTreeMap<String, Value>,
+    legs: &[RelationshipCountLeg],
+    catalog: &OptimizerCatalog,
+) -> PlanCost {
+    let seed_rows = estimate_seed_rows_from_properties(label, properties, catalog);
+    let relationship_rows = legs
+        .iter()
+        .map(|leg| estimate_relationship_count_leg_rows(seed_rows, leg, catalog))
+        .fold(0_u64, |acc, rows| acc.saturating_add(rows));
+    PlanCost {
+        estimated_rows: 1,
+        cost: seed_rows
+            .saturating_add(relationship_rows)
+            .saturating_add(legs.len() as u64)
+            .saturating_add(4),
+    }
+}
+
+fn estimate_seed_rows_from_properties(
+    label: &str,
+    properties: &BTreeMap<String, Value>,
+    catalog: &OptimizerCatalog,
+) -> u64 {
+    let label_rows = catalog.label_count(label).max(1);
+    let distinct_product = properties
+        .keys()
+        .map(|property| catalog.distinct_count(label, property).max(1))
+        .fold(1_u64, |acc, value| acc.saturating_mul(value))
+        .max(1);
+    label_rows.div_ceil(distinct_product).max(1)
+}
+
+fn estimate_relationship_count_leg_rows(
+    seed_rows: u64,
+    leg: &RelationshipCountLeg,
+    catalog: &OptimizerCatalog,
+) -> u64 {
+    let rel_count = catalog
+        .rel_type_counts
+        .get(&leg.rel_type)
+        .copied()
+        .unwrap_or(1)
+        .max(1);
+    let source_count = catalog
+        .rel_type_source_counts
+        .get(&leg.rel_type)
+        .copied()
+        .unwrap_or(seed_rows)
+        .max(1);
+    let fanout = rel_count.div_ceil(source_count).max(1);
+    let mut rows = seed_rows.saturating_mul(fanout).max(1);
+    if let Some(RelationshipCountFilter::PropertyNotEqOrEmpty { property, .. }) = &leg.filter {
+        let distinct = catalog
+            .rel_property_distinct_count(&leg.rel_type, property)
+            .max(1);
+        rows = rows.saturating_sub(rows.div_ceil(distinct)).max(1);
+    }
+    rows
 }
 
 fn physical_plan_access_path_covers_property(
@@ -5765,7 +5829,7 @@ mod tests {
     use crate::cypher::RelationshipDirection;
     use crate::planner::{
         AggregateFunction, AggregateTarget, Aggregation, LogicalPlan, Predicate, Projection,
-        ProjectionExpression,
+        ProjectionExpression, RelationshipCountLeg,
     };
     use crate::value::Value;
     use std::collections::BTreeMap;
@@ -6500,6 +6564,51 @@ mod tests {
             PlanCost {
                 estimated_rows: 10,
                 cost: 4_004,
+            }
+        );
+    }
+
+    #[test]
+    fn optional_relationship_count_sum_uses_seed_and_relationship_statistics() {
+        let logical = LogicalPlan::OptionalRelationshipCountSum {
+            variable: "t".to_string(),
+            label: "Thread".to_string(),
+            properties: BTreeMap::from([(
+                "id".to_string(),
+                Value::String("thread-42".to_string()),
+            )]),
+            legs: vec![RelationshipCountLeg {
+                rel_type: "CONTAINS".to_string(),
+                direction: RelationshipDirection::Outgoing,
+                distinct: false,
+                filter: None,
+            }],
+            output: "message_count".to_string(),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Thread".to_string(), 1_000),
+                    ("Message".to_string(), 50_000),
+                ],
+                [("CONTAINS".to_string(), 5_000)],
+                [("CONTAINS".to_string(), 1_000)],
+                [],
+                [],
+                [(("Thread".to_string(), "id".to_string()), 1_000)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 11,
             }
         );
     }
