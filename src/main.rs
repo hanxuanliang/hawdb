@@ -1248,6 +1248,7 @@ fn graph_lightning_gc_staging_report(
     let candidates = graph_lightning_staging_gc_candidates(&catalog, &catalog_bytes)?;
     let published_path = publish_dir.join("graph_lightning_published_manifest.json");
     let mut errors = Vec::new();
+    let mut published_pointer_errors = Vec::new();
     let mut pinned_paths = BTreeSet::new();
     let pointer_state = if published_path.exists() {
         let verification = verify_graph_lightning_published_manifest(staging_dir, publish_dir)?;
@@ -1268,18 +1269,22 @@ fn graph_lightning_gc_staging_report(
                 .collect();
             "verified"
         } else {
-            errors.push("published pointer verification failed; refusing to mark staging artifacts deletable".to_string());
+            push_grouped_error(
+                &mut errors,
+                &mut published_pointer_errors,
+                "published pointer verification failed; refusing to mark staging artifacts deletable",
+            );
             if let Some(verification_errors) = verification
                 .get("validation_gate")
                 .and_then(|gate| gate.get("errors"))
                 .and_then(serde_json::Value::as_array)
             {
-                errors.extend(
-                    verification_errors
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string),
-                );
+                for error in verification_errors
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                {
+                    push_grouped_error(&mut errors, &mut published_pointer_errors, error);
+                }
             }
             "verification_failed"
         }
@@ -1348,6 +1353,8 @@ fn graph_lightning_gc_staging_report(
         "candidates": candidate_reports,
         "gc_gate": {
             "decision": decision,
+            "published_pointer_errors": published_pointer_errors.len(),
+            "published_pointer_error_messages": published_pointer_errors,
             "errors": errors,
         },
     }))
@@ -2281,6 +2288,7 @@ mod tests {
         assert_eq!(report["pinned_count"], 4);
         assert_eq!(report["deletable_count"], 0);
         assert_eq!(report["gc_gate"]["decision"], "ready");
+        assert_eq!(report["gc_gate"]["published_pointer_errors"], 0);
         assert!(report["candidates"]
             .as_array()
             .unwrap()
@@ -2312,6 +2320,7 @@ mod tests {
         assert_eq!(report["pinned_count"], 0);
         assert_eq!(report["deletable_count"], 4);
         assert_eq!(report["gc_gate"]["decision"], "ready");
+        assert_eq!(report["gc_gate"]["published_pointer_errors"], 0);
         assert!(report["candidates"]
             .as_array()
             .unwrap()
@@ -2349,6 +2358,15 @@ mod tests {
         assert_eq!(report["pinned_count"], 0);
         assert_eq!(report["deletable_count"], 0);
         assert_eq!(report["gc_gate"]["decision"], "blocked");
+        assert_eq!(report["gc_gate"]["published_pointer_errors"], 4);
+        assert!(report["gc_gate"]["published_pointer_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("staging catalog checksum mismatch")));
         assert!(report["candidates"]
             .as_array()
             .unwrap()

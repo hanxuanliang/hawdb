@@ -164,6 +164,9 @@ and checksum, and that the referenced staging catalog still passes the
 source-independent verifier. Its validation gate keeps flat errors and grouped
 pointer, catalog, and staging error arrays so resume automation can distinguish
 pointer corruption from staging catalog drift.
+`skein graph-lightning-gc-staging-report <staging-dir> <publish-dir>` fails
+closed when a published pointer cannot be verified and groups the propagated
+published-pointer verification errors for cleanup automation.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a

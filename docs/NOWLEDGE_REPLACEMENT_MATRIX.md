@@ -64,6 +64,8 @@ Staging verification gates also split artifact, manifest, GraphStream, bundle,
 and catalog errors into grouped arrays for offline upload/resume automation.
 Published-pointer verification gates split pointer, catalog, and staging errors
 for Graph Lightning resume checks.
+Staging GC gates also group published-pointer verification errors before
+declaring artifacts deletable.
 
 ## Current Compatibility Evidence
 
