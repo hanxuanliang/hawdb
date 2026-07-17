@@ -4677,6 +4677,39 @@ fn bounded_background_schema_maintenance_limits_actual_execution() {
 }
 
 #[test]
+fn bounded_background_schema_maintenance_admits_actual_work_not_caller_cap() {
+    let path = unique_test_dir("bounded_background_schema_maintenance_actual_work");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(2),
+            ..LocalQosPolicy::default()
+        };
+
+        let output = db
+            .run_bounded_background_schema_maintenance(&policy, &LocalQosState::default(), 10)
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].get("object"),
+            Some(&Value::String("Memory.id".to_string()))
+        );
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Validating
+        }));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn scheduled_background_schema_maintenance_tracks_mutation_budget() {
     let path = unique_test_dir("scheduled_schema_maintenance_budget");
     {
@@ -4710,6 +4743,41 @@ fn scheduled_background_schema_maintenance_tracks_mutation_budget() {
                 [crate::WorkClass::Mutation.as_index()],
             0
         );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn bounded_scheduled_background_schema_maintenance_admits_actual_work_not_caller_cap() {
+    let path = unique_test_dir("bounded_scheduled_schema_maintenance_actual_work");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(2),
+            max_total_background_operations: Some(2),
+            ..LocalQosPolicy::default()
+        });
+
+        let output = db
+            .run_bounded_scheduled_background_schema_maintenance(&mut scheduler, 10)
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(
+            output.rows[0].get("object"),
+            Some(&Value::String("Memory.id".to_string()))
+        );
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Validating
+        }));
+        assert_eq!(scheduler.state().running_background_operations, 0);
     }
     std::fs::remove_dir_all(path).unwrap();
 }

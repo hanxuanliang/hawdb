@@ -1239,7 +1239,12 @@ impl Database {
         state: &LocalQosState,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
-        let request = WorkRequest::background(WorkClass::Mutation, max_estimated_operations);
+        let estimated_operations =
+            self.bounded_schema_maintenance_estimated_operations(max_estimated_operations);
+        if estimated_operations == 0 {
+            return self.run_bounded_schema_maintenance(max_estimated_operations);
+        }
+        let request = WorkRequest::background(WorkClass::Mutation, estimated_operations);
         match policy.admit(state, &request) {
             QosAdmission::Admit => self.run_bounded_schema_maintenance(max_estimated_operations),
             QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
@@ -1296,9 +1301,14 @@ impl Database {
         scheduler: &mut LocalQosScheduler,
         max_estimated_operations: usize,
     ) -> Result<QueryOutput> {
+        let estimated_operations =
+            self.bounded_schema_maintenance_estimated_operations(max_estimated_operations);
+        if estimated_operations == 0 {
+            return self.run_bounded_schema_maintenance(max_estimated_operations);
+        }
         let permit = match scheduler.try_start(WorkRequest::background(
             WorkClass::Mutation,
-            max_estimated_operations,
+            estimated_operations,
         )) {
             Ok(permit) => permit,
             Err(QosAdmission::Defer { reason }) => {
@@ -1335,6 +1345,23 @@ impl Database {
             .into_iter()
             .map(|item| item.estimated_operations)
             .fold(0usize, usize::saturating_add)
+    }
+
+    fn bounded_schema_maintenance_estimated_operations(
+        &self,
+        max_estimated_operations: usize,
+    ) -> usize {
+        let mut used_estimated_operations = 0usize;
+        for item in self.store.plan_schema_maintenance(&self.catalog) {
+            let Some(next) = used_estimated_operations.checked_add(item.estimated_operations)
+            else {
+                continue;
+            };
+            if next <= max_estimated_operations {
+                used_estimated_operations = next;
+            }
+        }
+        used_estimated_operations
     }
 
     pub fn projected_graph_statuses(&self) -> Vec<ProjectedGraphStatus> {
