@@ -524,10 +524,10 @@ impl SearchIndex {
     ) -> Result<SearchProjectionDeltaReport> {
         match policy.admit(state, &delta.background_work_request()) {
             QosAdmission::Admit => self.apply_projection_delta(delta),
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search projection delta deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search projection delta rejected: {reason}"
             ))),
         }
@@ -540,12 +540,12 @@ impl SearchIndex {
     ) -> Result<SearchProjectionDeltaReport> {
         let permit = match scheduler.try_start(delta.background_work_request()) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search projection delta deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search projection delta rejected: {reason}"
                 )));
@@ -718,10 +718,10 @@ impl SearchIndex {
         );
         match policy.admit(state, &request) {
             QosAdmission::Admit => self.rebuild_derived_artifacts(catalog, store, options),
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search projection rebuild deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search projection rebuild rejected: {reason}"
             ))),
         }
@@ -740,12 +740,12 @@ impl SearchIndex {
         );
         let permit = match scheduler.try_start(request) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search projection rebuild deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search projection rebuild rejected: {reason}"
                 )));
@@ -837,10 +837,10 @@ impl SearchIndex {
         let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
         match policy.admit(state, &request) {
             QosAdmission::Admit => self.repair_metadata_from_graph(catalog, store, options),
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search metadata repair deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search metadata repair rejected: {reason}"
             ))),
         }
@@ -857,12 +857,12 @@ impl SearchIndex {
         let request = WorkRequest::background(WorkClass::Projection, estimated_operations);
         let permit = match scheduler.try_start(request) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search metadata repair deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search metadata repair rejected: {reason}"
                 )));

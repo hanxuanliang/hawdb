@@ -7241,7 +7241,7 @@ fn external_content_artifact_job_background_work_plan_is_rankable_by_action() {
         LocalQosPolicy::default().evaluate_background_work(&LocalQosState::default(), &parse_plan);
     assert!(matches!(
         decision.admission,
-        QosAdmission::Defer { reason } if reason.contains("tenant budget remaining 2")
+        QosAdmission::Defer { reason, .. } if reason.contains("tenant budget remaining 2")
     ));
     assert!(decision
         .reasons

@@ -1083,10 +1083,10 @@ impl Database {
             QosAdmission::Admit => {
                 Ok(self.rebuild_bounded_property_index_projections(max_estimated_operations))
             }
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background property index projection rebuild deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background property index projection rebuild rejected: {reason}"
             ))),
         }
@@ -1111,12 +1111,12 @@ impl Database {
             estimated_operations,
         )) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background property index projection rebuild deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background property index projection rebuild rejected: {reason}"
                 )));
@@ -1231,10 +1231,10 @@ impl Database {
         let request = WorkRequest::background(WorkClass::Mutation, estimated_operations);
         match policy.admit(state, &request) {
             QosAdmission::Admit => self.run_schema_maintenance(),
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background schema maintenance deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background schema maintenance rejected: {reason}"
             ))),
         }
@@ -1254,10 +1254,10 @@ impl Database {
         let request = WorkRequest::background(WorkClass::Mutation, estimated_operations);
         match policy.admit(state, &request) {
             QosAdmission::Admit => self.run_bounded_schema_maintenance(max_estimated_operations),
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background schema maintenance deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background schema maintenance rejected: {reason}"
             ))),
         }
@@ -1285,12 +1285,12 @@ impl Database {
             estimated_operations,
         )) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background schema maintenance deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background schema maintenance rejected: {reason}"
                 )));
@@ -1318,12 +1318,12 @@ impl Database {
             estimated_operations,
         )) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background schema maintenance deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background schema maintenance rejected: {reason}"
                 )));
@@ -1670,10 +1670,10 @@ impl Database {
     ) -> Result<SearchProjectionDeltaReport> {
         match policy.admit(state, &request.background_work_request()) {
             QosAdmission::Admit => self.apply_search_projection_graph_delta(search_index, request),
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search projection graph delta deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background search projection graph delta rejected: {reason}"
             ))),
         }
@@ -1696,12 +1696,12 @@ impl Database {
     ) -> Result<SearchProjectionDeltaReport> {
         let permit = match scheduler.try_start(request.background_work_request()) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search projection graph delta deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background search projection graph delta rejected: {reason}"
                 )));

@@ -71,8 +71,23 @@ pub struct LocalQosState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QosAdmission {
     Admit,
-    Defer { reason: String },
-    Reject { reason: String },
+    Defer {
+        code: QosAdmissionCode,
+        reason: String,
+    },
+    Reject {
+        code: QosAdmissionCode,
+        reason: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QosAdmissionCode {
+    BackgroundDisabled,
+    PerWorkLimitExceeded,
+    TotalBackgroundLimitExceeded,
+    ClassBackgroundLimitExceeded,
+    TenantBudgetExceeded,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -255,7 +270,10 @@ impl LocalQosPolicy {
             plan.hint
                 .tenant_budget_defer_reason(plan.request.estimated_operations),
         ) {
-            (QosAdmission::Admit, Some(reason)) => QosAdmission::Defer { reason },
+            (QosAdmission::Admit, Some(reason)) => QosAdmission::Defer {
+                code: QosAdmissionCode::TenantBudgetExceeded,
+                reason,
+            },
             (admission, _) => admission,
         };
         let (score, mut reasons) = plan
@@ -263,10 +281,10 @@ impl LocalQosPolicy {
             .score_with_reasons(plan.request.estimated_operations);
         match &admission {
             QosAdmission::Admit => {}
-            QosAdmission::Defer { reason } => {
+            QosAdmission::Defer { reason, .. } => {
                 reasons.push(format!("admission deferred: {reason}"));
             }
-            QosAdmission::Reject { reason } => {
+            QosAdmission::Reject { reason, .. } => {
                 reasons.push(format!("admission rejected: {reason}"));
             }
         }
@@ -303,12 +321,14 @@ impl LocalQosPolicy {
     fn admit_background(&self, state: &LocalQosState, request: &WorkRequest) -> QosAdmission {
         if !self.background_enabled {
             return QosAdmission::Defer {
+                code: QosAdmissionCode::BackgroundDisabled,
                 reason: "background work is disabled".to_string(),
             };
         }
         if let Some(limit) = self.max_background_operations {
             if request.estimated_operations > limit {
                 return QosAdmission::Defer {
+                    code: QosAdmissionCode::PerWorkLimitExceeded,
                     reason: format!(
                         "background {:?} estimated operations {} exceeded per-work limit {limit}",
                         request.class, request.estimated_operations
@@ -322,6 +342,7 @@ impl LocalQosPolicy {
                 .saturating_add(request.estimated_operations);
             if total > limit {
                 return QosAdmission::Defer {
+                    code: QosAdmissionCode::TotalBackgroundLimitExceeded,
                     reason: format!(
                         "background {:?} would raise running operations to {total}, above limit {limit}",
                         request.class
@@ -335,6 +356,7 @@ impl LocalQosPolicy {
             .saturating_add(request.estimated_operations);
             if class_total > limit {
                 return QosAdmission::Defer {
+                    code: QosAdmissionCode::ClassBackgroundLimitExceeded,
                     reason: format!(
                         "background {:?} would raise class running operations to {class_total}, above class limit {limit}",
                         request.class
@@ -355,6 +377,24 @@ impl BackgroundWorkHint {
                     "tenant budget remaining {remaining} below estimated operations {estimated_operations}"
                 )
             })
+    }
+}
+
+impl QosAdmission {
+    pub fn code(&self) -> Option<QosAdmissionCode> {
+        match self {
+            QosAdmission::Admit => None,
+            QosAdmission::Defer { code, .. } | QosAdmission::Reject { code, .. } => Some(*code),
+        }
+    }
+
+    pub fn reason(&self) -> Option<&str> {
+        match self {
+            QosAdmission::Admit => None,
+            QosAdmission::Defer { reason, .. } | QosAdmission::Reject { reason, .. } => {
+                Some(reason)
+            }
+        }
     }
 }
 
@@ -450,7 +490,7 @@ impl LocalQosScheduler {
 mod tests {
     use super::{
         BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-        QosAdmission, WorkClass, WorkRequest,
+        QosAdmission, QosAdmissionCode, WorkClass, WorkRequest,
     };
 
     #[test]
@@ -472,9 +512,12 @@ mod tests {
         };
         let request = WorkRequest::background(WorkClass::Projection, 1);
 
+        let admission = policy.admit(&LocalQosState::default(), &request);
+
+        assert_eq!(admission.code(), Some(QosAdmissionCode::BackgroundDisabled));
         assert!(matches!(
-            policy.admit(&LocalQosState::default(), &request),
-            QosAdmission::Defer { reason } if reason.contains("disabled")
+            admission,
+            QosAdmission::Defer { reason, .. } if reason.contains("disabled")
         ));
     }
 
@@ -486,9 +529,15 @@ mod tests {
         };
         let request = WorkRequest::background(WorkClass::Projection, 5);
 
+        let admission = policy.admit(&LocalQosState::default(), &request);
+
+        assert_eq!(
+            admission.code(),
+            Some(QosAdmissionCode::PerWorkLimitExceeded)
+        );
         assert!(matches!(
-            policy.admit(&LocalQosState::default(), &request),
-            QosAdmission::Defer { reason } if reason.contains("per-work limit")
+            admission,
+            QosAdmission::Defer { reason, .. } if reason.contains("per-work limit")
         ));
     }
 
@@ -505,9 +554,15 @@ mod tests {
         };
         let request = WorkRequest::background(WorkClass::Analytics, 5);
 
+        let admission = policy.admit(&state, &request);
+
+        assert_eq!(
+            admission.code(),
+            Some(QosAdmissionCode::TotalBackgroundLimitExceeded)
+        );
         assert!(matches!(
-            policy.admit(&state, &request),
-            QosAdmission::Defer { reason } if reason.contains("above limit 12")
+            admission,
+            QosAdmission::Defer { reason, .. } if reason.contains("above limit 12")
         ));
     }
 
@@ -582,7 +637,7 @@ mod tests {
 
         assert!(matches!(
             decision.admission,
-            QosAdmission::Defer { reason } if reason.contains("above limit 4")
+            QosAdmission::Defer { reason, .. } if reason.contains("above limit 4")
         ));
         assert!(decision.score > 0);
         assert!(decision
@@ -607,9 +662,17 @@ mod tests {
             ),
         );
 
+        assert_eq!(
+            decision.admission.code(),
+            Some(QosAdmissionCode::TenantBudgetExceeded)
+        );
+        assert_eq!(
+            decision.admission.reason(),
+            Some("tenant budget remaining 4 below estimated operations 8")
+        );
         assert!(matches!(
             decision.admission,
-            QosAdmission::Defer { reason } if reason.contains("tenant budget remaining 4")
+            QosAdmission::Defer { ref reason, .. } if reason.contains("tenant budget remaining 4")
         ));
         assert_eq!(decision.score, 0);
         assert!(decision
@@ -639,7 +702,7 @@ mod tests {
 
         assert!(matches!(
             decision.admission,
-            QosAdmission::Defer { reason } if reason.contains("above limit 4")
+            QosAdmission::Defer { reason, .. } if reason.contains("above limit 4")
         ));
         assert!(decision.score > 0);
 
@@ -768,7 +831,7 @@ mod tests {
             .unwrap_err();
         assert!(matches!(
             second,
-            QosAdmission::Defer { reason } if reason.contains("above limit 12")
+            QosAdmission::Defer { reason, .. } if reason.contains("above limit 12")
         ));
         assert_eq!(scheduler.state().running_background_operations, 8);
 
@@ -823,9 +886,13 @@ mod tests {
         let same_class = scheduler
             .try_start(WorkRequest::background(WorkClass::Projection, 2))
             .unwrap_err();
+        assert_eq!(
+            same_class.code(),
+            Some(QosAdmissionCode::ClassBackgroundLimitExceeded)
+        );
         assert!(matches!(
             same_class,
-            QosAdmission::Defer { reason } if reason.contains("class limit 4")
+            QosAdmission::Defer { reason, .. } if reason.contains("class limit 4")
         ));
 
         let analytics = scheduler

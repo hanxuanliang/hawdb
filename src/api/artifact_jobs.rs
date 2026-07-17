@@ -517,10 +517,10 @@ impl Database {
 
         match policy.admit(state, &job.background_work_request(estimated_operations)) {
             QosAdmission::Admit => self.run_next_derived_artifact_job(),
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background derived artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background derived artifact job rejected: {reason}"
             ))),
         }
@@ -541,12 +541,12 @@ impl Database {
 
         let permit = match scheduler.try_start(job.background_work_request(estimated_operations)) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background derived artifact job deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background derived artifact job rejected: {reason}"
                 )));
@@ -596,10 +596,10 @@ impl Database {
             QosAdmission::Admit => {
                 self.run_external_content_artifact_job_at_index(index, &mut runtime)
             }
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background external content artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background external content artifact job rejected: {reason}"
             ))),
         }
@@ -623,12 +623,12 @@ impl Database {
             self.derived_artifact_jobs[index].background_work_request(estimated_operations),
         ) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background external content artifact job deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background external content artifact job rejected: {reason}"
                 )));
@@ -682,10 +682,10 @@ impl Database {
             QosAdmission::Admit => {
                 self.run_external_content_artifact_job_at_index(index, &mut runtime)
             }
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background external content artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background external content artifact job rejected: {reason}"
             ))),
         }
@@ -711,12 +711,12 @@ impl Database {
             self.derived_artifact_jobs[index].background_work_request(estimated_operations),
         ) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background external content artifact job deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background external content artifact job rejected: {reason}"
                 )));
@@ -863,10 +863,10 @@ impl Database {
             QosAdmission::Admit => {
                 self.run_external_content_artifact_job_at_index(index, &mut runtime)
             }
-            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
                 "background external content artifact job deferred: {reason}"
             ))),
-            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
                 "background external content artifact job rejected: {reason}"
             ))),
         }
@@ -892,12 +892,12 @@ impl Database {
             self.derived_artifact_jobs[index].background_work_request(estimated_operations),
         ) {
             Ok(permit) => permit,
-            Err(QosAdmission::Defer { reason }) => {
+            Err(QosAdmission::Defer { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background external content artifact job deferred: {reason}"
                 )));
             }
-            Err(QosAdmission::Reject { reason }) => {
+            Err(QosAdmission::Reject { reason, .. }) => {
                 return Err(SkeinError::Storage(format!(
                     "background external content artifact job rejected: {reason}"
                 )));
