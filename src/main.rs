@@ -647,12 +647,16 @@ fn graph_lightning_bootstrap_bundle_json(
         .graph_stream
         .validate_against_manifest(&export.manifest);
     let mut blockers = Vec::new();
+    let mut manifest_blocker_messages = Vec::new();
     if !export.manifest.validation.is_import_ready {
-        blockers.push("manifest validation is not import ready");
+        manifest_blocker_messages.push("manifest validation is not import ready");
     }
+    blockers.extend(manifest_blocker_messages.iter().copied());
+    let mut graph_stream_blocker_messages = Vec::new();
     if !graph_stream_validation.is_valid {
-        blockers.push("graph stream validation failed");
+        graph_stream_blocker_messages.push("graph stream validation failed");
     }
+    blockers.extend(graph_stream_blocker_messages.iter().copied());
     let decision = if blockers.is_empty() {
         "ready"
     } else {
@@ -664,6 +668,10 @@ fn graph_lightning_bootstrap_bundle_json(
         "graph_stream_validation": graph_lightning_graph_stream_validation_json(&graph_stream_validation),
         "export_gate": {
             "decision": decision,
+            "manifest_blockers": manifest_blocker_messages.len(),
+            "graph_stream_blockers": graph_stream_blocker_messages.len(),
+            "manifest_blocker_messages": manifest_blocker_messages,
+            "graph_stream_blocker_messages": graph_stream_blocker_messages,
             "blockers": blockers,
         },
     })
@@ -1841,10 +1849,47 @@ mod tests {
         assert_eq!(json["manifest"]["validation"]["is_import_ready"], true);
         assert_eq!(json["graph_stream_validation"]["is_valid"], true);
         assert_eq!(json["export_gate"]["decision"], "ready");
+        assert_eq!(json["export_gate"]["manifest_blockers"], 0);
+        assert_eq!(json["export_gate"]["graph_stream_blockers"], 0);
+        assert!(json["export_gate"]["manifest_blocker_messages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(json["export_gate"]["graph_stream_blocker_messages"]
+            .as_array()
+            .unwrap()
+            .is_empty());
         assert!(json["export_gate"]["blockers"]
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn graph_lightning_bootstrap_bundle_groups_export_gate_blockers() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let mut export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        export.manifest.validation.is_import_ready = false;
+        export.graph_stream.encoded.push_str("corrupt");
+
+        let json = graph_lightning_bootstrap_bundle_json(&export);
+
+        assert_eq!(json["export_gate"]["decision"], "blocked");
+        assert_eq!(json["export_gate"]["manifest_blockers"], 1);
+        assert_eq!(json["export_gate"]["graph_stream_blockers"], 1);
+        assert_eq!(
+            json["export_gate"]["manifest_blocker_messages"][0],
+            "manifest validation is not import ready"
+        );
+        assert_eq!(
+            json["export_gate"]["graph_stream_blocker_messages"][0],
+            "graph stream validation failed"
+        );
+        assert_eq!(json["export_gate"]["blockers"].as_array().unwrap().len(), 2);
     }
 
     #[test]

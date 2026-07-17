@@ -137,7 +137,11 @@ endpoint integrity.
 prints one machine-readable bootstrap evidence bundle containing the manifest,
 the GraphStream validation report, and a ready/blocked export gate decision. Use
 this as the CI or upload preflight entry point when the caller needs one JSON
-artifact instead of separate manifest and verifier commands.
+artifact instead of separate manifest and verifier commands. The export gate
+keeps a flattened `blockers` list for logs and also reports manifest and
+GraphStream blocker counts plus grouped blocker messages so import automation
+can distinguish snapshot readiness failures from stream artifact failures
+without parsing strings.
 `skein graph-lightning-stage-bootstrap [--require-ready] <database-path>
 <staging-dir>` writes a local staging catalog plus manifest, GraphStream, and
 bootstrap bundle artifacts with atomic file publication and directory sync. The

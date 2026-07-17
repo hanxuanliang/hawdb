@@ -57,6 +57,9 @@ Migration gate JSON keeps human-readable blockers and adds machine-readable
 fixture-mismatch, inventory, and shadow blocker counts plus grouped blocker
 messages so cutover automation can separate scanner coverage gaps from
 previous-wrapper parity failures.
+Graph Lightning bootstrap bundle export gates likewise split manifest and
+GraphStream blockers into counts and grouped messages for import preflight
+automation.
 
 ## Current Compatibility Evidence
 
