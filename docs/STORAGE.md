@@ -274,8 +274,13 @@ then writes all selected maintenance operations as one grouped WAL batch.
 to `PUBLIC` only after validation, and `GC` descriptors are tombstoned from the
 catalog. `Database::plan_schema_maintenance` is a read-only dry-run report for
 pending descriptor maintenance, including the source state, target state,
-action, and estimated operation count for budget admission. Explicit callers use
-the direct execution path without local background admission. Internal
+action, and estimated operation count for budget admission.
+`Database::run_bounded_schema_maintenance` applies only complete descriptor
+maintenance actions that fit a caller-supplied estimated-operation budget, using
+one WAL batch for the selected actions and leaving skipped descriptors in their
+current state for a later call. This is descriptor-level batching, not yet
+inside-object backfill checkpointing. Explicit callers use the direct execution
+path without local background admission. Internal
 maintenance loops can use the planned wrappers,
 `Database::run_planned_background_schema_maintenance` and
 `Database::run_planned_scheduled_background_schema_maintenance`, to charge the

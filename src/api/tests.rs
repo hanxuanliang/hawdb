@@ -3292,6 +3292,95 @@ fn schema_maintenance_plan_estimates_relationship_table_validation_work() {
 }
 
 #[test]
+fn bounded_schema_maintenance_skips_work_that_exceeds_budget_without_wal_write() {
+    let path = unique_test_dir("bounded_schema_maintenance_budget_skip");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        let before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+        let output = db.run_bounded_schema_maintenance(1).unwrap();
+
+        assert!(output.rows.is_empty());
+        let after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+        assert_eq!(after, before);
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Backfill
+        }));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn bounded_schema_maintenance_advances_descriptor_batches_incrementally() {
+    let path = unique_test_dir("bounded_schema_maintenance_incremental");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1, title: 'a'})").unwrap();
+        db.query("CREATE (:Memory {id: 2, title: 'b'})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(title) TYPE STRING NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(title) SET STATE BACKFILL")
+            .unwrap();
+
+        let first = db.run_bounded_schema_maintenance(2).unwrap();
+
+        assert_eq!(first.rows.len(), 1);
+        assert_eq!(
+            first.rows[0].get("object"),
+            Some(&Value::String("Memory.id".to_string()))
+        );
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Validating
+        }));
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "title" && property.state == SchemaObjectState::Backfill
+        }));
+
+        let second = db.run_bounded_schema_maintenance(2).unwrap();
+
+        assert_eq!(second.rows.len(), 1);
+        assert_eq!(
+            second.rows[0].get("object"),
+            Some(&Value::String("Memory.id".to_string()))
+        );
+        assert_eq!(
+            second.rows[0].get("to_state"),
+            Some(&Value::String("public".to_string()))
+        );
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "id" && property.state == SchemaObjectState::Public
+        }));
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "title" && property.state == SchemaObjectState::Backfill
+        }));
+
+        let third = db.run_bounded_schema_maintenance(2).unwrap();
+
+        assert_eq!(third.rows.len(), 1);
+        assert_eq!(
+            third.rows[0].get("object"),
+            Some(&Value::String("Memory.title".to_string()))
+        );
+        assert!(db.property_descriptors().iter().any(|property| {
+            property.name == "title" && property.state == SchemaObjectState::Validating
+        }));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
 fn schema_maintenance_background_work_plan_is_absent_without_pending_work() {
     let db = Database::new();
 

@@ -580,7 +580,10 @@ before advancing them to `PUBLIC`, and removes `GC` descriptors through a single
 grouped WAL batch. `Database::plan_schema_maintenance` exposes a read-only
 dry-run report with per-object source/target states and estimated operation
 counts so caller-owned background loops can decide admission before taking the
-writer. Projected graph derived artifacts can be refreshed through a
+writer. `Database::run_bounded_schema_maintenance` can then apply a prefix of
+complete descriptor-level maintenance actions that fit the caller's operation
+budget, leaving the rest resumable through later maintenance calls. Projected
+graph derived artifacts can be refreshed through a
 report-oriented `Database::rebuild_derived_artifacts` entry point; search
 projection artifacts expose the same report-oriented rebuild shape through
 `SearchIndex::rebuild_derived_artifacts`. Search projections also expose

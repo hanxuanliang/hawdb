@@ -21,8 +21,8 @@ use crate::search::{
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
-    NodeRecord, ProjectedGraphStatus, RecoveryMode, RelRecord, StorageReclamationWatermark,
-    StoreStableIdMapping, WalReplayConfig,
+    NodeRecord, ProjectedGraphStatus, RecoveryMode, RelRecord, SchemaMaintenanceAction,
+    StorageReclamationWatermark, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::value::Value;
 use std::cell::RefCell;
@@ -1014,28 +1014,18 @@ impl Database {
     pub fn run_schema_maintenance(&mut self) -> Result<QueryOutput> {
         self.ensure_writable()?;
         let actions = self.store.run_schema_maintenance(&mut self.catalog)?;
-        let rows = actions
-            .into_iter()
-            .map(|action| {
-                BTreeMap::from([
-                    ("object_type".to_string(), Value::String(action.object_type)),
-                    ("object".to_string(), Value::String(action.object)),
-                    (
-                        "from_state".to_string(),
-                        schema_state_value(action.from_state),
-                    ),
-                    (
-                        "to_state".to_string(),
-                        action
-                            .to_state
-                            .map(schema_state_value)
-                            .unwrap_or(Value::Null),
-                    ),
-                    ("action".to_string(), Value::String(action.action)),
-                ])
-            })
-            .collect();
-        Ok(QueryOutput { rows })
+        Ok(schema_maintenance_actions_output(actions))
+    }
+
+    pub fn run_bounded_schema_maintenance(
+        &mut self,
+        max_estimated_operations: usize,
+    ) -> Result<QueryOutput> {
+        self.ensure_writable()?;
+        let actions = self
+            .store
+            .run_bounded_schema_maintenance(&mut self.catalog, max_estimated_operations)?;
+        Ok(schema_maintenance_actions_output(actions))
     }
 
     pub fn run_background_schema_maintenance(
@@ -3814,6 +3804,31 @@ fn schema_state_value(state: SchemaObjectState) -> Value {
         SchemaObjectState::Gc => "gc",
     };
     Value::String(value.to_string())
+}
+
+fn schema_maintenance_actions_output(actions: Vec<SchemaMaintenanceAction>) -> QueryOutput {
+    let rows = actions
+        .into_iter()
+        .map(|action| {
+            BTreeMap::from([
+                ("object_type".to_string(), Value::String(action.object_type)),
+                ("object".to_string(), Value::String(action.object)),
+                (
+                    "from_state".to_string(),
+                    schema_state_value(action.from_state),
+                ),
+                (
+                    "to_state".to_string(),
+                    action
+                        .to_state
+                        .map(schema_state_value)
+                        .unwrap_or(Value::Null),
+                ),
+                ("action".to_string(), Value::String(action.action)),
+            ])
+        })
+        .collect();
+    QueryOutput { rows }
 }
 
 fn optional_u64_value(value: Option<u64>) -> Value {

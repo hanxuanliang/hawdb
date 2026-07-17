@@ -869,8 +869,25 @@ impl GraphStore {
         &mut self,
         catalog: &mut Catalog,
     ) -> Result<Vec<SchemaMaintenanceAction>> {
+        self.run_schema_maintenance_with_budget(catalog, None)
+    }
+
+    pub fn run_bounded_schema_maintenance(
+        &mut self,
+        catalog: &mut Catalog,
+        max_estimated_operations: usize,
+    ) -> Result<Vec<SchemaMaintenanceAction>> {
+        self.run_schema_maintenance_with_budget(catalog, Some(max_estimated_operations))
+    }
+
+    fn run_schema_maintenance_with_budget(
+        &mut self,
+        catalog: &mut Catalog,
+        max_estimated_operations: Option<usize>,
+    ) -> Result<Vec<SchemaMaintenanceAction>> {
         let mut ops = Vec::new();
         let mut actions = Vec::new();
+        let mut used_estimated_operations = 0usize;
 
         let gc_table_ids = catalog
             .table_descriptors()
@@ -887,6 +904,15 @@ impl GraphStore {
             };
             match property.state {
                 SchemaObjectState::Backfill => {
+                    let estimated_operations =
+                        self.schema_table_record_count(catalog, &table).max(1);
+                    if !reserve_schema_maintenance_budget(
+                        &mut used_estimated_operations,
+                        max_estimated_operations,
+                        estimated_operations,
+                    ) {
+                        continue;
+                    }
                     validate_property_descriptor(
                         catalog,
                         self,
@@ -910,6 +936,15 @@ impl GraphStore {
                     });
                 }
                 SchemaObjectState::Validating => {
+                    let estimated_operations =
+                        self.schema_table_record_count(catalog, &table).max(1);
+                    if !reserve_schema_maintenance_budget(
+                        &mut used_estimated_operations,
+                        max_estimated_operations,
+                        estimated_operations,
+                    ) {
+                        continue;
+                    }
                     validate_property_descriptor(
                         catalog,
                         self,
@@ -933,6 +968,13 @@ impl GraphStore {
                     });
                 }
                 SchemaObjectState::Gc => {
+                    if !reserve_schema_maintenance_budget(
+                        &mut used_estimated_operations,
+                        max_estimated_operations,
+                        1,
+                    ) {
+                        continue;
+                    }
                     ops.push(WalOp::GcPropertyDescriptor {
                         table_kind: table.kind,
                         table: table.name.clone(),
@@ -955,6 +997,15 @@ impl GraphStore {
         for table in catalog.table_descriptors().cloned().collect::<Vec<_>>() {
             match table.state {
                 SchemaObjectState::Backfill => {
+                    let estimated_operations =
+                        self.schema_table_record_count(catalog, &table).max(1);
+                    if !reserve_schema_maintenance_budget(
+                        &mut used_estimated_operations,
+                        max_estimated_operations,
+                        estimated_operations,
+                    ) {
+                        continue;
+                    }
                     ops.push(WalOp::AlterTableState {
                         table_kind: table.kind,
                         table: table.name.clone(),
@@ -969,6 +1020,24 @@ impl GraphStore {
                     });
                 }
                 SchemaObjectState::Validating => {
+                    let active_property_count = catalog
+                        .property_descriptors()
+                        .filter(|property| {
+                            property.table_id == table.id && property.state != SchemaObjectState::Gc
+                        })
+                        .count()
+                        .max(1);
+                    let estimated_operations = self
+                        .schema_table_record_count(catalog, &table)
+                        .max(1)
+                        .saturating_mul(active_property_count);
+                    if !reserve_schema_maintenance_budget(
+                        &mut used_estimated_operations,
+                        max_estimated_operations,
+                        estimated_operations,
+                    ) {
+                        continue;
+                    }
                     validate_table_descriptor(catalog, self, table.id)?;
                     ops.push(WalOp::AlterTableState {
                         table_kind: table.kind,
@@ -984,12 +1053,20 @@ impl GraphStore {
                     });
                 }
                 SchemaObjectState::Gc => {
-                    for property in catalog
+                    let properties = catalog
                         .property_descriptors()
                         .filter(|property| property.table_id == table.id)
                         .cloned()
-                        .collect::<Vec<_>>()
-                    {
+                        .collect::<Vec<_>>();
+                    let estimated_operations = properties.len().saturating_add(1);
+                    if !reserve_schema_maintenance_budget(
+                        &mut used_estimated_operations,
+                        max_estimated_operations,
+                        estimated_operations,
+                    ) {
+                        continue;
+                    }
+                    for property in properties {
                         ops.push(WalOp::GcPropertyDescriptor {
                             table_kind: table.kind,
                             table: table.name.clone(),
@@ -6984,6 +7061,22 @@ fn validate_property_descriptor_with_table_state(
         }
     }
     Ok(())
+}
+
+fn reserve_schema_maintenance_budget(
+    used_estimated_operations: &mut usize,
+    max_estimated_operations: Option<usize>,
+    estimated_operations: usize,
+) -> bool {
+    let Some(max_estimated_operations) = max_estimated_operations else {
+        return true;
+    };
+    let next = used_estimated_operations.saturating_add(estimated_operations);
+    if next > max_estimated_operations {
+        return false;
+    }
+    *used_estimated_operations = next;
+    true
 }
 
 fn validate_table_descriptor(
