@@ -1,6 +1,7 @@
 use super::{optional_u64_value, optional_usize_value, Database, QueryOutput};
 use crate::error::{Result, SkeinError};
 use crate::executor::Row;
+use crate::qos::{LocalQosPolicy, LocalQosState, QosAdmission, WorkClass, WorkRequest};
 use crate::value::Value;
 use std::collections::BTreeMap;
 
@@ -39,6 +40,17 @@ pub struct DerivedArtifactJob {
 pub struct DerivedArtifactJobReport {
     pub job: DerivedArtifactJob,
     pub output: QueryOutput,
+}
+
+impl DerivedArtifactJob {
+    pub fn background_work_request(&self, estimated_operations: usize) -> WorkRequest {
+        let class = if self.artifact_type == "projected_graph" {
+            WorkClass::Projection
+        } else {
+            WorkClass::Import
+        };
+        WorkRequest::background(class, estimated_operations)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -228,6 +240,31 @@ impl Database {
                     },
                 }))
             }
+        }
+    }
+
+    pub fn run_next_background_derived_artifact_job(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        let Some(job) = self
+            .derived_artifact_jobs
+            .iter()
+            .find(|job| job.status == DerivedArtifactJobStatus::Pending)
+        else {
+            return Ok(None);
+        };
+
+        match policy.admit(state, &job.background_work_request(estimated_operations)) {
+            QosAdmission::Admit => self.run_next_derived_artifact_job(),
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background derived artifact job deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background derived artifact job rejected: {reason}"
+            ))),
         }
     }
 

@@ -7,6 +7,7 @@ use super::{
     RecoveryMode, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
+use crate::qos::{LocalQosPolicy, LocalQosState};
 use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
 };
@@ -4609,6 +4610,70 @@ fn derived_artifact_job_rebuilds_projected_graphs() {
             DerivedArtifactJobStatus::Succeeded
         );
         assert!(db.run_next_derived_artifact_job().unwrap().is_none());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn background_derived_artifact_job_uses_qos_admission() {
+    let path = unique_test_dir("background_derived_artifact_job_deferred");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 1, title: 'Root'})").unwrap();
+        db.query("CALL project_graph('EntityGraph', ['Memory'], [])")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 2, title: 'Later'})")
+            .unwrap();
+
+        let job = db.schedule_derived_artifact_rebuild();
+        assert_eq!(job.status, DerivedArtifactJobStatus::Pending);
+
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        };
+        let error = db
+            .run_next_background_derived_artifact_job(&policy, &LocalQosState::default(), 2)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        let jobs = db.derived_artifact_jobs();
+        assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
+        assert_eq!(jobs[0].attempts, 0);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn background_derived_artifact_job_runs_when_qos_admits() {
+    let path = unique_test_dir("background_derived_artifact_job_admitted");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("MERGE (:Memory {id: 1, title: 'Root'})-[:LINKS]->(:Entity {id: 2, name: 'Mid'})")
+            .unwrap();
+        db.query("CALL project_graph('EntityGraph', ['Memory', 'Entity'], ['LINKS'])")
+            .unwrap();
+        db.checkpoint().unwrap();
+        db.query("CREATE (:Memory {id: 3, title: 'Later'})")
+            .unwrap();
+
+        db.schedule_derived_artifact_rebuild();
+        let report = db
+            .run_next_background_derived_artifact_job(
+                &LocalQosPolicy::default(),
+                &LocalQosState::default(),
+                2,
+            )
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+        assert_eq!(report.job.attempts, 1);
+        assert_eq!(report.output.rows.len(), 1);
+        assert_eq!(
+            report.output.rows[0].get("after_reusable"),
+            Some(&Value::Bool(true))
+        );
     }
     std::fs::remove_dir_all(path).unwrap();
 }
