@@ -2062,6 +2062,12 @@ impl OptimizerCatalog {
             .unwrap_or_else(|| self.label_count(label).max(1))
     }
 
+    fn known_distinct_count(&self, label: &str, property: &str) -> Option<u64> {
+        self.property_distinct_counts
+            .get(&(label.to_string(), property.to_string()))
+            .copied()
+    }
+
     fn rel_property_distinct_count(&self, rel_type: &str, property: &str) -> u64 {
         self.rel_property_distinct_counts
             .get(&(rel_type.to_string(), property.to_string()))
@@ -4042,11 +4048,8 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
             group_keys, input, ..
         } => {
             let input_cost = estimate_physical_plan_cost(input, catalog);
-            let rows = if group_keys.is_empty() {
-                1
-            } else {
-                input_cost.estimated_rows.div_ceil(4).max(1)
-            };
+            let rows =
+                estimate_aggregate_rows(group_keys, input, input_cost.estimated_rows, catalog);
             PlanCost {
                 estimated_rows: rows,
                 cost: input_cost.cost.saturating_add(input_cost.estimated_rows),
@@ -4133,6 +4136,31 @@ fn estimate_filter_rows(
     estimate_relationship_filter_rows(predicate, input, input_rows, catalog)
         .or_else(|| estimate_node_property_filter_rows(predicate, input, input_rows, catalog))
         .unwrap_or_else(|| input_rows.div_ceil(2).max(1))
+}
+
+fn estimate_aggregate_rows(
+    group_keys: &[Projection],
+    input: &PhysicalPlan,
+    input_rows: u64,
+    catalog: &OptimizerCatalog,
+) -> u64 {
+    if group_keys.is_empty() {
+        return 1;
+    }
+    let mut distinct_product = 1_u64;
+    for group_key in group_keys {
+        let ProjectionExpression::Property { variable, property } = &group_key.expression else {
+            return input_rows.div_ceil(4).max(1);
+        };
+        let Some(label) = physical_plan_node_label(input, variable) else {
+            return input_rows.div_ceil(4).max(1);
+        };
+        let Some(distinct_count) = catalog.known_distinct_count(label, property) else {
+            return input_rows.div_ceil(4).max(1);
+        };
+        distinct_product = distinct_product.saturating_mul(distinct_count.max(1));
+    }
+    input_rows.min(distinct_product).max(1)
 }
 
 fn estimate_node_property_filter_rows(
@@ -5696,7 +5724,10 @@ mod tests {
         OptimizerConfig, PlanCost,
     };
     use crate::cypher::RelationshipDirection;
-    use crate::planner::{LogicalPlan, Predicate, Projection, ProjectionExpression};
+    use crate::planner::{
+        AggregateFunction, AggregateTarget, Aggregation, LogicalPlan, Predicate, Projection,
+        ProjectionExpression,
+    };
     use crate::value::Value;
     use std::collections::BTreeMap;
 
@@ -6222,6 +6253,136 @@ mod tests {
             PlanCost {
                 estimated_rows: 0,
                 cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_group_keys_use_node_property_distinct_counts() {
+        let logical = LogicalPlan::Aggregate {
+            group_keys: vec![
+                Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "e".to_string(),
+                        property: "community_id".to_string(),
+                    },
+                    name: "community_id".to_string(),
+                },
+                Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "l".to_string(),
+                        property: "name".to_string(),
+                    },
+                    name: "label_name".to_string(),
+                },
+            ],
+            items: vec![Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::Variable("m".to_string()),
+                distinct: true,
+                name: "memory_count".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "m".to_string(),
+                source_label: "Memory".to_string(),
+                rel_variable: None,
+                rel_type: "HAS_LABEL".to_string(),
+                rel_properties: BTreeMap::new(),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "l".to_string(),
+                target_label: "Label".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::Expand {
+                    source_variable: "m".to_string(),
+                    source_label: "Memory".to_string(),
+                    rel_variable: None,
+                    rel_type: "MENTIONS".to_string(),
+                    rel_properties: BTreeMap::new(),
+                    direction: RelationshipDirection::Outgoing,
+                    target_variable: "e".to_string(),
+                    target_label: "Entity".to_string(),
+                    min_hops: 1,
+                    max_hops: 1,
+                    optional: false,
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "m".to_string(),
+                        label: "Memory".to_string(),
+                    }),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Memory".to_string(), 1_000),
+                    ("Entity".to_string(), 500),
+                    ("Label".to_string(), 100),
+                ],
+                [
+                    ("MENTIONS".to_string(), 2_000),
+                    ("HAS_LABEL".to_string(), 1_000),
+                ],
+                [
+                    ("MENTIONS".to_string(), 1_000),
+                    ("HAS_LABEL".to_string(), 1_000),
+                ],
+                [
+                    (
+                        (
+                            "Memory".to_string(),
+                            "MENTIONS".to_string(),
+                            "Entity".to_string(),
+                        ),
+                        1_000,
+                    ),
+                    (
+                        (
+                            "Memory".to_string(),
+                            "HAS_LABEL".to_string(),
+                            "Label".to_string(),
+                        ),
+                        1_000,
+                    ),
+                ],
+                [
+                    (
+                        (
+                            "Memory".to_string(),
+                            "MENTIONS".to_string(),
+                            "Entity".to_string(),
+                            1,
+                        ),
+                        1_000,
+                    ),
+                    (
+                        (
+                            "Memory".to_string(),
+                            "HAS_LABEL".to_string(),
+                            "Label".to_string(),
+                            1,
+                        ),
+                        1_000,
+                    ),
+                ],
+                [
+                    (("Entity".to_string(), "community_id".to_string()), 4),
+                    (("Label".to_string(), "name".to_string()), 5),
+                ],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 32 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 20,
+                cost: 6_004,
             }
         );
     }

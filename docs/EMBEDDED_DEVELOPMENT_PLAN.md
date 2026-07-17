@@ -788,6 +788,10 @@ Current implemented slice:
   histograms for equality, `IN`, and range predicates, so low-selectivity scan
   fallbacks and cross-pattern filters are not forced through the generic
   half-selectivity fallback
+- grouped aggregate cost estimation uses selected-plan variable labels and
+  explicit node-property distinct counts for simple node-property group keys,
+  while non-property or missing-statistics grouping keeps the conservative
+  fallback estimate
 - deterministic physical plan fingerprints are exposed through
   `OptimizerTrace::selected_plan_fingerprint` and `PhysicalPlan::fingerprint`
   for regression tests and future compatibility/shadow comparisons
@@ -804,12 +808,14 @@ Current implemented slice:
   source-to-memory-to-entity-to-label grouped workload,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
-  equality/`IN`/range selectivity, selected-plan cost stability, deterministic
-  fingerprints, and budget-fallback paths without depending on a storage fixture
+  equality/`IN`/range selectivity, grouped node-property aggregate cardinality,
+  selected-plan cost stability, deterministic fingerprints, and budget-fallback
+  paths without depending on a storage fixture
 
 Remaining Phase 4 work:
 
-- richer cross-pattern statistics beyond residual node-property filters
+- richer cross-pattern statistics beyond residual filters and grouped
+  node-property aggregates
 - alternative expand implementation candidates and pattern join-order
   enumeration once multi-pattern logical plans exist
 - bounded left-deep join-order enumeration beyond the current all-single-row

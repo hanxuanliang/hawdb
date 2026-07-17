@@ -205,15 +205,15 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             logical: source_memory_label_cross_pattern_plan(),
             catalog: source_memory_label_cross_pattern_catalog(),
             expected_cost: PlanCost {
-                estimated_rows: 20,
-                cost: 1650,
+                estimated_rows: 10,
+                cost: 1434,
             },
             fingerprint_contains: "AdjacencyExpandExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Source.id",
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:HAS_LABEL*1..1]->Label",
-                "selected physical plan cost: estimated_rows=20 cost=1650",
+                "selected physical plan cost: estimated_rows=10 cost=1434",
             ],
         },
         OptimizerSmokeCase {
@@ -222,7 +222,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: source_memory_entity_label_workload_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 25,
-                cost: 2609,
+                cost: 2445,
             },
             fingerprint_contains: "SortExec",
             decision_contains: &[
@@ -230,7 +230,7 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
                 "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
                 "estimate AdjacencyExpand for Memory-[:HAS_LABEL*1..1]->Label",
-                "selected physical plan cost: estimated_rows=25 cost=2609",
+                "selected physical plan cost: estimated_rows=25 cost=2445",
             ],
         },
         OptimizerSmokeCase {
@@ -850,7 +850,10 @@ fn source_memory_label_cross_pattern_catalog() -> OptimizerCatalog {
                     180_000,
                 ),
             ],
-            [(("Source".to_string(), "id".to_string()), 1_000)],
+            [
+                (("Source".to_string(), "id".to_string()), 1_000),
+                (("Label".to_string(), "name".to_string()), 10),
+            ],
             [],
         ),
     )
@@ -1018,7 +1021,11 @@ fn source_memory_entity_label_workload_catalog() -> OptimizerCatalog {
                     180_000,
                 ),
             ],
-            [(("Source".to_string(), "id".to_string()), 1_000)],
+            [
+                (("Source".to_string(), "id".to_string()), 1_000),
+                (("Entity".to_string(), "community_id".to_string()), 8),
+                (("Label".to_string(), "name".to_string()), 10),
+            ],
             [],
         ),
     )
