@@ -20,27 +20,21 @@ fn main() {
 
 fn nowledge_application_lexicon() -> SearchAnalyzerLexicon {
     SearchAnalyzerLexicon::default()
-        .with_alias_rule(["crystal"], ["crystallized_memory", "synthesized_memory"])
-        .with_alias_rule(
-            ["crystallization", "crystallized", "crystallized_memory"],
-            ["crystal"],
-        )
-        .with_alias_rule(
-            ["synthesized", "synthesis", "synthesized_memory"],
-            ["crystal"],
-        )
-        .with_alias_rule(["synthesized_from"], ["crystal", "sourced_from"])
-        .with_alias_rule(["episodic", "episodic_provenance"], ["raw_evidence"])
-        .with_alias_rule(["raw_evidence"], ["episodic_provenance"])
-        .with_alias_rule(["source_provenance"], ["sourced_from"])
-        .with_alias_rule(["sourced_from"], ["source_provenance"])
-        .with_alias_rule(["entity_mention", "memory_mention"], ["mentions"])
-        .with_alias_rule(["mentions"], ["entity_mention", "memory_mention"])
-        .with_alias_rule(["evolves"], ["memory_evolution"])
-        .with_alias_rule(["memory_evolution", "evolution_edge"], ["evolves"])
-        .with_alias_rule(["ai_summary"], ["community_summary"])
-        .with_alias_rule(
-            ["community_summary", "summarized_community"],
-            ["ai_summary"],
+        .with_normalized_alias_rule(["crystal"], ["crystallized memory", "synthesized memory"])
+        .with_normalized_alias_rule(["crystallization", "crystallized"], ["crystal"])
+        .with_normalized_alias_rule(["synthesized", "synthesis"], ["crystal"])
+        .with_normalized_alias_rule(["synthesized from"], ["crystal", "sourced from"])
+        .with_normalized_alias_rule(["episodic", "episodic provenance"], ["raw evidence"])
+        .with_normalized_alias_rule(["raw evidence"], ["episodic provenance"])
+        .with_normalized_alias_rule(["source provenance"], ["sourced from"])
+        .with_normalized_alias_rule(["sourced from"], ["source provenance"])
+        .with_normalized_alias_rule(["entity mention", "memory mention"], ["mentions"])
+        .with_normalized_alias_rule(["mentions"], ["entity mention", "memory mention"])
+        .with_normalized_alias_rule(["evolves"], ["memory evolution"])
+        .with_normalized_alias_rule(["memory evolution", "evolution edge"], ["evolves"])
+        .with_normalized_alias_rule(["ai summary"], ["community summary"])
+        .with_normalized_alias_rule(
+            ["community summary", "summarized community"],
+            ["ai summary"],
         )
 }

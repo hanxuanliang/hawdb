@@ -260,6 +260,23 @@ impl SearchAnalyzerLexicon {
         self
     }
 
+    pub fn with_normalized_alias_rule<I, A, S, T>(self, inputs: I, aliases: A) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        A: IntoIterator<Item = T>,
+        S: AsRef<str>,
+        T: AsRef<str>,
+    {
+        self.with_alias_rule(
+            inputs
+                .into_iter()
+                .flat_map(|input| normalized_alias_rule_terms(input.as_ref())),
+            aliases
+                .into_iter()
+                .flat_map(|alias| normalized_alias_rule_terms(alias.as_ref())),
+        )
+    }
+
     fn semantic_aliases(&self, token: &str) -> Vec<String> {
         self.alias_rules
             .iter()
@@ -1870,6 +1887,10 @@ fn tokenize_list(text: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec<St
     tokens
 }
 
+fn normalized_alias_rule_terms(text: &str) -> Vec<String> {
+    tokenize_list(text, &SearchAnalyzerLexicon::empty())
+}
+
 fn identifier_tokens(raw: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec<String> {
     let raw = raw.trim();
     if raw.is_empty() {
@@ -3289,30 +3310,62 @@ mod tests {
             .any(|term| term == "community_summary"));
     }
 
+    #[test]
+    fn tokenizer_normalizes_application_alias_rules() {
+        let mut index = SearchIndex::in_memory().with_analyzer_lexicon(
+            SearchAnalyzerLexicon::default()
+                .with_normalized_alias_rule(
+                    ["raw evidence", "RawEvidence"],
+                    ["episodic provenance"],
+                )
+                .with_normalized_alias_rule(["community summary"], ["aiSummary"]),
+        );
+        index
+            .upsert(SearchDocument {
+                id: "readable-aliases".to_string(),
+                title: "Episodic provenance keeps aiSummary auditable".to_string(),
+                content: "Application lexicons should not expose analyzer token internals"
+                    .to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let raw_evidence_hits =
+            index.search_with_report("raw evidence", None, SearchMode::Text, 10);
+        let summary_hits =
+            index.search_with_report("community summary", None, SearchMode::Text, 10);
+
+        assert_eq!(raw_evidence_hits.hits[0].id, "readable-aliases");
+        assert!(raw_evidence_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "episodic_provenance"));
+        assert_eq!(summary_hits.hits[0].id, "readable-aliases");
+        assert!(summary_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "ai_summary"));
+    }
+
     fn nowledge_example_analyzer_lexicon() -> SearchAnalyzerLexicon {
         SearchAnalyzerLexicon::default()
-            .with_alias_rule(["crystal"], ["crystallized_memory", "synthesized_memory"])
-            .with_alias_rule(
-                ["crystallization", "crystallized", "crystallized_memory"],
-                ["crystal"],
-            )
-            .with_alias_rule(
-                ["synthesized", "synthesis", "synthesized_memory"],
-                ["crystal"],
-            )
-            .with_alias_rule(["synthesized_from"], ["crystal", "sourced_from"])
-            .with_alias_rule(["episodic", "episodic_provenance"], ["raw_evidence"])
-            .with_alias_rule(["raw_evidence"], ["episodic_provenance"])
-            .with_alias_rule(["source_provenance"], ["sourced_from"])
-            .with_alias_rule(["sourced_from"], ["source_provenance"])
-            .with_alias_rule(["entity_mention", "memory_mention"], ["mentions"])
-            .with_alias_rule(["mentions"], ["entity_mention", "memory_mention"])
-            .with_alias_rule(["evolves"], ["memory_evolution"])
-            .with_alias_rule(["memory_evolution", "evolution_edge"], ["evolves"])
-            .with_alias_rule(["ai_summary"], ["community_summary"])
-            .with_alias_rule(
-                ["community_summary", "summarized_community"],
-                ["ai_summary"],
+            .with_normalized_alias_rule(["crystal"], ["crystallized memory", "synthesized memory"])
+            .with_normalized_alias_rule(["crystallization", "crystallized"], ["crystal"])
+            .with_normalized_alias_rule(["synthesized", "synthesis"], ["crystal"])
+            .with_normalized_alias_rule(["synthesized from"], ["crystal", "sourced from"])
+            .with_normalized_alias_rule(["episodic", "episodic provenance"], ["raw evidence"])
+            .with_normalized_alias_rule(["raw evidence"], ["episodic provenance"])
+            .with_normalized_alias_rule(["source provenance"], ["sourced from"])
+            .with_normalized_alias_rule(["sourced from"], ["source provenance"])
+            .with_normalized_alias_rule(["entity mention", "memory mention"], ["mentions"])
+            .with_normalized_alias_rule(["mentions"], ["entity mention", "memory mention"])
+            .with_normalized_alias_rule(["evolves"], ["memory evolution"])
+            .with_normalized_alias_rule(["memory evolution", "evolution edge"], ["evolves"])
+            .with_normalized_alias_rule(["ai summary"], ["community summary"])
+            .with_normalized_alias_rule(
+                ["community summary", "summarized community"],
+                ["ai summary"],
             )
     }
 
