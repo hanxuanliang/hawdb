@@ -1980,6 +1980,7 @@ fn knowledge_graph_seed_matches_filter(
                 .is_some_and(|label_id| node.labels.contains(&label_id))
         }
         "external_id" => node_external_id(node).as_deref() == Some(value),
+        "source_id" => node_projection_source_id(node).as_deref() == Some(value),
         "space_id" => normalized_node_space_id(node) == value,
         _ => node
             .properties
@@ -1994,6 +1995,13 @@ fn normalized_node_space_id(node: &NodeRecord) -> String {
         .map(value_to_external_id)
         .filter(|space_id| !space_id.is_empty())
         .unwrap_or_else(|| "default".to_string())
+}
+
+fn node_projection_source_id(node: &NodeRecord) -> Option<String> {
+    ["source_id", "thread_id", "source"]
+        .into_iter()
+        .find_map(|key| node.properties.get(key).map(value_to_external_id))
+        .filter(|source_id| !source_id.is_empty())
 }
 
 fn knowledge_query_terms(text: &str) -> BTreeSet<String> {
@@ -4646,6 +4654,50 @@ mod tests {
             .expect("graph seed retriever report");
         assert_eq!(graph_seed_report.candidate_count, 1);
         assert_eq!(graph_seed_report.top_candidates[0].id, "Memory:mem_1");
+    }
+
+    #[test]
+    fn knowledge_retrieval_source_filter_uses_projection_fallbacks() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem_1', title: 'Thread scoped graph', content: 'source fallback retrieval', thread_id: 'thread_1'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem_2', title: 'Thread scoped graph', content: 'source fallback retrieval', thread_id: 'thread_2'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "source fallback retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "source_id".to_string(),
+                    "thread_1".to_string(),
+                )]),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 10,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.diagnostics.search_filtered_document_count, 1);
+        assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
+        assert_eq!(output.search.hits[0].external_id.as_deref(), Some("mem_1"));
+        assert_eq!(output.search.hits[0].source_id.as_deref(), Some("thread_1"));
+        assert_eq!(
+            output.graph_seeds[0].entity.external_id.as_deref(),
+            Some("mem_1")
+        );
     }
 
     #[test]

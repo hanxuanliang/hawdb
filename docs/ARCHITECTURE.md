@@ -459,11 +459,12 @@ search fusion weights to bias vector or text child retrievers before graph
 context expansion, and pass metadata filters that scope both search hits and
 graph-native seed candidates. Filter keys align with graph-derived
 projection metadata:
-`kind` maps to canonical node labels, `external_id` maps to node `id`, and other
-keys map to same-name scalar node properties. `space_id` follows the Nowledge
-normalized-space rule: missing, `NULL`, and empty-string values are scoped as
-`default`. Returned diagnostics preserve the search limit, rank window, search
-fusion weights, graph seed budget, graph
+`kind` maps to canonical node labels, `external_id` maps to node `id`,
+`source_id` maps through the same `source_id`/`thread_id`/`source` projection
+fallback as search documents, and other keys map to same-name scalar node
+properties. `space_id` follows the Nowledge normalized-space rule: missing,
+`NULL`, and empty-string values are scoped as `default`. Returned diagnostics
+preserve the search limit, rank window, search fusion weights, graph seed budget, graph
 context budget, candidate budget, filtered candidate counts, search document
 scope, search hit count, search truncation flag and reasons, graph seed counts,
 graph-seed truncation flag and reasons, graph context path count, fan-out reason
