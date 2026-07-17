@@ -739,7 +739,9 @@ wrapper process for that adapter and run the production fixture set through it.
 Scope:
 
 - split the flat MVP into stable API, parser, catalog, planner, optimizer,
-  storage, and executor crates
+  storage, search, compatibility, and executor boundaries; use internal module
+  splits first when public contracts are still moving, and promote boundaries to
+  workspace packages only when the dependency direction is acyclic and stable
 - Chryso-style rule and cost interfaces
 - persistent statistics and index descriptors
 - pattern join ordering and scan/seek/expand costing
