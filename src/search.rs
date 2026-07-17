@@ -875,7 +875,9 @@ fn projection_row_from_node(catalog: &Catalog, node: &NodeRecord) -> Option<Sear
             .label_name(*label_id)
             .and_then(search_projection_kind_from_label)
     })?;
-    let external_id = string_property(node, "id").unwrap_or_else(|| node.id.0.to_string());
+    let external_id = string_property(node, "id")
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| node.id.0.to_string());
     let title = first_string_property(node, &["title", "name", "summary", "id"])
         .unwrap_or_else(|| external_id.clone());
     let body = first_string_property(
@@ -2905,6 +2907,46 @@ mod tests {
         assert_eq!(
             document.metadata.get("source_id").map(String::as_str),
             Some("thread_1")
+        );
+    }
+
+    #[test]
+    fn graph_rebuild_falls_back_for_empty_node_ids() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                BTreeMap::from([
+                    ("id".to_string(), Value::String(String::new())),
+                    (
+                        "title".to_string(),
+                        Value::String("Empty id graph".to_string()),
+                    ),
+                    (
+                        "content".to_string(),
+                        Value::String("fallback identity projection".to_string()),
+                    ),
+                ]),
+            )
+            .unwrap();
+
+        let mut index = SearchIndex::in_memory();
+        index
+            .rebuild_from_graph(&catalog, &store, SearchRebuildOptions::default())
+            .unwrap();
+
+        let hits = index.search("fallback identity projection", None, SearchMode::Text, 10);
+        let document = index.document("memory:0").expect("projected document");
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].id, "memory:0");
+        assert_eq!(hits[0].external_id.as_deref(), Some("0"));
+        assert!(index.document("memory:").is_none());
+        assert_eq!(
+            document.metadata.get("external_id").map(String::as_str),
+            Some("0")
         );
     }
 

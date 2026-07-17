@@ -460,7 +460,7 @@ context expansion, and pass metadata filters that scope both search hits and
 graph-native seed candidates. Filter keys align with graph-derived
 projection metadata:
 `kind` maps to canonical node labels, `external_id` maps to the projected node
-identity (`id` when present, otherwise the canonical node id string) used by
+identity (non-empty `id` when present, otherwise the canonical node id string) used by
 search hits, typed knowledge navigation, and graph context path endpoints,
 `source_id` maps through the same `source_id`/`thread_id`/`source` projection
 fallback as search documents, and other keys map to same-name scalar node

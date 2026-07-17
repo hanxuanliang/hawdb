@@ -3594,7 +3594,10 @@ fn node_label_names(catalog: &Catalog, node: &NodeRecord) -> Vec<String> {
 }
 
 fn node_external_id(node: &NodeRecord) -> Option<String> {
-    node.properties.get("id").map(value_to_external_id)
+    node.properties
+        .get("id")
+        .map(value_to_external_id)
+        .filter(|external_id| !external_id.is_empty())
 }
 
 fn projected_node_external_id(node: &NodeRecord) -> String {
@@ -4776,6 +4779,49 @@ mod tests {
         );
 
         assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.search.hits[0].external_id.as_deref(), Some("0"));
+        assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
+        assert_eq!(output.graph_seeds.len(), 1);
+        assert_eq!(
+            output.graph_seeds[0].entity.external_id.as_deref(),
+            Some("0")
+        );
+        assert_eq!(output.candidates.len(), 1);
+        assert_eq!(output.candidates[0].id, "memory:0");
+    }
+
+    #[test]
+    fn knowledge_retrieval_external_filter_falls_back_for_empty_projected_ids() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: '', title: 'Empty id graph', content: 'empty projected identity retrieval'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'named', title: 'Named graph', content: 'empty projected identity retrieval'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "empty projected identity retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("external_id".to_string(), "0".to_string())]),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 10,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.search.hits[0].id, "memory:0");
         assert_eq!(output.search.hits[0].external_id.as_deref(), Some("0"));
         assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
         assert_eq!(output.graph_seeds.len(), 1);
