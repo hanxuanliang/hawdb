@@ -1076,19 +1076,46 @@ fn metadata_matches(document: &SearchDocument, filters: &BTreeMap<String, String
 }
 
 fn metadata_value_matches(document: &SearchDocument, key: &str, expected: &str) -> bool {
-    if key == "space_id" {
-        let actual = document
+    match key {
+        "kind" => document
             .metadata
             .get(key)
-            .map(String::as_str)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(DEFAULT_SPACE_ID);
-        actual == expected
-    } else {
-        document
+            .is_some_and(|actual| metadata_kind_matches(actual.as_str(), expected)),
+        "space_id" => {
+            let actual = document
+                .metadata
+                .get(key)
+                .map(String::as_str)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(DEFAULT_SPACE_ID);
+            actual == expected
+        }
+        _ => document
             .metadata
             .get(key)
-            .is_some_and(|actual| actual == expected)
+            .is_some_and(|actual| actual == expected),
+    }
+}
+
+fn metadata_kind_matches(actual: &str, expected: &str) -> bool {
+    match (
+        normalized_projection_kind(actual),
+        normalized_projection_kind(expected),
+    ) {
+        (Some(actual), Some(expected)) => actual == expected,
+        _ => actual == expected,
+    }
+}
+
+fn normalized_projection_kind(value: &str) -> Option<&'static str> {
+    match value {
+        "Memory" | "memory" => Some("memory"),
+        "Message" | "message" => Some("message"),
+        "Entity" | "entity" => Some("entity"),
+        "Source" | "source" => Some("source"),
+        "SourceChunk" | "source_chunk" | "sourcechunk" | "chunk" => Some("source_chunk"),
+        "Community" | "community" => Some("community"),
+        _ => None,
     }
 }
 
@@ -2124,6 +2151,74 @@ mod tests {
             .expect("expected text retriever report");
         assert_eq!(text.candidate_count, 1);
         assert_eq!(text.top_hit_ids, vec!["memory:thread_1".to_string()]);
+    }
+
+    #[test]
+    fn search_kind_metadata_filter_accepts_canonical_labels() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:mem_1".to_string(),
+                title: "Kind scoped graph".to_string(),
+                content: "projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("kind".to_string(), "memory".to_string())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "entity:entity_1".to_string(),
+                title: "Kind scoped graph".to_string(),
+                content: "projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("kind".to_string(), "entity".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "projection diagnostics",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("kind".to_string(), "Memory".to_string())]),
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.filtered_document_count, 1);
+        assert_eq!(result.hits[0].id, "memory:mem_1");
+    }
+
+    #[test]
+    fn search_kind_metadata_filter_accepts_source_chunk_variants() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "source_chunk:chunk_1".to_string(),
+                title: "Chunk scoped graph".to_string(),
+                content: "projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("kind".to_string(), "source_chunk".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "projection diagnostics",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("kind".to_string(), "SourceChunk".to_string())]),
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.hits[0].id, "source_chunk:chunk_1");
     }
 
     #[test]

@@ -3575,12 +3575,12 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
 
 fn search_kind_to_label(kind: &str) -> Option<&'static str> {
     match kind {
-        "memory" => Some("Memory"),
-        "message" => Some("Message"),
-        "entity" => Some("Entity"),
-        "source" => Some("Source"),
-        "source_chunk" => Some("SourceChunk"),
-        "community" => Some("Community"),
+        "Memory" | "memory" => Some("Memory"),
+        "Message" | "message" => Some("Message"),
+        "Entity" | "entity" => Some("Entity"),
+        "Source" | "source" => Some("Source"),
+        "SourceChunk" | "source_chunk" | "sourcechunk" | "chunk" => Some("SourceChunk"),
+        "Community" | "community" => Some("Community"),
         _ => None,
     }
 }
@@ -4657,6 +4657,48 @@ mod tests {
             .expect("graph seed retriever report");
         assert_eq!(graph_seed_report.candidate_count, 1);
         assert_eq!(graph_seed_report.top_candidates[0].id, "Memory:mem_1");
+    }
+
+    #[test]
+    fn knowledge_retrieval_kind_filter_accepts_canonical_labels() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem_1', title: 'Filtered graph', content: 'kind scoped retrieval'})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'entity_1', name: 'Filtered graph', summary: 'kind scoped retrieval'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "kind scoped retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("kind".to_string(), "Memory".to_string())]),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 10,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.diagnostics.search_filtered_document_count, 1);
+        assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
+        assert_eq!(output.search.hits[0].kind.as_deref(), Some("memory"));
+        assert_eq!(output.search.hits[0].external_id.as_deref(), Some("mem_1"));
+        assert_eq!(output.graph_seeds.len(), 1);
+        assert_eq!(
+            output.graph_seeds[0].entity.external_id.as_deref(),
+            Some("mem_1")
+        );
     }
 
     #[test]
