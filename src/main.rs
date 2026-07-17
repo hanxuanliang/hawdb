@@ -1522,9 +1522,12 @@ fn graph_lightning_import_status(
     let mut staging_errors = Vec::new();
     let mut published_errors = Vec::new();
     let mut resource_errors = Vec::new();
+    let mut state_errors = Vec::new();
     let mut staging_verification = None;
     let mut published_verification = None;
-    let import_state = if !staging_catalog_present && published_pointer_present {
+    let state_marker =
+        graph_lightning_import_state_marker(staging_dir, &mut errors, &mut state_errors);
+    let artifact_state = if !staging_catalog_present && published_pointer_present {
         push_grouped_error(
             &mut errors,
             &mut presence_errors,
@@ -1564,6 +1567,12 @@ fn graph_lightning_import_status(
             "READY"
         }
     };
+    let import_state = graph_lightning_effective_import_state(
+        artifact_state,
+        state_marker
+            .get("import_state")
+            .and_then(serde_json::Value::as_str),
+    );
     let resume_action = graph_lightning_import_resume_action(import_state);
     let resource_retention = graph_lightning_import_resource_retention(
         import_state,
@@ -1573,15 +1582,19 @@ fn graph_lightning_import_status(
         &mut errors,
         &mut resource_errors,
     );
-    let decision = if import_state == "QUARANTINED" || !resource_errors.is_empty() {
-        "blocked"
-    } else {
-        "ready"
-    };
+    let decision =
+        if import_state == "QUARANTINED" || !resource_errors.is_empty() || !state_errors.is_empty()
+        {
+            "blocked"
+        } else {
+            "ready"
+        };
     Ok(serde_json::json!({
         "protocol": "graph-lightning-import-status",
         "protocol_version": 1,
         "import_state": import_state,
+        "artifact_state": artifact_state,
+        "state_marker": state_marker,
         "resume_action": resume_action,
         "resource_retention": resource_retention,
         "staging_catalog_present": staging_catalog_present,
@@ -1594,13 +1607,104 @@ fn graph_lightning_import_status(
             "staging_errors": staging_errors.len(),
             "published_errors": published_errors.len(),
             "resource_errors": resource_errors.len(),
+            "state_errors": state_errors.len(),
             "presence_error_messages": presence_errors,
             "staging_error_messages": staging_errors,
             "published_error_messages": published_errors,
             "resource_error_messages": resource_errors,
+            "state_error_messages": state_errors,
             "errors": errors,
         },
     }))
+}
+
+fn graph_lightning_import_state_marker(
+    staging_dir: &Path,
+    errors: &mut Vec<String>,
+    state_errors: &mut Vec<String>,
+) -> serde_json::Value {
+    let state_path = staging_dir.join("graph_lightning_import_state.json");
+    if !state_path.exists() {
+        return serde_json::json!({
+            "present": false,
+            "path": "graph_lightning_import_state.json",
+            "import_state": serde_json::Value::Null,
+            "raw": serde_json::Value::Null,
+        });
+    }
+
+    let marker = match read_json_file(&state_path) {
+        Ok(marker) => marker,
+        Err(error) => {
+            push_grouped_error(
+                errors,
+                state_errors,
+                format!("import state marker could not be read: {error}"),
+            );
+            return serde_json::json!({
+                "present": true,
+                "path": "graph_lightning_import_state.json",
+                "import_state": "QUARANTINED",
+                "raw": serde_json::Value::Null,
+            });
+        }
+    };
+    let protocol_valid = marker.get("protocol").and_then(serde_json::Value::as_str)
+        == Some("graph-lightning-import-state");
+    let version_valid = marker
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(1);
+    let import_state = marker
+        .get("import_state")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("QUARANTINED");
+
+    if !protocol_valid {
+        push_grouped_error(
+            errors,
+            state_errors,
+            "import state marker protocol mismatch",
+        );
+    }
+    if !version_valid {
+        push_grouped_error(
+            errors,
+            state_errors,
+            "import state marker protocol version mismatch",
+        );
+    }
+    if !graph_lightning_import_marker_state_allowed(import_state) {
+        push_grouped_error(
+            errors,
+            state_errors,
+            format!("import state marker uses unsupported state {import_state}"),
+        );
+    }
+
+    serde_json::json!({
+        "present": true,
+        "path": "graph_lightning_import_state.json",
+        "import_state": if state_errors.is_empty() { import_state } else { "QUARANTINED" },
+        "raw": marker,
+    })
+}
+
+fn graph_lightning_import_marker_state_allowed(import_state: &str) -> bool {
+    matches!(
+        import_state,
+        "EXPORTING" | "UPLOADING" | "MERGING" | "VALIDATING" | "FAILED" | "CANCELED"
+    )
+}
+
+fn graph_lightning_effective_import_state<'a>(
+    artifact_state: &'a str,
+    marker_state: Option<&'a str>,
+) -> &'a str {
+    if artifact_state == "PUBLISHED" || artifact_state == "QUARANTINED" {
+        return artifact_state;
+    }
+    marker_state.unwrap_or(artifact_state)
 }
 
 fn graph_lightning_import_resource_retention(
@@ -1673,6 +1777,24 @@ fn graph_lightning_import_resource_retention(
             "reason": "published pointer verification controls staging retention",
             "gc_report": gc_report,
         }),
+        "EXPORTING" | "UPLOADING" | "MERGING" | "VALIDATING" => serde_json::json!({
+            "action": "retain_for_active_import",
+            "safe_to_collect": false,
+            "protected_count": candidate_count,
+            "deletable_count": 0,
+            "gc_deletable_count": gc_deletable_count,
+            "reason": "import state marker reports active import work",
+            "gc_report": gc_report,
+        }),
+        "FAILED" | "CANCELED" => serde_json::json!({
+            "action": "hold_for_inspection",
+            "safe_to_collect": false,
+            "protected_count": candidate_count,
+            "deletable_count": 0,
+            "gc_deletable_count": gc_deletable_count,
+            "reason": "import state marker reports terminal import work",
+            "gc_report": gc_report,
+        }),
         "QUARANTINED" => serde_json::json!({
             "action": "hold_for_inspection",
             "safe_to_collect": false,
@@ -1708,11 +1830,47 @@ fn graph_lightning_import_resume_action(import_state: &str) -> serde_json::Value
             "terminal": false,
             "reason": "staging catalog verified but no published pointer exists",
         }),
+        "EXPORTING" => serde_json::json!({
+            "operation": "continue_export",
+            "safe_to_retry": true,
+            "terminal": false,
+            "reason": "import state marker reports export in progress",
+        }),
+        "UPLOADING" => serde_json::json!({
+            "operation": "continue_upload",
+            "safe_to_retry": true,
+            "terminal": false,
+            "reason": "import state marker reports upload in progress",
+        }),
+        "MERGING" => serde_json::json!({
+            "operation": "continue_merge",
+            "safe_to_retry": true,
+            "terminal": false,
+            "reason": "import state marker reports merge in progress",
+        }),
+        "VALIDATING" => serde_json::json!({
+            "operation": "continue_validation",
+            "safe_to_retry": true,
+            "terminal": false,
+            "reason": "import state marker reports validation in progress",
+        }),
         "PUBLISHED" => serde_json::json!({
             "operation": "none",
             "safe_to_retry": false,
             "terminal": true,
             "reason": "published pointer verified",
+        }),
+        "FAILED" => serde_json::json!({
+            "operation": "inspect_errors",
+            "safe_to_retry": false,
+            "terminal": true,
+            "reason": "import state marker reports failed import",
+        }),
+        "CANCELED" => serde_json::json!({
+            "operation": "none",
+            "safe_to_retry": false,
+            "terminal": true,
+            "reason": "import state marker reports canceled import",
         }),
         "QUARANTINED" => serde_json::json!({
             "operation": "inspect_errors",
@@ -2790,6 +2948,43 @@ mod tests {
     }
 
     #[test]
+    fn import_status_reports_active_state_marker_without_staging_catalog() {
+        let staging_dir = unique_main_test_dir("graph_lightning_status_exporting_marker_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_exporting_marker_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_state.json"),
+            serde_json::json!({
+                "protocol": "graph-lightning-import-state",
+                "protocol_version": 1,
+                "import_state": "EXPORTING",
+                "import_id": "import-1",
+                "task_id": "task-1",
+                "fencing_token": "fence-1",
+                "object_digest": "digest-1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["artifact_state"], "CREATED");
+        assert_eq!(report["import_state"], "EXPORTING");
+        assert_eq!(report["state_marker"]["present"], true);
+        assert_eq!(report["state_marker"]["import_state"], "EXPORTING");
+        assert_eq!(report["state_marker"]["raw"]["import_id"], "import-1");
+        assert_eq!(report["resume_action"]["operation"], "continue_export");
+        assert_eq!(report["resume_action"]["safe_to_retry"], true);
+        assert_eq!(report["resume_action"]["terminal"], false);
+        assert_eq!(report["resource_retention"]["action"], "none");
+        assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["status_gate"]["state_errors"], 0);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
     fn import_status_quarantines_pointer_without_staging_catalog() {
         let staging_dir = unique_main_test_dir("graph_lightning_status_pointer_only_staging");
         let publish_dir = unique_main_test_dir("graph_lightning_status_pointer_only_target");
@@ -2981,6 +3176,49 @@ mod tests {
     }
 
     #[test]
+    fn import_status_reports_canceled_state_marker_over_ready_staging() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_status_canceled_marker_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_canceled_marker_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_state.json"),
+            serde_json::json!({
+                "protocol": "graph-lightning-import-state",
+                "protocol_version": 1,
+                "import_state": "CANCELED",
+                "import_id": "import-canceled"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["artifact_state"], "READY");
+        assert_eq!(report["import_state"], "CANCELED");
+        assert_eq!(report["state_marker"]["import_state"], "CANCELED");
+        assert_eq!(report["resume_action"]["operation"], "none");
+        assert_eq!(report["resume_action"]["safe_to_retry"], false);
+        assert_eq!(report["resume_action"]["terminal"], true);
+        assert_eq!(
+            report["resource_retention"]["action"],
+            "hold_for_inspection"
+        );
+        assert_eq!(report["resource_retention"]["protected_count"], 4);
+        assert_eq!(report["resource_retention"]["safe_to_collect"], false);
+        assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["status_gate"]["state_errors"], 0);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
     fn import_status_blocks_when_resource_retention_cannot_read_candidates() {
         let staging_dir = unique_main_test_dir("graph_lightning_status_resource_blocked_staging");
         let publish_dir = unique_main_test_dir("graph_lightning_status_resource_blocked_target");
@@ -3022,6 +3260,48 @@ mod tests {
                 .as_str()
                 .unwrap()
                 .contains("resource retention report failed")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_quarantines_invalid_state_marker() {
+        let staging_dir = unique_main_test_dir("graph_lightning_status_invalid_marker_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_invalid_marker_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_state.json"),
+            serde_json::json!({
+                "protocol": "wrong-protocol",
+                "protocol_version": 99,
+                "import_state": "UNKNOWN"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["artifact_state"], "CREATED");
+        assert_eq!(report["import_state"], "QUARANTINED");
+        assert_eq!(report["state_marker"]["present"], true);
+        assert_eq!(report["state_marker"]["import_state"], "QUARANTINED");
+        assert_eq!(report["resume_action"]["operation"], "inspect_errors");
+        assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["status_gate"]["state_errors"], 3);
+        assert!(report["status_gate"]["state_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error.as_str().unwrap().contains("protocol mismatch")));
+        assert!(report["status_gate"]["state_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("unsupported state UNKNOWN")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
