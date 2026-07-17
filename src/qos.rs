@@ -47,6 +47,12 @@ pub struct BackgroundWorkDecision {
     pub reasons: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedBackgroundWork {
+    pub index: usize,
+    pub decision: BackgroundWorkDecision,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LocalQosPolicy {
     pub max_background_operations: Option<usize>,
@@ -254,6 +260,28 @@ impl LocalQosPolicy {
         }
     }
 
+    pub fn rank_background_work(
+        &self,
+        state: &LocalQosState,
+        plans: &[BackgroundWorkPlan],
+    ) -> Vec<RankedBackgroundWork> {
+        let mut ranked = plans
+            .iter()
+            .enumerate()
+            .map(|(index, plan)| RankedBackgroundWork {
+                index,
+                decision: self.evaluate_background_work(state, plan),
+            })
+            .collect::<Vec<_>>();
+        ranked.sort_by(|left, right| {
+            admission_rank(&left.decision.admission)
+                .cmp(&admission_rank(&right.decision.admission))
+                .then_with(|| right.decision.score.cmp(&left.decision.score))
+                .then_with(|| left.index.cmp(&right.index))
+        });
+        ranked
+    }
+
     fn admit_background(&self, state: &LocalQosState, request: &WorkRequest) -> QosAdmission {
         if !self.background_enabled {
             return QosAdmission::Defer {
@@ -300,6 +328,14 @@ impl LocalQosPolicy {
     }
 }
 
+fn admission_rank(admission: &QosAdmission) -> u8 {
+    match admission {
+        QosAdmission::Admit => 0,
+        QosAdmission::Defer { .. } => 1,
+        QosAdmission::Reject { .. } => 2,
+    }
+}
+
 fn scaled_staleness_score(age_millis: u64, limit_millis: u64) -> u64 {
     if age_millis == 0 || limit_millis == 0 {
         return 0;
@@ -338,6 +374,10 @@ impl LocalQosScheduler {
 
     pub fn evaluate_background_work(&self, plan: &BackgroundWorkPlan) -> BackgroundWorkDecision {
         self.policy.evaluate_background_work(&self.state, plan)
+    }
+
+    pub fn rank_background_work(&self, plans: &[BackgroundWorkPlan]) -> Vec<RankedBackgroundWork> {
+        self.policy.rank_background_work(&self.state, plans)
     }
 
     pub fn try_start(
@@ -564,6 +604,109 @@ mod tests {
             QosAdmission::Defer { reason } if reason.contains("above limit 4")
         ));
         assert!(decision.score > 0);
+
+        scheduler.finish(running);
+    }
+
+    #[test]
+    fn background_work_ranking_prefers_admitted_high_value_plans_stably() {
+        let policy = LocalQosPolicy {
+            max_total_background_operations: Some(3),
+            ..LocalQosPolicy::default()
+        };
+        let state = LocalQosState {
+            running_background_operations: 1,
+            ..LocalQosState::default()
+        };
+        let plans = vec![
+            BackgroundWorkPlan::background(
+                WorkClass::Projection,
+                3,
+                BackgroundWorkHint {
+                    active_topic: true,
+                    query_probability_per_million: 1_000_000,
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+            BackgroundWorkPlan::background(
+                WorkClass::Import,
+                1,
+                BackgroundWorkHint {
+                    query_probability_per_million: 10,
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+            BackgroundWorkPlan::background(
+                WorkClass::Analytics,
+                1,
+                BackgroundWorkHint {
+                    query_probability_per_million: 100_000,
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+            BackgroundWorkPlan::background(
+                WorkClass::Shadow,
+                1,
+                BackgroundWorkHint {
+                    query_probability_per_million: 100_000,
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+        ];
+
+        let ranked = policy.rank_background_work(&state, &plans);
+
+        assert_eq!(
+            ranked.iter().map(|entry| entry.index).collect::<Vec<_>>(),
+            vec![2, 3, 1, 0]
+        );
+        assert!(matches!(ranked[0].decision.admission, QosAdmission::Admit));
+        assert!(matches!(ranked[1].decision.admission, QosAdmission::Admit));
+        assert!(matches!(ranked[2].decision.admission, QosAdmission::Admit));
+        assert!(matches!(
+            ranked[3].decision.admission,
+            QosAdmission::Defer { .. }
+        ));
+        assert!(ranked[0].decision.score >= ranked[1].decision.score);
+    }
+
+    #[test]
+    fn scheduler_ranks_background_work_against_current_state() {
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_total_background_operations: Some(2),
+            ..LocalQosPolicy::default()
+        });
+        let running = scheduler
+            .try_start(WorkRequest::background(WorkClass::Projection, 1))
+            .unwrap();
+        let plans = vec![
+            BackgroundWorkPlan::background(
+                WorkClass::Import,
+                2,
+                BackgroundWorkHint {
+                    active_topic: true,
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+            BackgroundWorkPlan::background(
+                WorkClass::Import,
+                1,
+                BackgroundWorkHint {
+                    query_probability_per_million: 1,
+                    ..BackgroundWorkHint::default()
+                },
+            ),
+        ];
+
+        let ranked = scheduler.rank_background_work(&plans);
+
+        assert_eq!(ranked[0].index, 1);
+        assert_eq!(ranked[1].index, 0);
+        assert!(matches!(ranked[0].decision.admission, QosAdmission::Admit));
+        assert!(matches!(
+            ranked[1].decision.admission,
+            QosAdmission::Defer { .. }
+        ));
 
         scheduler.finish(running);
     }

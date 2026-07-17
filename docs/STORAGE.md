@@ -324,7 +324,10 @@ recent delta size, query probability, staleness TTL, freshness SLO, and tenant
 budget. `LocalQosPolicy::evaluate_background_work` returns the existing
 admission result plus a deterministic expected-value score and reasons, so the
 caller can rank or skip internal background work without moving queue ownership
-into Skein.
+into Skein. `LocalQosPolicy::rank_background_work` and the matching
+`LocalQosScheduler` method apply the same evaluation to a caller-owned candidate
+list, sort admitted work before deferred/rejected work, then sort by score and
+original index for deterministic polling loops.
 `Database::schedule_external_content_artifact_job` records content/blob parser
 work at the same orchestration boundary. Callers that need structured parser
 inputs can use `Database::schedule_external_content_artifact_job_with_payload`

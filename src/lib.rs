@@ -80,8 +80,8 @@ pub use nowledge_inventory::{
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPermit, LocalQosPolicy,
-    LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkPriority, WorkRequest,
-    WORK_CLASS_COUNT,
+    LocalQosScheduler, LocalQosState, QosAdmission, RankedBackgroundWork, WorkClass, WorkPriority,
+    WorkRequest, WORK_CLASS_COUNT,
 };
 pub use schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,
