@@ -2082,10 +2082,34 @@ fn knowledge_neighbors_for(
         };
     };
 
-    let relationship_type = request
-        .relationship_type
-        .as_deref()
-        .and_then(|name| catalog.rel_type_id(name));
+    let relationship_type = match request.relationship_type.as_deref() {
+        Some(name) => match catalog.rel_type_id(name) {
+            Some(rel_type_id) => Some(rel_type_id),
+            None => {
+                return KnowledgeNeighborsOutput {
+                    graph_commit_epoch: store.commit_epoch(),
+                    seed_node_id: Some(seed.id.0),
+                    paths: Vec::new(),
+                    fanout_reasons: Vec::new(),
+                    diagnostics: knowledge_traversal_diagnostics(
+                        KnowledgeTraversalDiagnosticInput {
+                            seed_found: true,
+                            target_found: None,
+                            path_count: 0,
+                            node_count: 0,
+                            relationship_count: 0,
+                            fanout_reason_count: 0,
+                            max_hops: request.max_hops,
+                            path_limit: Some(request.limit),
+                            node_limit: None,
+                            relationship_limit: None,
+                        },
+                    ),
+                };
+            }
+        },
+        None => None,
+    };
     let (paths, fanout_reasons) = expand_knowledge_neighbors_for(
         catalog,
         store,
@@ -5790,6 +5814,22 @@ mod tests {
             incoming.paths[0].source_external_id.as_deref(),
             Some("mention")
         );
+
+        let unknown_type = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("DOES_NOT_EXIST".to_string()),
+            direction: KnowledgeNeighborDirection::Both,
+            limit: 8,
+            max_hops: 2,
+        });
+        assert_eq!(unknown_type.seed_node_id, Some(0));
+        assert!(unknown_type.paths.is_empty());
+        assert!(unknown_type.diagnostics.seed_found);
+        assert_eq!(unknown_type.diagnostics.path_count, 0);
+        assert_eq!(unknown_type.diagnostics.node_count, 0);
+        assert_eq!(unknown_type.diagnostics.relationship_count, 0);
+        assert!(unknown_type.fanout_reasons.is_empty());
     }
 
     #[test]
