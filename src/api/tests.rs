@@ -4441,12 +4441,38 @@ fn external_content_artifact_jobs_are_explicitly_outside_graph_kernel() {
 #[test]
 fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
     let mut db = Database::new();
-    db.schedule_external_content_artifact_job("source-1", "parse");
+    let job = db.schedule_external_content_artifact_job_with_payload(
+        "source-1",
+        "parse",
+        BTreeMap::from([
+            (
+                "source_id".to_string(),
+                Value::String("source-1".to_string()),
+            ),
+            (
+                "content_uri".to_string(),
+                Value::String("file:///nowledge/source-1.md".to_string()),
+            ),
+            ("sha256".to_string(), Value::String("abc123".to_string())),
+            (
+                "target_projection".to_string(),
+                Value::String("search".to_string()),
+            ),
+        ]),
+    );
+    assert_eq!(
+        job.payload.get("content_uri"),
+        Some(&Value::String("file:///nowledge/source-1.md".to_string()))
+    );
 
     let report = db
         .run_next_external_content_artifact_job_with(|job| {
             assert_eq!(job.status, DerivedArtifactJobStatus::Running);
             assert_eq!(job.attempts, 1);
+            assert_eq!(
+                job.payload.get("sha256"),
+                Some(&Value::String("abc123".to_string()))
+            );
             Ok(QueryOutput {
                 rows: vec![BTreeMap::from([
                     ("job_id".to_string(), Value::Int(job.id as i64)),
@@ -4458,8 +4484,12 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
                     ("action".to_string(), Value::String(job.action.clone())),
                     (
                         "published_projection".to_string(),
-                        Value::String("search".to_string()),
+                        job.payload
+                            .get("target_projection")
+                            .cloned()
+                            .unwrap_or(Value::String("unknown".to_string())),
                     ),
+                    ("parsed_chunks".to_string(), Value::Int(2)),
                 ])],
             })
         })
@@ -4474,6 +4504,10 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
         Some(&Value::String("search".to_string()))
     );
     assert_eq!(
+        report.output.rows[0].get("parsed_chunks"),
+        Some(&Value::Int(2))
+    );
+    assert_eq!(
         db.derived_artifact_jobs()[0].status,
         DerivedArtifactJobStatus::Succeeded
     );
@@ -4481,6 +4515,39 @@ fn caller_owned_content_artifact_runtime_can_complete_external_jobs() {
         .run_next_external_content_artifact_job_with(|_| unreachable!())
         .unwrap()
         .is_none());
+}
+
+#[test]
+fn graph_kernel_rejects_external_content_jobs_with_payload_intact() {
+    let mut db = Database::new();
+    db.schedule_external_content_artifact_job_with_payload(
+        "source-2",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("s3://bucket/source-2.pdf".to_string()),
+        )]),
+    );
+
+    let report = db.run_next_derived_artifact_job().unwrap().unwrap();
+
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Failed);
+    assert_eq!(
+        report.job.payload.get("content_uri"),
+        Some(&Value::String("s3://bucket/source-2.pdf".to_string()))
+    );
+    assert_eq!(
+        report.output.rows[0].get("payload"),
+        Some(&Value::Map(BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("s3://bucket/source-2.pdf".to_string())
+        )])))
+    );
+    assert!(report
+        .job
+        .last_error
+        .as_deref()
+        .is_some_and(|error| error.contains("outside the graph kernel")));
 }
 
 #[test]

@@ -29,6 +29,7 @@ pub struct DerivedArtifactJob {
     pub artifact_type: String,
     pub name: String,
     pub action: String,
+    pub payload: BTreeMap<String, Value>,
     pub status: DerivedArtifactJobStatus,
     pub attempts: u32,
     pub last_error: Option<String>,
@@ -57,7 +58,21 @@ impl Database {
         name: impl Into<String>,
         action: impl Into<String>,
     ) -> DerivedArtifactJob {
-        self.enqueue_derived_artifact_job("content_artifact", name.into(), action.into())
+        self.schedule_external_content_artifact_job_with_payload(name, action, BTreeMap::new())
+    }
+
+    pub fn schedule_external_content_artifact_job_with_payload(
+        &mut self,
+        name: impl Into<String>,
+        action: impl Into<String>,
+        payload: BTreeMap<String, Value>,
+    ) -> DerivedArtifactJob {
+        self.enqueue_derived_artifact_job_with_payload(
+            "content_artifact",
+            name.into(),
+            action.into(),
+            payload,
+        )
     }
 
     pub fn derived_artifact_jobs(&self) -> Vec<DerivedArtifactJob> {
@@ -204,11 +219,22 @@ impl Database {
         name: impl Into<String>,
         action: impl Into<String>,
     ) -> DerivedArtifactJob {
+        self.enqueue_derived_artifact_job_with_payload(artifact_type, name, action, BTreeMap::new())
+    }
+
+    fn enqueue_derived_artifact_job_with_payload(
+        &mut self,
+        artifact_type: impl Into<String>,
+        name: impl Into<String>,
+        action: impl Into<String>,
+        payload: BTreeMap<String, Value>,
+    ) -> DerivedArtifactJob {
         let job = DerivedArtifactJob {
             id: self.next_derived_artifact_job_id,
             artifact_type: artifact_type.into(),
             name: name.into(),
             action: action.into(),
+            payload,
             status: DerivedArtifactJobStatus::Pending,
             attempts: 0,
             last_error: None,
@@ -268,6 +294,7 @@ fn derived_artifact_job_failure_row(job: &DerivedArtifactJob, error: &str) -> Ro
         ),
         ("name".to_string(), Value::String(job.name.clone())),
         ("action".to_string(), Value::String(job.action.clone())),
+        ("payload".to_string(), Value::Map(job.payload.clone())),
         (
             "status".to_string(),
             Value::String(job.status.as_str().to_string()),

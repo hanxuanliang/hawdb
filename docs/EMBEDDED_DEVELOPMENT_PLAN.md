@@ -570,10 +570,12 @@ grouped WAL batch. Projected graph derived artifacts can be refreshed through a
 report-oriented `Database::rebuild_derived_artifacts` entry point; search
 projection artifacts expose the same report-oriented rebuild shape through
 `SearchIndex::rebuild_derived_artifacts`. Content artifact jobs are scheduled at
-the same boundary; the default graph-kernel runner rejects them, while
-`Database::run_next_external_content_artifact_job_with` lets a caller-owned
-content runtime complete parsing/crawling/chunking jobs without embedding that
-runtime in Skein.
+the same boundary; callers can attach structured job payloads for object
+references, checksums, parser hints, and projection targets. The default
+graph-kernel runner rejects those jobs while preserving the payload in the job
+report, and `Database::run_next_external_content_artifact_job_with` lets a
+caller-owned content runtime complete parsing/crawling/chunking jobs without
+embedding that runtime in Skein.
 
 An internal compatibility fixture harness is implemented for Nowledge-shaped
 query families. It runs setup statements, parameterized Cypher checks, expected

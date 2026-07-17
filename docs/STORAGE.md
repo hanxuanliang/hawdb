@@ -294,12 +294,17 @@ for these projected graph artifacts. Jobs expose pending/running/succeeded/faile
 state, attempts, and last error without adding threads or hiding rebuild
 failures.
 `Database::schedule_external_content_artifact_job` records content/blob parser
-work at the same orchestration boundary. The graph-kernel job runner still
-rejects those jobs with a graph-kernel-external error, while
+work at the same orchestration boundary. Callers that need structured parser
+inputs can use `Database::schedule_external_content_artifact_job_with_payload`
+to attach object references, checksums, content type, target projection, or
+other application-owned metadata as a `Value::Map`. The graph-kernel job runner
+still rejects those jobs with a graph-kernel-external error and preserves the
+payload in the failed job report, while
 `Database::run_next_external_content_artifact_job_with` lets the caller supply
 the content artifact runtime and complete the job status without embedding
 parsing, crawling, chunking, or large-value runtime logic in Skein. That runtime
-publishes rebuildable projections back to Skein through caller-owned output.
+reads the payload and publishes rebuildable projections back to Skein through
+caller-owned output.
 
 Search projection rebuild has the same orchestration shape at the search layer:
 `SearchIndex::rebuild_derived_artifacts` reports the search projection artifact
