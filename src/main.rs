@@ -5,12 +5,15 @@ use skein::{
     scan_nowledge_query_inventory_to_json, CanonicalGraphSnapshotValidation,
     CanonicalSnapshotIdentityAudit, Database, DatabaseConfig, ExternalShadowCommand,
     ExternalShadowReady, GraphLightningBootstrapManifest, Result, SkeinError, Value,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
+
+const GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION: u64 = 1;
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1).peekable();
@@ -872,7 +875,7 @@ fn stage_graph_lightning_bootstrap_export(
     let artifact_summary = graph_lightning_artifact_summary(&artifacts, "byte_len");
     let catalog = serde_json::json!({
         "protocol": "graph-lightning-staging-catalog",
-        "protocol_version": 1,
+        "protocol_version": GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION,
         "stage_state": stage_state,
         "graph_commit_epoch": export.manifest.graph_commit_epoch,
         "logical_checksum": export.manifest.logical_checksum,
@@ -908,6 +911,27 @@ fn verify_graph_lightning_staging_catalog(
     let mut manifest = None;
     let mut graph_stream = None;
     let mut bundle = None;
+
+    let catalog_protocol_matches = catalog.get("protocol").and_then(serde_json::Value::as_str)
+        == Some("graph-lightning-staging-catalog");
+    if !catalog_protocol_matches {
+        push_grouped_error(
+            &mut errors,
+            &mut catalog_errors,
+            "staging catalog protocol mismatch",
+        );
+    }
+    let catalog_protocol_version_matches = catalog
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64)
+        == Some(GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION);
+    if !catalog_protocol_version_matches {
+        push_grouped_error(
+            &mut errors,
+            &mut catalog_errors,
+            "staging catalog protocol version mismatch",
+        );
+    }
 
     let artifacts = catalog
         .get("artifacts")
@@ -1029,6 +1053,19 @@ fn verify_graph_lightning_staging_catalog(
         }
     }
 
+    let manifest_protocol_version_matches = manifest
+        .as_ref()
+        .and_then(|manifest| manifest.get("protocol_version"))
+        .and_then(serde_json::Value::as_u64)
+        == Some(GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION);
+    if !manifest_protocol_version_matches {
+        push_grouped_error(
+            &mut errors,
+            &mut manifest_errors,
+            "manifest protocol version mismatch",
+        );
+    }
+
     let graph_stream_validation = graph_stream
         .as_ref()
         .map(|encoded| skein::validate_graph_lightning_graph_stream(encoded, None));
@@ -1137,6 +1174,9 @@ fn verify_graph_lightning_staging_catalog(
     }
     let decision = if errors.is_empty()
         && artifact_integrity
+        && catalog_protocol_matches
+        && catalog_protocol_version_matches
+        && manifest_protocol_version_matches
         && manifest_matches_graph_stream
         && bundle_matches_artifacts
         && catalog_state_ready
@@ -1148,9 +1188,12 @@ fn verify_graph_lightning_staging_catalog(
     };
     Ok(serde_json::json!({
         "protocol": "graph-lightning-staging-verification",
-        "protocol_version": 1,
+        "protocol_version": GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION,
         "catalog_path": "graph_lightning_staging_catalog.json",
         "artifact_integrity": artifact_integrity,
+        "catalog_protocol_matches": catalog_protocol_matches,
+        "catalog_protocol_version_matches": catalog_protocol_version_matches,
+        "manifest_protocol_version_matches": manifest_protocol_version_matches,
         "manifest_matches_graph_stream": manifest_matches_graph_stream,
         "bundle_matches_artifacts": bundle_matches_artifacts,
         "catalog_state_ready": catalog_state_ready,
@@ -3175,6 +3218,9 @@ mod tests {
         assert_eq!(report["protocol"], "graph-lightning-staging-verification");
         assert_eq!(report["validation_gate"]["decision"], "ready");
         assert_eq!(report["artifact_integrity"], true);
+        assert_eq!(report["catalog_protocol_matches"], true);
+        assert_eq!(report["catalog_protocol_version_matches"], true);
+        assert_eq!(report["manifest_protocol_version_matches"], true);
         assert_eq!(report["manifest_matches_graph_stream"], true);
         assert_eq!(report["bundle_matches_artifacts"], true);
         assert_eq!(report["artifact_summary"]["object_count"], 3);
@@ -3191,6 +3237,72 @@ mod tests {
         assert_eq!(report["validation_gate"]["graph_stream_errors"], 0);
         assert_eq!(report["validation_gate"]["bundle_errors"], 0);
         assert_eq!(report["validation_gate"]["catalog_errors"], 0);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn staging_verification_blocks_unsupported_catalog_version() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_catalog_version");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
+        let catalog = std::fs::read_to_string(&catalog_path)
+            .unwrap()
+            .replace("\"protocol_version\": 1", "\"protocol_version\": 99");
+        std::fs::write(&catalog_path, catalog).unwrap();
+
+        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+
+        assert_eq!(report["validation_gate"]["decision"], "blocked");
+        assert_eq!(report["catalog_protocol_matches"], true);
+        assert_eq!(report["catalog_protocol_version_matches"], false);
+        assert_eq!(report["validation_gate"]["catalog_errors"], 1);
+        assert!(report["validation_gate"]["catalog_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("protocol version mismatch")));
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn staging_verification_blocks_unsupported_manifest_version() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_manifest_version");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        let manifest_path = staging_dir.join("graph_lightning_bootstrap_manifest.json");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap()
+            .replace("\"protocol_version\": 1", "\"protocol_version\": 99");
+        std::fs::write(&manifest_path, manifest).unwrap();
+
+        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+
+        assert_eq!(report["validation_gate"]["decision"], "blocked");
+        assert_eq!(report["manifest_protocol_version_matches"], false);
+        assert!(report["validation_gate"]["manifest_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("manifest protocol version mismatch")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }

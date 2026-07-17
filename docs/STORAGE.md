@@ -156,7 +156,8 @@ between the catalog, manifest, bundle, and GraphStream artifact. Its validation
 gate keeps flat errors for logs and grouped artifact, manifest, GraphStream,
 bundle, and catalog error arrays for local upload/resume automation. Its
 artifact summary reports the same count and byte metrics from the actually
-measured artifacts.
+measured artifacts. Unknown staging-catalog or bootstrap-manifest protocol
+versions block validation instead of being read on a best-effort basis.
 `skein graph-lightning-publish-staging [--require-state-marker]
 [--fencing-token <token>] [--expected-graph-epoch <epoch>] <staging-dir>
 <publish-dir>` verifies a READY staging catalog and atomically writes

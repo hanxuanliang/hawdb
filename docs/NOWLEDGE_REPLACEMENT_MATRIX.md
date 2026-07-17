@@ -64,7 +64,8 @@ GraphStream blockers into counts and grouped messages for import preflight
 automation.
 Staging verification gates also split artifact, manifest, GraphStream, bundle,
 and catalog errors into grouped arrays for offline upload/resume automation,
-with staged artifact count/byte summaries for upload observability.
+with staged artifact count/byte summaries for upload observability and
+fail-closed catalog/manifest protocol-version checks.
 Published-pointer verification gates split pointer, catalog, and staging errors
 for Graph Lightning resume checks.
 Staging GC gates also group published-pointer verification errors before
