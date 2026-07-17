@@ -429,12 +429,15 @@ before vector scoring, BM25 corpus statistics, retriever candidate counts, and
 final truncation so scoped retrieval does not leak unscoped candidates into
 ranking diagnostics. `SearchResultSet::candidate_set` reports the exact
 projection-local pre-filter set using stable document IDs, including id-space,
-representation, cardinality, filtered-out count, exactness, and the metadata
-filters that produced it. This is a diagnostic boundary only: projection-local
-positions are not stable graph identity across projection generations.
-Higher-level retrieval APIs can use those fields for score breakdowns,
-provenance, and stale projection warnings without making the search projection
-canonical. Callers that need response-level diagnostics can use
+representation, cardinality, filtered-out count, exactness, the metadata
+filters that produced it, the source graph snapshot commit epoch when the
+projection was rebuilt from graph storage, and a policy epoch placeholder.
+`policy_epoch` remains `None` until a policy runtime exists. This is a
+diagnostic boundary only: projection-local positions are not stable graph
+identity across projection generations. Higher-level retrieval APIs can use
+those fields for score breakdowns, provenance, and stale projection warnings
+without making the search projection canonical. Callers that need
+response-level diagnostics can use
 `SearchIndex::search_with_report` to get the total document count, post-filter
 document count, candidate-set report, pre-limit hit count, requested limit, rank
 window, truncation flag, truncation reasons, child retriever availability,

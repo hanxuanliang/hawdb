@@ -154,6 +154,8 @@ pub struct SearchCandidateSetReport {
     pub representation: String,
     pub cardinality: usize,
     pub exact: bool,
+    pub snapshot_source_graph_commit_epoch: Option<u64>,
+    pub policy_epoch: Option<u64>,
     pub filtered_out_count: usize,
     pub metadata_filters: BTreeMap<String, String>,
 }
@@ -544,6 +546,8 @@ impl SearchIndex {
             representation: "sorted_document_ids".to_string(),
             cardinality: filtered_document_count,
             exact: true,
+            snapshot_source_graph_commit_epoch: self.source_graph_commit_epoch,
+            policy_epoch: None,
             filtered_out_count: document_count.saturating_sub(filtered_document_count),
             metadata_filters: options.metadata_filters.clone(),
         };
@@ -2037,6 +2041,11 @@ mod tests {
         assert_eq!(result.candidate_set.representation, "sorted_document_ids");
         assert_eq!(result.candidate_set.cardinality, 1);
         assert!(result.candidate_set.exact);
+        assert_eq!(
+            result.candidate_set.snapshot_source_graph_commit_epoch,
+            None
+        );
+        assert_eq!(result.candidate_set.policy_epoch, None);
         assert_eq!(result.candidate_set.filtered_out_count, 1);
         assert_eq!(
             result.candidate_set.metadata_filters,
@@ -2515,6 +2524,23 @@ mod tests {
                 index.projection_freshness().source_graph_commit_epoch,
                 Some(store.commit_epoch())
             );
+            let result = index.search_with_options(
+                "graph storage",
+                None,
+                SearchMode::Text,
+                SearchQueryOptions {
+                    limit: 10,
+                    rank_window: None,
+                    fusion_weights: SearchFusionWeights::default(),
+                    metadata_filters: BTreeMap::new(),
+                },
+            );
+            assert_eq!(result.total_hits, 1);
+            assert_eq!(
+                result.candidate_set.snapshot_source_graph_commit_epoch,
+                Some(store.commit_epoch())
+            );
+            assert_eq!(result.candidate_set.policy_epoch, None);
         }
 
         let snapshot = read_search_snapshot_text(&path.join(SEARCH_SNAPSHOT_FILE)).unwrap();
