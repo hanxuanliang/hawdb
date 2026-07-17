@@ -514,6 +514,9 @@ fn retrieves_knowledge_through_database_facade() {
         output.diagnostics.projection_source_graph_commit_epoch,
         Some(4)
     );
+    assert!(!output.diagnostics.projection_stale);
+    assert!(!output.diagnostics.projection_full_reindex_needed);
+    assert!(!output.diagnostics.projection_metadata_repair_needed);
     assert_eq!(output.diagnostics.search_limit, 1);
     assert!(output.diagnostics.search_truncated);
     assert_eq!(
@@ -1396,6 +1399,9 @@ fn knowledge_retrieval_diagnostics_report_projection_warnings() {
 
     assert!(output.projection_freshness.full_reindex_needed);
     assert!(output.projection_freshness.metadata_repair_needed);
+    assert!(!output.diagnostics.projection_stale);
+    assert!(output.diagnostics.projection_full_reindex_needed);
+    assert!(output.diagnostics.projection_metadata_repair_needed);
     assert!(output
         .diagnostics
         .warnings
@@ -1417,6 +1423,55 @@ fn knowledge_retrieval_diagnostics_report_projection_warnings() {
         .iter()
         .any(|warning| warning
             == "search projection metadata repair reason: missing derived metadata"));
+}
+
+#[test]
+fn knowledge_retrieval_diagnostics_expose_stale_projection_flag() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'mem_1', title: 'Stale projection', content: 'projection warning retrieval'})",
+    )
+    .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'mem_2', title: 'New graph row', content: 'newer than projection'})",
+    )
+    .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "projection warning".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 10,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 10,
+            graph_context_limit: 0,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert_eq!(output.graph_commit_epoch, 2);
+    assert_eq!(
+        output.diagnostics.projection_source_graph_commit_epoch,
+        Some(1)
+    );
+    assert!(output.diagnostics.projection_stale);
+    assert!(!output.diagnostics.projection_full_reindex_needed);
+    assert!(!output.diagnostics.projection_metadata_repair_needed);
+    assert!(output
+        .diagnostics
+        .warnings
+        .iter()
+        .any(|warning| warning == "search projection is older than graph snapshot"));
 }
 
 #[test]

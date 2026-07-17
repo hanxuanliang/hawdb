@@ -405,6 +405,9 @@ pub struct KnowledgeRetrievalOutput {
 pub struct KnowledgeRetrievalDiagnostics {
     pub graph_commit_epoch: u64,
     pub projection_source_graph_commit_epoch: Option<u64>,
+    pub projection_stale: bool,
+    pub projection_full_reindex_needed: bool,
+    pub projection_metadata_repair_needed: bool,
     pub search_document_count: usize,
     pub search_filtered_document_count: usize,
     pub search_total_hits: usize,
@@ -1952,6 +1955,9 @@ fn knowledge_retrieval_diagnostics(
     KnowledgeRetrievalDiagnostics {
         graph_commit_epoch,
         projection_source_graph_commit_epoch: projection_freshness.source_graph_commit_epoch,
+        projection_stale: search_projection_is_stale(projection_freshness, graph_commit_epoch),
+        projection_full_reindex_needed: projection_freshness.full_reindex_needed,
+        projection_metadata_repair_needed: projection_freshness.metadata_repair_needed,
         search_document_count: search.document_count,
         search_filtered_document_count: search.filtered_document_count,
         search_total_hits: search.total_hits,
@@ -2001,11 +2007,7 @@ fn knowledge_retrieval_warnings(
     graph_commit_epoch: u64,
 ) -> Vec<String> {
     let mut warnings = Vec::new();
-    if projection_freshness
-        .source_graph_commit_epoch
-        .map(|projection_epoch| projection_epoch < graph_commit_epoch)
-        .unwrap_or(false)
-    {
+    if search_projection_is_stale(projection_freshness, graph_commit_epoch) {
         warnings.push("search projection is older than graph snapshot".to_string());
     }
     if projection_freshness.full_reindex_needed {
@@ -2027,6 +2029,16 @@ fn knowledge_retrieval_warnings(
         );
     }
     warnings
+}
+
+fn search_projection_is_stale(
+    projection_freshness: &SearchProjectionFreshness,
+    graph_commit_epoch: u64,
+) -> bool {
+    projection_freshness
+        .source_graph_commit_epoch
+        .map(|projection_epoch| projection_epoch < graph_commit_epoch)
+        .unwrap_or(false)
 }
 
 fn graph_seed_candidate_id(seed: &KnowledgeGraphSeed) -> String {
