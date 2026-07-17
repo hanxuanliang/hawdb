@@ -275,6 +275,22 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "source_entity_community_export_workload",
+            logical: source_entity_community_export_workload_plan(),
+            catalog: source_entity_community_export_workload_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 10,
+                cost: 1074,
+            },
+            fingerprint_contains: "SortExec",
+            decision_contains: &[
+                "choose IndexNodeSeek for Source.id",
+                "estimate AdjacencyExpand for Source-[:SOURCED_FROM*1..1]->Memory",
+                "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
+                "selected physical plan cost: estimated_rows=10 cost=1074",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "community_synthesized_source_coverage",
             logical: community_synthesized_source_coverage_plan(),
             catalog: community_synthesized_source_coverage_catalog(),
@@ -1346,6 +1362,176 @@ fn source_memory_entity_label_workload_catalog() -> OptimizerCatalog {
                 (("Source".to_string(), "id".to_string()), 1_000),
                 (("Entity".to_string(), "community_id".to_string()), 8),
                 (("Label".to_string(), "name".to_string()), 10),
+            ],
+            [],
+        ),
+    )
+}
+
+fn source_entity_community_export_workload_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(10),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![
+                SortItem {
+                    key: SortKey::Column("memory_count".to_string()),
+                    direction: SortDirection::Desc,
+                },
+                SortItem {
+                    key: SortKey::Column("entity_count".to_string()),
+                    direction: SortDirection::Desc,
+                },
+            ],
+            input: Box::new(LogicalPlan::Aggregate {
+                group_keys: vec![
+                    Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "e".to_string(),
+                            property: "community_id".to_string(),
+                        },
+                        name: "community_id".to_string(),
+                    },
+                    Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "e".to_string(),
+                            property: "entity_type".to_string(),
+                        },
+                        name: "entity_type".to_string(),
+                    },
+                ],
+                items: vec![
+                    Aggregation {
+                        function: AggregateFunction::Count,
+                        target: AggregateTarget::Variable("m".to_string()),
+                        distinct: true,
+                        name: "memory_count".to_string(),
+                    },
+                    Aggregation {
+                        function: AggregateFunction::Count,
+                        target: AggregateTarget::Variable("e".to_string()),
+                        distinct: true,
+                        name: "entity_count".to_string(),
+                    },
+                ],
+                input: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyIsNotNull {
+                        variable: "e".to_string(),
+                        property: "community_id".to_string(),
+                    },
+                    input: Box::new(LogicalPlan::Expand {
+                        source_variable: "m".to_string(),
+                        source_label: "Memory".to_string(),
+                        rel_variable: None,
+                        rel_type: "MENTIONS".to_string(),
+                        rel_properties: Default::default(),
+                        direction: RelationshipDirection::Outgoing,
+                        target_variable: "e".to_string(),
+                        target_label: "Entity".to_string(),
+                        min_hops: 1,
+                        max_hops: 1,
+                        optional: false,
+                        input: Box::new(LogicalPlan::Filter {
+                            predicate: Predicate::PropertyIn {
+                                variable: "m".to_string(),
+                                property: "unit_type".to_string(),
+                                values: vec![
+                                    Value::String("fact".to_string()),
+                                    Value::String("episode".to_string()),
+                                ],
+                            },
+                            input: Box::new(LogicalPlan::Expand {
+                                source_variable: "s".to_string(),
+                                source_label: "Source".to_string(),
+                                rel_variable: None,
+                                rel_type: "SOURCED_FROM".to_string(),
+                                rel_properties: Default::default(),
+                                direction: RelationshipDirection::Incoming,
+                                target_variable: "m".to_string(),
+                                target_label: "Memory".to_string(),
+                                min_hops: 1,
+                                max_hops: 1,
+                                optional: false,
+                                input: Box::new(LogicalPlan::Filter {
+                                    predicate: Predicate::PropertyEq {
+                                        variable: "s".to_string(),
+                                        property: "id".to_string(),
+                                        value: Value::String("source-42".to_string()),
+                                    },
+                                    input: Box::new(LogicalPlan::NodeScan {
+                                        variable: "s".to_string(),
+                                        label: "Source".to_string(),
+                                    }),
+                                }),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn source_entity_community_export_workload_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Source".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Source".to_string(), 1_000),
+                ("Memory".to_string(), 100_000),
+                ("Entity".to_string(), 50_000),
+            ],
+            [
+                ("SOURCED_FROM".to_string(), 250_000),
+                ("MENTIONS".to_string(), 300_000),
+            ],
+            [
+                ("SOURCED_FROM".to_string(), 50_000),
+                ("MENTIONS".to_string(), 90_000),
+            ],
+            [
+                (
+                    (
+                        "Source".to_string(),
+                        "SOURCED_FROM".to_string(),
+                        "Memory".to_string(),
+                    ),
+                    120_000,
+                ),
+                (
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                    ),
+                    300_000,
+                ),
+            ],
+            [
+                (
+                    (
+                        "Source".to_string(),
+                        "SOURCED_FROM".to_string(),
+                        "Memory".to_string(),
+                        1,
+                    ),
+                    120_000,
+                ),
+                (
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                        1,
+                    ),
+                    300_000,
+                ),
+            ],
+            [
+                (("Source".to_string(), "id".to_string()), 1_000),
+                (("Memory".to_string(), "unit_type".to_string()), 6),
+                (("Entity".to_string(), "community_id".to_string()), 16),
+                (("Entity".to_string(), "entity_type".to_string()), 12),
             ],
             [],
         ),
