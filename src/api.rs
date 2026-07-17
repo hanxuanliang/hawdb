@@ -1363,7 +1363,7 @@ impl Database {
                 } else {
                     continue;
                 };
-                if !seen_relationships.insert(relationship.id.0) {
+                if !seen_relationships.insert((seed_hit_id.clone(), relationship.id.0)) {
                     continue;
                 }
                 if paths.len() >= graph_context_limit {
@@ -4282,12 +4282,20 @@ mod tests {
         );
         assert!(!output.diagnostics.candidate_truncated);
         assert!(output.diagnostics.candidate_truncation_reasons.is_empty());
-        assert_eq!(output.diagnostics.graph_context_path_count, 1);
-        assert_eq!(output.graph_context_paths.len(), 1);
+        assert_eq!(output.diagnostics.graph_context_path_count, 2);
+        assert_eq!(output.graph_context_paths.len(), 2);
         assert!(output
             .evidence
             .iter()
             .any(|evidence| evidence.canonical_node_id == Some(0)));
+        assert!(output
+            .graph_context_paths
+            .iter()
+            .any(|path| path.seed_hit_id == "memory:root"));
+        assert!(output
+            .graph_context_paths
+            .iter()
+            .any(|path| path.seed_hit_id == "Memory:root"));
     }
 
     #[test]
@@ -5660,6 +5668,63 @@ mod tests {
         );
         assert_eq!(output.fanout_reasons.len(), 1);
         assert!(output.fanout_reasons[0].contains("knowledge_graph_seed_limit 1"));
+    }
+
+    #[test]
+    fn knowledge_retrieval_keeps_context_per_retriever_seed() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'shared', title: 'Shared graph seed', content: 'shared graph seed'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Entity'})",
+        )
+            .unwrap();
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let output = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "shared graph seed".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 1,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 1,
+                graph_context_limit: 4,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        let search_evidence = output
+            .evidence
+            .iter()
+            .find(|evidence| evidence.canonical_node_id == Some(0))
+            .expect("search evidence for shared memory");
+        assert_eq!(search_evidence.graph_context_path_count, 1);
+
+        let graph_seed_report = output
+            .retrievers
+            .iter()
+            .find(|report| report.name == "graph_seed")
+            .expect("graph seed report");
+        let graph_seed_candidate = graph_seed_report
+            .top_candidates
+            .iter()
+            .find(|candidate| candidate.canonical_node_id == Some(0))
+            .expect("graph seed candidate for shared memory");
+        assert_eq!(graph_seed_candidate.graph_context_path_count, 1);
+        assert!(output
+            .graph_context_paths
+            .iter()
+            .any(|path| path.seed_hit_id == search_evidence.hit_id));
+        assert!(output
+            .graph_context_paths
+            .iter()
+            .any(|path| path.seed_hit_id == "Memory:shared"));
     }
 
     #[test]
