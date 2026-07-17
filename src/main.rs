@@ -1412,12 +1412,16 @@ fn graph_lightning_import_status(
     let staging_catalog_present = catalog_path.exists();
     let published_pointer_present = published_path.exists();
     let mut errors = Vec::new();
+    let mut presence_errors = Vec::new();
+    let mut staging_errors = Vec::new();
+    let mut published_errors = Vec::new();
     let mut staging_verification = None;
     let mut published_verification = None;
     let import_state = if !staging_catalog_present && published_pointer_present {
-        errors.push(
-            "published pointer exists without a matching staging catalog; refusing to treat import as created"
-                .to_string(),
+        push_grouped_error(
+            &mut errors,
+            &mut presence_errors,
+            "published pointer exists without a matching staging catalog; refusing to treat import as created",
         );
         "QUARANTINED"
     } else if !staging_catalog_present {
@@ -1426,7 +1430,9 @@ fn graph_lightning_import_status(
         let staging_report = verify_graph_lightning_staging_catalog(staging_dir)?;
         let staging_ready = gate_decision(&staging_report, "validation_gate") == Some("ready");
         if !staging_ready {
-            errors.extend(gate_errors(&staging_report, "validation_gate"));
+            for error in gate_errors(&staging_report, "validation_gate") {
+                push_grouped_error(&mut errors, &mut staging_errors, error);
+            }
         }
         staging_verification = Some(staging_report);
         if !staging_ready {
@@ -1437,7 +1443,9 @@ fn graph_lightning_import_status(
             let published_ready =
                 gate_decision(&published_report, "validation_gate") == Some("ready");
             if !published_ready {
-                errors.extend(gate_errors(&published_report, "validation_gate"));
+                for error in gate_errors(&published_report, "validation_gate") {
+                    push_grouped_error(&mut errors, &mut published_errors, error);
+                }
             }
             published_verification = Some(published_report);
             if published_ready {
@@ -1464,6 +1472,12 @@ fn graph_lightning_import_status(
         "published_verification": published_verification,
         "status_gate": {
             "decision": decision,
+            "presence_errors": presence_errors.len(),
+            "staging_errors": staging_errors.len(),
+            "published_errors": published_errors.len(),
+            "presence_error_messages": presence_errors,
+            "staging_error_messages": staging_errors,
+            "published_error_messages": published_errors,
             "errors": errors,
         },
     }))
@@ -2398,6 +2412,9 @@ mod tests {
         assert_eq!(report["staging_catalog_present"], false);
         assert_eq!(report["published_pointer_present"], false);
         assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["status_gate"]["presence_errors"], 0);
+        assert_eq!(report["status_gate"]["staging_errors"], 0);
+        assert_eq!(report["status_gate"]["published_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
@@ -2419,6 +2436,17 @@ mod tests {
         assert_eq!(report["staging_catalog_present"], false);
         assert_eq!(report["published_pointer_present"], true);
         assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["status_gate"]["presence_errors"], 1);
+        assert_eq!(report["status_gate"]["staging_errors"], 0);
+        assert_eq!(report["status_gate"]["published_errors"], 0);
+        assert!(report["status_gate"]["presence_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("published pointer exists without a matching staging catalog")));
         assert!(report["status_gate"]["errors"]
             .as_array()
             .unwrap()
@@ -2454,6 +2482,9 @@ mod tests {
         );
         assert_eq!(report["published_verification"], serde_json::Value::Null);
         assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["status_gate"]["presence_errors"], 0);
+        assert_eq!(report["status_gate"]["staging_errors"], 0);
+        assert_eq!(report["status_gate"]["published_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
@@ -2480,6 +2511,9 @@ mod tests {
             "ready"
         );
         assert_eq!(report["status_gate"]["decision"], "ready");
+        assert_eq!(report["status_gate"]["presence_errors"], 0);
+        assert_eq!(report["status_gate"]["staging_errors"], 0);
+        assert_eq!(report["status_gate"]["published_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
         std::fs::remove_dir_all(publish_dir).unwrap();
@@ -2507,6 +2541,17 @@ mod tests {
 
         assert_eq!(report["import_state"], "QUARANTINED");
         assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["status_gate"]["presence_errors"], 0);
+        assert_eq!(report["status_gate"]["staging_errors"], 1);
+        assert_eq!(report["status_gate"]["published_errors"], 0);
+        assert!(report["status_gate"]["staging_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("staging catalog is not READY")));
         assert!(report["status_gate"]["errors"]
             .as_array()
             .unwrap()

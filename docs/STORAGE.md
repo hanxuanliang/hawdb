@@ -167,6 +167,9 @@ pointer corruption from staging catalog drift.
 `skein graph-lightning-gc-staging-report <staging-dir> <publish-dir>` fails
 closed when a published pointer cannot be verified and groups the propagated
 published-pointer verification errors for cleanup automation.
+`skein graph-lightning-import-status <staging-dir> <publish-dir>` summarizes
+CREATED/READY/PUBLISHED/QUARANTINED state and groups presence, staging, and
+published-pointer errors for resume automation.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
