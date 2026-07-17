@@ -177,9 +177,20 @@ pub struct SearchRetrieverReport {
     pub name: String,
     pub available: bool,
     pub candidate_count: usize,
+    pub candidate_set: SearchRetrieverCandidateSetReport,
     pub fallback_reasons: Vec<String>,
     pub top_hit_ids: Vec<String>,
     pub top_candidates: Vec<SearchRetrieverCandidate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchRetrieverCandidateSetReport {
+    pub id_space: String,
+    pub representation: String,
+    pub cardinality: usize,
+    pub exact: bool,
+    pub snapshot_source_graph_commit_epoch: Option<u64>,
+    pub policy_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1018,6 +1029,11 @@ impl SearchIndex {
                 name: "vector".to_string(),
                 available: vector_available && mode != SearchMode::Text,
                 candidate_count: vector_scores.len(),
+                candidate_set: retriever_candidate_set_report(
+                    vector_window_ranks.len(),
+                    self.source_graph_commit_epoch,
+                    options.policy_epoch,
+                ),
                 fallback_reasons: vector_fallback_reasons,
                 top_hit_ids: top_ranked_ids(&vector_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&vector_window_ranks, &vector_scores, limit),
@@ -1026,6 +1042,11 @@ impl SearchIndex {
                 name: "text".to_string(),
                 available: text_available && mode != SearchMode::Vector,
                 candidate_count: text_scores.len(),
+                candidate_set: retriever_candidate_set_report(
+                    text_window_ranks.len(),
+                    self.source_graph_commit_epoch,
+                    options.policy_epoch,
+                ),
                 fallback_reasons: text_fallback_reasons,
                 top_hit_ids: top_ranked_ids(&text_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&text_window_ranks, &text_scores, limit),
@@ -1508,6 +1529,21 @@ fn top_ranked_candidates(
     });
     ranked.truncate(limit);
     ranked
+}
+
+fn retriever_candidate_set_report(
+    cardinality: usize,
+    snapshot_source_graph_commit_epoch: Option<u64>,
+    policy_epoch: Option<u64>,
+) -> SearchRetrieverCandidateSetReport {
+    SearchRetrieverCandidateSetReport {
+        id_space: "search_projection_document_id".to_string(),
+        representation: "ranked_document_ids".to_string(),
+        cardinality,
+        exact: true,
+        snapshot_source_graph_commit_epoch,
+        policy_epoch,
+    }
 }
 
 fn rrf_child_score(rank: Option<usize>) -> f64 {
@@ -2398,6 +2434,19 @@ mod tests {
         assert!(text.available);
         assert_eq!(vector.candidate_count, 2);
         assert_eq!(text.candidate_count, 2);
+        assert_eq!(
+            vector.candidate_set.id_space,
+            "search_projection_document_id"
+        );
+        assert_eq!(vector.candidate_set.representation, "ranked_document_ids");
+        assert_eq!(vector.candidate_set.cardinality, 2);
+        assert!(vector.candidate_set.exact);
+        assert_eq!(vector.candidate_set.policy_epoch, None);
+        assert_eq!(
+            vector.candidate_set.snapshot_source_graph_commit_epoch,
+            None
+        );
+        assert_eq!(text.candidate_set, vector.candidate_set);
         assert_eq!(vector.top_hit_ids[0], "both");
         assert_eq!(vector.top_candidates[0].id, "both");
         assert_eq!(vector.top_candidates[0].rank, 1);
@@ -2456,6 +2505,7 @@ mod tests {
             .find(|retriever| retriever.name == "text")
             .expect("expected text retriever report");
         assert_eq!(text.candidate_count, 2);
+        assert_eq!(text.candidate_set.cardinality, 1);
         assert_eq!(text.top_candidates.len(), 1);
         assert_eq!(text.top_candidates[0].rank, 1);
         assert!(result
@@ -2660,6 +2710,7 @@ mod tests {
             .find(|retriever| retriever.name == "text")
             .expect("expected text retriever report");
         assert_eq!(text.candidate_count, 1);
+        assert_eq!(text.candidate_set.cardinality, 1);
         assert_eq!(text.top_hit_ids, vec!["memory:thread_1".to_string()]);
     }
 
@@ -2694,6 +2745,12 @@ mod tests {
 
         assert_eq!(result.total_hits, 1);
         assert_eq!(result.candidate_set.policy_epoch, Some(42));
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert_eq!(text.candidate_set.policy_epoch, Some(42));
         assert_eq!(
             index
                 .search_with_report("graph", None, SearchMode::Text, 10)

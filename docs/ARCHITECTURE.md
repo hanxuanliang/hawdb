@@ -470,8 +470,8 @@ response-level diagnostics can use
 `SearchIndex::search_with_report` to get the total document count, post-filter
 document count, candidate-set report, pre-limit hit count, requested limit, rank
 window, truncation flag, truncation reasons, fallback reasons, child retriever
-availability, child fallback reasons, candidate counts, top hit IDs, and
-per-child top candidate ranks and scores.
+availability, child fallback reasons, candidate counts, child output candidate
+sets, top hit IDs, and per-child top candidate ranks and scores.
 
 The stable embedded facade exposes this boundary without owning search state:
 `Database::rebuild_search_projection` derives projection rows from the canonical
