@@ -11506,6 +11506,92 @@ fn grouped_count_aggregates_relationship_matches() {
 }
 
 #[test]
+fn with_collect_distinct_property_returns_source_ids() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'crystal-1', is_crystal: true})-[:SYNTHESIZED_FROM]->(:Memory {id: 'source-2'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'source-1'})").unwrap();
+    db.query("MATCH (c:Memory {id: 'crystal-1'}), (s:Memory {id: 'source-1'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'crystal-1'}), (s:Memory {id: 'source-1'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'crystal-2', is_crystal: true})-[:SYNTHESIZED_FROM]->(:Memory {id: 'source-3'})",
+    )
+    .unwrap();
+
+    let output = db
+        .query_with_params(
+            "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) WHERE c.id IN $ids WITH c, COLLECT(DISTINCT s.id) AS source_ids RETURN c.id, source_ids",
+            &BTreeMap::from([(
+                "ids".to_string(),
+                Value::List(vec![Value::String("crystal-1".to_string())]),
+            )]),
+        )
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("c.id"),
+        Some(&Value::String("crystal-1".to_string()))
+    );
+    assert_eq!(
+        output.rows[0].get("source_ids"),
+        Some(&Value::List(vec![
+            Value::String("source-1".to_string()),
+            Value::String("source-2".to_string()),
+        ]))
+    );
+}
+
+#[test]
+fn with_count_and_collect_preserves_group_node_for_ordering() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'entity-1', community_id: 42})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity-2', community_id: 42})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-1', title: 'First', importance: 0.8})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-2', title: 'Second', importance: 0.9})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-1'}), (e:Entity {id: 'entity-1'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-1'}), (e:Entity {id: 'entity-2'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-1'}), (e:Entity {id: 'entity-2'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-2'}), (e:Entity {id: 'entity-1'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+
+    let output = db
+        .query_with_params(
+            "MATCH (e:Entity {community_id: $community_id})<-[:MENTIONS]-(m:Memory) WITH m, COUNT(e) AS entity_count, COLLECT(DISTINCT e.id) AS entity_ids RETURN m, entity_count, entity_ids ORDER BY entity_count DESC, m.importance DESC LIMIT 1",
+            &BTreeMap::from([("community_id".to_string(), Value::Int(42))]),
+        )
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    let Some(Value::Map(memory)) = output.rows[0].get("m") else {
+        panic!("expected grouped memory node map");
+    };
+    assert_eq!(
+        memory.get("id"),
+        Some(&Value::String("memory-1".to_string()))
+    );
+    assert_eq!(output.rows[0].get("entity_count"), Some(&Value::Int(3)));
+    assert_eq!(
+        output.rows[0].get("entity_ids"),
+        Some(&Value::List(vec![
+            Value::String("entity-1".to_string()),
+            Value::String("entity-2".to_string()),
+        ]))
+    );
+}
+
+#[test]
 fn merge_node_is_idempotent() {
     let mut db = Database::new();
     let first = db
