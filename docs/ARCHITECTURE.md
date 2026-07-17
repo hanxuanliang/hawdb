@@ -457,12 +457,13 @@ projection metadata:
 keys map to same-name scalar node properties. Returned diagnostics preserve the
 search limit, rank window, graph seed budget, graph context budget, candidate
 budget, filtered candidate counts, search document scope, search hit count,
-graph seed counts, graph-seed truncation flag and reasons, graph context path
-count, fan-out reason count, final candidate count, pre-limit merged candidate
-count, response-level candidate truncation flag and reasons, graph-context
-truncation flag and reasons, projection source graph commit epoch, stale
-projection warnings, projection marker warnings, and empty-result reasons. This
-keeps Knowledge Retrieval as the primary
+search truncation flag and reasons, graph seed counts, graph-seed truncation
+flag and reasons, graph context path count, fan-out reason count, final
+candidate count, pre-limit merged candidate count, response-level candidate
+truncation flag and reasons, graph-context truncation flag and reasons,
+projection source graph commit epoch, stale projection warnings, projection
+marker warnings, and empty-result reasons. This keeps Knowledge Retrieval as
+the primary
 application-facing path while preserving the rule that search artifacts are
 rebuildable and outside the graph WAL.
 

@@ -395,6 +395,8 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_filtered_document_count: usize,
     pub search_total_hits: usize,
     pub search_limit: usize,
+    pub search_truncated: bool,
+    pub search_truncation_reasons: Vec<String>,
     pub rank_window: Option<usize>,
     pub graph_seed_candidate_count: usize,
     pub graph_seed_returned_count: usize,
@@ -1797,6 +1799,8 @@ fn knowledge_retrieval_diagnostics(
         search_filtered_document_count: search.filtered_document_count,
         search_total_hits: search.total_hits,
         search_limit: search.limit,
+        search_truncated: search.truncated,
+        search_truncation_reasons: search.truncation_reasons.clone(),
         rank_window: search.rank_window,
         graph_seed_candidate_count: input.graph_seed_candidate_count,
         graph_seed_returned_count: input.graph_seed_returned_count,
@@ -4134,6 +4138,8 @@ mod tests {
         assert_eq!(output.projection_freshness.document_count, 2);
         assert_eq!(output.diagnostics.search_total_hits, 1);
         assert_eq!(output.diagnostics.search_limit, 4);
+        assert!(!output.diagnostics.search_truncated);
+        assert!(output.diagnostics.search_truncation_reasons.is_empty());
         assert_eq!(output.diagnostics.rank_window, None);
         assert_eq!(output.diagnostics.graph_seed_limit, 2);
         assert!(!output.diagnostics.graph_seed_truncated);
@@ -4365,6 +4371,11 @@ mod tests {
             Some(4)
         );
         assert_eq!(output.diagnostics.search_limit, 1);
+        assert!(output.diagnostics.search_truncated);
+        assert_eq!(
+            output.diagnostics.search_truncation_reasons,
+            vec!["limit 1 returned from 2 matching hits".to_string()]
+        );
         assert_eq!(output.diagnostics.rank_window, None);
         assert_eq!(output.diagnostics.graph_seed_limit, 2);
         assert_eq!(output.diagnostics.graph_context_limit, 1);
