@@ -455,17 +455,16 @@ graph-native seed candidates. Filter keys align with graph-derived
 projection metadata:
 `kind` maps to canonical node labels, `external_id` maps to node `id`, and other
 keys map to same-name scalar node properties. Returned diagnostics preserve the
-search limit, rank window, graph seed budget, graph context budget, candidate
-budget, filtered candidate counts, search document scope, search hit count,
-search truncation flag and reasons, graph seed counts, graph-seed truncation
-flag and reasons, graph context path count, fan-out reason count, final
-candidate count, pre-limit merged candidate count, response-level candidate
-truncation flag and reasons, graph-context truncation flag and reasons,
-projection source graph commit epoch, stale projection warnings, projection
-marker warnings, and empty-result reasons. This keeps Knowledge Retrieval as
-the primary
-application-facing path while preserving the rule that search artifacts are
-rebuildable and outside the graph WAL.
+search limit, rank window, search fusion weights, graph seed budget, graph
+context budget, candidate budget, filtered candidate counts, search document
+scope, search hit count, search truncation flag and reasons, graph seed counts,
+graph-seed truncation flag and reasons, graph context path count, fan-out reason
+count, final candidate count, pre-limit merged candidate count, response-level
+candidate truncation flag and reasons, graph-context truncation flag and
+reasons, projection source graph commit epoch, stale projection warnings,
+projection marker warnings, and empty-result reasons. This keeps Knowledge
+Retrieval as the primary application-facing path while preserving the rule that
+search artifacts are rebuildable and outside the graph WAL.
 
 `Database::retrieve_knowledge` also includes a bounded graph-native seed
 retriever over canonical nodes. `KnowledgeRetrievalRequest::graph_seed_limit`

@@ -387,7 +387,7 @@ pub struct KnowledgeRetrievalOutput {
     pub fanout_reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeRetrievalDiagnostics {
     pub graph_commit_epoch: u64,
     pub projection_source_graph_commit_epoch: Option<u64>,
@@ -398,6 +398,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_truncated: bool,
     pub search_truncation_reasons: Vec<String>,
     pub rank_window: Option<usize>,
+    pub search_fusion_weights: SearchFusionWeights,
     pub graph_seed_candidate_count: usize,
     pub graph_seed_returned_count: usize,
     pub graph_seed_limit: usize,
@@ -1802,6 +1803,7 @@ fn knowledge_retrieval_diagnostics(
         search_truncated: search.truncated,
         search_truncation_reasons: search.truncation_reasons.clone(),
         rank_window: search.rank_window,
+        search_fusion_weights: search.fusion_weights,
         graph_seed_candidate_count: input.graph_seed_candidate_count,
         graph_seed_returned_count: input.graph_seed_returned_count,
         graph_seed_limit: request.graph_seed_limit,
@@ -4141,6 +4143,10 @@ mod tests {
         assert!(!output.diagnostics.search_truncated);
         assert!(output.diagnostics.search_truncation_reasons.is_empty());
         assert_eq!(output.diagnostics.rank_window, None);
+        assert_eq!(
+            output.diagnostics.search_fusion_weights,
+            SearchFusionWeights::default()
+        );
         assert_eq!(output.diagnostics.graph_seed_limit, 2);
         assert!(!output.diagnostics.graph_seed_truncated);
         assert!(output.diagnostics.graph_seed_truncation_reasons.is_empty());
@@ -4978,6 +4984,13 @@ mod tests {
 
         assert_eq!(
             output.search.fusion_weights,
+            SearchFusionWeights {
+                vector_weight: 1.0,
+                text_weight: 3.0
+            }
+        );
+        assert_eq!(
+            output.diagnostics.search_fusion_weights,
             SearchFusionWeights {
                 vector_weight: 1.0,
                 text_weight: 3.0
