@@ -371,6 +371,13 @@ The printed migration gate bundle includes a top-level `shadow_run` object with
 self-shadow runs. Cutover automation must not treat `protocol_smoke` as
 previous-wrapper parity evidence.
 
+The bundle also includes a top-level `cutover_evidence` object. `eligible` is
+true only when the run used previous-wrapper evidence, executed the ready
+preflight, produced at least one matched shadow check, and the migration gate
+decision is `ready`. Its `blockers` array is intended for CI and release gates
+that need to reject protocol smoke or incomplete shadow runs without rejoining
+the rest of the bundle fields.
+
 `--shadow-ready` sends the same `ready` preflight without requiring the final
 migration gate decision to be `ready`. Use it for previous-wrapper adapter
 integration runs when failing fast on protocol version or capability drift is
