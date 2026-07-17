@@ -792,8 +792,10 @@ Current implemented slice:
   once the selected physical plan proves the variable is a node or relationship
 - grouped aggregate cost estimation uses selected-plan variable labels/types
   and explicit node-property or relationship-property distinct counts for
-  simple property group keys, while non-property or missing-statistics grouping
-  keeps the conservative fallback estimate
+  simple property group keys, and adds bounded work cost for distinct property
+  aggregate targets such as `COUNT(DISTINCT e2.community_id)`, while
+  non-property or missing-statistics grouping keeps the conservative fallback
+  estimate
 - optional relationship count-sum costing uses source label/property
   distinct counts plus relationship type/source counts for Nowledge cleanup
   and extracted-reference count paths instead of a fixed leg-count constant
@@ -812,6 +814,7 @@ Current implemented slice:
   source-to-memory-to-label cross-pattern aggregate workload, a larger
   source-to-memory-to-entity-to-label grouped workload,
   community-to-synthesized-source coverage aggregate workload,
+  entity bridge-span distinct-property aggregate workload,
   thread-cleanup optional relationship count-sum workload with seed/fanout cost
   tracing,
   endpoint-existence and nested endpoint-existence cartesian product cost

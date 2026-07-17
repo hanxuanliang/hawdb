@@ -290,6 +290,20 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "entity_bridge_span_aggregate",
+            logical: entity_bridge_span_aggregate_plan(),
+            catalog: entity_bridge_span_aggregate_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 10,
+                cost: 145_514,
+            },
+            fingerprint_contains: "count(distinct 2:e2.12:community_id)",
+            decision_contains: &[
+                "estimate AdjacencyExpand for Entity-[:RELATES_TO*1..1]->Entity",
+                "selected physical plan cost: estimated_rows=10 cost=145514",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "thread_cleanup_optional_count",
             logical: thread_cleanup_optional_count_plan(),
             catalog: thread_cleanup_optional_count_catalog(),
@@ -1361,6 +1375,99 @@ fn community_synthesized_source_coverage_catalog() -> OptimizerCatalog {
     )
 }
 
+fn entity_bridge_span_aggregate_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(10),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![SortItem {
+                key: SortKey::Column("community_span".to_string()),
+                direction: SortDirection::Desc,
+            }],
+            input: Box::new(LogicalPlan::Aggregate {
+                group_keys: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "e1".to_string(),
+                        property: "id".to_string(),
+                    },
+                    name: "entity_id".to_string(),
+                }],
+                items: vec![
+                    Aggregation {
+                        function: AggregateFunction::Count,
+                        target: AggregateTarget::Property {
+                            variable: "e2".to_string(),
+                            property: "community_id".to_string(),
+                        },
+                        distinct: true,
+                        name: "community_span".to_string(),
+                    },
+                    Aggregation {
+                        function: AggregateFunction::Count,
+                        target: AggregateTarget::All,
+                        distinct: false,
+                        name: "bridge_strength".to_string(),
+                    },
+                ],
+                input: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyIn {
+                        variable: "e1".to_string(),
+                        property: "community_id".to_string(),
+                        values: vec![Value::Int(10), Value::Int(20), Value::Int(30)],
+                    },
+                    input: Box::new(LogicalPlan::Expand {
+                        source_variable: "e1".to_string(),
+                        source_label: "Entity".to_string(),
+                        rel_variable: None,
+                        rel_type: "RELATES_TO".to_string(),
+                        rel_properties: BTreeMap::new(),
+                        direction: RelationshipDirection::Undirected,
+                        target_variable: "e2".to_string(),
+                        target_label: "Entity".to_string(),
+                        min_hops: 1,
+                        max_hops: 1,
+                        optional: false,
+                        input: Box::new(entity_scan("e1")),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn entity_bridge_span_aggregate_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Entity".to_string(), 10_000)],
+            [("RELATES_TO".to_string(), 60_000)],
+            [("RELATES_TO".to_string(), 10_000)],
+            [(
+                (
+                    "Entity".to_string(),
+                    "RELATES_TO".to_string(),
+                    "Entity".to_string(),
+                ),
+                60_000,
+            )],
+            [(
+                (
+                    "Entity".to_string(),
+                    "RELATES_TO".to_string(),
+                    "Entity".to_string(),
+                    1,
+                ),
+                60_000,
+            )],
+            [
+                (("Entity".to_string(), "id".to_string()), 10_000),
+                (("Entity".to_string(), "community_id".to_string()), 100),
+            ],
+            [],
+        ),
+    )
+}
+
 fn thread_cleanup_optional_count_plan() -> LogicalPlan {
     LogicalPlan::OptionalRelationshipCountSum {
         variable: "t".to_string(),
@@ -1715,5 +1822,12 @@ fn memory_scan() -> LogicalPlan {
     LogicalPlan::NodeScan {
         variable: "m".to_string(),
         label: "Memory".to_string(),
+    }
+}
+
+fn entity_scan(variable: &str) -> LogicalPlan {
+    LogicalPlan::NodeScan {
+        variable: variable.to_string(),
+        label: "Entity".to_string(),
     }
 }

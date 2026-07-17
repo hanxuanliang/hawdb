@@ -4188,14 +4188,18 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
             cost: (*max_hops as u64).saturating_mul(8).saturating_add(4),
         },
         PhysicalPlan::AggregateExec {
-            group_keys, input, ..
+            group_keys,
+            items,
+            input,
         } => {
             let input_cost = estimate_physical_plan_cost(input, catalog);
             let rows =
                 estimate_aggregate_rows(group_keys, input, input_cost.estimated_rows, catalog);
+            let work_rows =
+                estimate_aggregate_work_rows(items, input, input_cost.estimated_rows, catalog);
             PlanCost {
                 estimated_rows: rows,
-                cost: input_cost.cost.saturating_add(input_cost.estimated_rows),
+                cost: input_cost.cost.saturating_add(work_rows),
             }
         }
         PhysicalPlan::DistinctExec { input } => {
@@ -4308,6 +4312,36 @@ fn estimate_aggregate_rows(
         distinct_product = distinct_product.saturating_mul(distinct_count.max(1));
     }
     input_rows.min(distinct_product).max(1)
+}
+
+fn estimate_aggregate_work_rows(
+    items: &[Aggregation],
+    input: &PhysicalPlan,
+    input_rows: u64,
+    catalog: &OptimizerCatalog,
+) -> u64 {
+    let distinct_property_work = items
+        .iter()
+        .filter_map(|item| {
+            if !item.distinct {
+                return None;
+            }
+            let AggregateTarget::Property { variable, property } = &item.target else {
+                return None;
+            };
+            if let Some(label) = physical_plan_node_label(input, variable) {
+                catalog.known_distinct_count(label, property)
+            } else if let Some(rel_type) = physical_plan_relationship_type(input, variable) {
+                catalog.known_rel_property_distinct_count(rel_type, property)
+            } else {
+                None
+            }
+        })
+        .fold(0_u64, |sum, distinct_count| {
+            sum.saturating_add(input_rows.min(distinct_count.max(1)))
+        });
+
+    input_rows.saturating_add(distinct_property_work)
 }
 
 fn estimate_id_in_rows(values: &[Value], input_rows: u64) -> u64 {
@@ -7214,6 +7248,58 @@ mod tests {
             PlanCost {
                 estimated_rows: 10,
                 cost: 4_004,
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_distinct_property_targets_add_bounded_work_cost() {
+        let logical = LogicalPlan::Aggregate {
+            group_keys: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "unit_type".to_string(),
+                },
+                name: "unit_type".to_string(),
+            }],
+            items: vec![Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::Property {
+                    variable: "m".to_string(),
+                    property: "community_id".to_string(),
+                },
+                distinct: true,
+                name: "community_span".to_string(),
+            }],
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [
+                    (("Memory".to_string(), "unit_type".to_string()), 5),
+                    (("Memory".to_string(), "community_id".to_string()), 10),
+                ],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 8 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 5,
+                cost: 2_014,
             }
         );
     }
