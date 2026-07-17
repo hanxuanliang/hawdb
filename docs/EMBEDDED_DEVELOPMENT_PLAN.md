@@ -596,11 +596,16 @@ expose the same report-oriented rebuild shape through
 `SearchIndex::rebuild_derived_artifacts`. Search projections also expose
 bounded incremental deltas for ordinary FTS/BM25 row upsert/delete changes:
 `SearchIndex::apply_projection_delta` accepts an operation budget and fails
-without partial index mutation on budget or embedding-dimension errors.
+without partial index mutation on budget or embedding-dimension errors;
+`Database::apply_search_projection_delta` exposes the same caller-owned
+projection boundary beside graph operations without moving search state into
+the graph WAL.
 Internal background callers can use `SearchIndex::apply_background_projection_delta`
-to pass the same delta through `LocalQosPolicy` admission before applying it;
-callers that need in-flight background budget tracking can use
-`SearchIndex::apply_scheduled_background_projection_delta` with
+or `Database::apply_background_search_projection_delta` to pass the same delta
+through `LocalQosPolicy` admission before applying it; callers that need
+in-flight background budget tracking can use
+`SearchIndex::apply_scheduled_background_projection_delta` or
+`Database::apply_scheduled_background_search_projection_delta` with
 `LocalQosScheduler`. Full search rebuilds expose a rankable background plan and
 background/scheduled rebuild wrappers so internal loops can charge the scan
 estimate before replacing the projection. Graph-derived metadata repair exposes

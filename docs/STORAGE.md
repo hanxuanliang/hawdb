@@ -414,10 +414,11 @@ documents, and lifecycle-marker state. It still uses the bounded all-or-nothing
 graph-to-search rebuild path, so a row-limit failure keeps the previous search
 projection intact.
 Incremental search projection deltas can also run through
-`SearchIndex::apply_scheduled_background_projection_delta`, which uses
-`LocalQosScheduler` to account for in-flight internal background projection
-work while keeping the direct delta API available for explicit foreground
-callers.
+`SearchIndex::apply_scheduled_background_projection_delta` or the matching
+`Database::apply_scheduled_background_search_projection_delta` facade, which
+uses `LocalQosScheduler` to account for in-flight internal background
+projection work while keeping the direct delta API available for explicit
+foreground callers.
 The metadata-only repair path follows the same boundary:
 `SearchIndex::repair_background_metadata_from_graph` uses stateless
 `LocalQosPolicy` admission, and

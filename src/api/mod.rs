@@ -16,8 +16,9 @@ use crate::schema::{
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
-    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionFreshness,
-    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
+    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -1261,6 +1262,41 @@ impl Database {
         options: SearchRebuildOptions,
     ) -> Result<SearchRebuildSummary> {
         search_index.rebuild_from_graph(&self.catalog, &self.store, options)
+    }
+
+    pub fn search_projection_delta_background_work_plan(
+        &self,
+        delta: &SearchProjectionDelta,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        delta.background_work_plan(hint)
+    }
+
+    pub fn apply_search_projection_delta(
+        &self,
+        search_index: &mut SearchIndex,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        search_index.apply_projection_delta(delta)
+    }
+
+    pub fn apply_background_search_projection_delta(
+        &self,
+        search_index: &mut SearchIndex,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        search_index.apply_background_projection_delta(policy, state, delta)
+    }
+
+    pub fn apply_scheduled_background_search_projection_delta(
+        &self,
+        search_index: &mut SearchIndex,
+        scheduler: &mut LocalQosScheduler,
+        delta: SearchProjectionDelta,
+    ) -> Result<SearchProjectionDeltaReport> {
+        search_index.apply_scheduled_background_projection_delta(scheduler, delta)
     }
 
     pub fn retrieve_knowledge(
