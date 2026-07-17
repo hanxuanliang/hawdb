@@ -5744,6 +5744,99 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
 }
 
 #[test]
+fn read_transaction_retrieves_knowledge_from_pinned_snapshot() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root', title: 'Snapshot retrieval', content: 'snapshot retrieval root'})-[:MENTIONS]->(:Entity {id: 'before', name: 'Before'})")
+            .unwrap();
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let read_tx = db.begin_read_transaction();
+    let after = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Entity",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("after".to_string())),
+                ("name".to_string(), Value::String("After".to_string())),
+            ]),
+        )
+        .unwrap();
+    db.store
+        .create_relationship(
+            &mut db.catalog,
+            NodeId(0),
+            after,
+            "MENTIONS",
+            BTreeMap::new(),
+        )
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'later', title: 'Snapshot retrieval', content: 'snapshot retrieval later'})")
+        .unwrap();
+
+    let snapshot_output = read_tx.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "snapshot retrieval".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 4,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 8,
+            graph_context_limit: 8,
+            graph_context_max_hops: 1,
+        },
+    );
+    assert_eq!(snapshot_output.graph_commit_epoch, 1);
+    assert_eq!(snapshot_output.graph_context_paths.len(), 2);
+    assert!(snapshot_output
+        .graph_context_paths
+        .iter()
+        .all(|path| path.target_external_id.as_deref() == Some("before")));
+    assert!(snapshot_output
+        .graph_context_paths
+        .iter()
+        .all(|path| path.target_external_id.as_deref() != Some("after")));
+    assert!(snapshot_output
+        .graph_seeds
+        .iter()
+        .all(|seed| seed.entity.external_id.as_deref() != Some("later")));
+
+    let latest_output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "snapshot retrieval".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 4,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 8,
+            graph_context_limit: 8,
+            graph_context_max_hops: 1,
+        },
+    );
+    assert_eq!(latest_output.graph_commit_epoch, 4);
+    assert!(latest_output
+        .graph_context_paths
+        .iter()
+        .any(|path| path.target_external_id.as_deref() == Some("after")));
+    assert!(latest_output
+        .graph_seeds
+        .iter()
+        .any(|seed| seed.entity.external_id.as_deref() == Some("later")));
+}
+
+#[test]
 fn read_transaction_survives_later_checkpoint() {
     let path = unique_test_dir("read_tx_checkpoint");
     {

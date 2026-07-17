@@ -1008,6 +1008,67 @@ impl Database {
         search_index: &SearchIndex,
         request: &KnowledgeRetrievalRequest,
     ) -> KnowledgeRetrievalOutput {
+        KnowledgeRetrievalGraphContext {
+            catalog: &self.catalog,
+            store: &self.store,
+        }
+        .retrieve_knowledge(search_index, request)
+    }
+
+    pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
+        knowledge_entity_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_neighbors(
+        &self,
+        request: &KnowledgeNeighborsRequest,
+    ) -> KnowledgeNeighborsOutput {
+        knowledge_neighbors_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
+        knowledge_paths_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_subgraph(
+        &self,
+        request: &KnowledgeSubgraphRequest,
+    ) -> KnowledgeSubgraphOutput {
+        knowledge_subgraph_for(&self.catalog, &self.store, request)
+    }
+
+    fn ensure_writable(&self) -> Result<()> {
+        if self.config.read_only {
+            return Err(SkeinError::Execution(
+                "database is opened in read-only mode".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn project_graph(&self, rel_type: Option<&str>) -> ProjectedGraph {
+        match rel_type {
+            Some(name) => self
+                .catalog
+                .rel_type_id(name)
+                .map(|rel_type_id| ProjectedGraph::from_store(&self.store, Some(rel_type_id)))
+                .unwrap_or_else(|| ProjectedGraph::from_store_without_edges(&self.store)),
+            None => ProjectedGraph::from_store(&self.store, None),
+        }
+    }
+}
+
+struct KnowledgeRetrievalGraphContext<'a> {
+    catalog: &'a Catalog,
+    store: &'a GraphStore,
+}
+
+impl KnowledgeRetrievalGraphContext<'_> {
+    fn retrieve_knowledge(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+    ) -> KnowledgeRetrievalOutput {
         let search = search_index.search_with_options(
             &request.query_text,
             request.query_embedding.as_deref(),
@@ -1085,48 +1146,6 @@ impl Database {
         }
     }
 
-    pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
-        knowledge_entity_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_neighbors(
-        &self,
-        request: &KnowledgeNeighborsRequest,
-    ) -> KnowledgeNeighborsOutput {
-        knowledge_neighbors_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
-        knowledge_paths_for(&self.catalog, &self.store, request)
-    }
-
-    pub fn knowledge_subgraph(
-        &self,
-        request: &KnowledgeSubgraphRequest,
-    ) -> KnowledgeSubgraphOutput {
-        knowledge_subgraph_for(&self.catalog, &self.store, request)
-    }
-
-    fn ensure_writable(&self) -> Result<()> {
-        if self.config.read_only {
-            return Err(SkeinError::Execution(
-                "database is opened in read-only mode".to_string(),
-            ));
-        }
-        Ok(())
-    }
-
-    pub fn project_graph(&self, rel_type: Option<&str>) -> ProjectedGraph {
-        match rel_type {
-            Some(name) => self
-                .catalog
-                .rel_type_id(name)
-                .map(|rel_type_id| ProjectedGraph::from_store(&self.store, Some(rel_type_id)))
-                .unwrap_or_else(|| ProjectedGraph::from_store_without_edges(&self.store)),
-            None => ProjectedGraph::from_store(&self.store, None),
-        }
-    }
-
     fn expand_knowledge_context(
         &self,
         search: &SearchResultSet,
@@ -1166,8 +1185,8 @@ impl Database {
             }
             record_dense_adjacency_diagnostics(
                 DenseAdjacencyDiagnosticContext {
-                    catalog: &self.catalog,
-                    store: &self.store,
+                    catalog: self.catalog,
+                    store: self.store,
                     operation: "graph_context",
                     relationship_type: None,
                     requested_direction: KnowledgeNeighborDirection::Both,
@@ -1177,7 +1196,7 @@ impl Database {
                 &mut fanout_reasons,
             );
             for edge in knowledge_expansion_edges_for_node(
-                &self.store,
+                self.store,
                 current_node,
                 None,
                 KnowledgeNeighborDirection::Both,
@@ -1232,8 +1251,8 @@ impl Database {
         relationship: &RelRecord,
     ) -> Option<KnowledgeGraphContextPath> {
         context_path_for_relationship(
-            &self.catalog,
-            &self.store,
+            self.catalog,
+            self.store,
             seed_hit_id,
             hop,
             direction,
@@ -1242,7 +1261,7 @@ impl Database {
     }
 
     fn knowledge_entity_from_node(&self, node: &NodeRecord) -> KnowledgeEntity {
-        knowledge_entity_from_node(&self.catalog, node)
+        knowledge_entity_from_node(self.catalog, node)
     }
 
     fn knowledge_evidence_for_search(
@@ -1408,7 +1427,7 @@ impl Database {
             .store
             .scan_nodes(None)
             .filter(|node| {
-                knowledge_graph_seed_matches_filters(&self.catalog, node, metadata_filters)
+                knowledge_graph_seed_matches_filters(self.catalog, node, metadata_filters)
             })
             .filter_map(|node| {
                 let (score, matched_properties) =
@@ -3986,6 +4005,18 @@ impl DatabaseReadTransaction {
 
     pub fn export_canonical_graph_snapshot(&self) -> CanonicalGraphSnapshotExport {
         export_canonical_graph_snapshot_for(&self.catalog, &self.store)
+    }
+
+    pub fn retrieve_knowledge(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+    ) -> KnowledgeRetrievalOutput {
+        KnowledgeRetrievalGraphContext {
+            catalog: &self.catalog,
+            store: &self.store,
+        }
+        .retrieve_knowledge(search_index, request)
     }
 
     pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {

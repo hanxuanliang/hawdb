@@ -468,7 +468,11 @@ The stable embedded facade exposes this boundary without owning search state:
 `Database::rebuild_search_projection` derives projection rows from the canonical
 graph into a caller-owned `SearchIndex`, and `Database::retrieve_knowledge`
 combines that projection report with the current graph commit epoch and a
-compact diagnostics summary. Retrieval callers can pass a rank window through
+compact diagnostics summary. `DatabaseReadTransaction::retrieve_knowledge`
+uses the same caller-owned `SearchIndex` while resolving graph seeds and graph
+context against the pinned catalog and graph snapshot, so retrieval can stay
+snapshot-stable without moving search projection state into the graph store.
+Retrieval callers can pass a rank window through
 `KnowledgeRetrievalRequest` to bound hybrid child retriever participation, pass
 search fusion weights to bias vector or text child retrievers before graph
 context expansion, and pass metadata filters that scope both search hits and
@@ -565,12 +569,12 @@ falling back to untyped relationship expansion.
 `Database::knowledge_subgraph` expands a bounded typed subgraph from one
 identity, returning canonical node snapshots, relationship evidence segments,
 node/relationship fan-out reasons, and node/relationship count diagnostics.
-`DatabaseReadTransaction` exposes the same typed knowledge
-operations over its pinned catalog and graph snapshot, so callers can perform
-stable knowledge navigation without falling back to ad hoc Cypher. This makes common
-knowledge-application navigation a first-class API instead of forcing
-application code to construct ad hoc Cypher for every entity lookup,
-neighborhood lookup, path query, or local subgraph expansion.
+`DatabaseReadTransaction` exposes the same Knowledge Retrieval facade and typed
+knowledge operations over its pinned catalog and graph snapshot, so callers can
+perform stable retrieval and navigation without falling back to ad hoc Cypher.
+This makes common knowledge-application navigation a first-class API instead of
+forcing application code to construct ad hoc Cypher for every retrieval, entity
+lookup, neighborhood lookup, path query, or local subgraph expansion.
 
 ## Milestones
 
