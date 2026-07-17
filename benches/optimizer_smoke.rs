@@ -262,6 +262,19 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=100 cost=3007",
             ],
         },
+        OptimizerSmokeCase {
+            name: "residual_node_property_in",
+            logical: residual_node_property_in_plan(),
+            catalog: residual_node_property_in_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 30,
+                cost: 2004,
+            },
+            fingerprint_contains: "PropertyIn",
+            decision_contains: &[
+                "selected physical plan cost: estimated_rows=30 cost=2004",
+            ],
+        },
     ]
 }
 
@@ -1013,6 +1026,32 @@ fn post_product_node_property_filter_catalog() -> OptimizerCatalog {
                 (("Memory".to_string(), "kind".to_string()), 10),
                 (("Source".to_string(), "id".to_string()), 1_000),
             ],
+            [],
+        ),
+    )
+}
+
+fn residual_node_property_in_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::PropertyIn {
+            variable: "m".to_string(),
+            property: "id".to_string(),
+            values: vec![Value::Int(1), Value::Int(2), Value::Int(2), Value::Int(3)],
+        },
+        input: Box::new(memory_scan()),
+    }
+}
+
+fn residual_node_property_in_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 1_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Memory".to_string(), "id".to_string()), 100)],
             [],
         ),
     )

@@ -785,8 +785,9 @@ Current implemented slice:
   unordered multi-row product semantics
 - residual node-property filters use the selected physical plan to recover the
   filtered node variable's label and apply node-property distinct counts or
-  histograms, so low-selectivity scan fallbacks and cross-pattern filters are
-  not forced through the generic half-selectivity fallback
+  histograms for equality, `IN`, and range predicates, so low-selectivity scan
+  fallbacks and cross-pattern filters are not forced through the generic
+  half-selectivity fallback
 - deterministic physical plan fingerprints are exposed through
   `OptimizerTrace::selected_plan_fingerprint` and `PhysicalPlan::fingerprint`
   for regression tests and future compatibility/shadow comparisons
@@ -802,8 +803,8 @@ Current implemented slice:
   source-to-memory-to-label cross-pattern aggregate workload,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
-  selectivity, selected-plan cost stability, deterministic fingerprints, and
-  budget-fallback paths without depending on a storage fixture
+  equality/`IN`/range selectivity, selected-plan cost stability, deterministic
+  fingerprints, and budget-fallback paths without depending on a storage fixture
 
 Remaining Phase 4 work:
 

@@ -2144,6 +2144,28 @@ impl OptimizerCatalog {
             .max(1)
     }
 
+    fn estimate_property_in_rows(
+        &self,
+        label: &str,
+        property: &str,
+        values: &[Value],
+        input_rows: u64,
+    ) -> u64 {
+        if values.is_empty() {
+            return 0;
+        }
+        let distinct_count = self.distinct_count(label, property).max(1);
+        let value_count = values
+            .iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            .min(distinct_count as usize) as u64;
+        input_rows
+            .saturating_mul(value_count)
+            .div_ceil(distinct_count)
+            .max(1)
+    }
+
     fn estimate_property_range_rows(
         &self,
         label: &str,
@@ -4157,6 +4179,12 @@ fn estimate_node_property_filter_rows(
                 })
             }
         }
+        Predicate::PropertyIn {
+            variable,
+            property,
+            values,
+        } => physical_plan_node_label(input, variable)
+            .map(|label| catalog.estimate_property_in_rows(label, property, values, input_rows)),
         _ => None,
     }
 }
@@ -6120,6 +6148,82 @@ mod tests {
         assert!(trace.decisions.iter().any(
             |decision| decision == "selected physical plan cost: estimated_rows=100 cost=3007"
         ));
+    }
+
+    #[test]
+    fn residual_node_property_in_uses_distinct_value_count() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::PropertyIn {
+                variable: "m".to_string(),
+                property: "id".to_string(),
+                values: vec![Value::Int(1), Value::Int(2), Value::Int(2), Value::Int(3)],
+            },
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [(("Memory".to_string(), "id".to_string()), 100)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 30,
+                cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn residual_node_property_in_empty_list_estimates_zero_rows() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::PropertyIn {
+                variable: "m".to_string(),
+                property: "id".to_string(),
+                values: Vec::new(),
+            },
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [(("Memory".to_string(), "id".to_string()), 100)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 0,
+                cost: 2_004,
+            }
+        );
     }
 
     #[test]
