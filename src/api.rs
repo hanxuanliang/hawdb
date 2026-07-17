@@ -3532,6 +3532,13 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
                 .map(|rel_type| ((rel_type.to_string(), property.clone()), *count))
         },
     );
+    let rel_property_histograms = statistics.rel_property_histograms.iter().filter_map(
+        |((rel_type_id, property), values)| {
+            catalog
+                .rel_type_name(*rel_type_id)
+                .map(|rel_type| ((rel_type.to_string(), property.clone()), values.clone()))
+        },
+    );
     OptimizerCatalog::new(
         OptimizerCatalogIndexes::new(
             equality_property_indexes,
@@ -3548,7 +3555,8 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
             property_distinct_counts,
             property_histograms,
         )
-        .with_relationship_property_distinct_counts(rel_property_distinct_counts),
+        .with_relationship_property_distinct_counts(rel_property_distinct_counts)
+        .with_relationship_property_histograms(rel_property_histograms),
     )
 }
 
@@ -6733,6 +6741,35 @@ mod tests {
     }
 
     #[test]
+    fn relationship_property_histograms_drive_filter_range_costing() {
+        let mut db = Database::new();
+        for id in 0..10 {
+            db.query(&format!(
+                "CREATE (:Memory {{id: {id}}})-[:MENTIONS {{created_at: {id}}}]->(:Entity {{id: {}}})",
+                id + 100
+            ))
+            .unwrap();
+        }
+
+        let explain = db
+            .explain_query(
+                "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE r.created_at > 8 RETURN r.created_at AS created_at",
+            )
+            .unwrap();
+        let physical_plan = explain.physical_plan.explain(0);
+
+        assert!(physical_plan.contains("FilterExec"));
+        assert!(physical_plan.contains("PropertyCompare"));
+        assert_eq!(
+            explain.trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 45,
+            }
+        );
+    }
+
+    #[test]
     fn property_histograms_are_bounded_deterministic_samples() {
         let mut db = Database::new();
         for id in 0..200 {
@@ -7898,6 +7935,7 @@ mod tests {
         assert!(checkpoint.contains("stat_bounded_path_count"));
         assert!(checkpoint.contains("stat_property_distinct_count"));
         assert!(checkpoint.contains("stat_rel_property_distinct_count"));
+        assert!(checkpoint.contains("stat_rel_property_histogram"));
         assert!(checkpoint.contains("stat_property_histogram"));
         assert!(checkpoint.contains("stat_property_histogram_sampled"));
 

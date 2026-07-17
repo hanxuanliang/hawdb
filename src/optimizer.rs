@@ -1893,6 +1893,7 @@ pub struct OptimizerCatalog {
     property_distinct_counts: BTreeMap<(String, String), u64>,
     rel_property_distinct_counts: BTreeMap<(String, String), u64>,
     property_histograms: BTreeMap<(String, String), Vec<Value>>,
+    rel_property_histograms: BTreeMap<(String, String), Vec<Value>>,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -1913,6 +1914,7 @@ pub struct OptimizerCatalogStatistics {
     property_distinct_counts: BTreeMap<(String, String), u64>,
     rel_property_distinct_counts: BTreeMap<(String, String), u64>,
     property_histograms: BTreeMap<(String, String), Vec<Value>>,
+    rel_property_histograms: BTreeMap<(String, String), Vec<Value>>,
 }
 
 impl CascadesOptimizer {
@@ -1994,6 +1996,7 @@ impl OptimizerCatalog {
             property_distinct_counts: statistics.property_distinct_counts,
             rel_property_distinct_counts: statistics.rel_property_distinct_counts,
             property_histograms: statistics.property_histograms,
+            rel_property_histograms: statistics.rel_property_histograms,
         }
     }
 
@@ -2070,6 +2073,43 @@ impl OptimizerCatalog {
                     .unwrap_or(1)
                     .max(1)
             })
+    }
+
+    fn estimate_rel_property_eq_rows(
+        &self,
+        rel_type: &str,
+        property: &str,
+        input_rows: u64,
+    ) -> u64 {
+        input_rows
+            .div_ceil(self.rel_property_distinct_count(rel_type, property).max(1))
+            .max(1)
+    }
+
+    fn estimate_rel_property_range_rows(
+        &self,
+        rel_type: &str,
+        property: &str,
+        op: ComparisonOp,
+        value: &Value,
+        input_rows: u64,
+    ) -> u64 {
+        let Some(histogram) = self
+            .rel_property_histograms
+            .get(&(rel_type.to_string(), property.to_string()))
+            .filter(|values| !values.is_empty())
+        else {
+            return input_rows.div_ceil(2).max(1);
+        };
+        let matching_values = histogram
+            .iter()
+            .filter(|candidate| compare_histogram_value(candidate, op, value))
+            .count() as u64;
+        let distinct_count = histogram.len() as u64;
+        input_rows
+            .saturating_mul(matching_values)
+            .div_ceil(distinct_count)
+            .max(1)
     }
 
     fn estimate_range_rows(
@@ -2232,6 +2272,7 @@ impl OptimizerCatalogStatistics {
             property_distinct_counts: property_distinct_counts.into_iter().collect(),
             rel_property_distinct_counts: BTreeMap::new(),
             property_histograms: property_histograms.into_iter().collect(),
+            rel_property_histograms: BTreeMap::new(),
         }
     }
 
@@ -2240,6 +2281,14 @@ impl OptimizerCatalogStatistics {
         rel_property_distinct_counts: impl IntoIterator<Item = ((String, String), u64)>,
     ) -> Self {
         self.rel_property_distinct_counts = rel_property_distinct_counts.into_iter().collect();
+        self
+    }
+
+    pub fn with_relationship_property_histograms(
+        mut self,
+        rel_property_histograms: impl IntoIterator<Item = ((String, String), Vec<Value>)>,
+    ) -> Self {
+        self.rel_property_histograms = rel_property_histograms.into_iter().collect();
         self
     }
 }
@@ -3761,9 +3810,9 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
                     .saturating_add(scaled_rows),
             }
         }
-        PhysicalPlan::FilterExec { input, .. } => {
+        PhysicalPlan::FilterExec { predicate, input } => {
             let input_cost = estimate_physical_plan_cost(input, catalog);
-            let rows = input_cost.estimated_rows.div_ceil(2).max(1);
+            let rows = estimate_filter_rows(predicate, input, input_cost.estimated_rows, catalog);
             PlanCost {
                 estimated_rows: rows,
                 cost: input_cost.cost.saturating_add(input_cost.estimated_rows),
@@ -3880,6 +3929,85 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
             estimated_rows: 1,
             cost: 1,
         },
+    }
+}
+
+fn estimate_filter_rows(
+    predicate: &Predicate,
+    input: &PhysicalPlan,
+    input_rows: u64,
+    catalog: &OptimizerCatalog,
+) -> u64 {
+    estimate_relationship_filter_rows(predicate, input, input_rows, catalog)
+        .unwrap_or_else(|| input_rows.div_ceil(2).max(1))
+}
+
+fn estimate_relationship_filter_rows(
+    predicate: &Predicate,
+    input: &PhysicalPlan,
+    input_rows: u64,
+    catalog: &OptimizerCatalog,
+) -> Option<u64> {
+    match predicate {
+        Predicate::And(predicates) => {
+            let mut rows = input_rows.max(1);
+            let mut matched = false;
+            for predicate in predicates {
+                if let Some(estimated) =
+                    estimate_relationship_filter_rows(predicate, input, rows, catalog)
+                {
+                    rows = estimated;
+                    matched = true;
+                }
+            }
+            matched.then_some(rows)
+        }
+        Predicate::PropertyEq {
+            variable, property, ..
+        } => estimate_relationship_property_filter_rows(
+            input,
+            variable,
+            property,
+            input_rows,
+            catalog,
+            |catalog, rel_type, property, rows| {
+                catalog.estimate_rel_property_eq_rows(rel_type, property, rows)
+            },
+        ),
+        Predicate::PropertyCompare {
+            variable,
+            property,
+            op,
+            value,
+        } => estimate_relationship_property_filter_rows(
+            input,
+            variable,
+            property,
+            input_rows,
+            catalog,
+            |catalog, rel_type, property, rows| {
+                catalog.estimate_rel_property_range_rows(rel_type, property, *op, value, rows)
+            },
+        ),
+        _ => None,
+    }
+}
+
+fn estimate_relationship_property_filter_rows(
+    input: &PhysicalPlan,
+    variable: &str,
+    property: &str,
+    input_rows: u64,
+    catalog: &OptimizerCatalog,
+    estimate: impl Fn(&OptimizerCatalog, &str, &str, u64) -> u64,
+) -> Option<u64> {
+    match input {
+        PhysicalPlan::AdjacencyExpandExec {
+            rel_variable: Some(rel_variable),
+            rel_type,
+            ..
+        } if rel_variable == variable => Some(estimate(catalog, rel_type, property, input_rows)),
+        _ => None,
     }
 }
 

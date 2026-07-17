@@ -133,6 +133,7 @@ pub struct GraphStatistics {
     pub property_distinct_counts: BTreeMap<(LabelId, String), u64>,
     pub rel_property_distinct_counts: BTreeMap<(RelTypeId, String), u64>,
     pub property_histograms: BTreeMap<(LabelId, String), Vec<Value>>,
+    pub rel_property_histograms: BTreeMap<(RelTypeId, String), Vec<Value>>,
     pub sampled_property_histograms: BTreeMap<(LabelId, String), bool>,
 }
 

@@ -4780,6 +4780,7 @@ impl GraphStore {
                 | ["stat_property_distinct_count", _, _, _]
                 | ["stat_rel_property_distinct_count", _, _, _]
                 | ["stat_property_histogram", _, _, _]
+                | ["stat_rel_property_histogram", _, _, _]
                 | ["stat_property_histogram_sampled", _, _, _] => {}
                 ["project_graph", raw_name, raw_node_labels, raw_rel_types] => {
                     self.apply_project_graph_definition(
@@ -5387,6 +5388,14 @@ impl DurableStore {
                 rel_type_id.0,
                 encode_string(property),
                 count
+            ));
+        }
+        for ((rel_type_id, property), values) in &statistics.rel_property_histograms {
+            body.push_str(&format!(
+                "stat_rel_property_histogram\t{}\t{}\t{}\n",
+                rel_type_id.0,
+                encode_string(property),
+                encode_value_vec(values)
             ));
         }
         for ((label_id, property), values) in &statistics.property_histograms {
@@ -7371,10 +7380,14 @@ fn compute_statistics(
             .sampled_property_histograms
             .insert(key, is_sampled);
     }
-    statistics.rel_property_distinct_counts = rel_property_values
-        .into_iter()
-        .map(|(key, values)| (key, values.len() as u64))
-        .collect();
+    for (key, values) in rel_property_values {
+        statistics
+            .rel_property_distinct_counts
+            .insert(key.clone(), values.len() as u64);
+        statistics
+            .rel_property_histograms
+            .insert(key, sample_histogram_values(values));
+    }
     statistics.bounded_path_counts =
         compute_bounded_path_counts(nodes, &outgoing_by_source_type, MAX_BOUNDED_PATH_STAT_HOPS);
     statistics
@@ -8961,6 +8974,20 @@ mod tests {
                 .rel_property_distinct_counts
                 .get(&(RelTypeId(0), "weight".to_string())),
             Some(&4)
+        );
+        assert_eq!(
+            statistics
+                .rel_property_histograms
+                .get(&(RelTypeId(0), "weight".to_string()))
+                .and_then(|values| values.first()),
+            Some(&Value::Int(0))
+        );
+        assert_eq!(
+            statistics
+                .rel_property_histograms
+                .get(&(RelTypeId(0), "weight".to_string()))
+                .and_then(|values| values.last()),
+            Some(&Value::Int(3))
         );
     }
 
