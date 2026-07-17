@@ -414,6 +414,9 @@ pub struct KnowledgeRetrieverReport {
     pub name: String,
     pub available: bool,
     pub candidate_count: usize,
+    pub limit: Option<usize>,
+    pub truncated: bool,
+    pub truncation_reasons: Vec<String>,
     pub top_candidates: Vec<KnowledgeRetrieverCandidate>,
 }
 
@@ -1604,6 +1607,15 @@ fn knowledge_retriever_reports(
             name: report.name.clone(),
             available: report.available,
             candidate_count: report.candidate_count,
+            limit: Some(search.limit),
+            truncated: report.candidate_count > report.top_candidates.len(),
+            truncation_reasons: knowledge_search_retriever_truncation_reasons(
+                report.name.as_str(),
+                report.candidate_count,
+                report.top_candidates.len(),
+                search.limit,
+                search.rank_window,
+            ),
             top_candidates: report
                 .top_candidates
                 .iter()
@@ -1619,6 +1631,13 @@ fn knowledge_retriever_reports(
         name: "graph_seed".to_string(),
         available: graph_seed_limit > 0,
         candidate_count: graph_seed_candidate_count,
+        limit: Some(graph_seed_limit),
+        truncated: graph_seed_candidate_count > graph_seeds.len(),
+        truncation_reasons: knowledge_graph_seed_truncation_reasons(
+            graph_seed_candidate_count,
+            graph_seeds.len(),
+            graph_seed_limit,
+        ),
         top_candidates: graph_seeds
             .iter()
             .enumerate()
@@ -1630,6 +1649,51 @@ fn knowledge_retriever_reports(
             .collect(),
     });
     reports
+}
+
+fn knowledge_search_retriever_truncation_reasons(
+    name: &str,
+    candidate_count: usize,
+    returned_count: usize,
+    search_limit: usize,
+    rank_window: Option<usize>,
+) -> Vec<String> {
+    if candidate_count <= returned_count {
+        return Vec::new();
+    }
+    let mut reasons = Vec::new();
+    if let Some(rank_window) = rank_window {
+        if candidate_count > rank_window && returned_count <= rank_window {
+            reasons.push(format!(
+                "{name} rank_window {rank_window} returned from {candidate_count} candidates"
+            ));
+        }
+    }
+    if returned_count >= search_limit && candidate_count > search_limit {
+        reasons.push(format!(
+            "{name} search_limit {search_limit} returned from {candidate_count} candidates"
+        ));
+    }
+    if reasons.is_empty() {
+        reasons.push(format!(
+            "{name} returned {returned_count} of {candidate_count} candidates"
+        ));
+    }
+    reasons
+}
+
+fn knowledge_graph_seed_truncation_reasons(
+    candidate_count: usize,
+    returned_count: usize,
+    graph_seed_limit: usize,
+) -> Vec<String> {
+    if candidate_count > returned_count {
+        vec![format!(
+            "graph_seed limit {graph_seed_limit} returned from {candidate_count} candidates"
+        )]
+    } else {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4689,6 +4753,17 @@ mod tests {
             .expect("text retriever report");
         assert_eq!(text_report.candidate_count, 2);
         assert_eq!(text_report.top_candidates.len(), 1);
+        let text_retriever = output
+            .retrievers
+            .iter()
+            .find(|report| report.name == "text")
+            .expect("text knowledge retriever report");
+        assert_eq!(text_retriever.limit, Some(10));
+        assert!(text_retriever.truncated);
+        assert!(text_retriever
+            .truncation_reasons
+            .iter()
+            .any(|reason| reason.contains("rank_window 1")));
         let second_text = output
             .search
             .hits
@@ -4821,6 +4896,12 @@ mod tests {
         assert_eq!(graph_seed_report.top_candidates.len(), 1);
         assert_eq!(graph_seed_report.top_candidates[0].id, "Entity:graph");
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
+        assert_eq!(graph_seed_report.limit, Some(1));
+        assert!(graph_seed_report.truncated);
+        assert!(graph_seed_report
+            .truncation_reasons
+            .iter()
+            .any(|reason| reason.contains("graph_seed limit 1")));
         assert_eq!(
             output.graph_seeds[0].entity.external_id.as_deref(),
             Some("graph")

@@ -468,7 +468,10 @@ snapshots and matched property names. This gives the retriever DAG an explicit
 graph child even when the caller has no usable search projection.
 At the knowledge facade level, `KnowledgeRetrieverReport` normalizes child
 retriever diagnostics for vector, text, and graph seed legs: availability,
-candidate count, and top candidate rank/score are exposed in one place.
+candidate count, optional limit, truncation flag, truncation reasons, and top
+candidate rank/score are exposed in one place. Search child reports distinguish
+rank-window trimming from search-limit truncation, while graph seed reports
+record graph-seed limit truncation.
 `KnowledgeCandidate` then projects returned search hits and graph-native seeds
 into one application-facing candidate surface. Each candidate records its source
 leg, source-local rank, merged source legs, combined score, score breakdown,
