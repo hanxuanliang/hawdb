@@ -549,6 +549,101 @@ fn retrieves_knowledge_through_database_facade() {
 }
 
 #[test]
+fn knowledge_retrieval_expands_graph_context_by_ordered_adjacency() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root', title: 'Ordered retrieval context'})")
+        .unwrap();
+    let lower_neighbor_id = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Entity",
+            BTreeMap::from([
+                (
+                    "id".to_string(),
+                    Value::String("lower-neighbor".to_string()),
+                ),
+                (
+                    "name".to_string(),
+                    Value::String("Lower neighbor".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+    let higher_neighbor_id = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Entity",
+            BTreeMap::from([
+                (
+                    "id".to_string(),
+                    Value::String("higher-neighbor".to_string()),
+                ),
+                (
+                    "name".to_string(),
+                    Value::String("Higher neighbor".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+    db.store
+        .create_relationship(
+            &mut db.catalog,
+            NodeId(0),
+            higher_neighbor_id,
+            "MENTIONS",
+            BTreeMap::new(),
+        )
+        .unwrap();
+    db.store
+        .create_relationship(
+            &mut db.catalog,
+            NodeId(0),
+            lower_neighbor_id,
+            "RELATES_TO",
+            BTreeMap::new(),
+        )
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "ordered retrieval".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 1,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 0,
+            graph_context_limit: 1,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert_eq!(output.graph_context_paths.len(), 1);
+    assert_eq!(
+        output.graph_context_paths[0].target_external_id.as_deref(),
+        Some("lower-neighbor")
+    );
+    assert_eq!(
+        output.graph_context_paths[0].relationship_type.as_str(),
+        "RELATES_TO"
+    );
+    assert!(output
+        .fanout_reasons
+        .iter()
+        .any(|reason| reason.contains("graph_context_limit 1")));
+}
+
+#[test]
 fn knowledge_retrieval_applies_metadata_filters_to_search_and_graph_seeds() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'mem_1', title: 'Filtered graph', content: 'metadata scoped retrieval', source_id: 'thread_1'})")

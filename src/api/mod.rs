@@ -1162,15 +1162,13 @@ impl Database {
             if depth >= graph_context_max_hops {
                 continue;
             }
-            for relationship in self.store.scan_relationships(None) {
-                let (direction, next_node) = if relationship.source == current_node {
-                    (KnowledgeGraphPathDirection::Outgoing, relationship.target)
-                } else if relationship.target == current_node {
-                    (KnowledgeGraphPathDirection::Incoming, relationship.source)
-                } else {
-                    continue;
-                };
-                if !seen_relationships.insert((seed_hit_id.clone(), relationship.id.0)) {
+            for edge in knowledge_expansion_edges_for_node(
+                &self.store,
+                current_node,
+                None,
+                KnowledgeNeighborDirection::Both,
+            ) {
+                if !seen_relationships.insert((seed_hit_id.clone(), edge.relationship.id.0)) {
                     continue;
                 }
                 if paths.len() >= graph_context_limit {
@@ -1182,14 +1180,14 @@ impl Database {
                 let Some(path) = self.context_path_for_relationship(
                     &seed_hit_id,
                     depth + 1,
-                    direction,
-                    relationship,
+                    edge.direction,
+                    edge.relationship,
                 ) else {
                     continue;
                 };
                 paths.push(path);
-                if seen_frontier_nodes.insert((seed_hit_id.clone(), next_node.0)) {
-                    frontier.push_back((seed_hit_id.clone(), next_node, depth + 1));
+                if seen_frontier_nodes.insert((seed_hit_id.clone(), edge.next_node.0)) {
+                    frontier.push_back((seed_hit_id.clone(), edge.next_node, depth + 1));
                 }
             }
         }
@@ -1835,17 +1833,6 @@ fn knowledge_query_terms(text: &str) -> BTreeSet<String> {
         .filter(|token| !token.is_empty())
         .map(str::to_ascii_lowercase)
         .collect()
-}
-
-fn neighbor_direction_allows(
-    requested: KnowledgeNeighborDirection,
-    actual: KnowledgeGraphPathDirection,
-) -> bool {
-    match requested {
-        KnowledgeNeighborDirection::Outgoing => actual == KnowledgeGraphPathDirection::Outgoing,
-        KnowledgeNeighborDirection::Incoming => actual == KnowledgeGraphPathDirection::Incoming,
-        KnowledgeNeighborDirection::Both => true,
-    }
 }
 
 fn knowledge_entity_for(
@@ -2501,25 +2488,24 @@ fn knowledge_expansion_edges_for_node<'a>(
     requested_direction: KnowledgeNeighborDirection,
 ) -> Vec<KnowledgeExpansionEdge<'a>> {
     let Some(rel_type) = relationship_type else {
-        return store
-            .scan_relationships(None)
-            .filter_map(|relationship| {
-                let (direction, next_node) = if relationship.source == node_id {
-                    (KnowledgeGraphPathDirection::Outgoing, relationship.target)
-                } else if relationship.target == node_id {
-                    (KnowledgeGraphPathDirection::Incoming, relationship.source)
-                } else {
-                    return None;
+        let mut edges = Vec::new();
+        let mut seen_relationships = BTreeSet::new();
+        for adjacency_direction in adjacency_directions_for_request(requested_direction) {
+            for entry in store.ordered_adjacency_entries_for_node(node_id, adjacency_direction) {
+                let Some(relationship) = store.relationship(entry.relationship_id) else {
+                    continue;
                 };
-                neighbor_direction_allows(requested_direction, direction).then_some(
-                    KnowledgeExpansionEdge {
-                        direction,
-                        next_node,
-                        relationship,
-                    },
-                )
-            })
-            .collect();
+                if !seen_relationships.insert(entry.relationship_id.0) {
+                    continue;
+                }
+                edges.push(KnowledgeExpansionEdge {
+                    direction: knowledge_path_direction_for_adjacency(adjacency_direction),
+                    next_node: entry.neighbor_id,
+                    relationship,
+                });
+            }
+        }
+        return edges;
     };
 
     let mut edges = Vec::new();

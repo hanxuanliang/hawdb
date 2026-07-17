@@ -4309,6 +4309,34 @@ impl GraphStore {
         entries
     }
 
+    pub fn ordered_adjacency_entries_for_node(
+        &self,
+        node_id: NodeId,
+        direction: AdjacencyDirection,
+    ) -> Vec<OrderedAdjacencyEntry> {
+        let adjacency = match direction {
+            AdjacencyDirection::Outgoing => &self.outgoing,
+            AdjacencyDirection::Incoming => &self.incoming,
+        };
+        let mut entries = adjacency
+            .iter()
+            .filter(|((group_node, _), _)| *group_node == node_id)
+            .flat_map(|(_, rel_ids)| rel_ids.iter())
+            .filter_map(|rel_id| {
+                let relationship = self.relationships.get(rel_id)?;
+                Some(OrderedAdjacencyEntry {
+                    relationship_id: relationship.id,
+                    neighbor_id: match direction {
+                        AdjacencyDirection::Outgoing => relationship.target,
+                        AdjacencyDirection::Incoming => relationship.source,
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| (entry.neighbor_id, entry.relationship_id));
+        entries
+    }
+
     pub fn scan_relationships<'a>(
         &'a self,
         rel_type: Option<RelTypeId>,
@@ -8630,6 +8658,66 @@ mod tests {
             incoming,
             vec![OrderedAdjacencyEntry {
                 relationship_id: rel_one,
+                neighbor_id: source,
+            }]
+        );
+    }
+
+    #[test]
+    fn ordered_adjacency_entries_for_node_sort_across_relationship_types() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+        let target_one = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let target_two = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(2))]))
+            .unwrap();
+
+        let rel_late_neighbor = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_two,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let rel_early_neighbor = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_one,
+                "RELATES_TO",
+                BTreeMap::new(),
+            )
+            .unwrap();
+
+        let outgoing =
+            store.ordered_adjacency_entries_for_node(source, AdjacencyDirection::Outgoing);
+        let incoming =
+            store.ordered_adjacency_entries_for_node(target_one, AdjacencyDirection::Incoming);
+
+        assert_eq!(
+            outgoing,
+            vec![
+                OrderedAdjacencyEntry {
+                    relationship_id: rel_early_neighbor,
+                    neighbor_id: target_one,
+                },
+                OrderedAdjacencyEntry {
+                    relationship_id: rel_late_neighbor,
+                    neighbor_id: target_two,
+                },
+            ]
+        );
+        assert_eq!(
+            incoming,
+            vec![OrderedAdjacencyEntry {
+                relationship_id: rel_early_neighbor,
                 neighbor_id: source,
             }]
         );
