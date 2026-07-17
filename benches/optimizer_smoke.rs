@@ -290,6 +290,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "source_coverage_aggregate_filter",
+            logical: source_coverage_aggregate_filter_plan(),
+            catalog: community_synthesized_source_coverage_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 37,
+            },
+            fingerprint_contains: "ExpressionEq(column(7:covered)=int:3)",
+            decision_contains: &[
+                "choose IndexNodeSeek for Community.id",
+                "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
+                "selected physical plan cost: estimated_rows=1 cost=37",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "entity_bridge_span_aggregate",
             logical: entity_bridge_span_aggregate_plan(),
             catalog: entity_bridge_span_aggregate_catalog(),
@@ -1362,6 +1377,58 @@ fn community_synthesized_source_coverage_plan() -> LogicalPlan {
                     input: Box::new(LogicalPlan::NodeScan {
                         variable: "c".to_string(),
                         label: "Community".to_string(),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn source_coverage_aggregate_filter_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(1),
+        input: Box::new(LogicalPlan::Filter {
+            predicate: Predicate::ExpressionEq {
+                expression: ProjectionExpression::Column("covered".to_string()),
+                value: ProjectionExpression::Literal(Value::Int(3)),
+            },
+            input: Box::new(LogicalPlan::Aggregate {
+                group_keys: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "c".to_string(),
+                        property: "id".to_string(),
+                    },
+                    name: "cid".to_string(),
+                }],
+                items: vec![Aggregation {
+                    function: AggregateFunction::Count,
+                    target: AggregateTarget::Variable("s".to_string()),
+                    distinct: true,
+                    name: "covered".to_string(),
+                }],
+                input: Box::new(LogicalPlan::Expand {
+                    source_variable: "c".to_string(),
+                    source_label: "Community".to_string(),
+                    rel_variable: None,
+                    rel_type: "SYNTHESIZED_FROM".to_string(),
+                    rel_properties: Default::default(),
+                    direction: RelationshipDirection::Outgoing,
+                    target_variable: "s".to_string(),
+                    target_label: "Source".to_string(),
+                    min_hops: 1,
+                    max_hops: 1,
+                    optional: false,
+                    input: Box::new(LogicalPlan::Filter {
+                        predicate: Predicate::PropertyEq {
+                            variable: "c".to_string(),
+                            property: "id".to_string(),
+                            value: Value::String("community-42".to_string()),
+                        },
+                        input: Box::new(LogicalPlan::NodeScan {
+                            variable: "c".to_string(),
+                            label: "Community".to_string(),
+                        }),
                     }),
                 }),
             }),

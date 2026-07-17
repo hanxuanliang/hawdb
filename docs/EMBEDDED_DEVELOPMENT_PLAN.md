@@ -911,7 +911,8 @@ Current implemented slice:
   pushed-down relationship equality plus relationship range-filter workload, a
   source-to-memory-to-label cross-pattern aggregate workload, a larger
   source-to-memory-to-entity-to-label grouped workload,
-  community-to-synthesized-source coverage aggregate workload,
+  community-to-synthesized-source coverage aggregate workload plus the
+  aggregate-alias coverage filter shape used by source coverage checks,
   entity bridge-span distinct-property aggregate workload,
   thread-cleanup optional relationship count-sum workload with seed/fanout cost
   tracing, incoming mention optional relationship count-sum and optional degree
