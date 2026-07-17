@@ -28,7 +28,10 @@ use std::rc::Rc;
 
 mod artifact_jobs;
 
-pub use artifact_jobs::{DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus};
+pub use artifact_jobs::{
+    DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
+    ExternalContentArtifactJobSummary,
+};
 
 #[derive(Debug)]
 pub struct Database {

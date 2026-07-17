@@ -41,6 +41,17 @@ pub struct DerivedArtifactJobReport {
     pub output: QueryOutput,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExternalContentArtifactJobSummary {
+    pub total: usize,
+    pub pending: usize,
+    pub running: usize,
+    pub succeeded: usize,
+    pub failed: usize,
+    pub next_pending_job_id: Option<u64>,
+    pub oldest_failed_job_id: Option<u64>,
+}
+
 impl Database {
     pub fn schedule_derived_artifact_rebuild(&mut self) -> DerivedArtifactJob {
         self.enqueue_derived_artifact_job("projected_graph", "*", "rebuild")
@@ -101,6 +112,34 @@ impl Database {
             .take(limit)
             .cloned()
             .collect()
+    }
+
+    pub fn external_content_artifact_job_summary(&self) -> ExternalContentArtifactJobSummary {
+        let mut summary = ExternalContentArtifactJobSummary::default();
+        for job in self
+            .derived_artifact_jobs
+            .iter()
+            .filter(|job| is_external_content_artifact_job(&job.artifact_type))
+        {
+            summary.total += 1;
+            match job.status {
+                DerivedArtifactJobStatus::Pending => {
+                    summary.pending += 1;
+                    summary.next_pending_job_id.get_or_insert(job.id);
+                }
+                DerivedArtifactJobStatus::Running => {
+                    summary.running += 1;
+                }
+                DerivedArtifactJobStatus::Succeeded => {
+                    summary.succeeded += 1;
+                }
+                DerivedArtifactJobStatus::Failed => {
+                    summary.failed += 1;
+                    summary.oldest_failed_job_id.get_or_insert(job.id);
+                }
+            }
+        }
+        summary
     }
 
     pub fn retry_failed_external_content_artifact_job(

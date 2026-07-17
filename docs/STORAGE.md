@@ -319,7 +319,11 @@ other application-owned metadata as a `Value::Map`.
 view for caller-owned runtimes that poll parser work without scanning the whole
 embedded job history. `Database::failed_external_content_artifact_jobs` returns
 the matching bounded failed view for recovery queues and operator-facing parser
-diagnostics. The graph-kernel job runner still rejects those jobs with a
+diagnostics. `Database::external_content_artifact_job_summary` exposes aggregate
+pending, running, succeeded, and failed counts plus the next pending and oldest
+failed job ids, giving caller-owned runtimes a cheap scheduling and health
+surface before they fetch bounded job details. The graph-kernel job runner still
+rejects those jobs with a
 graph-kernel-external error and preserves the payload in the failed job report,
 while
 `Database::run_next_external_content_artifact_job_with` and
