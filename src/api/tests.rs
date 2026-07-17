@@ -3182,6 +3182,10 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
     assert_eq!(unknown_type.diagnostics.node_count, 0);
     assert_eq!(unknown_type.diagnostics.relationship_count, 0);
     assert!(unknown_type.fanout_reasons.is_empty());
+    assert_eq!(
+        unknown_type.diagnostics.fallback_reasons,
+        vec!["relationship type DOES_NOT_EXIST not found".to_string()]
+    );
 }
 
 #[test]
@@ -3511,6 +3515,24 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(wrong_direction.diagnostics.target_found, Some(true));
     assert_eq!(wrong_direction.diagnostics.path_count, 0);
 
+    let unknown_type = db.knowledge_paths(&KnowledgePathRequest {
+        source_label: "Memory".to_string(),
+        source_external_id: "root".to_string(),
+        target_label: "Entity".to_string(),
+        target_external_id: "right".to_string(),
+        relationship_type: Some("DOES_NOT_EXIST".to_string()),
+        direction: KnowledgeNeighborDirection::Outgoing,
+        max_hops: 1,
+        limit: 4,
+    });
+    assert!(unknown_type.paths.is_empty());
+    assert!(unknown_type.diagnostics.seed_found);
+    assert_eq!(unknown_type.diagnostics.target_found, Some(true));
+    assert_eq!(
+        unknown_type.diagnostics.fallback_reasons,
+        vec!["relationship type DOES_NOT_EXIST not found".to_string()]
+    );
+
     let limited = db.knowledge_paths(&KnowledgePathRequest {
         source_label: "Memory".to_string(),
         source_external_id: "root".to_string(),
@@ -3797,6 +3819,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert!(unknown_type.nodes.is_empty());
     assert!(unknown_type.relationships.is_empty());
     assert!(unknown_type.fanout_reasons.is_empty());
+    assert_eq!(
+        unknown_type.diagnostics.fallback_reasons,
+        vec!["relationship type DOES_NOT_EXIST not found".to_string()]
+    );
 
     let missing = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
         label: "Memory".to_string(),

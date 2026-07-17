@@ -2694,6 +2694,7 @@ fn knowledge_neighbors_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: Some(request.limit),
                 node_limit: None,
@@ -2720,6 +2721,7 @@ fn knowledge_neighbors_for(
                             relationship_count: 0,
                             fanout_reason_count: 0,
                             fanout_reasons: Vec::new(),
+                            missing_relationship_type: Some(name.to_string()),
                             max_hops: request.max_hops,
                             path_limit: Some(request.limit),
                             node_limit: None,
@@ -2754,6 +2756,7 @@ fn knowledge_neighbors_for(
             relationship_count: paths.len(),
             fanout_reason_count: fanout_reasons.len(),
             fanout_reasons: fanout_reasons.clone(),
+            missing_relationship_type: None,
             max_hops: request.max_hops,
             path_limit: Some(request.limit),
             node_limit: None,
@@ -2799,6 +2802,7 @@ fn knowledge_paths_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: Some(request.limit),
                 node_limit: None,
@@ -2821,6 +2825,7 @@ fn knowledge_paths_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: Some(request.limit),
                 node_limit: None,
@@ -2847,6 +2852,7 @@ fn knowledge_paths_for(
                             relationship_count: 0,
                             fanout_reason_count: 0,
                             fanout_reasons: Vec::new(),
+                            missing_relationship_type: Some(name.to_string()),
                             max_hops: request.max_hops,
                             path_limit: Some(request.limit),
                             node_limit: None,
@@ -2883,6 +2889,7 @@ fn knowledge_paths_for(
             relationship_count: paths.iter().map(|path| path.segments.len()).sum::<usize>(),
             fanout_reason_count: fanout_reasons.len(),
             fanout_reasons: fanout_reasons.clone(),
+            missing_relationship_type: None,
             max_hops: request.max_hops,
             path_limit: Some(request.limit),
             node_limit: None,
@@ -2918,6 +2925,7 @@ fn knowledge_subgraph_for(
                 relationship_count: 0,
                 fanout_reason_count: 0,
                 fanout_reasons: Vec::new(),
+                missing_relationship_type: None,
                 max_hops: request.max_hops,
                 path_limit: None,
                 node_limit: Some(request.node_limit),
@@ -2944,6 +2952,7 @@ fn knowledge_subgraph_for(
                             relationship_count: 0,
                             fanout_reason_count: 0,
                             fanout_reasons: Vec::new(),
+                            missing_relationship_type: Some(name.to_string()),
                             max_hops: request.max_hops,
                             path_limit: None,
                             node_limit: Some(request.node_limit),
@@ -2978,6 +2987,7 @@ fn knowledge_subgraph_for(
             relationship_count: relationships.len(),
             fanout_reason_count: fanout_reasons.len(),
             fanout_reasons: fanout_reasons.clone(),
+            missing_relationship_type: None,
             max_hops: request.max_hops,
             path_limit: None,
             node_limit: Some(request.node_limit),
@@ -2997,6 +3007,7 @@ struct KnowledgeTraversalDiagnosticInput {
     relationship_count: usize,
     fanout_reason_count: usize,
     fanout_reasons: Vec<String>,
+    missing_relationship_type: Option<String>,
     max_hops: usize,
     path_limit: Option<usize>,
     node_limit: Option<usize>,
@@ -3036,6 +3047,9 @@ fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInpu
     }
     if input.relationship_limit == Some(0) {
         reasons.push("subgraph traversal disabled by relationship_limit 0".to_string());
+    }
+    if let Some(relationship_type) = &input.missing_relationship_type {
+        reasons.push(format!("relationship type {relationship_type} not found"));
     }
     reasons
 }
