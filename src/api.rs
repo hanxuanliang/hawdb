@@ -3458,6 +3458,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         })
     }
 
+    pub fn retrieve_knowledge(
+        &self,
+        search_index: &SearchIndex,
+        request: &KnowledgeRetrievalRequest,
+    ) -> KnowledgeRetrievalOutput {
+        self.db.retrieve_knowledge(search_index, request)
+    }
+
     pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
         self.db.knowledge_entity(request)
     }
@@ -3885,6 +3893,45 @@ mod tests {
             .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
             .unwrap();
         assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn nowledge_graph_adapter_retrieves_knowledge_with_external_projection() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root', title: 'Root retrieval', content: 'Adapter knowledge retrieval'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Skein'})")
+            .unwrap();
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+
+        let adapter = NowledgeGraphAdapter::new(&mut db);
+        let output = adapter.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "adapter retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 4,
+                rank_window: None,
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 2,
+                graph_context_limit: 4,
+                graph_context_max_hops: 1,
+            },
+        );
+
+        assert_eq!(output.graph_commit_epoch, 1);
+        assert_eq!(output.projection_freshness.document_count, 2);
+        assert_eq!(output.diagnostics.search_total_hits, 1);
+        assert_eq!(output.diagnostics.graph_context_path_count, 1);
+        assert_eq!(output.graph_context_paths.len(), 1);
+        assert!(output
+            .evidence
+            .iter()
+            .any(|evidence| evidence.canonical_node_id == Some(0)));
     }
 
     #[test]

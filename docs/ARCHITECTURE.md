@@ -310,10 +310,12 @@ The replacement should preserve the current local wrapper shape:
 accepts `NowledgeGraphStatement` values containing Cypher text plus typed
 parameters, and exposes query, explain, and grouped mutation transaction
 execution through the same planner and storage paths as `Database`. It also
-forwards the typed knowledge navigation APIs for entity lookup, bounded
-neighbors, bounded paths, and bounded subgraph expansion, including traversal
-diagnostics. This keeps the compatibility boundary parameterized and reviewable
-without adding an ACL layer to the embedded built-in core.
+forwards the Knowledge Retrieval facade over a caller-owned `SearchIndex`, plus
+typed knowledge navigation APIs for entity lookup, bounded neighbors, bounded
+paths, and bounded subgraph expansion, including traversal diagnostics. This
+keeps the compatibility boundary parameterized and reviewable without adding an
+ACL layer to the embedded built-in core, while preserving the rule that search
+projections stay outside canonical graph state.
 
 Migration gates use a machine-readable query inventory. `scan-nowledge-inventory`
 walks Nowledge Rust source files, extracts conservative Cypher string-literal
