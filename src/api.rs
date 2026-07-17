@@ -1801,6 +1801,8 @@ fn knowledge_retrieval_diagnostics(
         } else if search.total_hits == 0 {
             empty_reasons
                 .push("search retrievers returned no hits inside filtered scope".to_string());
+        } else if search.hits.is_empty() && search.truncated {
+            empty_reasons.extend(search.truncation_reasons.iter().cloned());
         }
         if input.candidate_total_count == 0 {
             if request.graph_seed_limit == 0 {
@@ -5096,6 +5098,41 @@ mod tests {
             .empty_reasons
             .iter()
             .any(|reason| reason == "retrieval produced no candidates"));
+
+        let mut search_index = SearchIndex::in_memory();
+        db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+            .unwrap();
+        let search_disabled_by_limit = db.retrieve_knowledge(
+            &search_index,
+            &KnowledgeRetrievalRequest {
+                query_text: "Graph candidate".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 0,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 0,
+                graph_context_limit: 0,
+                graph_context_max_hops: 1,
+            },
+        );
+        assert_eq!(search_disabled_by_limit.search.total_hits, 1);
+        assert!(search_disabled_by_limit.search.hits.is_empty());
+        assert!(search_disabled_by_limit.diagnostics.search_truncated);
+        assert!(search_disabled_by_limit.candidates.is_empty());
+        assert!(search_disabled_by_limit
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "limit 0 returned from 1 matching hits"));
+        assert!(search_disabled_by_limit
+            .diagnostics
+            .empty_reasons
+            .iter()
+            .any(|reason| reason == "graph seed retriever disabled by limit 0"));
     }
 
     #[test]
