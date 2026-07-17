@@ -2171,7 +2171,7 @@ fn knowledge_paths_for(
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: false,
-                target_found: target_node_id.map(|_| true),
+                target_found: Some(target_node_id.is_some()),
                 path_count: 0,
                 node_count: 0,
                 relationship_count: 0,
@@ -6082,6 +6082,40 @@ mod tests {
         assert_eq!(missing.diagnostics.target_found, Some(false));
         assert_eq!(missing.diagnostics.path_count, 0);
         assert!(missing.paths.is_empty());
+
+        let missing_source = db.knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "missing".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "right".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 2,
+            limit: 4,
+        });
+        assert_eq!(missing_source.source_node_id, None);
+        assert_eq!(missing_source.target_node_id, Some(2));
+        assert!(!missing_source.diagnostics.seed_found);
+        assert_eq!(missing_source.diagnostics.target_found, Some(true));
+        assert_eq!(missing_source.diagnostics.path_count, 0);
+        assert!(missing_source.paths.is_empty());
+
+        let missing_both = db.knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "missing-source".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "missing-target".to_string(),
+            relationship_type: None,
+            direction: KnowledgeNeighborDirection::Both,
+            max_hops: 2,
+            limit: 4,
+        });
+        assert_eq!(missing_both.source_node_id, None);
+        assert_eq!(missing_both.target_node_id, None);
+        assert!(!missing_both.diagnostics.seed_found);
+        assert_eq!(missing_both.diagnostics.target_found, Some(false));
+        assert_eq!(missing_both.diagnostics.path_count, 0);
+        assert!(missing_both.paths.is_empty());
     }
 
     #[test]
