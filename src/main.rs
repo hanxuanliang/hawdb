@@ -35,6 +35,7 @@ fn main() -> Result<()> {
         }
         if command == "nowledge-cypher-migration-gate" {
             let mut require_ready = false;
+            let mut require_cutover_evidence = false;
             let mut allow_self_shadow = false;
             let mut shadow_ready = false;
             let mut shadow_trace = None;
@@ -43,6 +44,10 @@ fn main() -> Result<()> {
                 match flag.as_str() {
                     "--require-ready" => {
                         require_ready = true;
+                        args.next();
+                    }
+                    "--require-cutover-evidence" => {
+                        require_cutover_evidence = true;
                         args.next();
                     }
                     "--allow-self-shadow" => {
@@ -130,6 +135,11 @@ fn main() -> Result<()> {
             add_cutover_evidence_report(&mut json, is_self_shadow, shadow_ready_preflight)?;
             let rendered = serde_json::to_string_pretty(&json).unwrap();
             println!("{rendered}");
+            if require_cutover_evidence && !cutover_evidence_is_eligible(&json) {
+                return Err(SkeinError::Execution(
+                    "nowledge migration gate lacks eligible cutover evidence".to_string(),
+                ));
+            }
             if require_ready
                 && json
                     .get("migration_gate")
@@ -472,7 +482,7 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 
@@ -650,6 +660,14 @@ fn add_shadow_trace_report(
         }),
     );
     Ok(())
+}
+
+fn cutover_evidence_is_eligible(bundle: &serde_json::Value) -> bool {
+    bundle
+        .get("cutover_evidence")
+        .and_then(|evidence| evidence.get("eligible"))
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
 }
 
 fn should_run_shadow_ready(require_ready: bool, shadow_ready: bool) -> bool {
@@ -1803,7 +1821,7 @@ fn value_json(value: &Value) -> serde_json::Value {
 mod tests {
     use super::{
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
-        add_shadow_trace_report, canonical_snapshot_validation_json,
+        add_shadow_trace_report, canonical_snapshot_validation_json, cutover_evidence_is_eligible,
         graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
         graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
         graph_lightning_gc_staging_report, graph_lightning_graph_stream_usage,
@@ -1964,6 +1982,7 @@ mod tests {
         add_cutover_evidence_report(&mut bundle, false, true).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
+        assert!(cutover_evidence_is_eligible(&bundle));
         assert_eq!(
             bundle["cutover_evidence"]["evidence_kind"],
             "previous_wrapper"
@@ -1989,6 +2008,7 @@ mod tests {
         add_cutover_evidence_report(&mut bundle, true, true).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
         assert_eq!(
             bundle["cutover_evidence"]["evidence_kind"],
             "protocol_smoke"
@@ -2011,10 +2031,23 @@ mod tests {
         add_cutover_evidence_report(&mut bundle, false, false).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
         assert_eq!(
             bundle["cutover_evidence"]["blockers"][0],
             "shadow ready preflight was not executed"
         );
+    }
+
+    #[test]
+    fn missing_cutover_evidence_is_not_eligible() {
+        let bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready",
+                "shadow_evidence_present": true
+            }
+        });
+
+        assert!(!cutover_evidence_is_eligible(&bundle));
     }
 
     #[test]
