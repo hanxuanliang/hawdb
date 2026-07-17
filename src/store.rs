@@ -5300,6 +5300,8 @@ impl GraphStore {
                 | ["stat_rel_type_source_count", _, _]
                 | ["stat_rel_type_target_count", _, _]
                 | ["stat_path_count", _, _, _, _]
+                | ["stat_path_source_distinct_count", _, _, _, _]
+                | ["stat_path_target_distinct_count", _, _, _, _]
                 | ["stat_bounded_path_count", _, _, _, _, _]
                 | ["stat_property_distinct_count", _, _, _]
                 | ["stat_rel_property_distinct_count", _, _, _]
@@ -5894,6 +5896,22 @@ impl DurableStore {
         for ((source_label_id, rel_type_id, target_label_id), count) in &statistics.path_counts {
             body.push_str(&format!(
                 "stat_path_count\t{}\t{}\t{}\t{}\n",
+                source_label_id.0, rel_type_id.0, target_label_id.0, count
+            ));
+        }
+        for ((source_label_id, rel_type_id, target_label_id), count) in
+            &statistics.path_source_distinct_counts
+        {
+            body.push_str(&format!(
+                "stat_path_source_distinct_count\t{}\t{}\t{}\t{}\n",
+                source_label_id.0, rel_type_id.0, target_label_id.0, count
+            ));
+        }
+        for ((source_label_id, rel_type_id, target_label_id), count) in
+            &statistics.path_target_distinct_counts
+        {
+            body.push_str(&format!(
+                "stat_path_target_distinct_count\t{}\t{}\t{}\t{}\n",
                 source_label_id.0, rel_type_id.0, target_label_id.0, count
             ));
         }
@@ -7873,6 +7891,8 @@ fn compute_statistics(
     let mut rel_property_values = BTreeMap::<(RelTypeId, String), BTreeSet<Value>>::new();
     let mut rel_type_sources = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
     let mut rel_type_targets = BTreeMap::<RelTypeId, BTreeSet<NodeId>>::new();
+    let mut path_sources = BTreeMap::<(LabelId, RelTypeId, LabelId), BTreeSet<NodeId>>::new();
+    let mut path_targets = BTreeMap::<(LabelId, RelTypeId, LabelId), BTreeSet<NodeId>>::new();
     let mut outgoing_by_source_type = BTreeMap::<(NodeId, RelTypeId), Vec<NodeId>>::new();
 
     for node in nodes.values() {
@@ -7915,10 +7935,16 @@ fn compute_statistics(
         ) {
             for source_label in &source.labels {
                 for target_label in &target.labels {
-                    *statistics
-                        .path_counts
-                        .entry((*source_label, relationship.rel_type, *target_label))
-                        .or_default() += 1;
+                    let path_key = (*source_label, relationship.rel_type, *target_label);
+                    *statistics.path_counts.entry(path_key).or_default() += 1;
+                    path_sources
+                        .entry(path_key)
+                        .or_default()
+                        .insert(relationship.source);
+                    path_targets
+                        .entry(path_key)
+                        .or_default()
+                        .insert(relationship.target);
                 }
             }
         }
@@ -7930,6 +7956,14 @@ fn compute_statistics(
     statistics.rel_type_target_counts = rel_type_targets
         .into_iter()
         .map(|(rel_type, targets)| (rel_type, targets.len() as u64))
+        .collect();
+    statistics.path_source_distinct_counts = path_sources
+        .into_iter()
+        .map(|(path, sources)| (path, sources.len() as u64))
+        .collect();
+    statistics.path_target_distinct_counts = path_targets
+        .into_iter()
+        .map(|(path, targets)| (path, targets.len() as u64))
         .collect();
     for (key, values) in property_values {
         let histogram_sample_limit = adaptive_histogram_sample_limit(values.len());
@@ -9808,6 +9842,51 @@ mod tests {
                 .get(&(RelTypeId(0), "weight".to_string())),
             Some(&false)
         );
+    }
+
+    #[test]
+    fn statistics_track_path_source_and_target_coverage() {
+        let nodes = [
+            (0, LabelId(0)),
+            (1, LabelId(0)),
+            (10, LabelId(1)),
+            (11, LabelId(1)),
+            (12, LabelId(1)),
+        ]
+        .into_iter()
+        .map(|(id, label)| {
+            (
+                NodeId(id),
+                NodeRecord {
+                    id: NodeId(id),
+                    labels: BTreeSet::from([label]),
+                    properties: BTreeMap::new(),
+                },
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+        let relationships = [(0, 0, 10), (1, 0, 11), (2, 1, 11), (3, 1, 12), (4, 1, 12)]
+            .into_iter()
+            .map(|(id, source, target)| {
+                (
+                    RelId(id),
+                    RelRecord {
+                        id: RelId(id),
+                        source: NodeId(source),
+                        target: NodeId(target),
+                        rel_type: RelTypeId(0),
+                        properties: BTreeMap::new(),
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        let statistics = compute_statistics(&nodes, &relationships, 1);
+        let path = (LabelId(0), RelTypeId(0), LabelId(1));
+
+        assert_eq!(statistics.path_counts.get(&path), Some(&5));
+        assert_eq!(statistics.path_source_distinct_counts.get(&path), Some(&2));
+        assert_eq!(statistics.path_target_distinct_counts.get(&path), Some(&3));
     }
 
     #[test]

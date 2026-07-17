@@ -1890,6 +1890,8 @@ pub struct OptimizerCatalog {
     rel_type_source_counts: BTreeMap<String, u64>,
     rel_type_target_counts: BTreeMap<String, u64>,
     path_counts: BTreeMap<(String, String, String), u64>,
+    path_source_distinct_counts: BTreeMap<(String, String, String), u64>,
+    path_target_distinct_counts: BTreeMap<(String, String, String), u64>,
     bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     property_distinct_counts: BTreeMap<(String, String), u64>,
     rel_property_distinct_counts: BTreeMap<(String, String), u64>,
@@ -1912,6 +1914,8 @@ pub struct OptimizerCatalogStatistics {
     rel_type_source_counts: BTreeMap<String, u64>,
     rel_type_target_counts: BTreeMap<String, u64>,
     path_counts: BTreeMap<(String, String, String), u64>,
+    path_source_distinct_counts: BTreeMap<(String, String, String), u64>,
+    path_target_distinct_counts: BTreeMap<(String, String, String), u64>,
     bounded_path_counts: BTreeMap<(String, String, String, usize), u64>,
     property_distinct_counts: BTreeMap<(String, String), u64>,
     rel_property_distinct_counts: BTreeMap<(String, String), u64>,
@@ -1995,6 +1999,8 @@ impl OptimizerCatalog {
             rel_type_source_counts: statistics.rel_type_source_counts,
             rel_type_target_counts: statistics.rel_type_target_counts,
             path_counts: statistics.path_counts,
+            path_source_distinct_counts: statistics.path_source_distinct_counts,
+            path_target_distinct_counts: statistics.path_target_distinct_counts,
             bounded_path_counts: statistics.bounded_path_counts,
             property_distinct_counts: statistics.property_distinct_counts,
             rel_property_distinct_counts: statistics.rel_property_distinct_counts,
@@ -2060,6 +2066,36 @@ impl OptimizerCatalog {
 
     fn relationship_count(&self, rel_type: &str) -> u64 {
         self.rel_type_counts.get(rel_type).copied().unwrap_or(1)
+    }
+
+    fn path_source_distinct_count(
+        &self,
+        source_label: &str,
+        rel_type: &str,
+        target_label: &str,
+    ) -> Option<u64> {
+        self.path_source_distinct_counts
+            .get(&(
+                source_label.to_string(),
+                rel_type.to_string(),
+                target_label.to_string(),
+            ))
+            .copied()
+    }
+
+    fn path_target_distinct_count(
+        &self,
+        source_label: &str,
+        rel_type: &str,
+        target_label: &str,
+    ) -> Option<u64> {
+        self.path_target_distinct_counts
+            .get(&(
+                source_label.to_string(),
+                rel_type.to_string(),
+                target_label.to_string(),
+            ))
+            .copied()
     }
 
     fn distinct_count(&self, label: &str, property: &str) -> u64 {
@@ -2440,6 +2476,8 @@ impl OptimizerCatalogStatistics {
             rel_type_source_counts: rel_type_source_counts.into_iter().collect(),
             rel_type_target_counts: BTreeMap::new(),
             path_counts: path_counts.into_iter().collect(),
+            path_source_distinct_counts: BTreeMap::new(),
+            path_target_distinct_counts: BTreeMap::new(),
             bounded_path_counts: bounded_path_counts.into_iter().collect(),
             property_distinct_counts: property_distinct_counts.into_iter().collect(),
             rel_property_distinct_counts: BTreeMap::new(),
@@ -2461,6 +2499,22 @@ impl OptimizerCatalogStatistics {
         rel_type_target_counts: impl IntoIterator<Item = (String, u64)>,
     ) -> Self {
         self.rel_type_target_counts = rel_type_target_counts.into_iter().collect();
+        self
+    }
+
+    pub fn with_path_source_distinct_counts(
+        mut self,
+        path_source_distinct_counts: impl IntoIterator<Item = ((String, String, String), u64)>,
+    ) -> Self {
+        self.path_source_distinct_counts = path_source_distinct_counts.into_iter().collect();
+        self
+    }
+
+    pub fn with_path_target_distinct_counts(
+        mut self,
+        path_target_distinct_counts: impl IntoIterator<Item = ((String, String, String), u64)>,
+    ) -> Self {
+        self.path_target_distinct_counts = path_target_distinct_counts.into_iter().collect();
         self
     }
 
@@ -4360,8 +4414,10 @@ fn estimate_aggregate_work_rows(
             }
             match &item.target {
                 AggregateTarget::Variable(variable) => {
-                    if let Some(label) = physical_plan_node_label(input, variable) {
-                        Some(catalog.label_count(label))
+                    if let Some(distinct_count) =
+                        physical_plan_node_variable_distinct_count(input, variable, catalog)
+                    {
+                        Some(distinct_count)
                     } else {
                         physical_plan_relationship_type(input, variable)
                             .map(|rel_type| catalog.relationship_count(rel_type))
@@ -4385,6 +4441,51 @@ fn estimate_aggregate_work_rows(
         });
 
     input_rows.saturating_add(distinct_property_work)
+}
+
+fn physical_plan_node_variable_distinct_count(
+    plan: &PhysicalPlan,
+    variable: &str,
+    catalog: &OptimizerCatalog,
+) -> Option<u64> {
+    match plan {
+        PhysicalPlan::AdjacencyExpandExec {
+            source_variable,
+            source_label,
+            rel_type,
+            target_variable,
+            target_label,
+            input,
+            ..
+        } => {
+            if source_variable == variable {
+                catalog
+                    .path_source_distinct_count(source_label, rel_type, target_label)
+                    .or_else(|| Some(catalog.label_count(source_label)))
+            } else if target_variable == variable {
+                catalog
+                    .path_target_distinct_count(source_label, rel_type, target_label)
+                    .or_else(|| Some(catalog.label_count(target_label)))
+            } else {
+                physical_plan_node_variable_distinct_count(input, variable, catalog)
+            }
+        }
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            physical_plan_node_variable_distinct_count(left, variable, catalog)
+                .or_else(|| physical_plan_node_variable_distinct_count(right, variable, catalog))
+        }
+        PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::NodeColumnLookupExec { input, .. }
+        | PhysicalPlan::OptionalDegreeExec { input, .. }
+        | PhysicalPlan::AggregateExec { input, .. }
+        | PhysicalPlan::DistinctExec { input }
+        | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. } => {
+            physical_plan_node_variable_distinct_count(input, variable, catalog)
+        }
+        _ => physical_plan_node_label(plan, variable).map(|label| catalog.label_count(label)),
+    }
 }
 
 fn estimate_id_in_rows(values: &[Value], input_rows: u64) -> u64 {
@@ -7456,6 +7557,88 @@ mod tests {
             PlanCost {
                 estimated_rows: 5,
                 cost: 3_004,
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_distinct_variable_targets_use_path_target_coverage() {
+        let logical = LogicalPlan::Aggregate {
+            group_keys: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "unit_type".to_string(),
+                },
+                name: "unit_type".to_string(),
+            }],
+            items: vec![Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::Variable("e".to_string()),
+                distinct: true,
+                name: "entity_count".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "m".to_string(),
+                source_label: "Memory".to_string(),
+                rel_variable: None,
+                rel_type: "MENTIONS".to_string(),
+                rel_properties: BTreeMap::new(),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "e".to_string(),
+                target_label: "Entity".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000), ("Entity".to_string(), 5_000)],
+                [("MENTIONS".to_string(), 1_000)],
+                [("MENTIONS".to_string(), 1_000)],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                    ),
+                    1_000,
+                )],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                        1,
+                    ),
+                    1_000,
+                )],
+                [(("Memory".to_string(), "unit_type".to_string()), 5)],
+                [],
+            )
+            .with_path_target_distinct_counts([(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                ),
+                12,
+            )]),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 5,
+                cost: 4_016,
             }
         );
     }

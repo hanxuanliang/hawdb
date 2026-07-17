@@ -280,13 +280,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: community_synthesized_source_coverage_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1,
-                cost: 29,
+                cost: 24,
             },
             fingerprint_contains: "AggregateExec",
             decision_contains: &[
                 "choose IndexNodeSeek for Community.id",
                 "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
-                "selected physical plan cost: estimated_rows=1 cost=29",
+                "selected physical plan cost: estimated_rows=1 cost=24",
             ],
         },
         OptimizerSmokeCase {
@@ -295,13 +295,13 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             catalog: community_synthesized_source_coverage_catalog(),
             expected_cost: PlanCost {
                 estimated_rows: 1,
-                cost: 37,
+                cost: 32,
             },
             fingerprint_contains: "ExpressionEq(column(7:covered)=int:3)",
             decision_contains: &[
                 "choose IndexNodeSeek for Community.id",
                 "estimate AdjacencyExpand for Community-[:SYNTHESIZED_FROM*1..1]->Source",
-                "selected physical plan cost: estimated_rows=1 cost=37",
+                "selected physical plan cost: estimated_rows=1 cost=32",
             ],
         },
         OptimizerSmokeCase {
@@ -1465,7 +1465,15 @@ fn community_synthesized_source_coverage_catalog() -> OptimizerCatalog {
             )],
             [(("Community".to_string(), "id".to_string()), 5_000)],
             [],
-        ),
+        )
+        .with_path_target_distinct_counts([(
+            (
+                "Community".to_string(),
+                "SYNTHESIZED_FROM".to_string(),
+                "Source".to_string(),
+            ),
+            3,
+        )]),
     )
 }
 

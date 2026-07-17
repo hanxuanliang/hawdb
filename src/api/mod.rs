@@ -4221,6 +4221,30 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
             ))
         },
     );
+    let path_source_distinct_counts = statistics.path_source_distinct_counts.iter().filter_map(
+        |((source_label_id, rel_type_id, target_label_id), count)| {
+            Some((
+                (
+                    catalog.label_name(*source_label_id)?.to_string(),
+                    catalog.rel_type_name(*rel_type_id)?.to_string(),
+                    catalog.label_name(*target_label_id)?.to_string(),
+                ),
+                *count,
+            ))
+        },
+    );
+    let path_target_distinct_counts = statistics.path_target_distinct_counts.iter().filter_map(
+        |((source_label_id, rel_type_id, target_label_id), count)| {
+            Some((
+                (
+                    catalog.label_name(*source_label_id)?.to_string(),
+                    catalog.rel_type_name(*rel_type_id)?.to_string(),
+                    catalog.label_name(*target_label_id)?.to_string(),
+                ),
+                *count,
+            ))
+        },
+    );
     let bounded_path_counts = statistics.bounded_path_counts.iter().filter_map(
         |((source_label_id, rel_type_id, target_label_id, hops), count)| {
             Some((
@@ -4283,6 +4307,8 @@ fn optimizer_catalog(catalog: &Catalog, statistics: &GraphStatistics) -> Optimiz
             property_histograms,
         )
         .with_relationship_type_target_counts(rel_type_target_counts)
+        .with_path_source_distinct_counts(path_source_distinct_counts)
+        .with_path_target_distinct_counts(path_target_distinct_counts)
         .with_relationship_property_distinct_counts(rel_property_distinct_counts)
         .with_relationship_property_histograms(rel_property_histograms),
     )

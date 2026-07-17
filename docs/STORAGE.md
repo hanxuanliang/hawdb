@@ -228,8 +228,9 @@ bounded background/scheduled wrappers that bind QoS admission to the same
 descriptor rebuild budget. Conjunctive range seeks keep the complete `AND`
 predicate as a residual filter while using merged lower and upper bounds as the
 access path. Statistics now include per-label/property and
-per-relationship-type/property distinct counts, bounded sorted value histograms,
-and exact-versus-sampled markers. Histograms use deterministic adaptive samples:
+per-relationship-type/property distinct counts, one-hop path source/target
+coverage distinct counts, bounded sorted value histograms, and
+exact-versus-sampled markers. Histograms use deterministic adaptive samples:
 small distinct sets remain exact, medium sets keep up to 256 values, and large
 sets keep up to 512 values while always retaining the minimum and maximum
 sampled bounds. Range costing uses these histograms for selectivity estimates.
@@ -487,6 +488,7 @@ aligned with the intended Adaptive Native Graph Store.
    storage API already exposes ordered adjacency entries and sparse/dense group
    classification over the current in-memory adjacency indexes.
 4. Add property spill blocks for large values.
-5. Add richer index statistics and text analyzer parity.
+5. Add richer index statistics beyond one-hop path source/target coverage and
+   text analyzer parity.
 6. Add richer caller-owned blob/content parser integration at the boundary
    outside the graph kernel.

@@ -130,6 +130,8 @@ pub struct GraphStatistics {
     pub rel_type_source_counts: BTreeMap<RelTypeId, u64>,
     pub rel_type_target_counts: BTreeMap<RelTypeId, u64>,
     pub path_counts: BTreeMap<(LabelId, RelTypeId, LabelId), u64>,
+    pub path_source_distinct_counts: BTreeMap<(LabelId, RelTypeId, LabelId), u64>,
+    pub path_target_distinct_counts: BTreeMap<(LabelId, RelTypeId, LabelId), u64>,
     pub bounded_path_counts: BTreeMap<(LabelId, RelTypeId, LabelId, usize), u64>,
     pub property_distinct_counts: BTreeMap<(LabelId, String), u64>,
     pub rel_property_distinct_counts: BTreeMap<(RelTypeId, String), u64>,
