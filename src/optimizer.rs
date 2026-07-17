@@ -3714,7 +3714,9 @@ fn order_single_row_cartesian_product_children(
 ) -> (PhysicalPlan, PhysicalPlan) {
     let left_cost = estimate_physical_plan_cost(&left, catalog);
     let right_cost = estimate_physical_plan_cost(&right, catalog);
-    if left_cost.estimated_rows != 1 || right_cost.estimated_rows != 1 {
+    if !cartesian_product_leaves_are_single_row(catalog, &left)
+        || !cartesian_product_leaves_are_single_row(catalog, &right)
+    {
         decisions.push(format!(
             "keep NodeCartesianProduct input order: left_rows={} right_rows={} reason=non_single_row_input",
             left_cost.estimated_rows, right_cost.estimated_rows
@@ -3722,23 +3724,88 @@ fn order_single_row_cartesian_product_children(
         return (left, right);
     }
 
-    let left_fingerprint = left.fingerprint();
-    let right_fingerprint = right.fingerprint();
-    let should_swap =
-        (right_cost.cost, right_fingerprint.as_str()) < (left_cost.cost, left_fingerprint.as_str());
-    if should_swap {
+    let mut leaves = Vec::new();
+    collect_cartesian_product_leaves(left, &mut leaves);
+    collect_cartesian_product_leaves(right, &mut leaves);
+
+    let mut keyed_leaves = leaves
+        .into_iter()
+        .map(|plan| {
+            let cost = estimate_physical_plan_cost(&plan, catalog);
+            let fingerprint = plan.fingerprint();
+            (cost, fingerprint, plan)
+        })
+        .collect::<Vec<_>>();
+
+    let original_order = keyed_leaves
+        .iter()
+        .map(|(cost, fingerprint, _)| format!("{}:{}", cost.cost, fingerprint))
+        .collect::<Vec<_>>()
+        .join("|");
+    keyed_leaves.sort_by(
+        |(left_cost, left_fingerprint, _), (right_cost, right_fingerprint, _)| {
+            (left_cost.cost, left_fingerprint).cmp(&(right_cost.cost, right_fingerprint))
+        },
+    );
+    let ordered = keyed_leaves
+        .iter()
+        .map(|(cost, fingerprint, _)| format!("{}:{}", cost.cost, fingerprint))
+        .collect::<Vec<_>>()
+        .join("|");
+    if original_order == ordered {
         decisions.push(format!(
-            "swap NodeCartesianProduct input order: left_cost={} right_cost={} left_fingerprint={} right_fingerprint={}",
-            left_cost.cost, right_cost.cost, left_fingerprint, right_fingerprint
+            "keep NodeCartesianProduct single-row input order: inputs={} order={ordered}",
+            keyed_leaves.len()
         ));
-        (right, left)
     } else {
         decisions.push(format!(
-            "keep NodeCartesianProduct input order: left_cost={} right_cost={} left_fingerprint={} right_fingerprint={}",
-            left_cost.cost, right_cost.cost, left_fingerprint, right_fingerprint
+            "order NodeCartesianProduct single-row inputs: inputs={} original={original_order} ordered={ordered}",
+            keyed_leaves.len()
         ));
-        (left, right)
     }
+
+    let mut ordered_plans = keyed_leaves.into_iter().map(|(_, _, plan)| plan);
+    let left = ordered_plans
+        .next()
+        .expect("cartesian product has left input");
+    let right = rebuild_cartesian_product(ordered_plans);
+    (left, right)
+}
+
+fn cartesian_product_leaves_are_single_row(
+    catalog: &OptimizerCatalog,
+    plan: &PhysicalPlan,
+) -> bool {
+    match plan {
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            cartesian_product_leaves_are_single_row(catalog, left)
+                && cartesian_product_leaves_are_single_row(catalog, right)
+        }
+        plan => estimate_physical_plan_cost(plan, catalog).estimated_rows == 1,
+    }
+}
+
+fn collect_cartesian_product_leaves(plan: PhysicalPlan, leaves: &mut Vec<PhysicalPlan>) {
+    match plan {
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            collect_cartesian_product_leaves(*left, leaves);
+            collect_cartesian_product_leaves(*right, leaves);
+        }
+        plan => leaves.push(plan),
+    }
+}
+
+fn rebuild_cartesian_product(plans: impl IntoIterator<Item = PhysicalPlan>) -> PhysicalPlan {
+    let mut plans = plans.into_iter();
+    let first = plans
+        .next()
+        .expect("cartesian product rebuild requires at least one input");
+    plans.fold(first, |left, right| {
+        PhysicalPlan::NodeCartesianProductExec {
+            left: Box::new(left),
+            right: Box::new(right),
+        }
+    })
 }
 
 fn push_cartesian_product_cost_decision(
@@ -5530,7 +5597,7 @@ mod tests {
             .optimize_with_catalog(&logical, &catalog);
 
         assert!(trace.decisions.iter().any(|decision| {
-            decision.starts_with("keep NodeCartesianProduct input order: left_cost=3 right_cost=3")
+            decision.starts_with("keep NodeCartesianProduct single-row input order: inputs=2")
         }));
         assert!(trace.decisions.iter().any(|decision| {
             decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=3 cost=7"
@@ -5609,7 +5676,7 @@ mod tests {
             .optimize_with_catalog(&logical, &catalog);
 
         assert!(trace.decisions.iter().any(|decision| {
-            decision.starts_with("swap NodeCartesianProduct input order: left_cost=5 right_cost=3")
+            decision.starts_with("order NodeCartesianProduct single-row inputs: inputs=2")
         }));
         assert!(trace.decisions.iter().any(|decision| {
             decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=5 cost=9"
@@ -5622,6 +5689,185 @@ mod tests {
             PlanCost {
                 estimated_rows: 1,
                 cost: 9,
+            }
+        );
+    }
+
+    #[test]
+    fn cartesian_product_orders_nested_single_row_inputs() {
+        let logical = LogicalPlan::NodeCartesianProduct {
+            left: Box::new(LogicalPlan::NodeCartesianProduct {
+                left: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::And(vec![
+                        Predicate::PropertyEq {
+                            variable: "m".to_string(),
+                            property: "id".to_string(),
+                            value: Value::String("memory-42".to_string()),
+                        },
+                        Predicate::PropertyEq {
+                            variable: "m".to_string(),
+                            property: "kind".to_string(),
+                            value: Value::String("note".to_string()),
+                        },
+                    ]),
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "m".to_string(),
+                        label: "Memory".to_string(),
+                    }),
+                }),
+                right: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyEq {
+                        variable: "s".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("source-42".to_string()),
+                    },
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "s".to_string(),
+                        label: "Source".to_string(),
+                    }),
+                }),
+            }),
+            right: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "e".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("entity-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "e".to_string(),
+                    label: "Entity".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new(
+                [
+                    ("Entity".to_string(), "id".to_string()),
+                    ("Source".to_string(), "id".to_string()),
+                ],
+                [(
+                    "Memory".to_string(),
+                    vec!["id".to_string(), "kind".to_string()],
+                )],
+                [],
+                [],
+            ),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Entity".to_string(), 50_000),
+                    ("Memory".to_string(), 10_000),
+                    ("Source".to_string(), 1_000),
+                ],
+                [],
+                [],
+                [],
+                [],
+                [
+                    (("Entity".to_string(), "id".to_string()), 50_000),
+                    (("Memory".to_string(), "id".to_string()), 10_000),
+                    (("Memory".to_string(), "kind".to_string()), 2),
+                    (("Source".to_string(), "id".to_string()), 1_000),
+                ],
+                [],
+            ),
+        );
+
+        let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 32 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert!(trace.decisions.iter().any(|decision| {
+            decision.starts_with("order NodeCartesianProduct single-row inputs: inputs=3")
+        }));
+        assert!(trace.decisions.iter().any(|decision| {
+            decision == "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=9 cost=13"
+        }));
+        let fingerprint = plan.fingerprint();
+        assert!(fingerprint.contains("NodeCartesianProductExec(IndexNodeSeek(1:e:6:Entity"));
+        assert!(fingerprint.contains("IndexNodeSeek(1:s:6:Source"));
+        assert!(fingerprint.contains("FilterExec(And(PropertyEq(1:m.2:id=string:9:memory-42)"));
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 1,
+                cost: 13,
+            }
+        );
+    }
+
+    #[test]
+    fn cartesian_product_keeps_nested_multi_row_inputs() {
+        let logical = LogicalPlan::NodeCartesianProduct {
+            left: Box::new(LogicalPlan::NodeCartesianProduct {
+                left: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+                right: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyEq {
+                        variable: "s".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("source-42".to_string()),
+                    },
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "s".to_string(),
+                        label: "Source".to_string(),
+                    }),
+                }),
+            }),
+            right: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "e".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("entity-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "e".to_string(),
+                    label: "Entity".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new(
+                [
+                    ("Entity".to_string(), "id".to_string()),
+                    ("Source".to_string(), "id".to_string()),
+                ],
+                [],
+                [],
+                [],
+            ),
+            OptimizerCatalogStatistics::new(
+                [
+                    ("Entity".to_string(), 50_000),
+                    ("Memory".to_string(), 10),
+                    ("Source".to_string(), 1_000),
+                ],
+                [],
+                [],
+                [],
+                [],
+                [
+                    (("Entity".to_string(), "id".to_string()), 50_000),
+                    (("Source".to_string(), "id".to_string()), 1_000),
+                ],
+                [],
+            ),
+        );
+
+        let (plan, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 32 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert!(trace.decisions.iter().any(|decision| {
+            decision == "keep NodeCartesianProduct input order: left_rows=10 right_rows=1 reason=non_single_row_input"
+        }));
+        assert!(plan.fingerprint().starts_with(
+            "NodeCartesianProductExec(NodeCartesianProductExec(SeqNodeScan(1:m:6:Memory)"
+        ));
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 10,
+                cost: 40,
             }
         );
     }

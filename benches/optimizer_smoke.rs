@@ -232,6 +232,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=1 cost=8",
             ],
         },
+        OptimizerSmokeCase {
+            name: "nested_endpoint_existence_cartesian_product",
+            logical: nested_endpoint_existence_cartesian_product_plan(),
+            catalog: nested_endpoint_existence_cartesian_product_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 14,
+            },
+            fingerprint_contains: "NodeCartesianProductExec(IndexNodeSeek(1:e:6:Entity",
+            decision_contains: &[
+                "order NodeCartesianProduct single-row inputs: inputs=3",
+                "estimate NodeCartesianProduct: left_rows=1 right_rows=1 output_rows=1 left_cost=3 right_cost=9 cost=13",
+                "selected physical plan cost: estimated_rows=1 cost=14",
+            ],
+        },
     ]
 }
 
@@ -851,6 +866,94 @@ fn endpoint_existence_cartesian_product_catalog() -> OptimizerCatalog {
             [],
             [
                 (("Memory".to_string(), "id".to_string()), 10_000),
+                (("Source".to_string(), "id".to_string()), 1_000),
+            ],
+            [],
+        ),
+    )
+}
+
+fn nested_endpoint_existence_cartesian_product_plan() -> LogicalPlan {
+    LogicalPlan::Project {
+        items: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "m".to_string(),
+                property: "id".to_string(),
+            },
+            name: "memory_id".to_string(),
+        }],
+        input: Box::new(LogicalPlan::NodeCartesianProduct {
+            left: Box::new(LogicalPlan::NodeCartesianProduct {
+                left: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::And(vec![
+                        Predicate::PropertyEq {
+                            variable: "m".to_string(),
+                            property: "id".to_string(),
+                            value: Value::String("memory-42".to_string()),
+                        },
+                        Predicate::PropertyEq {
+                            variable: "m".to_string(),
+                            property: "kind".to_string(),
+                            value: Value::String("note".to_string()),
+                        },
+                    ]),
+                    input: Box::new(memory_scan()),
+                }),
+                right: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyEq {
+                        variable: "s".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("source-42".to_string()),
+                    },
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "s".to_string(),
+                        label: "Source".to_string(),
+                    }),
+                }),
+            }),
+            right: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "e".to_string(),
+                    property: "id".to_string(),
+                    value: Value::String("entity-42".to_string()),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "e".to_string(),
+                    label: "Entity".to_string(),
+                }),
+            }),
+        }),
+    }
+}
+
+fn nested_endpoint_existence_cartesian_product_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [
+                ("Entity".to_string(), "id".to_string()),
+                ("Source".to_string(), "id".to_string()),
+            ],
+            [(
+                "Memory".to_string(),
+                vec!["id".to_string(), "kind".to_string()],
+            )],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Entity".to_string(), 50_000),
+                ("Memory".to_string(), 10_000),
+                ("Source".to_string(), 1_000),
+            ],
+            [],
+            [],
+            [],
+            [],
+            [
+                (("Entity".to_string(), "id".to_string()), 50_000),
+                (("Memory".to_string(), "id".to_string()), 10_000),
+                (("Memory".to_string(), "kind".to_string()), 2),
                 (("Source".to_string(), "id".to_string()), 1_000),
             ],
             [],
