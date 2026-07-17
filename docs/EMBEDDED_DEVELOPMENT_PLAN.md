@@ -612,8 +612,11 @@ current dry-run estimate to the `Mutation` background lane before advancing
 schema descriptors or appending maintenance WAL. The lower-level
 `run_background_schema_maintenance` and
 `run_scheduled_background_schema_maintenance` variants remain available when a
-caller has its own estimate. These wrappers preserve the existing single-batch
-validation semantics and only add admission/accounting. Content
+caller has its own estimate. `Database::schema_maintenance_background_work_plan`
+also lets caller-owned loops rank pending schema maintenance beside projection,
+import, analytics, and shadow work before admission. These wrappers preserve the
+existing single-batch validation semantics and only add
+admission/accounting. Content
 artifact jobs are scheduled at the same boundary; callers can attach structured
 job payloads for object
 references, checksums, parser hints, and projection targets. The default

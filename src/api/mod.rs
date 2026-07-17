@@ -8,7 +8,8 @@ use crate::optimizer::{
 };
 use crate::planner;
 use crate::qos::{
-    LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+    BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
+    QosAdmission, WorkClass, WorkRequest,
 };
 use crate::schema::{
     Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics, IndexDescriptor,
@@ -993,6 +994,21 @@ impl Database {
             })
             .collect();
         QueryOutput { rows }
+    }
+
+    pub fn schema_maintenance_background_work_plan(
+        &self,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let estimated_operations = self.schema_maintenance_estimated_operations();
+        if estimated_operations == 0 {
+            return None;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Mutation,
+            estimated_operations,
+            hint,
+        ))
     }
 
     pub fn run_schema_maintenance(&mut self) -> Result<QueryOutput> {

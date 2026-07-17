@@ -332,10 +332,14 @@ requests.
 Callers that maintain their own background loop can build a
 `BackgroundWorkPlan` with `BackgroundWorkHint` signals for active topic,
 recent delta size, query probability, staleness TTL, freshness SLO, and tenant
-budget. `LocalQosPolicy::evaluate_background_work` returns the existing
-admission result plus a deterministic expected-value score and reasons, so the
-caller can rank or skip internal background work without moving queue ownership
-into Skein. `LocalQosPolicy::rank_background_work` and the matching
+budget. Schema maintenance can join the same caller-owned candidate list
+through `Database::schema_maintenance_background_work_plan`, which returns a
+`Mutation` background work plan using the current dry-run estimate when
+descriptor maintenance is pending.
+`LocalQosPolicy::evaluate_background_work` returns the existing admission result
+plus a deterministic expected-value score and reasons, so the caller can rank or
+skip internal background work without moving queue ownership into Skein.
+`LocalQosPolicy::rank_background_work` and the matching
 `LocalQosScheduler` method apply the same evaluation to a caller-owned candidate
 list, sort admitted work before deferred/rejected work, then sort by score and
 original index for deterministic polling loops.

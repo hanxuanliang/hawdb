@@ -7,7 +7,7 @@ use super::{
     RecoveryMode, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
-use crate::qos::{LocalQosPolicy, LocalQosScheduler, LocalQosState};
+use crate::qos::{BackgroundWorkHint, LocalQosPolicy, LocalQosScheduler, LocalQosState};
 use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
 };
@@ -3287,6 +3287,53 @@ fn schema_maintenance_plan_estimates_relationship_table_validation_work() {
             plan.rows[0].get("estimated_operations"),
             Some(&Value::Int(2))
         );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn schema_maintenance_background_work_plan_is_absent_without_pending_work() {
+    let db = Database::new();
+
+    assert!(db
+        .schema_maintenance_background_work_plan(BackgroundWorkHint::default())
+        .is_none());
+}
+
+#[test]
+fn schema_maintenance_background_work_plan_uses_pending_estimate_for_ranking() {
+    let path = unique_test_dir("schema_maintenance_background_plan");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1})").unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        db.query("CREATE PROPERTY ON NODE TABLE Memory(id) TYPE INT NOT NULL")
+            .unwrap();
+        db.query("ALTER PROPERTY ON NODE TABLE Memory(id) SET STATE BACKFILL")
+            .unwrap();
+
+        let plan = db
+            .schema_maintenance_background_work_plan(BackgroundWorkHint {
+                active_topic: true,
+                query_probability_per_million: 250_000,
+                ..BackgroundWorkHint::default()
+            })
+            .unwrap();
+
+        assert_eq!(plan.request.class, crate::WorkClass::Mutation);
+        assert_eq!(plan.request.estimated_operations, 2);
+
+        let ranked =
+            LocalQosPolicy::default().rank_background_work(&LocalQosState::default(), &[plan]);
+
+        assert_eq!(ranked.len(), 1);
+        assert_eq!(ranked[0].index, 0);
+        assert!(ranked[0]
+            .decision
+            .reasons
+            .iter()
+            .any(|reason| reason == "active topic"));
     }
     std::fs::remove_dir_all(path).unwrap();
 }
