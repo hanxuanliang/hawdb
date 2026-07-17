@@ -585,8 +585,11 @@ all projection-relevant changes through that epoch, so retrieval diagnostics can
 distinguish a fresh incremental projection from a partial one. Delta apply
 reports include the source graph commit epoch before and after the update plus a
 boolean indicating whether this delta advanced the projection freshness
-watermark. This keeps FTS/vector projection maintenance incremental without
-writing search state into the graph WAL.
+watermark. Freshness-aware background work plans can derive recent delta
+operations and source graph commit lag from the caller-owned projection, letting
+the QoS ranker prioritize stale graph-derived projection maintenance by expected
+value. This keeps FTS/vector projection maintenance incremental without writing
+search state into the graph WAL.
 
 Typed knowledge operations can bypass the search projection entirely when the
 caller already has graph identity. `Database::knowledge_entity` returns a

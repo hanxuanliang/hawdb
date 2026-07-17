@@ -358,6 +358,31 @@ fn database_facade_builds_search_projection_delta_from_graph_nodes() {
     assert_eq!(plan.request.class, WorkClass::Projection);
     assert_eq!(plan.request.estimated_operations, 2);
 
+    let freshness_plan = db
+        .search_projection_graph_delta_freshness_background_work_plan(
+            &search_index,
+            &request,
+            BackgroundWorkHint {
+                query_probability_per_million: 100_000,
+                ..BackgroundWorkHint::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(freshness_plan.request.class, WorkClass::Projection);
+    assert_eq!(freshness_plan.request.estimated_operations, 2);
+    assert_eq!(freshness_plan.hint.recent_delta_operations, 2);
+    assert_eq!(
+        freshness_plan.hint.source_graph_commit_lag,
+        db.store.commit_epoch()
+    );
+    let ranked = LocalQosPolicy::default()
+        .rank_background_work(&LocalQosState::default(), &[freshness_plan]);
+    assert!(ranked[0]
+        .decision
+        .reasons
+        .iter()
+        .any(|reason| reason == "source graph commit lag 1"));
+
     let report = db
         .apply_search_projection_graph_delta(&mut search_index, request)
         .unwrap();

@@ -27,6 +27,7 @@ pub struct WorkRequest {
 pub struct BackgroundWorkHint {
     pub active_topic: bool,
     pub recent_delta_operations: usize,
+    pub source_graph_commit_lag: u64,
     pub query_probability_per_million: u32,
     pub staleness_millis: u64,
     pub staleness_ttl_millis: Option<u64>,
@@ -162,6 +163,15 @@ impl BackgroundWorkHint {
             reasons.push(format!(
                 "recent delta operations {}",
                 self.recent_delta_operations
+            ));
+        }
+
+        let source_graph_commit_lag_score = self.source_graph_commit_lag.min(1_000_000);
+        if source_graph_commit_lag_score > 0 {
+            score = score.saturating_add(source_graph_commit_lag_score);
+            reasons.push(format!(
+                "source graph commit lag {}",
+                self.source_graph_commit_lag
             ));
         }
 
@@ -494,6 +504,7 @@ mod tests {
             active_topic: true,
             query_probability_per_million: 800_000,
             recent_delta_operations: 20,
+            source_graph_commit_lag: 3,
             staleness_millis: 6_000,
             staleness_ttl_millis: Some(1_000),
             freshness_slo_millis: Some(5_000),
@@ -512,6 +523,10 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason.contains("active topic")));
+        assert!(decision
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("source graph commit lag 3")));
         assert!(decision
             .reasons
             .iter()

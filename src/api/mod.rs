@@ -1328,6 +1328,22 @@ impl Database {
         request.background_work_plan(hint)
     }
 
+    pub fn search_projection_graph_delta_freshness_background_work_plan(
+        &self,
+        search_index: &SearchIndex,
+        request: &SearchProjectionGraphDeltaRequest,
+        mut hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        if hint.recent_delta_operations == 0 {
+            hint.recent_delta_operations = request.operation_count();
+        }
+        if hint.source_graph_commit_lag == 0 {
+            hint.source_graph_commit_lag =
+                search_projection_commit_lag(search_index, self.store.commit_epoch());
+        }
+        request.background_work_plan(hint)
+    }
+
     pub fn build_search_projection_graph_delta(
         &self,
         request: &SearchProjectionGraphDeltaRequest,
@@ -3213,6 +3229,15 @@ fn search_projection_graph_delta_for(
         max_operations: request.max_operations,
         source_graph_commit_epoch: request.complete_through_graph_commit_epoch,
     })
+}
+
+fn search_projection_commit_lag(search_index: &SearchIndex, graph_commit_epoch: u64) -> u64 {
+    graph_commit_epoch.saturating_sub(
+        search_index
+            .projection_freshness()
+            .source_graph_commit_epoch
+            .unwrap_or(0),
+    )
 }
 
 fn knowledge_entity_from_node(catalog: &Catalog, node: &NodeRecord) -> KnowledgeEntity {
