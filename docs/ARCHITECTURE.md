@@ -480,8 +480,10 @@ record graph-seed limit truncation.
 `KnowledgeCandidate` then projects returned search hits and graph-native seeds
 into one application-facing candidate surface. Each candidate records its source
 leg, source-local rank, merged source legs, combined score, score breakdown,
-optional canonical entity snapshot, optional search evidence summary, matched
-projection spans, matched graph properties, and graph-context path count.
+optional canonical node ID, optional canonical entity snapshot, optional search
+evidence summary, matched projection spans, matched graph properties, and
+graph-context path count. The canonical node ID is explicit so callers do not
+treat search projection hit IDs as stable graph identity.
 Search-hit and graph-seed
 candidates that resolve to the same canonical node are merged by graph identity,
 with the search hit kept as the primary leg and the graph seed recorded in

@@ -430,6 +430,7 @@ pub struct KnowledgeRetrieverCandidate {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeCandidate {
     pub id: String,
+    pub canonical_node_id: Option<u64>,
     pub source: KnowledgeCandidateSource,
     pub source_rank: usize,
     pub merged_sources: Vec<KnowledgeCandidateSource>,
@@ -1459,6 +1460,7 @@ impl Database {
                     knowledge_candidate_score_breakdown(Some(hit.score), None, scoring);
                 KnowledgeCandidate {
                     id: hit.id.clone(),
+                    canonical_node_id: evidence.canonical_node_id,
                     source: KnowledgeCandidateSource::SearchHit,
                     source_rank: index + 1,
                     merged_sources: vec![KnowledgeCandidateSource::SearchHit],
@@ -1512,6 +1514,7 @@ impl Database {
                 knowledge_candidate_score_breakdown(None, Some(seed.score), scoring);
             candidates.push(KnowledgeCandidate {
                 id: seed_candidate_id,
+                canonical_node_id: Some(seed.entity.node_id),
                 source: KnowledgeCandidateSource::GraphSeed,
                 source_rank: index + 1,
                 merged_sources: vec![KnowledgeCandidateSource::GraphSeed],
@@ -4283,6 +4286,7 @@ mod tests {
         );
         assert_eq!(output.candidates[0].source_rank, 1);
         assert_eq!(output.candidates[0].id, output.search.hits[0].id);
+        assert_eq!(output.candidates[0].canonical_node_id, Some(0));
         assert_eq!(
             output.candidates[0].merged_sources,
             vec![
@@ -4367,6 +4371,7 @@ mod tests {
             KnowledgeCandidateSource::GraphSeed
         );
         assert_eq!(output.candidates[1].source_rank, 2);
+        assert_eq!(output.candidates[1].canonical_node_id, Some(2));
         assert!(output.candidates[1].evidence.is_none());
         assert_eq!(
             output.candidates[1].entity.as_ref().unwrap(),
