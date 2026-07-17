@@ -399,6 +399,8 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_seed_candidate_count: usize,
     pub graph_seed_returned_count: usize,
     pub graph_seed_limit: usize,
+    pub graph_seed_truncated: bool,
+    pub graph_seed_truncation_reasons: Vec<String>,
     pub graph_context_path_count: usize,
     pub graph_context_limit: usize,
     pub graph_context_max_hops: usize,
@@ -1783,6 +1785,11 @@ fn knowledge_retrieval_diagnostics(
         input.candidate_count,
         request.candidate_limit,
     );
+    let graph_seed_truncation_reasons = knowledge_graph_seed_truncation_reasons(
+        input.graph_seed_candidate_count,
+        input.graph_seed_returned_count,
+        request.graph_seed_limit,
+    );
     KnowledgeRetrievalDiagnostics {
         graph_commit_epoch,
         projection_source_graph_commit_epoch: projection_freshness.source_graph_commit_epoch,
@@ -1794,6 +1801,8 @@ fn knowledge_retrieval_diagnostics(
         graph_seed_candidate_count: input.graph_seed_candidate_count,
         graph_seed_returned_count: input.graph_seed_returned_count,
         graph_seed_limit: request.graph_seed_limit,
+        graph_seed_truncated: !graph_seed_truncation_reasons.is_empty(),
+        graph_seed_truncation_reasons,
         graph_context_path_count: input.graph_context_path_count,
         graph_context_limit: request.graph_context_limit,
         graph_context_max_hops: request.graph_context_max_hops,
@@ -4127,6 +4136,8 @@ mod tests {
         assert_eq!(output.diagnostics.search_limit, 4);
         assert_eq!(output.diagnostics.rank_window, None);
         assert_eq!(output.diagnostics.graph_seed_limit, 2);
+        assert!(!output.diagnostics.graph_seed_truncated);
+        assert!(output.diagnostics.graph_seed_truncation_reasons.is_empty());
         assert_eq!(output.diagnostics.graph_context_limit, 4);
         assert_eq!(output.diagnostics.graph_context_max_hops, 1);
         assert!(!output.diagnostics.graph_context_truncated);
@@ -5037,6 +5048,11 @@ mod tests {
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
         assert_eq!(graph_seed_report.limit, Some(1));
         assert!(graph_seed_report.truncated);
+        assert!(output.diagnostics.graph_seed_truncated);
+        assert_eq!(
+            output.diagnostics.graph_seed_truncation_reasons,
+            vec!["graph_seed limit 1 returned from 3 candidates".to_string()]
+        );
         assert!(graph_seed_report
             .truncation_reasons
             .iter()
