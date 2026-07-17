@@ -5168,6 +5168,47 @@ fn explicit_index_ddl_enables_index_seek_plans() {
 }
 
 #[test]
+fn explicit_index_ddl_enables_index_multi_seek_plans_for_property_in() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'a', title: 'A'})").unwrap();
+    db.query("CREATE (:Memory {id: 'b', title: 'B'})").unwrap();
+    db.query("CREATE (:Memory {id: 'c', title: 'C'})").unwrap();
+    for id in 0..32 {
+        db.query(&format!(
+            "CREATE (:Memory {{id: 'extra-{id}', title: 'Extra {id}'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+
+    let explain = db
+        .explain_query("MATCH (m:Memory) WHERE m.id IN ['a', 'b', 'a'] RETURN m.id AS id")
+        .unwrap();
+    assert!(explain
+        .physical_plan
+        .explain(0)
+        .contains("IndexNodeMultiSeek"));
+    assert!(explain
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision.contains("choose IndexNodeMultiSeek")));
+
+    let output = db
+        .query("MATCH (m:Memory) WHERE m.id IN ['a', 'b', 'a'] RETURN m.id AS id ORDER BY id ASC")
+        .unwrap();
+    assert_eq!(output.rows.len(), 2);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("a".to_string()))
+    );
+    assert_eq!(
+        output.rows[1].get("id"),
+        Some(&Value::String("b".to_string()))
+    );
+}
+
+#[test]
 fn composite_index_ddl_enables_composite_index_seek_plans() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'One'})")

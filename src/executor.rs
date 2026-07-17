@@ -506,6 +506,7 @@ pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
         | PhysicalPlan::NodeCartesianProductExec { .. }
         | PhysicalPlan::NodeColumnLookupExec { .. }
         | PhysicalPlan::IndexNodeSeek { .. }
+        | PhysicalPlan::IndexNodeMultiSeek { .. }
         | PhysicalPlan::IndexNodeCompositeSeek { .. }
         | PhysicalPlan::IndexNodeRangeSeek { .. }
         | PhysicalPlan::IndexNodeTextSeek { .. }
@@ -1707,6 +1708,30 @@ fn execute_bindings(
                     relationships: BTreeMap::new(),
                 })
                 .collect())
+        }
+        PhysicalPlan::IndexNodeMultiSeek {
+            variable,
+            label,
+            property,
+            values,
+        } => {
+            let Some(label_id) = catalog.label_id(label) else {
+                return Ok(Vec::new());
+            };
+            let mut seen = std::collections::BTreeSet::new();
+            let mut output = Vec::new();
+            for value in values {
+                for node in store.seek_nodes_by_property(label_id, property, value) {
+                    if seen.insert(node.id) {
+                        output.push(Binding {
+                            values: BTreeMap::new(),
+                            nodes: BTreeMap::from([(variable.clone(), node.clone())]),
+                            relationships: BTreeMap::new(),
+                        });
+                    }
+                }
+            }
+            Ok(output)
         }
         PhysicalPlan::IndexNodeCompositeSeek {
             variable,

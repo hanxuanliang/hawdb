@@ -896,7 +896,9 @@ Current implemented slice:
 - metadata-aware scan/seek costing for simple label plus equality predicates:
   missing descriptors keep `SeqNodeScan + Filter`, selective predicates choose
   `IndexNodeSeek`, and low-selectivity predicates can keep the scan path with an
-  explainable optimizer trace decision
+  explainable optimizer trace decision; indexed property-list predicates can
+  choose `IndexNodeMultiSeek` for Nowledge feed and source coverage shapes such
+  as `WHERE c.id IN $ids`
 - metadata-aware expand cardinality estimates for bounded outgoing patterns:
   the optimizer consumes label/type/label path counts and relationship fanout
   summaries, applies relationship-property distinct counts for property pattern
@@ -948,6 +950,7 @@ Current implemented slice:
   source-to-memory-to-entity-to-label grouped workload,
   community-to-synthesized-source coverage aggregate workload plus the
   aggregate-alias coverage filter shape used by source coverage checks,
+  feed synthesized-source collection reads backed by indexed `IN` seeks,
   entity bridge-span distinct-property aggregate workload,
   thread-cleanup optional relationship count-sum workload with seed/fanout cost
   tracing, incoming mention optional relationship count-sum and optional degree

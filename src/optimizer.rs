@@ -267,6 +267,12 @@ pub enum PhysicalPlan {
         property: String,
         value: Value,
     },
+    IndexNodeMultiSeek {
+        variable: String,
+        label: String,
+        property: String,
+        values: Vec<Value>,
+    },
     IndexNodeCompositeSeek {
         variable: String,
         label: String,
@@ -686,6 +692,16 @@ impl PhysicalPlan {
             } => {
                 format!(
                     "{pad}IndexNodeSeek variable={variable} label={label} property={property} value={value:?}"
+                )
+            }
+            PhysicalPlan::IndexNodeMultiSeek {
+                variable,
+                label,
+                property,
+                values,
+            } => {
+                format!(
+                    "{pad}IndexNodeMultiSeek variable={variable} label={label} property={property} values={values:?}"
                 )
             }
             PhysicalPlan::IndexNodeCompositeSeek {
@@ -1529,6 +1545,27 @@ impl PhysicalPlan {
                 output.push('=');
                 write_value(output, value);
                 output.push(')');
+            }
+            PhysicalPlan::IndexNodeMultiSeek {
+                variable,
+                label,
+                property,
+                values,
+            } => {
+                output.push_str("IndexNodeMultiSeek(");
+                write_identifier(output, variable);
+                output.push(':');
+                write_identifier(output, label);
+                output.push('.');
+                write_identifier(output, property);
+                output.push_str(" IN [");
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        output.push(',');
+                    }
+                    write_value(output, value);
+                }
+                output.push_str("])");
             }
             PhysicalPlan::IndexNodeCompositeSeek {
                 variable,
@@ -4240,6 +4277,23 @@ fn estimate_physical_plan_cost(plan: &PhysicalPlan, catalog: &OptimizerCatalog) 
                 cost: rows.saturating_mul(2).saturating_add(1),
             }
         }
+        PhysicalPlan::IndexNodeMultiSeek {
+            label,
+            property,
+            values,
+            ..
+        } => {
+            let distinct_count = catalog.distinct_count(label, property).max(1);
+            let rows_per_value = catalog.label_count(label).div_ceil(distinct_count).max(1);
+            let rows = rows_per_value
+                .saturating_mul(values.len() as u64)
+                .min(catalog.label_count(label))
+                .max(1);
+            PlanCost {
+                estimated_rows: rows,
+                cost: rows.saturating_mul(2).saturating_add(values.len() as u64),
+            }
+        }
         PhysicalPlan::IndexNodeCompositeSeek {
             label, predicates, ..
         } => {
@@ -4902,6 +4956,11 @@ fn physical_plan_access_path_covers_property(
             property: plan_property,
             ..
         }
+        | PhysicalPlan::IndexNodeMultiSeek {
+            variable: plan_variable,
+            property: plan_property,
+            ..
+        }
         | PhysicalPlan::IndexNodeRangeSeek {
             variable: plan_variable,
             property: plan_property,
@@ -4948,6 +5007,11 @@ fn physical_plan_node_label<'a>(plan: &'a PhysicalPlan, variable: &str) -> Optio
             label,
         }
         | PhysicalPlan::IndexNodeSeek {
+            variable: plan_variable,
+            label,
+            ..
+        }
+        | PhysicalPlan::IndexNodeMultiSeek {
             variable: plan_variable,
             label,
             ..
@@ -5274,6 +5338,53 @@ fn index_seek_from_filter(
             }
         }
         (
+            Predicate::PropertyIn {
+                variable,
+                property,
+                values,
+            },
+            LogicalPlan::NodeScan {
+                variable: scan_variable,
+                label,
+            },
+        ) if variable == scan_variable => {
+            if !catalog.has_property_index(label, property) {
+                decisions.push(format!(
+                    "choose SeqNodeScan for {label}.{property}: no equality index descriptor"
+                ));
+                return None;
+            }
+            let label_count = catalog.label_count(label);
+            let distinct_count = catalog.distinct_count(label, property).max(1);
+            let rows_per_value = label_count.div_ceil(distinct_count).max(1);
+            let estimated_rows = rows_per_value
+                .saturating_mul(values.len() as u64)
+                .min(label_count)
+                .max(1);
+            let scan_cost = label_count.saturating_add(4);
+            let seek_cost = estimated_rows
+                .saturating_mul(2)
+                .saturating_add(values.len() as u64);
+            if seek_cost <= scan_cost {
+                decisions.push(format!(
+                    "choose IndexNodeMultiSeek for {label}.{property}: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} distinct_count={distinct_count} value_count={}",
+                    values.len()
+                ));
+                Some(PhysicalPlan::IndexNodeMultiSeek {
+                    variable: variable.clone(),
+                    label: label.clone(),
+                    property: property.clone(),
+                    values: values.clone(),
+                })
+            } else {
+                decisions.push(format!(
+                    "choose SeqNodeScan for {label}.{property}: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} distinct_count={distinct_count} value_count={}",
+                    values.len()
+                ));
+                None
+            }
+        }
+        (
             Predicate::PropertyCompare {
                 variable,
                 property,
@@ -5433,6 +5544,45 @@ fn equality_index_seek_from_conjunction(
                     label: label.to_string(),
                     property: property.clone(),
                     value: value.clone(),
+                }),
+            });
+        }
+    }
+    for predicate in predicates {
+        let Predicate::PropertyIn {
+            variable,
+            property,
+            values,
+        } = predicate
+        else {
+            continue;
+        };
+        if variable != scan_variable || !catalog.has_property_index(label, property) {
+            continue;
+        }
+        let label_count = catalog.label_count(label);
+        let distinct_count = catalog.distinct_count(label, property).max(1);
+        let rows_per_value = label_count.div_ceil(distinct_count).max(1);
+        let estimated_rows = rows_per_value
+            .saturating_mul(values.len() as u64)
+            .min(label_count)
+            .max(1);
+        let scan_cost = label_count.saturating_add(4);
+        let seek_cost = estimated_rows
+            .saturating_mul(2)
+            .saturating_add(values.len() as u64);
+        if seek_cost <= scan_cost {
+            decisions.push(format!(
+                "choose IndexNodeMultiSeek for {label}.{property} in conjunction: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} distinct_count={distinct_count} value_count={}",
+                values.len()
+            ));
+            return Some(PhysicalPlan::FilterExec {
+                predicate: full_predicate.clone(),
+                input: Box::new(PhysicalPlan::IndexNodeMultiSeek {
+                    variable: variable.clone(),
+                    label: label.to_string(),
+                    property: property.clone(),
+                    values: values.clone(),
                 }),
             });
         }

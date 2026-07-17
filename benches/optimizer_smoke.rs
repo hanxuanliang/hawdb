@@ -321,6 +321,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "feed_synthesized_source_collect",
+            logical: feed_synthesized_source_collect_plan(),
+            catalog: feed_synthesized_source_collect_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 11,
+            },
+            fingerprint_contains: "collect(distinct 1:s.2:id)",
+            decision_contains: &[
+                "choose IndexNodeMultiSeek for Memory.id",
+                "estimate AdjacencyExpand for Memory-[:SYNTHESIZED_FROM*1..1]->Memory",
+                "selected physical plan cost: estimated_rows=1 cost=11",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "entity_bridge_span_aggregate",
             logical: entity_bridge_span_aggregate_plan(),
             catalog: entity_bridge_span_aggregate_catalog(),
@@ -1673,6 +1688,92 @@ fn community_synthesized_source_coverage_catalog() -> OptimizerCatalog {
                 "Source".to_string(),
             ),
             3,
+        )]),
+    )
+}
+
+fn feed_synthesized_source_collect_plan() -> LogicalPlan {
+    LogicalPlan::Aggregate {
+        group_keys: vec![Projection {
+            expression: ProjectionExpression::Property {
+                variable: "c".to_string(),
+                property: "id".to_string(),
+            },
+            name: "c.id".to_string(),
+        }],
+        items: vec![Aggregation {
+            function: AggregateFunction::Collect,
+            target: AggregateTarget::Property {
+                variable: "s".to_string(),
+                property: "id".to_string(),
+            },
+            distinct: true,
+            name: "source_ids".to_string(),
+        }],
+        input: Box::new(LogicalPlan::Expand {
+            source_variable: "c".to_string(),
+            source_label: "Memory".to_string(),
+            rel_variable: None,
+            rel_type: "SYNTHESIZED_FROM".to_string(),
+            rel_properties: Default::default(),
+            direction: RelationshipDirection::Outgoing,
+            target_variable: "s".to_string(),
+            target_label: "Memory".to_string(),
+            min_hops: 1,
+            max_hops: 1,
+            optional: false,
+            input: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyIn {
+                    variable: "c".to_string(),
+                    property: "id".to_string(),
+                    values: vec![
+                        Value::String("crystal-1".to_string()),
+                        Value::String("crystal-2".to_string()),
+                    ],
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "c".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+        }),
+    }
+}
+
+fn feed_synthesized_source_collect_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Memory".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 50_000)],
+            [("SYNTHESIZED_FROM".to_string(), 12_000)],
+            [("SYNTHESIZED_FROM".to_string(), 4_000)],
+            [(
+                (
+                    "Memory".to_string(),
+                    "SYNTHESIZED_FROM".to_string(),
+                    "Memory".to_string(),
+                ),
+                12_000,
+            )],
+            [(
+                (
+                    "Memory".to_string(),
+                    "SYNTHESIZED_FROM".to_string(),
+                    "Memory".to_string(),
+                    1,
+                ),
+                12_000,
+            )],
+            [(("Memory".to_string(), "id".to_string()), 50_000)],
+            [],
+        )
+        .with_path_target_distinct_counts([(
+            (
+                "Memory".to_string(),
+                "SYNTHESIZED_FROM".to_string(),
+                "Memory".to_string(),
+            ),
+            6_000,
         )]),
     )
 }
