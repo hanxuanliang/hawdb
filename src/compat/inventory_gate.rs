@@ -66,6 +66,9 @@ pub struct CompatibilityMigrationGateReport {
     pub fixture_mismatch_blockers: usize,
     pub inventory_blockers: usize,
     pub shadow_blockers: usize,
+    pub fixture_mismatch_blocker_messages: Vec<String>,
+    pub inventory_blocker_messages: Vec<String>,
+    pub shadow_blocker_messages: Vec<String>,
     pub blockers: Vec<String>,
 }
 
@@ -293,6 +296,9 @@ pub fn compatibility_migration_gate_report_to_json(
         "fixture_mismatch_blockers": report.fixture_mismatch_blockers,
         "inventory_blockers": report.inventory_blockers,
         "shadow_blockers": report.shadow_blockers,
+        "fixture_mismatch_blocker_messages": report.fixture_mismatch_blocker_messages,
+        "inventory_blocker_messages": report.inventory_blocker_messages,
+        "shadow_blocker_messages": report.shadow_blocker_messages,
         "blockers": report.blockers,
     })
 }
@@ -604,25 +610,25 @@ pub fn assess_compatibility_migration_gate(
     shadow: &CompatibilityCutoverReport,
 ) -> CompatibilityMigrationGateReport {
     let mut blockers = Vec::new();
-    let mut fixture_mismatch_blockers = 0;
+    let mut fixture_mismatch_blocker_messages = Vec::new();
     if inventory.fixture != shadow.fixture {
-        fixture_mismatch_blockers += 1;
-        blockers.push(format!(
+        fixture_mismatch_blocker_messages.push(format!(
             "inventory fixture '{}' does not match shadow fixture '{}'",
             inventory.fixture, shadow.fixture
         ));
     }
+    blockers.extend(fixture_mismatch_blocker_messages.iter().cloned());
+    let inventory_blocker_messages = inventory.blockers.clone();
     let inventory_blockers = inventory.blockers.len();
     blockers.extend(
-        inventory
-            .blockers
+        inventory_blocker_messages
             .iter()
             .map(|blocker| format!("inventory: {blocker}")),
     );
+    let shadow_blocker_messages = shadow.blockers.clone();
     let shadow_blockers = shadow.blockers.len();
     blockers.extend(
-        shadow
-            .blockers
+        shadow_blocker_messages
             .iter()
             .map(|blocker| format!("shadow: {blocker}")),
     );
@@ -638,9 +644,12 @@ pub fn assess_compatibility_migration_gate(
         },
         inventory_decision: inventory.decision,
         shadow_decision: shadow.decision,
-        fixture_mismatch_blockers,
+        fixture_mismatch_blockers: fixture_mismatch_blocker_messages.len(),
         inventory_blockers,
         shadow_blockers,
+        fixture_mismatch_blocker_messages,
+        inventory_blocker_messages,
+        shadow_blocker_messages,
         blockers,
     }
 }

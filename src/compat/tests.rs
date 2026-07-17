@@ -420,6 +420,9 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
     assert_eq!(gate.fixture_mismatch_blockers, 1);
     assert_eq!(gate.inventory_blockers, 2);
     assert_eq!(gate.shadow_blockers, 1);
+    assert_eq!(gate.fixture_mismatch_blocker_messages.len(), 1);
+    assert_eq!(gate.inventory_blocker_messages.len(), 2);
+    assert_eq!(gate.shadow_blocker_messages, vec!["shadow failed"]);
     assert_eq!(gate.blockers.len(), 4);
     assert!(gate.blockers[0].contains("does not match"));
     assert!(gate.blockers[1].starts_with("inventory:"));
@@ -431,6 +434,21 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
     assert_eq!(gate_json["fixture_mismatch_blockers"], 1);
     assert_eq!(gate_json["inventory_blockers"], 2);
     assert_eq!(gate_json["shadow_blockers"], 1);
+    assert_eq!(
+        gate_json["fixture_mismatch_blocker_messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        gate_json["inventory_blocker_messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(gate_json["shadow_blocker_messages"][0], "shadow failed");
     assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 4);
 }
 
@@ -488,6 +506,20 @@ fn migration_gate_bundle_reports_blocked_json() {
     assert_eq!(json["migration_gate"]["fixture_mismatch_blockers"], 0);
     assert_eq!(json["migration_gate"]["inventory_blockers"], 2);
     assert_eq!(json["migration_gate"]["shadow_blockers"], 2);
+    assert_eq!(
+        json["migration_gate"]["inventory_blocker_messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        json["migration_gate"]["shadow_blocker_messages"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
     assert_eq!(
         json["migration_gate"]["blockers"].as_array().unwrap().len(),
         4
