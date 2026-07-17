@@ -48,6 +48,8 @@ pub struct ExternalContentArtifactJobSummary {
     pub running: usize,
     pub succeeded: usize,
     pub failed: usize,
+    pub pending_by_action: BTreeMap<String, usize>,
+    pub failed_by_action: BTreeMap<String, usize>,
     pub next_pending_job_id: Option<u64>,
     pub oldest_failed_job_id: Option<u64>,
 }
@@ -142,6 +144,10 @@ impl Database {
             match job.status {
                 DerivedArtifactJobStatus::Pending => {
                     summary.pending += 1;
+                    *summary
+                        .pending_by_action
+                        .entry(job.action.clone())
+                        .or_default() += 1;
                     summary.next_pending_job_id.get_or_insert(job.id);
                 }
                 DerivedArtifactJobStatus::Running => {
@@ -152,6 +158,10 @@ impl Database {
                 }
                 DerivedArtifactJobStatus::Failed => {
                     summary.failed += 1;
+                    *summary
+                        .failed_by_action
+                        .entry(job.action.clone())
+                        .or_default() += 1;
                     summary.oldest_failed_job_id.get_or_insert(job.id);
                 }
             }

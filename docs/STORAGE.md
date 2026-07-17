@@ -321,9 +321,10 @@ embedded job history. `Database::failed_external_content_artifact_jobs` returns
 the matching bounded failed view for recovery queues and operator-facing parser
 diagnostics. `Database::external_content_artifact_job_summary` exposes aggregate
 pending, running, succeeded, and failed counts plus the next pending and oldest
-failed job ids, giving caller-owned runtimes a cheap scheduling and health
-surface before they fetch bounded job details. The graph-kernel job runner still
-rejects those jobs with a
+failed job ids. It also groups pending and failed counts by action so
+action-specific parser, crawler, or embedding runtimes can decide whether to
+poll their queue before fetching bounded job details. The graph-kernel job
+runner still rejects those jobs with a
 graph-kernel-external error and preserves the payload in the failed job report,
 while
 `Database::run_next_external_content_artifact_job_with` and

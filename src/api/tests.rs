@@ -4781,7 +4781,7 @@ fn failed_external_content_artifact_jobs_are_bounded_and_filtered() {
 fn external_content_artifact_job_summary_counts_runtime_work_only() {
     let mut db = Database::new();
     let first = db.schedule_external_content_artifact_job("source-1", "parse");
-    let second = db.schedule_external_content_artifact_job("source-2", "parse");
+    let second = db.schedule_external_content_artifact_job("source-2", "crawl");
     db.schedule_projected_graph_artifact_rebuild("MissingGraph");
 
     let initial = db.external_content_artifact_job_summary();
@@ -4790,6 +4790,11 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
     assert_eq!(initial.running, 0);
     assert_eq!(initial.succeeded, 0);
     assert_eq!(initial.failed, 0);
+    assert_eq!(
+        initial.pending_by_action,
+        BTreeMap::from([("crawl".to_string(), 1), ("parse".to_string(), 1)])
+    );
+    assert!(initial.failed_by_action.is_empty());
     assert_eq!(initial.next_pending_job_id, Some(first.id));
     assert_eq!(initial.oldest_failed_job_id, None);
 
@@ -4821,6 +4826,11 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
     assert_eq!(after_run.running, 0);
     assert_eq!(after_run.succeeded, 1);
     assert_eq!(after_run.failed, 1);
+    assert!(after_run.pending_by_action.is_empty());
+    assert_eq!(
+        after_run.failed_by_action,
+        BTreeMap::from([("parse".to_string(), 1)])
+    );
     assert_eq!(after_run.next_pending_job_id, None);
     assert_eq!(after_run.oldest_failed_job_id, Some(first.id));
 
@@ -4831,6 +4841,11 @@ fn external_content_artifact_job_summary_counts_runtime_work_only() {
     assert_eq!(after_retry.pending, 1);
     assert_eq!(after_retry.succeeded, 1);
     assert_eq!(after_retry.failed, 0);
+    assert_eq!(
+        after_retry.pending_by_action,
+        BTreeMap::from([("parse".to_string(), 1)])
+    );
+    assert!(after_retry.failed_by_action.is_empty());
     assert_eq!(after_retry.next_pending_job_id, Some(first.id));
     assert_eq!(after_retry.oldest_failed_job_id, None);
 }
