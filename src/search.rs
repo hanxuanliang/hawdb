@@ -1346,6 +1346,9 @@ fn identifier_tokens(raw: &str) -> Vec<String> {
     }
     let mut tokens = Vec::new();
     push_unique_token(&mut tokens, raw.to_lowercase());
+    for token in cjk_ngram_tokens(raw) {
+        push_unique_token(&mut tokens, token);
+    }
     let parts = identifier_parts(raw);
     for part in &parts {
         push_analyzed_token(&mut tokens, part.clone());
@@ -1354,6 +1357,44 @@ fn identifier_tokens(raw: &str) -> Vec<String> {
         push_analyzed_token(&mut tokens, pair.join("_"));
     }
     tokens
+}
+
+fn cjk_ngram_tokens(raw: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut run = Vec::new();
+    for ch in raw.chars() {
+        if is_cjk_search_char(ch) {
+            run.push(ch);
+        } else {
+            push_cjk_ngram_tokens(&mut tokens, &run);
+            run.clear();
+        }
+    }
+    push_cjk_ngram_tokens(&mut tokens, &run);
+    tokens
+}
+
+fn push_cjk_ngram_tokens(tokens: &mut Vec<String>, run: &[char]) {
+    for width in [2_usize, 3] {
+        if run.len() < width {
+            continue;
+        }
+        for window in run.windows(width) {
+            push_unique_token(tokens, window.iter().collect());
+        }
+    }
+}
+
+fn is_cjk_search_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x3400..=0x4DBF
+            | 0x4E00..=0x9FFF
+            | 0xF900..=0xFAFF
+            | 0x3040..=0x309F
+            | 0x30A0..=0x30FF
+            | 0xAC00..=0xD7AF
+    )
 }
 
 fn identifier_parts(raw: &str) -> Vec<String> {
@@ -2447,6 +2488,30 @@ mod tests {
         assert_eq!(snake_hits[0].id, "chunk");
         assert_eq!(kebab_hits[0].id, "chunk");
         assert_eq!(version_hits[0].id, "chunk");
+    }
+
+    #[test]
+    fn tokenizer_matches_cjk_subterms_with_ngrams() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "design".to_string(),
+                title: "自研图数据库设计".to_string(),
+                content: "稳定逻辑ID和可重建投影".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let graph_hits = index.search_with_report("图数据库", None, SearchMode::Text, 10);
+        let projection_hits = index.search("重建投影", None, SearchMode::Text, 10);
+
+        assert_eq!(graph_hits.hits[0].id, "design");
+        assert!(graph_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "数据库"));
+        assert_eq!(projection_hits[0].id, "design");
     }
 
     #[test]

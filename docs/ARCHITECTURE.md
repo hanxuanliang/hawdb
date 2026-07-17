@@ -404,7 +404,8 @@ The text leg uses BM25-style scoring rather than simple token coverage:
 case-insensitive tokenizer output preserves Nowledge-style underscore
 identifiers, splits camelCase/snake_case/kebab/path-like identifiers, creates
 adjacent chunk bigrams, splits acronym-to-titlecase technical identifiers such
-as `LSMTree` and `HTTPServer`, normalizes common English suffixes for
+as `LSMTree` and `HTTPServer`, emits conservative CJK bigrams and trigrams for
+Chinese/Japanese/Korean knowledge notes, normalizes common English suffixes for
 memory/source/thread-style terms, and expands conservative knowledge-retrieval
 aliases such as `rag`, `graph_rag`, `graph_retrieval`, and `kg`, plus database
 system aliases such as `wal`/`write_ahead_log`, `mvcc`, `lsm`, `csr`, and
