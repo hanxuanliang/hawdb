@@ -399,6 +399,11 @@ graph epoch, produced-row counts, and small metadata. It deliberately stores
 only references and audit metadata, not parser result payloads. The matching
 background and scheduled completion runners apply the same standard row shape
 while charging parser/crawler work to the `Import` QoS lane.
+`ExternalContentArtifactRuntimeManifest` lets a caller-owned runtime declare the
+actions it can handle, required payload keys, version, and estimated operation
+cost. Skein uses that manifest only to return bounded claimable-job views and an
+Import-lane background work plan; it is not a sandbox policy and does not grant
+the runtime access to graph-kernel execution.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` for stateless
 `LocalQosPolicy` admission or

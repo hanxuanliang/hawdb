@@ -1,11 +1,12 @@
 use super::{
     validate_graph_lightning_graph_stream, BackgroundMaintenanceOptions, CanonicalStableIdMapping,
     Database, DatabaseConfig, DerivedArtifactJobStatus, ExternalContentArtifactJobCompletion,
-    KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
-    KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-    KnowledgePathRequest, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
-    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    ExternalContentArtifactRuntimeManifest, KnowledgeCandidateScoringPolicy,
+    KnowledgeCandidateSource, KnowledgeEntityRequest, KnowledgeGraphPathDirection,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
+    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -7104,6 +7105,92 @@ fn external_content_artifact_job_background_work_plan_is_rankable_by_action() {
             3,
         )
         .is_none());
+}
+
+#[test]
+fn external_content_runtime_manifest_filters_claimable_jobs() {
+    let mut db = Database::new();
+    let parse = db.schedule_external_content_artifact_job_with_payload(
+        "source-parse",
+        "parse",
+        BTreeMap::from([
+            (
+                "content_uri".to_string(),
+                Value::String("file:///nowledge/source-parse.md".to_string()),
+            ),
+            ("sha256".to_string(), Value::String("parse-sha".to_string())),
+        ]),
+    );
+    db.schedule_external_content_artifact_job_with_payload(
+        "source-crawl",
+        "crawl",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("https://example.invalid/source-crawl".to_string()),
+        )]),
+    );
+    db.schedule_external_content_artifact_job("source-missing", "parse");
+
+    let manifest = ExternalContentArtifactRuntimeManifest::new("markdown-parser")
+        .with_runtime_version("1.0.0")
+        .with_supported_action("parse")
+        .with_required_payload_key("content_uri")
+        .with_required_payload_key("sha256")
+        .with_estimated_operations(7);
+
+    let pending = db.pending_external_content_artifact_jobs_for_runtime(&manifest, 8);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, parse.id);
+    assert_eq!(pending[0].action, "parse");
+    assert_eq!(
+        pending[0].payload.get("sha256"),
+        Some(&Value::String("parse-sha".to_string()))
+    );
+    assert!(db
+        .pending_external_content_artifact_jobs_for_runtime(&manifest, 0)
+        .is_empty());
+}
+
+#[test]
+fn external_content_runtime_manifest_exposes_import_work_plan() {
+    let mut db = Database::new();
+    assert!(db
+        .external_content_artifact_job_background_work_plan_for_runtime(
+            &ExternalContentArtifactRuntimeManifest::new("parser")
+                .with_supported_action("parse")
+                .with_required_payload_key("content_uri"),
+            BackgroundWorkHint::default(),
+        )
+        .is_none());
+
+    db.schedule_external_content_artifact_job_with_payload(
+        "source-parse",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-parse.md".to_string()),
+        )]),
+    );
+    let manifest = ExternalContentArtifactRuntimeManifest::new("parser")
+        .with_supported_action("parse")
+        .with_required_payload_key("content_uri")
+        .with_estimated_operations(5);
+    let plan = db
+        .external_content_artifact_job_background_work_plan_for_runtime(
+            &manifest,
+            BackgroundWorkHint {
+                active_topic: true,
+                query_probability_per_million: 10,
+                ..BackgroundWorkHint::default()
+            },
+        )
+        .unwrap();
+
+    assert_eq!(plan.request.class, WorkClass::Import);
+    assert_eq!(plan.request.estimated_operations, 5);
+    let ranked = LocalQosPolicy::default().rank_background_work(&LocalQosState::default(), &[plan]);
+    assert_eq!(ranked.len(), 1);
+    assert!(matches!(ranked[0].decision.admission, QosAdmission::Admit));
 }
 
 #[test]

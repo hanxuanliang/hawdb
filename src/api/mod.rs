@@ -39,6 +39,7 @@ mod artifact_jobs;
 pub use artifact_jobs::{
     DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
     ExternalContentArtifactJobCompletion, ExternalContentArtifactJobSummary,
+    ExternalContentArtifactRuntimeManifest,
 };
 
 #[derive(Debug)]

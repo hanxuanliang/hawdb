@@ -6,7 +6,7 @@ use crate::qos::{
     QosAdmission, WorkClass, WorkRequest,
 };
 use crate::value::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DerivedArtifactJobStatus {
@@ -153,6 +153,47 @@ pub struct ExternalContentArtifactJobSummary {
     pub oldest_failed_job_id: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalContentArtifactRuntimeManifest {
+    pub runtime_name: String,
+    pub runtime_version: Option<String>,
+    pub supported_actions: BTreeSet<String>,
+    pub required_payload_keys: BTreeSet<String>,
+    pub estimated_operations: usize,
+}
+
+impl ExternalContentArtifactRuntimeManifest {
+    pub fn new(runtime_name: impl Into<String>) -> Self {
+        Self {
+            runtime_name: runtime_name.into(),
+            runtime_version: None,
+            supported_actions: BTreeSet::new(),
+            required_payload_keys: BTreeSet::new(),
+            estimated_operations: 1,
+        }
+    }
+
+    pub fn with_runtime_version(mut self, runtime_version: impl Into<String>) -> Self {
+        self.runtime_version = Some(runtime_version.into());
+        self
+    }
+
+    pub fn with_supported_action(mut self, action: impl Into<String>) -> Self {
+        self.supported_actions.insert(action.into());
+        self
+    }
+
+    pub fn with_required_payload_key(mut self, key: impl Into<String>) -> Self {
+        self.required_payload_keys.insert(key.into());
+        self
+    }
+
+    pub fn with_estimated_operations(mut self, estimated_operations: usize) -> Self {
+        self.estimated_operations = estimated_operations;
+        self
+    }
+}
+
 impl Database {
     pub fn schedule_derived_artifact_rebuild(&mut self) -> DerivedArtifactJob {
         self.enqueue_derived_artifact_job("projected_graph", "*", "rebuild")
@@ -214,6 +255,22 @@ impl Database {
                 job.status == DerivedArtifactJobStatus::Pending
                     && job.action == action
                     && is_external_content_artifact_job(&job.artifact_type)
+            })
+            .take(limit)
+            .cloned()
+            .collect()
+    }
+
+    pub fn pending_external_content_artifact_jobs_for_runtime(
+        &self,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        limit: usize,
+    ) -> Vec<DerivedArtifactJob> {
+        self.derived_artifact_jobs
+            .iter()
+            .filter(|job| {
+                job.status == DerivedArtifactJobStatus::Pending
+                    && external_content_runtime_can_claim(manifest, job)
             })
             .take(limit)
             .cloned()
@@ -334,6 +391,26 @@ impl Database {
                     && is_external_content_artifact_job(&job.artifact_type)
             })
             .then(|| BackgroundWorkPlan::background(WorkClass::Import, estimated_operations, hint))
+    }
+
+    pub fn external_content_artifact_job_background_work_plan_for_runtime(
+        &self,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        self.derived_artifact_jobs
+            .iter()
+            .any(|job| {
+                job.status == DerivedArtifactJobStatus::Pending
+                    && external_content_runtime_can_claim(manifest, job)
+            })
+            .then(|| {
+                BackgroundWorkPlan::background(
+                    WorkClass::Import,
+                    manifest.estimated_operations,
+                    hint,
+                )
+            })
     }
 
     pub fn retry_failed_external_content_artifact_job(
@@ -1086,6 +1163,18 @@ fn is_external_content_artifact_job(artifact_type: &str) -> bool {
         artifact_type,
         "content_artifact" | "artifact_parse" | "content_parse" | "blob_parse" | "crawler"
     )
+}
+
+fn external_content_runtime_can_claim(
+    manifest: &ExternalContentArtifactRuntimeManifest,
+    job: &DerivedArtifactJob,
+) -> bool {
+    is_external_content_artifact_job(&job.artifact_type)
+        && manifest.supported_actions.contains(&job.action)
+        && manifest
+            .required_payload_keys
+            .iter()
+            .all(|key| job.payload.contains_key(key))
 }
 
 fn summarize_external_content_artifact_job(

@@ -669,6 +669,11 @@ and `Database::complete_external_content_artifact_job_with` convert that
 manifest into the retained audit row. The matching background and scheduled
 completion runners preserve the same row shape while charging parser/crawler
 work to the `Import` QoS lane.
+`ExternalContentArtifactRuntimeManifest` lets caller-owned parser/crawler loops
+declare supported actions, required payload keys, runtime version, and estimated
+operation cost so Skein can expose bounded claimable-job views and a matching
+Import-lane background work plan without treating the manifest as a sandbox or
+execution permission.
 Internal parser/crawler loops can use
 `Database::run_next_background_external_content_artifact_job_with` or
 `Database::run_next_scheduled_background_external_content_artifact_job_with` to
