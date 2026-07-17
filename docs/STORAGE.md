@@ -153,11 +153,15 @@ lengths and checksums, recomputes GraphStream validation, and checks agreement
 between the catalog, manifest, bundle, and GraphStream artifact. Its validation
 gate keeps flat errors for logs and grouped artifact, manifest, GraphStream,
 bundle, and catalog error arrays for local upload/resume automation.
-`skein graph-lightning-publish-staging <staging-dir> <publish-dir>` verifies a
-READY staging catalog and atomically writes
+`skein graph-lightning-publish-staging [--require-state-marker]
+[--fencing-token <token>] [--expected-graph-epoch <epoch>] <staging-dir>
+<publish-dir>` verifies a READY staging catalog and atomically writes
 `graph_lightning_published_manifest.json`. Repeating the command for the same
 manifest is idempotent; attempting to publish a different manifest over an
-existing pointer fails instead of overwriting the published graph pointer.
+existing pointer fails instead of overwriting the published graph pointer. When
+the optional state-marker/fencing preflight is enabled, publish requires a
+VALIDATING import marker, matching fencing token, and matching staged manifest
+graph epoch before writing the pointer.
 `skein graph-lightning-verify-published <staging-dir> <publish-dir>` verifies
 that the published pointer still references the staged catalog by byte length
 and checksum, and that the referenced staging catalog still passes the

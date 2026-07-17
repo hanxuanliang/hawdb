@@ -341,16 +341,17 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if command == "graph-lightning-publish-staging" {
-            let staging_dir = args
-                .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_publish_staging_usage()))?;
-            let publish_dir = args
-                .next()
-                .ok_or_else(|| SkeinError::Semantic(graph_lightning_publish_staging_usage()))?;
-            if args.next().is_some() {
-                return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
-            }
-            let report = publish_graph_lightning_staging_catalog(staging_dir, publish_dir)?;
+            let (options, staging_dir, publish_dir) =
+                parse_graph_lightning_publish_staging_args(args)?;
+            let report = if options == PublishGraphLightningOptions::default() {
+                publish_graph_lightning_staging_catalog(staging_dir, publish_dir)?
+            } else {
+                publish_graph_lightning_staging_catalog_with_options(
+                    staging_dir,
+                    publish_dir,
+                    options,
+                )?
+            };
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             return Ok(());
         }
@@ -510,7 +511,52 @@ fn graph_lightning_verify_staging_usage() -> String {
 }
 
 fn graph_lightning_publish_staging_usage() -> String {
-    "graph-lightning-publish-staging requires <staging-dir> <publish-dir>".to_string()
+    "graph-lightning-publish-staging requires [--require-state-marker] [--fencing-token <token>] [--expected-graph-epoch <epoch>] <staging-dir> <publish-dir>".to_string()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct PublishGraphLightningOptions {
+    require_state_marker: bool,
+    fencing_token: Option<String>,
+    expected_graph_epoch: Option<u64>,
+}
+
+fn parse_graph_lightning_publish_staging_args(
+    args: impl Iterator<Item = String>,
+) -> Result<(PublishGraphLightningOptions, String, String)> {
+    let mut options = PublishGraphLightningOptions::default();
+    let mut positional = Vec::new();
+    let mut args = args.peekable();
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--require-state-marker" => {
+                options.require_state_marker = true;
+            }
+            "--fencing-token" => {
+                let Some(value) = args.next() else {
+                    return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+                };
+                options.fencing_token = Some(value);
+            }
+            "--expected-graph-epoch" => {
+                let Some(value) = args.next() else {
+                    return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+                };
+                let epoch = value
+                    .parse::<u64>()
+                    .map_err(|_| SkeinError::Semantic(graph_lightning_publish_staging_usage()))?;
+                options.expected_graph_epoch = Some(epoch);
+            }
+            value if value.starts_with("--") => {
+                return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+            }
+            value => positional.push(value.to_string()),
+        }
+    }
+    if positional.len() != 2 {
+        return Err(SkeinError::Semantic(graph_lightning_publish_staging_usage()));
+    }
+    Ok((options, positional.remove(0), positional.remove(0)))
 }
 
 fn graph_lightning_verify_published_usage() -> String {
@@ -1141,6 +1187,18 @@ fn publish_graph_lightning_staging_catalog(
     staging_dir: impl AsRef<Path>,
     publish_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
+    publish_graph_lightning_staging_catalog_with_options(
+        staging_dir,
+        publish_dir,
+        PublishGraphLightningOptions::default(),
+    )
+}
+
+fn publish_graph_lightning_staging_catalog_with_options(
+    staging_dir: impl AsRef<Path>,
+    publish_dir: impl AsRef<Path>,
+    options: PublishGraphLightningOptions,
+) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
     let publish_dir = publish_dir.as_ref();
     let verification = verify_graph_lightning_staging_catalog(staging_dir)?;
@@ -1165,6 +1223,7 @@ fn publish_graph_lightning_staging_catalog(
         ))
     })?;
     let manifest = read_staging_artifact_json(&catalog, staging_dir, "manifest")?;
+    let publish_preflight = graph_lightning_publish_preflight(staging_dir, &manifest, &options)?;
     let pointer = serde_json::json!({
         "protocol": "graph-lightning-published-manifest",
         "protocol_version": 1,
@@ -1194,6 +1253,7 @@ fn publish_graph_lightning_staging_catalog(
                     "publish_gate".to_string(),
                     serde_json::json!({
                         "decision": "idempotent",
+                        "preflight": publish_preflight,
                         "errors": [],
                     }),
                 );
@@ -1211,6 +1271,7 @@ fn publish_graph_lightning_staging_catalog(
             "publish_gate".to_string(),
             serde_json::json!({
                 "decision": "published",
+                "preflight": publish_preflight,
                 "errors": [],
             }),
         );
@@ -1223,6 +1284,95 @@ fn publish_graph_lightning_staging_catalog(
     )?;
     sync_directory(publish_dir)?;
     Ok(report)
+}
+
+fn graph_lightning_publish_preflight(
+    staging_dir: &Path,
+    manifest: &serde_json::Value,
+    options: &PublishGraphLightningOptions,
+) -> Result<serde_json::Value> {
+    let mut errors = Vec::new();
+    let mut state_errors = Vec::new();
+    let state_marker =
+        graph_lightning_import_state_marker(staging_dir, &mut errors, &mut state_errors);
+    let marker_present = state_marker
+        .get("present")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true);
+    let marker_state = state_marker
+        .get("import_state")
+        .and_then(serde_json::Value::as_str);
+    if options.require_state_marker && !marker_present {
+        push_grouped_error(
+            &mut errors,
+            &mut state_errors,
+            "publish requires graph lightning import state marker",
+        );
+    }
+    if marker_present && marker_state != Some("VALIDATING") {
+        push_grouped_error(
+            &mut errors,
+            &mut state_errors,
+            format!(
+                "publish requires VALIDATING import state marker, found {}",
+                marker_state.unwrap_or("missing")
+            ),
+        );
+    }
+
+    let manifest_epoch = manifest
+        .get("graph_commit_epoch")
+        .and_then(serde_json::Value::as_u64);
+    let expected_graph_epoch_matches = options
+        .expected_graph_epoch
+        .is_none_or(|expected| manifest_epoch == Some(expected));
+    if !expected_graph_epoch_matches {
+        push_grouped_error(
+            &mut errors,
+            &mut state_errors,
+            format!(
+                "expected graph epoch {:?} did not match staged manifest epoch {:?}",
+                options.expected_graph_epoch, manifest_epoch
+            ),
+        );
+    }
+
+    let marker_fencing_token = state_marker
+        .get("idempotency_key")
+        .and_then(|key| key.get("fencing_token"))
+        .and_then(serde_json::Value::as_str);
+    let fencing_token_matches = options
+        .fencing_token
+        .as_deref()
+        .is_none_or(|expected| marker_fencing_token == Some(expected));
+    if !fencing_token_matches {
+        push_grouped_error(
+            &mut errors,
+            &mut state_errors,
+            "publish fencing token did not match import state marker",
+        );
+    }
+
+    if !errors.is_empty() {
+        return Err(SkeinError::Execution(format!(
+            "graph lightning publish preflight blocked: {}",
+            errors.join("; ")
+        )));
+    }
+
+    Ok(serde_json::json!({
+        "decision": "ready",
+        "require_state_marker": options.require_state_marker,
+        "expected_graph_epoch": options.expected_graph_epoch,
+        "manifest_graph_epoch": manifest_epoch,
+        "expected_graph_epoch_matches": expected_graph_epoch_matches,
+        "fencing_token_required": options.fencing_token.is_some(),
+        "fencing_token_matches": fencing_token_matches,
+        "state_marker": state_marker,
+        "state_errors": state_errors.len(),
+        "state_error_messages": state_errors,
+        "errors": errors,
+    }))
 }
 
 fn verify_graph_lightning_published_manifest(
@@ -2153,10 +2303,11 @@ mod tests {
         graph_lightning_publish_staging_usage, graph_lightning_stage_bootstrap_usage,
         graph_lightning_verify_export_usage, graph_lightning_verify_published_usage,
         graph_lightning_verify_staging_usage, is_self_shadow_command, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog, should_run_shadow_ready,
+        publish_graph_lightning_staging_catalog,
+        publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
-        verify_graph_lightning_staging_catalog,
+        verify_graph_lightning_staging_catalog, PublishGraphLightningOptions,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -2743,6 +2894,182 @@ mod tests {
 
         std::fs::remove_dir_all(staging_dir).unwrap();
         std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn publish_staging_with_preflight_accepts_matching_fencing_and_epoch() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_publish_preflight_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_publish_preflight_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_state.json"),
+            serde_json::json!({
+                "protocol": "graph-lightning-import-state",
+                "protocol_version": 1,
+                "import_state": "VALIDATING",
+                "import_id": "import-1",
+                "task_id": "task-1",
+                "fencing_token": "fence-1",
+                "object_digest": "digest-1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let published = publish_graph_lightning_staging_catalog_with_options(
+            &staging_dir,
+            &publish_dir,
+            PublishGraphLightningOptions {
+                require_state_marker: true,
+                fencing_token: Some("fence-1".to_string()),
+                expected_graph_epoch: Some(export.manifest.graph_commit_epoch),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(published["publish_gate"]["decision"], "published");
+        assert_eq!(published["publish_gate"]["preflight"]["decision"], "ready");
+        assert_eq!(
+            published["publish_gate"]["preflight"]["state_marker"]["import_state"],
+            "VALIDATING"
+        );
+        assert_eq!(
+            published["publish_gate"]["preflight"]["state_marker"]["idempotency_key"]
+                ["fencing_token"],
+            "fence-1"
+        );
+        assert_eq!(
+            published["publish_gate"]["preflight"]["expected_graph_epoch"],
+            export.manifest.graph_commit_epoch
+        );
+        assert_eq!(
+            published["publish_gate"]["preflight"]["expected_graph_epoch_matches"],
+            true
+        );
+        assert_eq!(
+            published["publish_gate"]["preflight"]["fencing_token_matches"],
+            true
+        );
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+        std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn publish_staging_rejects_missing_required_state_marker() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_publish_missing_marker_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_publish_missing_marker_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+
+        let error = publish_graph_lightning_staging_catalog_with_options(
+            &staging_dir,
+            &publish_dir,
+            PublishGraphLightningOptions {
+                require_state_marker: true,
+                fencing_token: None,
+                expected_graph_epoch: None,
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("publish requires graph lightning import state marker"));
+        assert!(!publish_dir
+            .join("graph_lightning_published_manifest.json")
+            .exists());
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn publish_staging_rejects_stale_fencing_token() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_publish_stale_fence_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_publish_stale_fence_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_state.json"),
+            serde_json::json!({
+                "protocol": "graph-lightning-import-state",
+                "protocol_version": 1,
+                "import_state": "VALIDATING",
+                "import_id": "import-1",
+                "task_id": "task-1",
+                "fencing_token": "fresh-fence",
+                "object_digest": "digest-1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let error = publish_graph_lightning_staging_catalog_with_options(
+            &staging_dir,
+            &publish_dir,
+            PublishGraphLightningOptions {
+                require_state_marker: true,
+                fencing_token: Some("stale-fence".to_string()),
+                expected_graph_epoch: Some(export.manifest.graph_commit_epoch),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("publish fencing token did not match"));
+        assert!(!publish_dir
+            .join("graph_lightning_published_manifest.json")
+            .exists());
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn publish_staging_rejects_unexpected_graph_epoch() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS {id: 'edge-root-mid'}]->(:Entity {id: 'mid', name: 'Mid'})",
+        )
+        .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let staging_dir = unique_main_test_dir("graph_lightning_publish_epoch_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_publish_epoch_target");
+        stage_graph_lightning_bootstrap_export(&export, &staging_dir).unwrap();
+
+        let error = publish_graph_lightning_staging_catalog_with_options(
+            &staging_dir,
+            &publish_dir,
+            PublishGraphLightningOptions {
+                require_state_marker: false,
+                fencing_token: None,
+                expected_graph_epoch: Some(export.manifest.graph_commit_epoch + 1),
+            },
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("expected graph epoch"));
+        assert!(!publish_dir
+            .join("graph_lightning_published_manifest.json")
+            .exists());
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
     }
 
     #[test]
@@ -3517,6 +3844,9 @@ mod tests {
     fn validates_graph_lightning_publish_staging_usage_text() {
         assert!(graph_lightning_publish_staging_usage().contains("<staging-dir>"));
         assert!(graph_lightning_publish_staging_usage().contains("<publish-dir>"));
+        assert!(graph_lightning_publish_staging_usage().contains("--require-state-marker"));
+        assert!(graph_lightning_publish_staging_usage().contains("--fencing-token"));
+        assert!(graph_lightning_publish_staging_usage().contains("--expected-graph-epoch"));
     }
 
     #[test]
