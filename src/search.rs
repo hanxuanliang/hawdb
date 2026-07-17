@@ -9,6 +9,9 @@ use std::fs::{self, File};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 
+mod analyzer_lexicon;
+use analyzer_lexicon::CORE_SEMANTIC_ALIAS_RULES;
+
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 pub const FULL_REINDEX_MARKER: &str = ".reindex_needed";
 pub const METADATA_REPAIR_MARKER: &str = ".projection_metadata_repair_needed";
@@ -202,6 +205,67 @@ pub struct SearchQueryOptions {
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchAnalyzerLexicon {
+    alias_rules: Vec<SearchAnalyzerAliasRule>,
+}
+
+impl SearchAnalyzerLexicon {
+    pub fn empty() -> Self {
+        Self {
+            alias_rules: Vec::new(),
+        }
+    }
+
+    pub fn with_alias_rule<I, A, S, T>(mut self, inputs: I, aliases: A) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        A: IntoIterator<Item = T>,
+        S: Into<String>,
+        T: Into<String>,
+    {
+        let inputs = inputs
+            .into_iter()
+            .map(Into::into)
+            .filter(|input: &String| !input.is_empty())
+            .collect::<Vec<_>>();
+        let aliases = aliases
+            .into_iter()
+            .map(Into::into)
+            .filter(|alias: &String| !alias.is_empty())
+            .collect::<Vec<_>>();
+        if !inputs.is_empty() && !aliases.is_empty() {
+            self.alias_rules
+                .push(SearchAnalyzerAliasRule { inputs, aliases });
+        }
+        self
+    }
+
+    fn semantic_aliases(&self, token: &str) -> Vec<String> {
+        self.alias_rules
+            .iter()
+            .filter(|rule| rule.inputs.iter().any(|input| input == token))
+            .flat_map(|rule| rule.aliases.iter().cloned())
+            .collect()
+    }
+}
+
+impl Default for SearchAnalyzerLexicon {
+    fn default() -> Self {
+        CORE_SEMANTIC_ALIAS_RULES
+            .iter()
+            .fold(Self::empty(), |lexicon, (inputs, aliases)| {
+                lexicon.with_alias_rule(inputs.iter().copied(), aliases.iter().copied())
+            })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchAnalyzerAliasRule {
+    inputs: Vec<String>,
+    aliases: Vec<String>,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SearchRebuildOptions {
     pub max_rows: Option<usize>,
@@ -248,6 +312,7 @@ pub struct SearchIndex {
     embedding_manifest: Option<SearchEmbeddingManifest>,
     source_graph_commit_epoch: Option<u64>,
     marker_lines: RefCell<BTreeMap<String, Vec<String>>>,
+    analyzer_lexicon: SearchAnalyzerLexicon,
 }
 
 impl SearchIndex {
@@ -264,9 +329,19 @@ impl SearchIndex {
             embedding_manifest: None,
             source_graph_commit_epoch: None,
             marker_lines: RefCell::new(BTreeMap::new()),
+            analyzer_lexicon: SearchAnalyzerLexicon::default(),
         };
         index.load_snapshot()?;
         Ok(index)
+    }
+
+    pub fn with_analyzer_lexicon(mut self, analyzer_lexicon: SearchAnalyzerLexicon) -> Self {
+        self.analyzer_lexicon = analyzer_lexicon;
+        self
+    }
+
+    pub fn set_analyzer_lexicon(&mut self, analyzer_lexicon: SearchAnalyzerLexicon) {
+        self.analyzer_lexicon = analyzer_lexicon;
     }
 
     pub fn upsert(&mut self, document: SearchDocument) -> Result<()> {
@@ -549,7 +624,7 @@ impl SearchIndex {
         mode: SearchMode,
         options: SearchQueryOptions,
     ) -> SearchResultSet {
-        let query_terms = tokenize(query_text);
+        let query_terms = tokenize(query_text, &self.analyzer_lexicon);
         let mut fallback_reasons = Vec::new();
         let limit = options.limit;
         let document_count = self.documents.len();
@@ -588,6 +663,7 @@ impl SearchIndex {
         let text_corpus = if text_available && mode != SearchMode::Vector {
             Some(TextCorpusStats::from_documents(
                 filtered_documents.iter().copied(),
+                &self.analyzer_lexicon,
             ))
         } else {
             None
@@ -608,7 +684,9 @@ impl SearchIndex {
             let text_score = if text_available && mode != SearchMode::Vector {
                 text_corpus
                     .as_ref()
-                    .map(|corpus| bm25_score(&query_terms, document, corpus))
+                    .map(|corpus| {
+                        bm25_score(&query_terms, document, corpus, &self.analyzer_lexicon)
+                    })
                     .unwrap_or(0.0)
             } else {
                 0.0
@@ -676,8 +754,16 @@ impl SearchIndex {
                     kind: document.metadata.get("kind").cloned(),
                     external_id: document.metadata.get("external_id").cloned(),
                     source_id: document.metadata.get("source_id").cloned(),
-                    matched_terms: matched_query_terms(&query_terms, document),
-                    matched_spans: matched_query_spans(&query_terms, document),
+                    matched_terms: matched_query_terms(
+                        &query_terms,
+                        document,
+                        &self.analyzer_lexicon,
+                    ),
+                    matched_spans: matched_query_spans(
+                        &query_terms,
+                        document,
+                        &self.analyzer_lexicon,
+                    ),
                     fallback_reasons: fallback_reasons.clone(),
                     projection_freshness: projection_freshness.clone(),
                 });
@@ -1161,13 +1247,16 @@ struct TextCorpusStats {
 }
 
 impl TextCorpusStats {
-    fn from_documents<'a>(documents: impl Iterator<Item = &'a SearchDocument>) -> Self {
+    fn from_documents<'a>(
+        documents: impl Iterator<Item = &'a SearchDocument>,
+        analyzer_lexicon: &SearchAnalyzerLexicon,
+    ) -> Self {
         let mut document_count = 0;
         let mut total_len = 0;
         let mut document_frequency = BTreeMap::new();
         for document in documents {
             document_count += 1;
-            let tokens = document_tokens(document);
+            let tokens = document_tokens(document, analyzer_lexicon);
             total_len += tokens.len();
             for term in tokens.into_iter().collect::<BTreeSet<_>>() {
                 *document_frequency.entry(term).or_insert(0) += 1;
@@ -1189,11 +1278,12 @@ fn bm25_score(
     query_terms: &BTreeSet<String>,
     document: &SearchDocument,
     corpus: &TextCorpusStats,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
 ) -> f64 {
     if query_terms.is_empty() || corpus.document_count == 0 {
         return 0.0;
     }
-    let tokens = document_tokens(document);
+    let tokens = document_tokens(document, analyzer_lexicon);
     if tokens.is_empty() {
         return 0.0;
     }
@@ -1225,11 +1315,15 @@ fn bm25_score(
     score
 }
 
-fn matched_query_terms(query_terms: &BTreeSet<String>, document: &SearchDocument) -> Vec<String> {
+fn matched_query_terms(
+    query_terms: &BTreeSet<String>,
+    document: &SearchDocument,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+) -> Vec<String> {
     if query_terms.is_empty() {
         return Vec::new();
     }
-    let document_terms = document_tokens(document)
+    let document_terms = document_tokens(document, analyzer_lexicon)
         .into_iter()
         .collect::<BTreeSet<_>>();
     query_terms
@@ -1242,13 +1336,26 @@ fn matched_query_terms(query_terms: &BTreeSet<String>, document: &SearchDocument
 fn matched_query_spans(
     query_terms: &BTreeSet<String>,
     document: &SearchDocument,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
 ) -> Vec<SearchMatchedSpan> {
     if query_terms.is_empty() {
         return Vec::new();
     }
     let mut spans = Vec::new();
-    collect_matched_query_spans("title", &document.title, query_terms, &mut spans);
-    collect_matched_query_spans("content", &document.content, query_terms, &mut spans);
+    collect_matched_query_spans(
+        "title",
+        &document.title,
+        query_terms,
+        analyzer_lexicon,
+        &mut spans,
+    );
+    collect_matched_query_spans(
+        "content",
+        &document.content,
+        query_terms,
+        analyzer_lexicon,
+        &mut spans,
+    );
     spans
 }
 
@@ -1256,6 +1363,7 @@ fn collect_matched_query_spans(
     field: &str,
     text: &str,
     query_terms: &BTreeSet<String>,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
     spans: &mut Vec<SearchMatchedSpan>,
 ) {
     let mut run_start = None::<usize>;
@@ -1263,11 +1371,27 @@ fn collect_matched_query_spans(
         if ch.is_alphanumeric() || ch == '_' {
             run_start.get_or_insert(index);
         } else if let Some(start) = run_start.take() {
-            push_matched_query_spans(field, text, start, index, query_terms, spans);
+            push_matched_query_spans(
+                field,
+                text,
+                start,
+                index,
+                query_terms,
+                analyzer_lexicon,
+                spans,
+            );
         }
     }
     if let Some(start) = run_start {
-        push_matched_query_spans(field, text, start, text.len(), query_terms, spans);
+        push_matched_query_spans(
+            field,
+            text,
+            start,
+            text.len(),
+            query_terms,
+            analyzer_lexicon,
+            spans,
+        );
     }
 }
 
@@ -1277,10 +1401,11 @@ fn push_matched_query_spans(
     start_byte: usize,
     end_byte: usize,
     query_terms: &BTreeSet<String>,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
     spans: &mut Vec<SearchMatchedSpan>,
 ) {
     let raw = &text[start_byte..end_byte];
-    let matching_terms = identifier_tokens(raw)
+    let matching_terms = identifier_tokens(raw, analyzer_lexicon)
         .into_iter()
         .filter(|term| query_terms.contains(term))
         .collect::<BTreeSet<_>>();
@@ -1295,19 +1420,25 @@ fn push_matched_query_spans(
     }
 }
 
-fn document_tokens(document: &SearchDocument) -> Vec<String> {
-    let mut tokens = tokenize_list(&document.title);
-    tokens.extend(tokenize_list(&document.title));
-    tokens.extend(tokenize_list(&document.content));
-    tokens.extend(searchable_metadata_tokens(document));
+fn document_tokens(
+    document: &SearchDocument,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+) -> Vec<String> {
+    let mut tokens = tokenize_list(&document.title, analyzer_lexicon);
+    tokens.extend(tokenize_list(&document.title, analyzer_lexicon));
+    tokens.extend(tokenize_list(&document.content, analyzer_lexicon));
+    tokens.extend(searchable_metadata_tokens(document, analyzer_lexicon));
     tokens
 }
 
-fn searchable_metadata_tokens(document: &SearchDocument) -> Vec<String> {
+fn searchable_metadata_tokens(
+    document: &SearchDocument,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+) -> Vec<String> {
     ["kind", "external_id", "source_id", "space_id"]
         .into_iter()
         .filter_map(|key| document.metadata.get(key))
-        .flat_map(|value| tokenize_list(value))
+        .flat_map(|value| tokenize_list(value, analyzer_lexicon))
         .collect()
 }
 
@@ -1319,19 +1450,19 @@ fn token_frequencies(tokens: impl Iterator<Item = String>) -> BTreeMap<String, u
     frequencies
 }
 
-fn tokenize(text: &str) -> BTreeSet<String> {
-    tokenize_list(text).into_iter().collect()
+fn tokenize(text: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> BTreeSet<String> {
+    tokenize_list(text, analyzer_lexicon).into_iter().collect()
 }
 
-fn tokenize_list(text: &str) -> Vec<String> {
+fn tokenize_list(text: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut previous_part = None::<String>;
     for raw in text.split(|ch: char| !ch.is_alphanumeric() && ch != '_') {
         let parts = identifier_parts(raw);
         if let (Some(previous), Some(first)) = (previous_part.as_ref(), parts.first()) {
-            push_analyzed_token(&mut tokens, format!("{previous}_{first}"));
+            push_analyzed_token(&mut tokens, format!("{previous}_{first}"), analyzer_lexicon);
         }
-        tokens.extend(identifier_tokens(raw));
+        tokens.extend(identifier_tokens(raw, analyzer_lexicon));
         if let Some(last) = parts.last() {
             previous_part = Some(last.clone());
         }
@@ -1339,7 +1470,7 @@ fn tokenize_list(text: &str) -> Vec<String> {
     tokens
 }
 
-fn identifier_tokens(raw: &str) -> Vec<String> {
+fn identifier_tokens(raw: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Vec::new();
@@ -1351,10 +1482,10 @@ fn identifier_tokens(raw: &str) -> Vec<String> {
     }
     let parts = identifier_parts(raw);
     for part in &parts {
-        push_analyzed_token(&mut tokens, part.clone());
+        push_analyzed_token(&mut tokens, part.clone(), analyzer_lexicon);
     }
     for pair in parts.windows(2) {
-        push_analyzed_token(&mut tokens, pair.join("_"));
+        push_analyzed_token(&mut tokens, pair.join("_"), analyzer_lexicon);
     }
     tokens
 }
@@ -1447,12 +1578,16 @@ fn push_unique_token(tokens: &mut Vec<String>, token: String) {
     }
 }
 
-fn push_analyzed_token(tokens: &mut Vec<String>, token: String) {
+fn push_analyzed_token(
+    tokens: &mut Vec<String>,
+    token: String,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+) {
     push_unique_token(tokens, token.clone());
     for normalized in normalize_english_suffixes(&token) {
         push_unique_token(tokens, normalized);
     }
-    for alias in semantic_aliases(&token) {
+    for alias in analyzer_lexicon.semantic_aliases(&token) {
         push_unique_token(tokens, alias);
     }
 }
@@ -1482,67 +1617,6 @@ fn normalize_english_suffixes(token: &str) -> Vec<String> {
         }
     }
     Vec::new()
-}
-
-fn semantic_aliases(token: &str) -> Vec<String> {
-    match token {
-        "ahead_log" | "write_ahead" | "write_ahead_log" => vec!["wal".to_string()],
-        "ann" => vec!["approximate_nearest_neighbor".to_string()],
-        "approximate_nearest" | "nearest_neighbor" | "approximate_nearest_neighbor" => {
-            vec!["ann".to_string()]
-        }
-        "compressed_sparse_column" | "sparse_column" => vec!["csc".to_string()],
-        "compressed_sparse_row" | "sparse_row" => vec!["csr".to_string()],
-        "concurrency_control" | "multi_version" | "multi_version_concurrency_control" => {
-            vec!["mvcc".to_string()]
-        }
-        "csc" => vec!["compressed_sparse_column".to_string()],
-        "csr" => vec!["compressed_sparse_row".to_string()],
-        "full_text" | "full_text_search" | "text_search" => vec!["fts".to_string()],
-        "fts" => vec!["full_text_search".to_string(), "text_search".to_string()],
-        "hybrid_retrieval" => vec!["hybrid_retrieve".to_string(), "hybrid_search".to_string()],
-        "hybrid_retrieve" | "hybrid_search" => vec!["hybrid_retrieval".to_string()],
-        "kg" => vec!["knowledge_graph".to_string()],
-        "knowledge_graph" => vec!["kg".to_string()],
-        "kuzu" => vec!["ladybug".to_string()],
-        "ladybug" => vec!["kuzu".to_string()],
-        "lance" => vec!["lancedb".to_string()],
-        "lancedb" => vec!["lance".to_string()],
-        "log_structured" | "log_structured_merge_tree" | "merge_tree" | "structured_merge" => {
-            vec!["lsm".to_string()]
-        }
-        "lsm" => vec!["log_structured_merge_tree".to_string()],
-        "mvcc" => vec!["multi_version_concurrency_control".to_string()],
-        "open_cypher" => vec!["cypher".to_string()],
-        "opencypher" => vec!["cypher".to_string(), "open_cypher".to_string()],
-        "pg" | "postgres" => vec!["postgresql".to_string()],
-        "postgresql" => vec!["postgres".to_string(), "pg".to_string()],
-        "pg_vector" | "pgvector" => vec!["vector_search".to_string()],
-        "rag" => vec![
-            "retrieval_augmented_generation".to_string(),
-            "graph_rag".to_string(),
-            "graph_retrieval".to_string(),
-        ],
-        "wal" => vec!["write_ahead_log".to_string()],
-        "graph_rag" => vec![
-            "rag".to_string(),
-            "retrieval_augmented_generation".to_string(),
-            "graph_retrieval".to_string(),
-        ],
-        "graphrag" => vec![
-            "graph_rag".to_string(),
-            "rag".to_string(),
-            "graph_retrieval".to_string(),
-        ],
-        "graph_retrieval" => vec!["graph_rag".to_string(), "rag".to_string()],
-        "retrieval_augmented" | "augmented_generation" | "retrieval_augmented_generation" => {
-            vec!["rag".to_string(), "graph_rag".to_string()]
-        }
-        "reciprocal_rank" | "rank_fusion" | "reciprocal_rank_fusion" => vec!["rrf".to_string()],
-        "rrf" => vec!["reciprocal_rank_fusion".to_string()],
-        "semantic_search" | "vector_search" => vec!["pgvector".to_string()],
-        _ => Vec::new(),
-    }
 }
 
 fn is_search_stopword(token: &str) -> bool {
@@ -2599,6 +2673,111 @@ mod tests {
         assert_eq!(expanded_hits[0].id, "graph-rag");
         assert_eq!(kg_hits[0].id, "graph-rag");
         assert_eq!(knowledge_graph_hits[0].id, "graph-rag");
+    }
+
+    #[test]
+    fn tokenizer_expands_nowledge_memory_lifecycle_aliases() {
+        let mut index =
+            SearchIndex::in_memory().with_analyzer_lexicon(nowledge_example_analyzer_lexicon());
+        index
+            .upsert(SearchDocument {
+                id: "memory-lifecycle".to_string(),
+                title: "Crystal memory keeps SYNTHESIZED_FROM evidence".to_string(),
+                content: "Episodic provenance preserves raw Thread and SourceChunk records"
+                    .to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let crystallization_hits = index.search("crystallization", None, SearchMode::Text, 10);
+        let synthesized_hits = index.search("synthesized memory", None, SearchMode::Text, 10);
+        let raw_evidence_hits =
+            index.search_with_report("raw evidence", None, SearchMode::Text, 10);
+
+        assert_eq!(crystallization_hits[0].id, "memory-lifecycle");
+        assert_eq!(synthesized_hits[0].id, "memory-lifecycle");
+        assert_eq!(raw_evidence_hits.hits[0].id, "memory-lifecycle");
+        assert!(raw_evidence_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "raw_evidence"));
+    }
+
+    #[test]
+    fn tokenizer_keeps_nowledge_application_aliases_out_of_default_lexicon() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory-lifecycle".to_string(),
+                title: "Crystal memory".to_string(),
+                content: "SYNTHESIZED_FROM evidence".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let hits = index.search("crystallization", None, SearchMode::Text, 10);
+
+        assert!(hits.is_empty());
+    }
+
+    #[test]
+    fn tokenizer_expands_nowledge_schema_relationship_aliases() {
+        let mut index =
+            SearchIndex::in_memory().with_analyzer_lexicon(nowledge_example_analyzer_lexicon());
+        index
+            .upsert(SearchDocument {
+                id: "schema-relationships".to_string(),
+                title: "SOURCED_FROM MENTIONS EVOLVES ai_summary".to_string(),
+                content: "Community summaries link source provenance and memory evolution"
+                    .to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let source_hits = index.search("source provenance", None, SearchMode::Text, 10);
+        let mention_hits = index.search("entity mention", None, SearchMode::Text, 10);
+        let evolution_hits = index.search("memory evolution", None, SearchMode::Text, 10);
+        let summary_hits =
+            index.search_with_report("community summary", None, SearchMode::Text, 10);
+
+        assert_eq!(source_hits[0].id, "schema-relationships");
+        assert_eq!(mention_hits[0].id, "schema-relationships");
+        assert_eq!(evolution_hits[0].id, "schema-relationships");
+        assert_eq!(summary_hits.hits[0].id, "schema-relationships");
+        assert!(summary_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "community_summary"));
+    }
+
+    fn nowledge_example_analyzer_lexicon() -> SearchAnalyzerLexicon {
+        SearchAnalyzerLexicon::default()
+            .with_alias_rule(["crystal"], ["crystallized_memory", "synthesized_memory"])
+            .with_alias_rule(
+                ["crystallization", "crystallized", "crystallized_memory"],
+                ["crystal"],
+            )
+            .with_alias_rule(
+                ["synthesized", "synthesis", "synthesized_memory"],
+                ["crystal"],
+            )
+            .with_alias_rule(["synthesized_from"], ["crystal", "sourced_from"])
+            .with_alias_rule(["episodic", "episodic_provenance"], ["raw_evidence"])
+            .with_alias_rule(["raw_evidence"], ["episodic_provenance"])
+            .with_alias_rule(["source_provenance"], ["sourced_from"])
+            .with_alias_rule(["sourced_from"], ["source_provenance"])
+            .with_alias_rule(["entity_mention", "memory_mention"], ["mentions"])
+            .with_alias_rule(["mentions"], ["entity_mention", "memory_mention"])
+            .with_alias_rule(["evolves"], ["memory_evolution"])
+            .with_alias_rule(["memory_evolution", "evolution_edge"], ["evolves"])
+            .with_alias_rule(["ai_summary"], ["community_summary"])
+            .with_alias_rule(
+                ["community_summary", "summarized_community"],
+                ["ai_summary"],
+            )
     }
 
     #[test]

@@ -82,10 +82,10 @@ pub use schema::{
     PropertyId, PropertyType, SchemaObjectState, TableDescriptor, TableId, TableKind,
 };
 pub use search::{
-    MetadataRepairOptions, MetadataRepairSummary, SearchDerivedArtifactReport, SearchDocument,
-    SearchEmbeddingManifest, SearchHit, SearchIndex, SearchMode, SearchProjectionFreshness,
-    SearchProjectionKind, SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet,
+    MetadataRepairOptions, MetadataRepairSummary, SearchAnalyzerLexicon,
+    SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchHit, SearchIndex,
+    SearchMode, SearchProjectionFreshness, SearchProjectionKind, SearchProjectionRow,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
 };
 pub use store::{DurabilityPolicy, RecoveryMode, StorageReclamationWatermark, WalReplayConfig};
 pub use value::Value;
