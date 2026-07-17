@@ -420,10 +420,10 @@ ranking diagnostics.
 Higher-level retrieval APIs can use those fields for score breakdowns,
 provenance, and stale projection warnings without making the search projection
 canonical. Callers that need response-level diagnostics can use
-`SearchIndex::search_with_report` to get the pre-limit hit count, requested
-limit, rank window, truncation flag, truncation reasons, child retriever
-availability, candidate counts, top hit IDs, and per-child top candidate ranks
-and scores.
+`SearchIndex::search_with_report` to get the total document count, post-filter
+document count, pre-limit hit count, requested limit, rank window, truncation
+flag, truncation reasons, child retriever availability, candidate counts, top
+hit IDs, and per-child top candidate ranks and scores.
 
 The stable embedded facade exposes this boundary without owning search state:
 `Database::rebuild_search_projection` derives projection rows from the canonical

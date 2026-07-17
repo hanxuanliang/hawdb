@@ -129,6 +129,8 @@ pub struct SearchResultSet {
     pub truncation_reasons: Vec<String>,
     pub retrievers: Vec<SearchRetrieverReport>,
     pub rank_window: Option<usize>,
+    pub document_count: usize,
+    pub filtered_document_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -481,11 +483,13 @@ impl SearchIndex {
         let query_terms = tokenize(query_text);
         let mut fallback_reasons = Vec::new();
         let limit = options.limit;
+        let document_count = self.documents.len();
         let filtered_documents = self
             .documents
             .values()
             .filter(|document| metadata_matches(document, &options.metadata_filters))
             .collect::<Vec<_>>();
+        let filtered_document_count = filtered_documents.len();
         let vector_available = match (query_embedding, self.embedding_dimension) {
             (Some(vector), Some(dimension)) if vector.len() == dimension => true,
             (Some(vector), Some(dimension)) => {
@@ -619,6 +623,8 @@ impl SearchIndex {
             truncation_reasons,
             retrievers,
             rank_window: options.rank_window,
+            document_count,
+            filtered_document_count,
         }
     }
 
@@ -1770,6 +1776,8 @@ mod tests {
         );
 
         assert_eq!(result.total_hits, 1);
+        assert_eq!(result.document_count, 2);
+        assert_eq!(result.filtered_document_count, 1);
         assert_eq!(result.hits[0].id, "memory:thread_1");
         assert_eq!(result.hits[0].source_id.as_deref(), Some("thread_1"));
         let text = result
@@ -1779,6 +1787,44 @@ mod tests {
             .expect("expected text retriever report");
         assert_eq!(text.candidate_count, 1);
         assert_eq!(text.top_hit_ids, vec!["memory:thread_1".to_string()]);
+    }
+
+    #[test]
+    fn search_report_exposes_metadata_filter_empty_scope() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:thread_1".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                metadata_filters: BTreeMap::from([(
+                    "source_id".to_string(),
+                    "missing_thread".to_string(),
+                )]),
+            },
+        );
+
+        assert_eq!(result.document_count, 1);
+        assert_eq!(result.filtered_document_count, 0);
+        assert_eq!(result.total_hits, 0);
+        let text = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "text")
+            .expect("expected text retriever report");
+        assert_eq!(text.candidate_count, 0);
     }
 
     #[test]
