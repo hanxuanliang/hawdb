@@ -425,6 +425,7 @@ pub struct KnowledgeRetrieverReport {
     pub available: bool,
     pub candidate_count: usize,
     pub limit: Option<usize>,
+    pub rank_window: Option<usize>,
     pub truncated: bool,
     pub truncation_reasons: Vec<String>,
     pub top_candidates: Vec<KnowledgeRetrieverCandidate>,
@@ -1641,6 +1642,7 @@ fn knowledge_retriever_reports(
             available: report.available,
             candidate_count: report.candidate_count,
             limit: Some(search.limit),
+            rank_window: search.rank_window,
             truncated: report.candidate_count > report.top_candidates.len(),
             truncation_reasons: knowledge_search_retriever_truncation_reasons(
                 report.name.as_str(),
@@ -1676,6 +1678,7 @@ fn knowledge_retriever_reports(
         available: graph_seed_limit > 0,
         candidate_count: graph_seed_candidate_count,
         limit: Some(graph_seed_limit),
+        rank_window: None,
         truncated: graph_seed_candidate_count > graph_seeds.len(),
         truncation_reasons: knowledge_graph_seed_truncation_reasons(
             graph_seed_candidate_count,
@@ -4423,6 +4426,8 @@ mod tests {
             .find(|report| report.name == "text")
             .expect("text knowledge retriever report");
         assert_eq!(text_retriever.candidate_count, 2);
+        assert_eq!(text_retriever.limit, Some(1));
+        assert_eq!(text_retriever.rank_window, None);
         assert_eq!(text_retriever.top_candidates[0].canonical_node_id, Some(0));
         assert_eq!(text_retriever.top_candidates[0].graph_context_path_count, 1);
         assert_eq!(
@@ -4482,6 +4487,8 @@ mod tests {
             .expect("graph seed retriever report");
         assert!(graph_seed_report.available);
         assert_eq!(graph_seed_report.candidate_count, 2);
+        assert_eq!(graph_seed_report.limit, Some(2));
+        assert_eq!(graph_seed_report.rank_window, None);
         assert_eq!(graph_seed_report.top_candidates.len(), 2);
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
         assert_eq!(
@@ -4893,10 +4900,13 @@ mod tests {
             .evidence
             .iter()
             .all(|evidence| evidence.rrf_score == evidence.score));
-        assert!(output
+        let vector_retriever = output
             .retrievers
             .iter()
-            .any(|report| report.name == "vector"));
+            .find(|report| report.name == "vector")
+            .expect("vector knowledge retriever report");
+        assert_eq!(vector_retriever.limit, Some(10));
+        assert_eq!(vector_retriever.rank_window, Some(1));
         let text_report = output
             .search
             .retrievers
@@ -4911,6 +4921,7 @@ mod tests {
             .find(|report| report.name == "text")
             .expect("text knowledge retriever report");
         assert_eq!(text_retriever.limit, Some(10));
+        assert_eq!(text_retriever.rank_window, Some(1));
         assert_eq!(text_retriever.top_candidates[0].canonical_node_id, Some(1));
         assert!(text_retriever.truncated);
         assert!(text_retriever
@@ -5071,6 +5082,7 @@ mod tests {
         );
         assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
         assert_eq!(graph_seed_report.limit, Some(1));
+        assert_eq!(graph_seed_report.rank_window, None);
         assert!(graph_seed_report.truncated);
         assert!(output.diagnostics.graph_seed_truncated);
         assert_eq!(
