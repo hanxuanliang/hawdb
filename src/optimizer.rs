@@ -2068,6 +2068,12 @@ impl OptimizerCatalog {
             .copied()
     }
 
+    fn known_rel_property_distinct_count(&self, rel_type: &str, property: &str) -> Option<u64> {
+        self.rel_property_distinct_counts
+            .get(&(rel_type.to_string(), property.to_string()))
+            .copied()
+    }
+
     fn rel_property_distinct_count(&self, rel_type: &str, property: &str) -> u64 {
         self.rel_property_distinct_counts
             .get(&(rel_type.to_string(), property.to_string()))
@@ -4152,10 +4158,14 @@ fn estimate_aggregate_rows(
         let ProjectionExpression::Property { variable, property } = &group_key.expression else {
             return input_rows.div_ceil(4).max(1);
         };
-        let Some(label) = physical_plan_node_label(input, variable) else {
-            return input_rows.div_ceil(4).max(1);
+        let distinct_count = if let Some(label) = physical_plan_node_label(input, variable) {
+            catalog.known_distinct_count(label, property)
+        } else if let Some(rel_type) = physical_plan_relationship_type(input, variable) {
+            catalog.known_rel_property_distinct_count(rel_type, property)
+        } else {
+            None
         };
-        let Some(distinct_count) = catalog.known_distinct_count(label, property) else {
+        let Some(distinct_count) = distinct_count else {
             return input_rows.div_ceil(4).max(1);
         };
         distinct_product = distinct_product.saturating_mul(distinct_count.max(1));
@@ -4325,6 +4335,35 @@ fn physical_plan_node_label<'a>(plan: &'a PhysicalPlan, variable: &str) -> Optio
         | PhysicalPlan::DistinctExec { input }
         | PhysicalPlan::SortExec { input, .. }
         | PhysicalPlan::LimitExec { input, .. } => physical_plan_node_label(input, variable),
+        _ => None,
+    }
+}
+
+fn physical_plan_relationship_type<'a>(plan: &'a PhysicalPlan, variable: &str) -> Option<&'a str> {
+    match plan {
+        PhysicalPlan::AdjacencyExpandExec {
+            rel_variable: Some(rel_variable),
+            rel_type,
+            input,
+            ..
+        } => {
+            if rel_variable == variable {
+                Some(rel_type.as_str())
+            } else {
+                physical_plan_relationship_type(input, variable)
+            }
+        }
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            physical_plan_relationship_type(left, variable)
+                .or_else(|| physical_plan_relationship_type(right, variable))
+        }
+        PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::OptionalDegreeExec { input, .. }
+        | PhysicalPlan::AggregateExec { input, .. }
+        | PhysicalPlan::DistinctExec { input }
+        | PhysicalPlan::SortExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. } => physical_plan_relationship_type(input, variable),
         _ => None,
     }
 }
@@ -6383,6 +6422,84 @@ mod tests {
             PlanCost {
                 estimated_rows: 20,
                 cost: 6_004,
+            }
+        );
+    }
+
+    #[test]
+    fn aggregate_group_keys_use_relationship_property_distinct_counts() {
+        let logical = LogicalPlan::Aggregate {
+            group_keys: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "r".to_string(),
+                    property: "weight".to_string(),
+                },
+                name: "weight".to_string(),
+            }],
+            items: vec![Aggregation {
+                function: AggregateFunction::Count,
+                target: AggregateTarget::Variable("e".to_string()),
+                distinct: true,
+                name: "entity_count".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "m".to_string(),
+                source_label: "Memory".to_string(),
+                rel_variable: Some("r".to_string()),
+                rel_type: "MENTIONS".to_string(),
+                rel_properties: BTreeMap::new(),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "e".to_string(),
+                target_label: "Entity".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000), ("Entity".to_string(), 1_000)],
+                [("MENTIONS".to_string(), 1_000)],
+                [("MENTIONS".to_string(), 1_000)],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                    ),
+                    1_000,
+                )],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                        1,
+                    ),
+                    1_000,
+                )],
+                [],
+                [],
+            )
+            .with_relationship_property_distinct_counts([(
+                ("MENTIONS".to_string(), "weight".to_string()),
+                10,
+            )]),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 10,
+                cost: 4_004,
             }
         );
     }

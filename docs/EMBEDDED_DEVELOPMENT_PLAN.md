@@ -788,10 +788,10 @@ Current implemented slice:
   histograms for equality, `IN`, and range predicates, so low-selectivity scan
   fallbacks and cross-pattern filters are not forced through the generic
   half-selectivity fallback
-- grouped aggregate cost estimation uses selected-plan variable labels and
-  explicit node-property distinct counts for simple node-property group keys,
-  while non-property or missing-statistics grouping keeps the conservative
-  fallback estimate
+- grouped aggregate cost estimation uses selected-plan variable labels/types
+  and explicit node-property or relationship-property distinct counts for
+  simple property group keys, while non-property or missing-statistics grouping
+  keeps the conservative fallback estimate
 - deterministic physical plan fingerprints are exposed through
   `OptimizerTrace::selected_plan_fingerprint` and `PhysicalPlan::fingerprint`
   for regression tests and future compatibility/shadow comparisons
