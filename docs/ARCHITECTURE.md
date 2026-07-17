@@ -480,7 +480,8 @@ The stable embedded facade exposes this boundary without owning search state:
 graph into a caller-owned `SearchIndex`, and the background variants expose the
 same rebuild through `LocalQosPolicy` or `LocalQosScheduler` admission for
 caller-owned maintenance loops. `DatabaseReadTransaction::rebuild_search_projection`
-can derive the same projection from a pinned catalog and graph snapshot.
+and `DatabaseReadTransaction::repair_search_projection_metadata` derive the same
+projection maintenance inputs from a pinned catalog and graph snapshot.
 `Database::retrieve_knowledge`
 combines the projection report with the current graph commit epoch and a compact
 diagnostics summary. `DatabaseReadTransaction::retrieve_knowledge` uses the same

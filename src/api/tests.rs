@@ -8503,6 +8503,62 @@ fn read_transaction_rebuilds_search_projection_from_pinned_snapshot() {
 }
 
 #[test]
+fn read_transaction_repairs_search_projection_metadata_from_pinned_snapshot() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'snapshot', title: 'Pinned projection', content: 'snapshot only', source_id: 'before', space_id: 'snapshot-space'})",
+    )
+    .unwrap();
+    let read_tx = db.begin_read_transaction();
+    db.query(
+        "MATCH (m:Memory {id: 'snapshot'}) SET m.source_id = 'after', m.space_id = 'live-space'",
+    )
+    .unwrap();
+
+    let mut snapshot_index = SearchIndex::in_memory();
+    snapshot_index
+        .upsert(SearchDocument {
+            id: "memory:snapshot".to_string(),
+            title: "Existing title".to_string(),
+            content: "Existing body should stay".to_string(),
+            embedding: Some(vec![1.0, 0.0]),
+            metadata: BTreeMap::from([("kind".to_string(), "stale".to_string())]),
+        })
+        .unwrap();
+
+    let summary = read_tx
+        .repair_search_projection_metadata(&mut snapshot_index, MetadataRepairOptions::default())
+        .unwrap();
+
+    assert_eq!(summary.scanned_nodes, 1);
+    assert_eq!(summary.repaired_documents, 1);
+    let document = snapshot_index.document("memory:snapshot").unwrap();
+    assert_eq!(document.title, "Existing title");
+    assert_eq!(document.content, "Existing body should stay");
+    assert_eq!(document.embedding, Some(vec![1.0, 0.0]));
+    assert_eq!(
+        document.metadata.get("source_id").map(String::as_str),
+        Some("before")
+    );
+    assert_eq!(
+        document.metadata.get("space_id").map(String::as_str),
+        Some("snapshot-space")
+    );
+
+    db.repair_search_projection_metadata(&mut snapshot_index, MetadataRepairOptions::default())
+        .unwrap();
+    let live_document = snapshot_index.document("memory:snapshot").unwrap();
+    assert_eq!(
+        live_document.metadata.get("source_id").map(String::as_str),
+        Some("after")
+    );
+    assert_eq!(
+        live_document.metadata.get("space_id").map(String::as_str),
+        Some("live-space")
+    );
+}
+
+#[test]
 fn read_transaction_survives_later_checkpoint() {
     let path = unique_test_dir("read_tx_checkpoint");
     {

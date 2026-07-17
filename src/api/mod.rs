@@ -4735,6 +4735,14 @@ impl DatabaseReadTransaction {
         search_index.rebuild_from_graph(&self.catalog, &self.store, options)
     }
 
+    pub fn repair_search_projection_metadata(
+        &self,
+        search_index: &mut SearchIndex,
+        options: MetadataRepairOptions,
+    ) -> Result<MetadataRepairSummary> {
+        search_index.repair_metadata_from_graph(&self.catalog, &self.store, options)
+    }
+
     pub fn retrieve_knowledge(
         &self,
         search_index: &SearchIndex,
