@@ -393,6 +393,7 @@ pub struct SearchProjectionGraphDeltaRequest {
     pub upsert_node_ids: Vec<u64>,
     pub delete_document_ids: Vec<String>,
     pub max_operations: Option<usize>,
+    pub complete_through_graph_commit_epoch: Option<u64>,
 }
 
 impl SearchProjectionGraphDeltaRequest {
@@ -3185,6 +3186,14 @@ fn search_projection_graph_delta_for(
             )));
         }
     }
+    if let Some(epoch) = request.complete_through_graph_commit_epoch {
+        let current_epoch = store.commit_epoch();
+        if epoch > current_epoch {
+            return Err(SkeinError::Storage(format!(
+                "search projection graph delta complete-through epoch {epoch} is ahead of graph commit epoch {current_epoch}"
+            )));
+        }
+    }
 
     let mut upserts = Vec::new();
     for node_id in &request.upsert_node_ids {
@@ -3202,7 +3211,7 @@ fn search_projection_graph_delta_for(
         upserts,
         deletes: request.delete_document_ids.clone(),
         max_operations: request.max_operations,
-        source_graph_commit_epoch: Some(store.commit_epoch()),
+        source_graph_commit_epoch: request.complete_through_graph_commit_epoch,
     })
 }
 

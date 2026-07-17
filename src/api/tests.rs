@@ -343,6 +343,7 @@ fn database_facade_builds_search_projection_delta_from_graph_nodes() {
         upsert_node_ids: vec![node_id.0],
         delete_document_ids: vec!["memory:old".to_string()],
         max_operations: Some(2),
+        complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
     };
 
     let plan = db
@@ -405,12 +406,87 @@ fn graph_search_projection_delta_budget_failure_keeps_projection_unchanged() {
                 upsert_node_ids: vec![node_id.0],
                 delete_document_ids: vec!["memory:old".to_string()],
                 max_operations: Some(1),
+                complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
             },
         )
         .unwrap_err();
 
     assert!(error.to_string().contains("operation count 2"));
     assert!(search_index.document("memory:old").is_some());
+    assert!(search_index.document("memory:new").is_none());
+}
+
+#[test]
+fn graph_search_projection_delta_without_watermark_keeps_freshness_epoch() {
+    let mut db = Database::new();
+    let node_id = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Memory",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("new".to_string())),
+                (
+                    "title".to_string(),
+                    Value::String("Partial graph projection".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+    let mut search_index = SearchIndex::in_memory();
+
+    db.apply_search_projection_graph_delta(
+        &mut search_index,
+        SearchProjectionGraphDeltaRequest {
+            upsert_node_ids: vec![node_id.0],
+            delete_document_ids: Vec::new(),
+            max_operations: Some(1),
+            complete_through_graph_commit_epoch: None,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        search_index
+            .projection_freshness()
+            .source_graph_commit_epoch,
+        None
+    );
+    assert!(search_index.document("memory:new").is_some());
+}
+
+#[test]
+fn graph_search_projection_delta_rejects_future_freshness_watermark() {
+    let mut db = Database::new();
+    let node_id = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Memory",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("new".to_string())),
+                (
+                    "title".to_string(),
+                    Value::String("Future graph projection".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+    let mut search_index = SearchIndex::in_memory();
+
+    let error = db
+        .apply_search_projection_graph_delta(
+            &mut search_index,
+            SearchProjectionGraphDeltaRequest {
+                upsert_node_ids: vec![node_id.0],
+                delete_document_ids: Vec::new(),
+                max_operations: Some(1),
+                complete_through_graph_commit_epoch: Some(db.store.commit_epoch() + 1),
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("ahead of graph commit epoch"));
     assert!(search_index.document("memory:new").is_none());
 }
 
@@ -449,6 +525,7 @@ fn background_graph_search_projection_delta_uses_qos_admission() {
                 upsert_node_ids: vec![node_id.0],
                 delete_document_ids: vec!["memory:old".to_string()],
                 max_operations: Some(2),
+                complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
             },
         )
         .unwrap_err();
@@ -475,6 +552,7 @@ fn scheduled_graph_search_projection_delta_releases_budget_on_build_error() {
                 upsert_node_ids: vec![99],
                 delete_document_ids: vec!["memory:old".to_string()],
                 max_operations: Some(2),
+                complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
             },
         )
         .unwrap_err();
