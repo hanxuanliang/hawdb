@@ -1016,6 +1016,9 @@ Current implemented slice:
   and hierarchical `louvain` procedure execution
 - compatibility cutover gate that converts a shadow report into `Ready` or
   `Blocked` with explicit primary-only coverage blockers
+- caller-owned rollback evidence fields in the migration gate so release
+  automation can require proof that the previous local graph database can still
+  be reopened without making the graph kernel open that database
 
 Remaining Phase 5 work:
 
@@ -1023,6 +1026,7 @@ Remaining Phase 5 work:
   kernel
 - optional `ExternalShadowCommand` wiring to the previous local graph wrapper
   when a specific migration gate needs compatibility evidence
+- rollback execution tooling owned by the migration/release layer
 
 ## First Implemented Compatibility Slice: Parameters
 

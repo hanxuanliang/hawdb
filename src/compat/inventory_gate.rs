@@ -70,9 +70,14 @@ pub struct CompatibilityMigrationGateReport {
     pub fixture_mismatch_blockers: usize,
     pub inventory_blockers: usize,
     pub shadow_blockers: usize,
+    pub rollback_required: bool,
+    pub rollback_ready: bool,
+    pub rollback_evidence: Option<String>,
+    pub rollback_blockers: usize,
     pub fixture_mismatch_blocker_messages: Vec<String>,
     pub inventory_blocker_messages: Vec<String>,
     pub shadow_blocker_messages: Vec<String>,
+    pub rollback_blocker_messages: Vec<String>,
     pub blockers: Vec<String>,
 }
 
@@ -82,6 +87,14 @@ pub struct CompatibilityMigrationGateBundle {
     pub inventory_gate: CompatibilityInventoryGateReport,
     pub cutover: CompatibilityCutoverReport,
     pub migration_gate: CompatibilityMigrationGateReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CompatibilityRollbackEvidence {
+    pub required: bool,
+    pub ready: bool,
+    pub evidence: Option<String>,
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -304,9 +317,14 @@ pub fn compatibility_migration_gate_report_to_json(
         "fixture_mismatch_blockers": report.fixture_mismatch_blockers,
         "inventory_blockers": report.inventory_blockers,
         "shadow_blockers": report.shadow_blockers,
+        "rollback_required": report.rollback_required,
+        "rollback_ready": report.rollback_ready,
+        "rollback_evidence": report.rollback_evidence,
+        "rollback_blockers": report.rollback_blockers,
         "fixture_mismatch_blocker_messages": report.fixture_mismatch_blocker_messages,
         "inventory_blocker_messages": report.inventory_blocker_messages,
         "shadow_blocker_messages": report.shadow_blocker_messages,
+        "rollback_blocker_messages": report.rollback_blocker_messages,
         "blockers": report.blockers,
     })
 }
@@ -617,6 +635,18 @@ pub fn assess_compatibility_migration_gate(
     inventory: &CompatibilityInventoryGateReport,
     shadow: &CompatibilityCutoverReport,
 ) -> CompatibilityMigrationGateReport {
+    assess_compatibility_migration_gate_with_rollback(
+        inventory,
+        shadow,
+        CompatibilityRollbackEvidence::default(),
+    )
+}
+
+pub fn assess_compatibility_migration_gate_with_rollback(
+    inventory: &CompatibilityInventoryGateReport,
+    shadow: &CompatibilityCutoverReport,
+    rollback: CompatibilityRollbackEvidence,
+) -> CompatibilityMigrationGateReport {
     let mut blockers = Vec::new();
     let mut fixture_mismatch_blocker_messages = Vec::new();
     if inventory.fixture != shadow.fixture {
@@ -640,6 +670,13 @@ pub fn assess_compatibility_migration_gate(
             .iter()
             .map(|blocker| format!("shadow: {blocker}")),
     );
+    let rollback_blocker_messages = rollback_blockers(&rollback);
+    let rollback_blockers = rollback_blocker_messages.len();
+    blockers.extend(
+        rollback_blocker_messages
+            .iter()
+            .map(|blocker| format!("rollback: {blocker}")),
+    );
 
     CompatibilityMigrationGateReport {
         fixture: inventory.fixture.clone(),
@@ -659,11 +696,24 @@ pub fn assess_compatibility_migration_gate(
         fixture_mismatch_blockers: fixture_mismatch_blocker_messages.len(),
         inventory_blockers,
         shadow_blockers,
+        rollback_required: rollback.required,
+        rollback_ready: rollback.ready,
+        rollback_evidence: rollback.evidence,
+        rollback_blockers,
         fixture_mismatch_blocker_messages,
         inventory_blocker_messages,
         shadow_blocker_messages,
+        rollback_blocker_messages,
         blockers,
     }
+}
+
+fn rollback_blockers(rollback: &CompatibilityRollbackEvidence) -> Vec<String> {
+    let mut blockers = rollback.blockers.clone();
+    if rollback.required && !rollback.ready {
+        blockers.push("previous database reopen evidence is required before cutover".to_string());
+    }
+    blockers
 }
 
 pub fn assess_compatibility_migration_gate_bundle(

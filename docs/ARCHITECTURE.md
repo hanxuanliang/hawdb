@@ -363,7 +363,10 @@ smoke testing; it exercises the process boundary but does not replace the
 required previous-wrapper parity run. The CLI bundle includes `shadow_run`
 metadata with `evidence_kind` set to either `previous_wrapper` or
 `protocol_smoke`, so automation can reject smoke evidence without parsing the
-shadow command line. The process protocol is specified in
+shadow command line. Migration gate reports also include caller-owned rollback
+evidence fields so release automation can require a previous-database reopen
+check while keeping the graph kernel independent from that previous database.
+The process protocol is specified in
 `docs/EXTERNAL_SHADOW_PROTOCOL.md` so previous-wrapper adapters can be
 implemented without depending on internal fixture code.
 

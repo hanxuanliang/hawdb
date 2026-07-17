@@ -390,14 +390,20 @@ The `migration_gate` object keeps the existing flattened `blockers` list for
 human-readable logs and also includes machine-readable
 `shadow_total_checks`, `shadow_matched_checks`,
 `shadow_primary_only_checks`, `shadow_evidence_present`,
-`fixture_mismatch_blockers`, `inventory_blockers`, and `shadow_blockers`
-counts. It also includes matching `fixture_mismatch_blocker_messages`,
-`inventory_blocker_messages`, and `shadow_blocker_messages` arrays.
+`fixture_mismatch_blockers`, `inventory_blockers`, `shadow_blockers`, and
+`rollback_blockers` counts. It also includes matching
+`fixture_mismatch_blocker_messages`, `inventory_blocker_messages`,
+`shadow_blocker_messages`, and `rollback_blocker_messages` arrays.
 `shadow_evidence_present` is true only when at least one check matched through
 the shadow engine; primary-only checks do not count as parity evidence. Cutover
 automation should use those grouped fields to distinguish scanner coverage gaps,
 fixture wiring drift, missing shadow evidence, and shadow parity failures
 without parsing blocker strings.
+
+When the caller requires rollback proof, the migration gate can also carry
+caller-owned rollback evidence through `rollback_required`, `rollback_ready`,
+and `rollback_evidence`. Skein only gates on this supplied evidence; it does not
+open or link the previous graph database.
 
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is

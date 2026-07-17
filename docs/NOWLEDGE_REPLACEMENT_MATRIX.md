@@ -55,9 +55,10 @@ parser runtimes, while keeping database-owned projected graph artifact rebuilds
 on the graph-kernel runner.
 Migration gate JSON keeps human-readable blockers and adds machine-readable
 fixture-mismatch, inventory, and shadow blocker counts, shadow evidence counts,
-`shadow_run.evidence_kind`, plus grouped blocker messages so cutover automation
-can separate scanner coverage gaps, previous-wrapper parity failures, and
-self-shadow protocol smoke.
+caller-owned rollback evidence fields, `shadow_run.evidence_kind`, plus grouped
+blocker messages so cutover automation can separate scanner coverage gaps,
+previous-wrapper parity failures, rollback readiness gaps, and self-shadow
+protocol smoke without making Skein open the previous graph database.
 Graph Lightning bootstrap bundle export gates likewise split manifest and
 GraphStream blockers into counts and grouped messages for import preflight
 automation.

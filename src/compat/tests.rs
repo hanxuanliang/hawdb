@@ -6,12 +6,13 @@ use super::{
     nowledge_memory_core_inventory, run_compatibility_fixture,
     run_compatibility_fixture_with_shadow, CompatibilityCheck, CompatibilityCheckReport,
     CompatibilityCutoverDecision, CompatibilityCutoverPolicy, CompatibilityCutoverReport,
-    CompatibilityFixture, CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite,
-    CompatibilityQueryInventory, CompatibilityQueryInventoryItem, CompatibilityShadowCheckReport,
-    CompatibilityShadowEngine, CompatibilityShadowReport, CompatibilityShadowStatus,
-    CompatibilityTolerance, CypherFixtureCheck, CypherFixtureStatement, ExpectedRows,
-    ExternalShadowCommand, ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput,
-    ProjectedGraphShadowResult, EXTERNAL_SHADOW_PROTOCOL_VERSION,
+    CompatibilityFixture, CompatibilityInventoryCoveragePolicy, CompatibilityInventoryGateReport,
+    CompatibilityQueryCallSite, CompatibilityQueryInventory, CompatibilityQueryInventoryItem,
+    CompatibilityRollbackEvidence, CompatibilityShadowCheckReport, CompatibilityShadowEngine,
+    CompatibilityShadowReport, CompatibilityShadowStatus, CompatibilityTolerance,
+    CypherFixtureCheck, CypherFixtureStatement, ExpectedRows, ExternalShadowCommand,
+    ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput, ProjectedGraphShadowResult,
+    EXTERNAL_SHADOW_PROTOCOL_VERSION,
 };
 use crate::{Database, QueryOutput, Result, Value};
 use std::collections::BTreeMap;
@@ -437,6 +438,10 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
     assert_eq!(gate.fixture_mismatch_blocker_messages.len(), 1);
     assert_eq!(gate.inventory_blocker_messages.len(), 2);
     assert_eq!(gate.shadow_blocker_messages, vec!["shadow failed"]);
+    assert!(!gate.rollback_required);
+    assert!(!gate.rollback_ready);
+    assert_eq!(gate.rollback_blockers, 0);
+    assert!(gate.rollback_blocker_messages.is_empty());
     assert_eq!(gate.blockers.len(), 4);
     assert!(gate.blockers[0].contains("does not match"));
     assert!(gate.blockers[1].starts_with("inventory:"));
@@ -452,6 +457,10 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
     assert_eq!(gate_json["fixture_mismatch_blockers"], 1);
     assert_eq!(gate_json["inventory_blockers"], 2);
     assert_eq!(gate_json["shadow_blockers"], 1);
+    assert_eq!(gate_json["rollback_required"], false);
+    assert_eq!(gate_json["rollback_ready"], false);
+    assert_eq!(gate_json["rollback_evidence"], serde_json::Value::Null);
+    assert_eq!(gate_json["rollback_blockers"], 0);
     assert_eq!(
         gate_json["fixture_mismatch_blocker_messages"]
             .as_array()
@@ -467,7 +476,112 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
         2
     );
     assert_eq!(gate_json["shadow_blocker_messages"][0], "shadow failed");
+    assert!(gate_json["rollback_blocker_messages"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     assert_eq!(gate_json["blockers"].as_array().unwrap().len(), 4);
+}
+
+#[test]
+fn migration_gate_blocks_when_required_rollback_evidence_is_missing() {
+    let inventory_gate = CompatibilityInventoryGateReport {
+        inventory: "required".to_string(),
+        fixture: "fixture".to_string(),
+        decision: CompatibilityCutoverDecision::Ready,
+        required_checks: 1,
+        covered_checks: 1,
+        missing_checks: Vec::new(),
+        extra_fixture_checks: Vec::new(),
+        blockers: Vec::new(),
+    };
+    let shadow = CompatibilityCutoverReport {
+        fixture: "fixture".to_string(),
+        shadow_engine: "previous-wrapper".to_string(),
+        decision: CompatibilityCutoverDecision::Ready,
+        total_checks: 1,
+        matched_checks: 1,
+        primary_only_checks: Vec::new(),
+        primary_only_reasons: BTreeMap::new(),
+        blockers: Vec::new(),
+    };
+
+    let gate = super::assess_compatibility_migration_gate_with_rollback(
+        &inventory_gate,
+        &shadow,
+        CompatibilityRollbackEvidence {
+            required: true,
+            ready: false,
+            evidence: None,
+            blockers: Vec::new(),
+        },
+    );
+
+    assert_eq!(gate.decision, CompatibilityCutoverDecision::Blocked);
+    assert!(gate.rollback_required);
+    assert!(!gate.rollback_ready);
+    assert_eq!(gate.rollback_blockers, 1);
+    assert_eq!(
+        gate.rollback_blocker_messages[0],
+        "previous database reopen evidence is required before cutover"
+    );
+    assert_eq!(
+        gate.blockers[0],
+        "rollback: previous database reopen evidence is required before cutover"
+    );
+}
+
+#[test]
+fn migration_gate_accepts_caller_owned_rollback_evidence() {
+    let inventory_gate = CompatibilityInventoryGateReport {
+        inventory: "required".to_string(),
+        fixture: "fixture".to_string(),
+        decision: CompatibilityCutoverDecision::Ready,
+        required_checks: 1,
+        covered_checks: 1,
+        missing_checks: Vec::new(),
+        extra_fixture_checks: Vec::new(),
+        blockers: Vec::new(),
+    };
+    let shadow = CompatibilityCutoverReport {
+        fixture: "fixture".to_string(),
+        shadow_engine: "previous-wrapper".to_string(),
+        decision: CompatibilityCutoverDecision::Ready,
+        total_checks: 1,
+        matched_checks: 1,
+        primary_only_checks: Vec::new(),
+        primary_only_reasons: BTreeMap::new(),
+        blockers: Vec::new(),
+    };
+
+    let gate = super::assess_compatibility_migration_gate_with_rollback(
+        &inventory_gate,
+        &shadow,
+        CompatibilityRollbackEvidence {
+            required: true,
+            ready: true,
+            evidence: Some("ladybug reopen smoke passed".to_string()),
+            blockers: Vec::new(),
+        },
+    );
+
+    assert_eq!(gate.decision, CompatibilityCutoverDecision::Ready);
+    assert!(gate.rollback_required);
+    assert!(gate.rollback_ready);
+    assert_eq!(
+        gate.rollback_evidence.as_deref(),
+        Some("ladybug reopen smoke passed")
+    );
+    assert_eq!(gate.rollback_blockers, 0);
+    assert!(gate.blockers.is_empty());
+
+    let gate_json = super::compatibility_migration_gate_report_to_json(&gate);
+    assert_eq!(gate_json["rollback_required"], true);
+    assert_eq!(gate_json["rollback_ready"], true);
+    assert_eq!(
+        gate_json["rollback_evidence"],
+        "ladybug reopen smoke passed"
+    );
 }
 
 #[test]

@@ -17,9 +17,10 @@ use external_shadow::{
 pub use external_shadow::{ExternalShadowCommand, ExternalShadowReady};
 pub use inventory_gate::{
     assess_compatibility_cypher_migration_gate_bundle, assess_compatibility_migration_gate,
-    assess_compatibility_migration_gate_bundle, assess_query_inventory_coverage,
-    assess_query_inventory_cypher_coverage, assess_query_inventory_gate,
-    build_compatibility_query_inventory, build_compatibility_query_inventory_from_json,
+    assess_compatibility_migration_gate_bundle, assess_compatibility_migration_gate_with_rollback,
+    assess_query_inventory_coverage, assess_query_inventory_cypher_coverage,
+    assess_query_inventory_gate, build_compatibility_query_inventory,
+    build_compatibility_query_inventory_from_json,
     build_compatibility_query_inventory_from_json_str, compatibility_cutover_report_to_json,
     compatibility_inventory_coverage_report_to_json, compatibility_inventory_gate_report_to_json,
     compatibility_migration_gate_bundle_to_json, compatibility_migration_gate_report_to_json,
@@ -27,7 +28,7 @@ pub use inventory_gate::{
     CompatibilityInventoryCoveragePolicy, CompatibilityInventoryCoverageReport,
     CompatibilityInventoryGateReport, CompatibilityMigrationGateBundle,
     CompatibilityMigrationGateReport, CompatibilityQueryCallSite, CompatibilityQueryInventory,
-    CompatibilityQueryInventoryItem,
+    CompatibilityQueryInventoryItem, CompatibilityRollbackEvidence,
 };
 pub use nowledge_fixture::{nowledge_memory_core_fixture, nowledge_memory_core_inventory};
 
