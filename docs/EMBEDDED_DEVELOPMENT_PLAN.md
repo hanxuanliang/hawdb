@@ -787,16 +787,17 @@ Current implemented slice:
 - `cargo bench --bench optimizer_smoke` covers optimizer-only range-seek plus
   bounded expand stats, composite seek, text seek, low-selectivity scan
   fallback, production-shaped selective seed + bounded expand + aggregate +
-  sort/limit, one-hop relationship-property expand reads, selected-plan cost
-  stability, deterministic fingerprints, and budget-fallback paths without
-  depending on a storage fixture
+  sort/limit, one-hop relationship-property expand reads, a Nowledge-shaped
+  pushed-down relationship equality plus relationship range-filter workload,
+  selected-plan cost stability, deterministic fingerprints, and budget-fallback
+  paths without depending on a storage fixture
 
 Remaining Phase 4 work:
 
 - richer cross-pattern statistics
 - alternative expand implementation candidates and pattern join-order
   enumeration once multi-pattern logical plans exist
-- larger workload-shaped optimizer benchmark suites
+- larger cross-pattern workload-shaped optimizer benchmark suites
 
 ### Phase 5: Analytics and Cutover
 

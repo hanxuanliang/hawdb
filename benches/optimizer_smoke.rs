@@ -185,6 +185,21 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=1 cost=6",
             ],
         },
+        OptimizerSmokeCase {
+            name: "relationship_status_range_filter",
+            logical: relationship_status_range_filter_plan(),
+            catalog: relationship_status_range_filter_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 9,
+            },
+            fingerprint_contains: "FilterExec",
+            decision_contains: &[
+                "choose IndexNodeSeek for Memory.id",
+                "rel_property_distinct_product=2",
+                "selected physical plan cost: estimated_rows=1 cost=9",
+            ],
+        },
     ]
 }
 
@@ -525,6 +540,100 @@ fn relationship_property_expand_catalog() -> OptimizerCatalog {
         .with_relationship_property_distinct_counts([(
             ("MENTIONS".to_string(), "weight".to_string()),
             10,
+        )]),
+    )
+}
+
+fn relationship_status_range_filter_plan() -> LogicalPlan {
+    LogicalPlan::Project {
+        items: vec![
+            Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "e".to_string(),
+                    property: "name".to_string(),
+                },
+                name: "entity".to_string(),
+            },
+            Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "r".to_string(),
+                    property: "created_at".to_string(),
+                },
+                name: "created_at".to_string(),
+            },
+        ],
+        input: Box::new(LogicalPlan::Filter {
+            predicate: Predicate::PropertyCompare {
+                variable: "r".to_string(),
+                property: "created_at".to_string(),
+                op: ComparisonOp::Gt,
+                value: Value::Int(80),
+            },
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "m".to_string(),
+                source_label: "Memory".to_string(),
+                rel_variable: Some("r".to_string()),
+                rel_type: "MENTIONS".to_string(),
+                rel_properties: BTreeMap::from([(
+                    "status".to_string(),
+                    Value::String("active".to_string()),
+                )]),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "e".to_string(),
+                target_label: "Entity".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::Filter {
+                    predicate: Predicate::PropertyEq {
+                        variable: "m".to_string(),
+                        property: "id".to_string(),
+                        value: Value::String("memory-42".to_string()),
+                    },
+                    input: Box::new(memory_scan()),
+                }),
+            }),
+        }),
+    }
+}
+
+fn relationship_status_range_filter_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Memory".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Memory".to_string(), 10_000),
+                ("Entity".to_string(), 50_000),
+            ],
+            [("MENTIONS".to_string(), 120_000)],
+            [("MENTIONS".to_string(), 40_000)],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                ),
+                40_000,
+            )],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                    1,
+                ),
+                40_000,
+            )],
+            [(("Memory".to_string(), "id".to_string()), 10_000)],
+            [],
+        )
+        .with_relationship_property_distinct_counts([(
+            ("MENTIONS".to_string(), "status".to_string()),
+            2,
+        )])
+        .with_relationship_property_histograms([(
+            ("MENTIONS".to_string(), "created_at".to_string()),
+            (0..10).map(|bucket| Value::Int(bucket * 10)).collect(),
         )]),
     )
 }
