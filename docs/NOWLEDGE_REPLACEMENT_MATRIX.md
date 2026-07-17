@@ -54,9 +54,10 @@ polling, specific-job execution, and explicit failed-job retry for caller-owned
 parser runtimes, while keeping database-owned projected graph artifact rebuilds
 on the graph-kernel runner.
 Migration gate JSON keeps human-readable blockers and adds machine-readable
-fixture-mismatch, inventory, and shadow blocker counts plus grouped blocker
-messages so cutover automation can separate scanner coverage gaps from
-previous-wrapper parity failures.
+fixture-mismatch, inventory, and shadow blocker counts, shadow evidence counts,
+`shadow_run.evidence_kind`, plus grouped blocker messages so cutover automation
+can separate scanner coverage gaps, previous-wrapper parity failures, and
+self-shadow protocol smoke.
 Graph Lightning bootstrap bundle export gates likewise split manifest and
 GraphStream blockers into counts and grouped messages for import preflight
 automation.

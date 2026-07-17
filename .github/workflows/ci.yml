@@ -59,6 +59,9 @@ jobs:
             cargo run --quiet --bin skein-shadow-self -- \
             > "$root/gate.json"
           grep -q '"decision": "ready"' "$root/gate.json"
+          grep -q '"shadow_run"' "$root/gate.json"
+          grep -q '"evidence_kind": "protocol_smoke"' "$root/gate.json"
+          grep -q '"self_shadow": true' "$root/gate.json"
           grep -q '"shadow_ready"' "$root/gate.json"
           grep -q '"shadow_trace"' "$root/gate.json"
           grep -q '"request_count"' "$root/gate.json"
@@ -87,5 +90,7 @@ jobs:
             exit 1
           fi
           grep -q '"decision": "blocked"' "$root/gate.json"
+          grep -q '"shadow_run"' "$root/gate.json"
+          grep -q '"evidence_kind": "protocol_smoke"' "$root/gate.json"
           grep -q '"shadow_ready"' "$root/gate.json"
           grep -q "nowledge migration gate is blocked" "$root/gate.err"

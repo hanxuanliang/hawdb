@@ -360,7 +360,10 @@ JSON. With `--require-ready`, the command exits with an error when the migration
 gate decision is blocked, making it suitable as a CI cutover gate.
 `skein-shadow-self` is a JSON-lines self-shadow process for protocol and CLI
 smoke testing; it exercises the process boundary but does not replace the
-required previous-wrapper parity run. The process protocol is specified in
+required previous-wrapper parity run. The CLI bundle includes `shadow_run`
+metadata with `evidence_kind` set to either `previous_wrapper` or
+`protocol_smoke`, so automation can reject smoke evidence without parsing the
+shadow command line. The process protocol is specified in
 `docs/EXTERNAL_SHADOW_PROTOCOL.md` so previous-wrapper adapters can be
 implemented without depending on internal fixture code.
 
