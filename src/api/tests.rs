@@ -580,6 +580,16 @@ fn retrieves_knowledge_through_database_facade() {
     assert_eq!(text_retriever.limit, Some(1));
     assert_eq!(text_retriever.rank_window, None);
     assert_eq!(text_retriever.fusion_weight, Some(1.0));
+    let search_text_retriever = output
+        .search
+        .retrievers
+        .iter()
+        .find(|report| report.name == "text")
+        .expect("text search retriever report");
+    assert_eq!(
+        text_retriever.candidate_set,
+        search_text_retriever.candidate_set
+    );
     assert_eq!(
         text_retriever.top_candidates[0].kind.as_deref(),
         Some("memory")
@@ -655,6 +665,23 @@ fn retrieves_knowledge_through_database_facade() {
     assert_eq!(graph_seed_report.rank_window, None);
     assert_eq!(graph_seed_report.fusion_weight, None);
     assert!(graph_seed_report.fallback_reasons.is_empty());
+    assert_eq!(
+        graph_seed_report.candidate_set.id_space,
+        "canonical_graph_node_id"
+    );
+    assert_eq!(
+        graph_seed_report.candidate_set.representation,
+        "ranked_node_ids"
+    );
+    assert_eq!(graph_seed_report.candidate_set.cardinality, 2);
+    assert!(graph_seed_report.candidate_set.exact);
+    assert_eq!(
+        graph_seed_report
+            .candidate_set
+            .snapshot_source_graph_commit_epoch,
+        Some(output.graph_commit_epoch)
+    );
+    assert_eq!(graph_seed_report.candidate_set.policy_epoch, None);
     assert_eq!(graph_seed_report.top_candidates.len(), 2);
     assert_eq!(graph_seed_report.top_candidates[0].rank, 1);
     assert_eq!(

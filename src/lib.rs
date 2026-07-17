@@ -94,7 +94,7 @@ pub use search::{
     SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchHit, SearchIndex,
     SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
     SearchProjectionKind, SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet,
+    SearchResultSet, SearchRetrieverCandidateSetReport,
 };
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,
