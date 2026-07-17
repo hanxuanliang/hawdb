@@ -1165,20 +1165,43 @@ fn verify_graph_lightning_published_manifest(
         && published.get("node_count") == manifest.get("node_count")
         && published.get("relationship_count") == manifest.get("relationship_count");
     let mut errors = Vec::new();
+    let mut pointer_errors = Vec::new();
+    let mut catalog_errors = Vec::new();
+    let mut staging_errors = Vec::new();
     if !pointer_state_published {
-        errors.push("published pointer is not PUBLISHED".to_string());
+        push_grouped_error(
+            &mut errors,
+            &mut pointer_errors,
+            "published pointer is not PUBLISHED",
+        );
     }
     if !catalog_checksum_matches {
-        errors.push("published pointer staging catalog checksum mismatch".to_string());
+        push_grouped_error(
+            &mut errors,
+            &mut catalog_errors,
+            "published pointer staging catalog checksum mismatch",
+        );
     }
     if !catalog_byte_len_matches {
-        errors.push("published pointer staging catalog byte length mismatch".to_string());
+        push_grouped_error(
+            &mut errors,
+            &mut catalog_errors,
+            "published pointer staging catalog byte length mismatch",
+        );
     }
     if !staging_ready {
-        errors.push("published staging catalog is not ready".to_string());
+        push_grouped_error(
+            &mut errors,
+            &mut staging_errors,
+            "published staging catalog is not ready",
+        );
     }
     if !pointer_matches_manifest {
-        errors.push("published pointer does not match staged manifest".to_string());
+        push_grouped_error(
+            &mut errors,
+            &mut pointer_errors,
+            "published pointer does not match staged manifest",
+        );
     }
     let decision = if errors.is_empty() {
         "ready"
@@ -1197,6 +1220,12 @@ fn verify_graph_lightning_published_manifest(
         "staging_verification": staging_verification,
         "validation_gate": {
             "decision": decision,
+            "pointer_errors": pointer_errors.len(),
+            "catalog_errors": catalog_errors.len(),
+            "staging_errors": staging_errors.len(),
+            "pointer_error_messages": pointer_errors,
+            "catalog_error_messages": catalog_errors,
+            "staging_error_messages": staging_errors,
             "errors": errors,
         },
     }))
@@ -2175,6 +2204,9 @@ mod tests {
         assert_eq!(report["catalog_byte_len_matches"], true);
         assert_eq!(report["pointer_matches_manifest"], true);
         assert_eq!(report["staging_ready"], true);
+        assert_eq!(report["validation_gate"]["pointer_errors"], 0);
+        assert_eq!(report["validation_gate"]["catalog_errors"], 0);
+        assert_eq!(report["validation_gate"]["staging_errors"], 0);
 
         std::fs::remove_dir_all(staging_dir).unwrap();
         std::fs::remove_dir_all(publish_dir).unwrap();
@@ -2204,6 +2236,17 @@ mod tests {
         assert_eq!(report["validation_gate"]["decision"], "blocked");
         assert_eq!(report["catalog_checksum_matches"], false);
         assert_eq!(report["staging_ready"], false);
+        assert_eq!(report["validation_gate"]["pointer_errors"], 0);
+        assert_eq!(report["validation_gate"]["catalog_errors"], 2);
+        assert_eq!(report["validation_gate"]["staging_errors"], 1);
+        assert_eq!(
+            report["validation_gate"]["catalog_error_messages"][0],
+            "published pointer staging catalog checksum mismatch"
+        );
+        assert_eq!(
+            report["validation_gate"]["staging_error_messages"][0],
+            "published staging catalog is not ready"
+        );
         assert!(report["validation_gate"]["errors"]
             .as_array()
             .unwrap()

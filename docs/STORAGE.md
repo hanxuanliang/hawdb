@@ -161,7 +161,9 @@ existing pointer fails instead of overwriting the published graph pointer.
 `skein graph-lightning-verify-published <staging-dir> <publish-dir>` verifies
 that the published pointer still references the staged catalog by byte length
 and checksum, and that the referenced staging catalog still passes the
-source-independent verifier.
+source-independent verifier. Its validation gate keeps flat errors and grouped
+pointer, catalog, and staging error arrays so resume automation can distinguish
+pointer corruption from staging catalog drift.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
