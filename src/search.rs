@@ -1459,6 +1459,8 @@ fn semantic_aliases(token: &str) -> Vec<String> {
         "csr" => vec!["compressed_sparse_row".to_string()],
         "full_text" | "full_text_search" | "text_search" => vec!["fts".to_string()],
         "fts" => vec!["full_text_search".to_string(), "text_search".to_string()],
+        "hybrid_retrieval" => vec!["hybrid_retrieve".to_string(), "hybrid_search".to_string()],
+        "hybrid_retrieve" | "hybrid_search" => vec!["hybrid_retrieval".to_string()],
         "kg" => vec!["knowledge_graph".to_string()],
         "knowledge_graph" => vec!["kg".to_string()],
         "kuzu" => vec!["ladybug".to_string()],
@@ -2616,14 +2618,27 @@ mod tests {
                 metadata: BTreeMap::new(),
             })
             .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "facade".to_string(),
+                title: "HybridRetrieve facade".to_string(),
+                content: "retriever DAG merges search hits and graph seed candidates".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
 
         let rrf_hits = index.search("reciprocal rank fusion", None, SearchMode::Text, 10);
         let ann_hits = index.search("approximate nearest neighbor", None, SearchMode::Text, 10);
         let abbreviation_hits = index.search("rrf ann", None, SearchMode::Text, 10);
+        let retrieval_hits = index.search("hybrid retrieval", None, SearchMode::Text, 10);
+        let search_hits = index.search("hybrid search", None, SearchMode::Text, 10);
 
         assert_eq!(rrf_hits[0].id, "retrieval");
         assert_eq!(ann_hits[0].id, "retrieval");
         assert_eq!(abbreviation_hits[0].id, "retrieval");
+        assert_eq!(retrieval_hits[0].id, "facade");
+        assert_eq!(search_hits[0].id, "facade");
     }
 
     #[test]

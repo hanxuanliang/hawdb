@@ -411,7 +411,8 @@ system aliases such as `wal`/`write_ahead_log`, `mvcc`, `lsm`, `csr`, and
 `csc`, and migration/projection aliases such as `pg`/`postgres`/`postgresql`,
 `pgvector`/`vector_search`, `fts`/`full_text_search`, `lance`/`lancedb`, and
 `kuzu`/`ladybug`, plus retrieval-algorithm aliases such as `rrf`/
-`reciprocal_rank_fusion` and `ann`/`approximate_nearest_neighbor`.
+`reciprocal_rank_fusion`, `ann`/`approximate_nearest_neighbor`, and
+`hybrid_retrieve`/`hybrid_retrieval`/`hybrid_search`.
 Conservative English stopwords are removed before query
 scoring, corpus statistics, and matched-term reporting, while raw compound
 identifiers such as `the_source` remain searchable. Term frequency affects rank,
