@@ -502,7 +502,7 @@ count, final candidate count, pre-limit merged candidate count, response-level
 candidate truncation flag and reasons, graph-context truncation flag and
 reasons, projection source graph commit epoch, stale projection warnings,
 projection marker warnings, structured projection stale/full-reindex/
-metadata-repair flags, and empty-result reasons. Empty-result reasons
+metadata-repair flags and marker reasons, and empty-result reasons. Empty-result reasons
 reuse the search projection report's own empty-result reasons, distinguishing
 empty projections, metadata-filter misses, no matching rows, search fallback
 causes such as empty text queries, missing or incompatible query embeddings, or

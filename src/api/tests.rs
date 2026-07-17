@@ -1624,7 +1624,15 @@ fn knowledge_retrieval_diagnostics_report_projection_warnings() {
     assert!(output.projection_freshness.metadata_repair_needed);
     assert!(!output.diagnostics.projection_stale);
     assert!(output.diagnostics.projection_full_reindex_needed);
+    assert_eq!(
+        output.diagnostics.projection_full_reindex_reasons,
+        vec!["stale projection".to_string()]
+    );
     assert!(output.diagnostics.projection_metadata_repair_needed);
+    assert_eq!(
+        output.diagnostics.projection_metadata_repair_reasons,
+        vec!["missing derived metadata".to_string()]
+    );
     assert!(output
         .diagnostics
         .warnings
