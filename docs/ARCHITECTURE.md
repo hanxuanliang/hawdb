@@ -477,7 +477,10 @@ graph-seed truncation flag and reasons, graph context path count, fan-out reason
 count, final candidate count, pre-limit merged candidate count, response-level
 candidate truncation flag and reasons, graph-context truncation flag and
 reasons, projection source graph commit epoch, stale projection warnings,
-projection marker warnings, and empty-result reasons. This keeps Knowledge
+projection marker warnings, and empty-result reasons. Empty-result reasons
+distinguish no matching projection rows from request-budget causes such as a
+disabled graph seed retriever, search limit zero, or response-level candidate
+limit zero. This keeps Knowledge
 Retrieval as the primary application-facing path while preserving the rule that
 search artifacts are rebuildable and outside the graph WAL.
 
