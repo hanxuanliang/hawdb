@@ -455,8 +455,9 @@ ranking diagnostics. `SearchResultSet::candidate_set` reports the exact
 projection-local pre-filter set using stable document IDs, including id-space,
 representation, cardinality, filtered-out count, exactness, the metadata
 filters that produced it, the source graph snapshot commit epoch when the
-projection was rebuilt from graph storage, and a policy epoch placeholder.
-`policy_epoch` remains `None` until a policy runtime exists. This is a
+projection was rebuilt from graph storage, and an optional caller-supplied
+policy epoch. `policy_epoch` is report metadata only and does not execute
+authorization or filtering policy inside the search projection. This is a
 diagnostic boundary only: projection-local positions are not stable graph
 identity across projection generations. Higher-level retrieval APIs can use
 those fields for score breakdowns, provenance, and stale projection warnings

@@ -1083,6 +1083,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 rank_window: request.rank_window,
                 fusion_weights: request.search_fusion_weights,
                 metadata_filters: request.metadata_filters.clone(),
+                policy_epoch: None,
             },
         );
         let (graph_seeds, graph_seed_candidate_count, graph_seed_fanout_reasons) = self

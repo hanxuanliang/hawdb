@@ -206,6 +206,7 @@ pub struct SearchQueryOptions {
     pub rank_window: Option<usize>,
     pub fusion_weights: SearchFusionWeights,
     pub metadata_filters: BTreeMap<String, String>,
+    pub policy_epoch: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -803,6 +804,7 @@ impl SearchIndex {
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
             },
         )
     }
@@ -830,7 +832,7 @@ impl SearchIndex {
             cardinality: filtered_document_count,
             exact: true,
             snapshot_source_graph_commit_epoch: self.source_graph_commit_epoch,
-            policy_epoch: None,
+            policy_epoch: options.policy_epoch,
             filtered_out_count: document_count.saturating_sub(filtered_document_count),
             metadata_filters: options.metadata_filters.clone(),
         };
@@ -2287,6 +2289,7 @@ mod tests {
                 rank_window: Some(1),
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
             },
         );
 
@@ -2345,6 +2348,7 @@ mod tests {
                 rank_window: Some(1),
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("scope".to_string(), "visible".to_string())]),
+                policy_epoch: None,
             },
         );
 
@@ -2394,6 +2398,7 @@ mod tests {
                     text_weight: 3.0,
                 },
                 metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
             },
         );
         let vector_weighted = index.search_with_options(
@@ -2408,6 +2413,7 @@ mod tests {
                     text_weight: 1.0,
                 },
                 metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
             },
         );
 
@@ -2466,6 +2472,7 @@ mod tests {
                     "source_id".to_string(),
                     "thread_1".to_string(),
                 )]),
+                policy_epoch: None,
             },
         );
 
@@ -2501,6 +2508,46 @@ mod tests {
     }
 
     #[test]
+    fn search_report_exposes_policy_epoch_when_supplied() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:thread_1".to_string(),
+                title: "Policy scoped graph".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "source_id".to_string(),
+                    "thread_1".to_string(),
+                )]),
+                policy_epoch: Some(42),
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.candidate_set.policy_epoch, Some(42));
+        assert_eq!(
+            index
+                .search_with_report("graph", None, SearchMode::Text, 10)
+                .candidate_set
+                .policy_epoch,
+            None
+        );
+    }
+
+    #[test]
     fn search_kind_metadata_filter_accepts_canonical_labels() {
         let mut index = SearchIndex::in_memory();
         index
@@ -2531,6 +2578,7 @@ mod tests {
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("kind".to_string(), "Memory".to_string())]),
+                policy_epoch: None,
             },
         );
 
@@ -2561,6 +2609,7 @@ mod tests {
                 rank_window: None,
                 fusion_weights: SearchFusionWeights::default(),
                 metadata_filters: BTreeMap::from([("kind".to_string(), "SourceChunk".to_string())]),
+                policy_epoch: None,
             },
         );
 
@@ -2611,6 +2660,7 @@ mod tests {
                     "space_id".to_string(),
                     DEFAULT_SPACE_ID.to_string(),
                 )]),
+                policy_epoch: None,
             },
         );
         let hit_ids = result
@@ -2650,6 +2700,7 @@ mod tests {
                     "source_id".to_string(),
                     "missing_thread".to_string(),
                 )]),
+                policy_epoch: None,
             },
         );
 
@@ -3339,6 +3390,7 @@ mod tests {
                     rank_window: None,
                     fusion_weights: SearchFusionWeights::default(),
                     metadata_filters: BTreeMap::new(),
+                    policy_epoch: None,
                 },
             );
             assert_eq!(result.total_hits, 1);
@@ -3616,6 +3668,7 @@ mod tests {
                     "source_id".to_string(),
                     "thread_1".to_string(),
                 )]),
+                policy_epoch: None,
             },
         );
 
