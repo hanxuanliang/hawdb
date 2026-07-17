@@ -4272,7 +4272,7 @@ fn estimate_node_property_filter_rows(
 ) -> Option<u64> {
     match predicate {
         Predicate::And(predicates) => {
-            let mut rows = input_rows.max(1);
+            let mut rows = input_rows;
             let mut matched = false;
             for predicate in predicates {
                 if let Some(estimated) =
@@ -4280,10 +4280,26 @@ fn estimate_node_property_filter_rows(
                 {
                     rows = estimated;
                     matched = true;
+                    if rows == 0 {
+                        break;
+                    }
                 }
             }
             matched.then_some(rows)
         }
+        Predicate::Or(predicates) => {
+            let mut rows = 0_u64;
+            for predicate in predicates {
+                let estimated =
+                    estimate_node_property_filter_rows(predicate, input, input_rows, catalog)?;
+                rows = rows.saturating_add(estimated);
+                if rows >= input_rows {
+                    return Some(input_rows);
+                }
+            }
+            Some(rows)
+        }
+        Predicate::ConstantBool(value) => Some(if *value { input_rows } else { 0 }),
         Predicate::PropertyEq {
             variable, property, ..
         } => {
@@ -4592,7 +4608,7 @@ fn estimate_relationship_filter_rows(
 ) -> Option<u64> {
     match predicate {
         Predicate::And(predicates) => {
-            let mut rows = input_rows.max(1);
+            let mut rows = input_rows;
             let mut matched = false;
             for predicate in predicates {
                 if let Some(estimated) =
@@ -4600,10 +4616,26 @@ fn estimate_relationship_filter_rows(
                 {
                     rows = estimated;
                     matched = true;
+                    if rows == 0 {
+                        break;
+                    }
                 }
             }
             matched.then_some(rows)
         }
+        Predicate::Or(predicates) => {
+            let mut rows = 0_u64;
+            for predicate in predicates {
+                let estimated =
+                    estimate_relationship_filter_rows(predicate, input, input_rows, catalog)?;
+                rows = rows.saturating_add(estimated);
+                if rows >= input_rows {
+                    return Some(input_rows);
+                }
+            }
+            Some(rows)
+        }
+        Predicate::ConstantBool(value) => Some(if *value { input_rows } else { 0 }),
         Predicate::PropertyEq {
             variable, property, ..
         } => estimate_relationship_property_filter_rows(
@@ -6595,6 +6627,47 @@ mod tests {
             trace.selected_plan_cost,
             PlanCost {
                 estimated_rows: 250,
+                cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn residual_node_or_filter_uses_branch_selectivity() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::Or(vec![
+                Predicate::ConstantBool(false),
+                Predicate::PropertyEq {
+                    variable: "t".to_string(),
+                    property: "source".to_string(),
+                    value: Value::String("slack".to_string()),
+                },
+            ]),
+            input: Box::new(LogicalPlan::NodeScan {
+                variable: "t".to_string(),
+                label: "Thread".to_string(),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Thread".to_string(), 1_000)],
+                [],
+                [],
+                [],
+                [],
+                [(("Thread".to_string(), "source".to_string()), 10)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 100,
                 cost: 2_004,
             }
         );

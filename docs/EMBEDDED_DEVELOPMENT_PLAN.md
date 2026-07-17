@@ -816,7 +816,8 @@ Current implemented slice:
   tracing and single-row input ordering, residual node-property filter
   equality/`IN`/range selectivity, residual relationship-property `IN`
   selectivity, residual string predicate selectivity without double-counting
-  full-text index candidates, grouped node-property aggregate cardinality,
+  full-text index candidates, constant/`OR` predicate selectivity for optional
+  parameter filters, grouped node-property aggregate cardinality,
   selected-plan cost stability, deterministic fingerprints, and budget-fallback
   paths without depending on a storage fixture
 

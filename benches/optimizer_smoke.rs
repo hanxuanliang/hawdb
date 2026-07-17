@@ -348,6 +348,19 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=30 cost=2004",
             ],
         },
+        OptimizerSmokeCase {
+            name: "thread_optional_source_filter",
+            logical: thread_optional_source_filter_plan(),
+            catalog: thread_optional_source_filter_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 100,
+                cost: 2004,
+            },
+            fingerprint_contains: "Or(False,PropertyEq",
+            decision_contains: &[
+                "selected physical plan cost: estimated_rows=100 cost=2004",
+            ],
+        },
     ]
 }
 
@@ -1501,6 +1514,38 @@ fn residual_node_property_in_catalog() -> OptimizerCatalog {
             [],
             [],
             [(("Memory".to_string(), "id".to_string()), 100)],
+            [],
+        ),
+    )
+}
+
+fn thread_optional_source_filter_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::Or(vec![
+            Predicate::ConstantBool(false),
+            Predicate::PropertyEq {
+                variable: "t".to_string(),
+                property: "source".to_string(),
+                value: Value::String("slack".to_string()),
+            },
+        ]),
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "t".to_string(),
+            label: "Thread".to_string(),
+        }),
+    }
+}
+
+fn thread_optional_source_filter_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Thread".to_string(), 1_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Thread".to_string(), "source".to_string()), 10)],
             [],
         ),
     )
