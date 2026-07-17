@@ -1788,17 +1788,18 @@ fn knowledge_retrieval_diagnostics(
     input: KnowledgeRetrievalDiagnosticsInput,
 ) -> KnowledgeRetrievalDiagnostics {
     let mut empty_reasons = Vec::new();
-    if search.document_count == 0 {
-        empty_reasons.push("search projection has no documents".to_string());
-    } else if search.filtered_document_count == 0 {
-        empty_reasons.push("metadata filters matched no search documents".to_string());
-    } else if search.total_hits == 0 {
-        empty_reasons.push("search retrievers returned no hits inside filtered scope".to_string());
-    }
-    if request.graph_seed_limit > 0 && input.graph_seed_candidate_count == 0 {
-        empty_reasons.push("graph seed retriever returned no candidates".to_string());
-    }
     if input.candidate_count == 0 {
+        if search.document_count == 0 {
+            empty_reasons.push("search projection has no documents".to_string());
+        } else if search.filtered_document_count == 0 {
+            empty_reasons.push("metadata filters matched no search documents".to_string());
+        } else if search.total_hits == 0 {
+            empty_reasons
+                .push("search retrievers returned no hits inside filtered scope".to_string());
+        }
+        if request.graph_seed_limit > 0 && input.graph_seed_candidate_count == 0 {
+            empty_reasons.push("graph seed retriever returned no candidates".to_string());
+        }
         empty_reasons.push("retrieval produced no candidates".to_string());
     }
     let candidate_truncation_reasons = knowledge_candidate_truncation_reasons(
@@ -5534,6 +5535,7 @@ mod tests {
             output.diagnostics.graph_seed_truncation_reasons,
             vec!["graph_seed limit 1 returned from 3 candidates".to_string()]
         );
+        assert!(output.diagnostics.empty_reasons.is_empty());
         assert!(graph_seed_report
             .truncation_reasons
             .iter()
