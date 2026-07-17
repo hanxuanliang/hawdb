@@ -370,7 +370,9 @@ aligned with the intended Adaptive Native Graph Store.
 
 1. Add page-level MVCC reader isolation.
 2. Add physical page/segment reclamation using pinned manifest epochs.
-3. Add sparse adjacency blocks before dense adjacency segments.
+3. Add physical sparse adjacency blocks before dense adjacency segments. The
+   storage API already exposes ordered adjacency entries and sparse/dense group
+   classification over the current in-memory adjacency indexes.
 4. Add property spill blocks for large values.
 5. Add richer index statistics and text analyzer parity.
 6. Add richer caller-owned blob/content parser integration at the boundary

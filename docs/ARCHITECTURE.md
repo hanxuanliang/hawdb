@@ -113,6 +113,11 @@ The initial storage engine should optimize for correctness and embeddability:
 
 The storage API should be iterator-oriented. The executor should be able to
 compose scans, expands, filters, and joins without materializing full graphs.
+Adjacency access also exposes a stable ordered view sorted by
+`(neighbor_id, relationship_id)` plus sparse/dense group classification. The
+current implementation computes that view over in-memory adjacency indexes; the
+same API is the boundary for later sparse blocks and copy-on-write dense
+segments.
 
 ## Cypher Pipeline
 

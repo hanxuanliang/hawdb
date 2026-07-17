@@ -87,7 +87,11 @@ pub use search::{
     SearchMode, SearchProjectionFreshness, SearchProjectionKind, SearchProjectionRow,
     SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
 };
-pub use store::{DurabilityPolicy, RecoveryMode, StorageReclamationWatermark, WalReplayConfig};
+pub use store::{
+    AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,
+    OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark, WalReplayConfig,
+    DENSE_ADJACENCY_DEGREE_THRESHOLD,
+};
 pub use value::Value;
 
 #[cfg(test)]

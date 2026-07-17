@@ -25,6 +25,7 @@ const MAX_PROPERTY_HISTOGRAM_DISTINCT_VALUES: usize = 4_096;
 const MAX_BOUNDED_PATH_STAT_HOPS: usize = 3;
 const DURABLE_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
 const DEFAULT_COMPRESSION_LEVEL: i32 = 3;
+pub const DENSE_ADJACENCY_DEGREE_THRESHOLD: usize = 64;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum DurabilityPolicy {
@@ -72,6 +73,33 @@ pub struct RelRecord {
     pub target: NodeId,
     pub rel_type: RelTypeId,
     pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdjacencyDirection {
+    Outgoing,
+    Incoming,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdjacencyLayout {
+    Sparse,
+    Dense,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OrderedAdjacencyEntry {
+    pub relationship_id: RelId,
+    pub neighbor_id: NodeId,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AdjacencyGroupStats {
+    pub node_id: NodeId,
+    pub rel_type: RelTypeId,
+    pub direction: AdjacencyDirection,
+    pub degree: usize,
+    pub layout: AdjacencyLayout,
 }
 
 type CompositePropertyKey = Vec<(String, Value)>;
@@ -4237,6 +4265,50 @@ impl GraphStore {
             .filter_map(|rel_id| self.relationships.get(rel_id))
     }
 
+    pub fn adjacency_group_stats(
+        &self,
+        node_id: NodeId,
+        rel_type: RelTypeId,
+        direction: AdjacencyDirection,
+    ) -> AdjacencyGroupStats {
+        let degree = self
+            .adjacency_relationship_ids(node_id, rel_type, direction)
+            .map(BTreeSet::len)
+            .unwrap_or_default();
+        AdjacencyGroupStats {
+            node_id,
+            rel_type,
+            direction,
+            degree,
+            layout: adjacency_layout_for_degree(degree),
+        }
+    }
+
+    pub fn ordered_adjacency_entries(
+        &self,
+        node_id: NodeId,
+        rel_type: RelTypeId,
+        direction: AdjacencyDirection,
+    ) -> Vec<OrderedAdjacencyEntry> {
+        let mut entries = self
+            .adjacency_relationship_ids(node_id, rel_type, direction)
+            .into_iter()
+            .flat_map(|rel_ids| rel_ids.iter())
+            .filter_map(|rel_id| {
+                let relationship = self.relationships.get(rel_id)?;
+                Some(OrderedAdjacencyEntry {
+                    relationship_id: relationship.id,
+                    neighbor_id: match direction {
+                        AdjacencyDirection::Outgoing => relationship.target,
+                        AdjacencyDirection::Incoming => relationship.source,
+                    },
+                })
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by_key(|entry| (entry.neighbor_id, entry.relationship_id));
+        entries
+    }
+
     pub fn scan_relationships<'a>(
         &'a self,
         rel_type: Option<RelTypeId>,
@@ -4254,6 +4326,18 @@ impl GraphStore {
 
     pub fn node(&self, id: NodeId) -> Option<&NodeRecord> {
         self.nodes.get(&id)
+    }
+
+    fn adjacency_relationship_ids(
+        &self,
+        node_id: NodeId,
+        rel_type: RelTypeId,
+        direction: AdjacencyDirection,
+    ) -> Option<&BTreeSet<RelId>> {
+        match direction {
+            AdjacencyDirection::Outgoing => self.outgoing.get(&(node_id, rel_type)),
+            AdjacencyDirection::Incoming => self.incoming.get(&(node_id, rel_type)),
+        }
     }
 
     pub fn register_projected_graph(
@@ -7608,6 +7692,14 @@ fn properties_contain_all(
         .all(|(property, value)| properties.get(property) == Some(value))
 }
 
+fn adjacency_layout_for_degree(degree: usize) -> AdjacencyLayout {
+    if degree >= DENSE_ADJACENCY_DEGREE_THRESHOLD {
+        AdjacencyLayout::Dense
+    } else {
+        AdjacencyLayout::Sparse
+    }
+}
+
 fn generated_stable_id(kind: &str, physical_id: u64) -> Value {
     Value::Map(BTreeMap::from([
         (
@@ -8421,8 +8513,9 @@ fn validate_storage_version(version: &str) -> Result<()> {
 mod tests {
     use super::{
         checksum_bytes, compute_statistics, encode_durable_text, read_durable_text,
-        ConnectedNodesCreate, DurableCompression, GraphStore, NodeId, NodeRecord,
-        ProjectedGraphDefinition, RelId, RelRecord, RelTypeId, DURABLE_COMPRESSION_HEADER,
+        AdjacencyDirection, AdjacencyLayout, ConnectedNodesCreate, DurableCompression, GraphStore,
+        NodeId, NodeRecord, OrderedAdjacencyEntry, ProjectedGraphDefinition, RelId, RelRecord,
+        RelTypeId, DENSE_ADJACENCY_DEGREE_THRESHOLD, DURABLE_COMPRESSION_HEADER,
     };
     use crate::schema::{Catalog, LabelId};
     use crate::value::Value;
@@ -8463,6 +8556,116 @@ mod tests {
             assert_eq!(rels[0].properties.get("weight"), Some(&Value::Int(7)));
         }
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn ordered_adjacency_entries_sort_by_neighbor_then_relationship_id() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+        let target_one = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let target_two = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(2))]))
+            .unwrap();
+        let target_three = store
+            .create_node(&mut catalog, "Entity", properties([("id", Value::Int(3))]))
+            .unwrap();
+
+        let rel_three = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_three,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let rel_one = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_one,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let rel_two = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target_two,
+                "MENTIONS",
+                BTreeMap::new(),
+            )
+            .unwrap();
+        let rel_type = catalog.rel_type_id("MENTIONS").unwrap();
+
+        let outgoing =
+            store.ordered_adjacency_entries(source, rel_type, AdjacencyDirection::Outgoing);
+        let incoming =
+            store.ordered_adjacency_entries(target_one, rel_type, AdjacencyDirection::Incoming);
+
+        assert_eq!(
+            outgoing,
+            vec![
+                OrderedAdjacencyEntry {
+                    relationship_id: rel_one,
+                    neighbor_id: target_one,
+                },
+                OrderedAdjacencyEntry {
+                    relationship_id: rel_two,
+                    neighbor_id: target_two,
+                },
+                OrderedAdjacencyEntry {
+                    relationship_id: rel_three,
+                    neighbor_id: target_three,
+                },
+            ]
+        );
+        assert_eq!(
+            incoming,
+            vec![OrderedAdjacencyEntry {
+                relationship_id: rel_one,
+                neighbor_id: source,
+            }]
+        );
+    }
+
+    #[test]
+    fn adjacency_group_stats_classify_sparse_and_dense_groups() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(0))]))
+            .unwrap();
+
+        for target_index in 0..DENSE_ADJACENCY_DEGREE_THRESHOLD {
+            let target = store
+                .create_node(
+                    &mut catalog,
+                    "Entity",
+                    properties([("id", Value::Int(target_index as i64))]),
+                )
+                .unwrap();
+            store
+                .create_relationship(&mut catalog, source, target, "MENTIONS", BTreeMap::new())
+                .unwrap();
+        }
+        let rel_type = catalog.rel_type_id("MENTIONS").unwrap();
+
+        let dense_stats =
+            store.adjacency_group_stats(source, rel_type, AdjacencyDirection::Outgoing);
+        let sparse_stats =
+            store.adjacency_group_stats(NodeId(1), rel_type, AdjacencyDirection::Incoming);
+
+        assert_eq!(dense_stats.degree, DENSE_ADJACENCY_DEGREE_THRESHOLD);
+        assert_eq!(dense_stats.layout, AdjacencyLayout::Dense);
+        assert_eq!(sparse_stats.degree, 1);
+        assert_eq!(sparse_stats.layout, AdjacencyLayout::Sparse);
     }
 
     #[test]
