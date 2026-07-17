@@ -40,6 +40,17 @@ pub enum QosAdmission {
     Reject { reason: String },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalQosPermit {
+    request: WorkRequest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalQosScheduler {
+    policy: LocalQosPolicy,
+    state: LocalQosState,
+}
+
 impl Default for LocalQosPolicy {
     fn default() -> Self {
         Self {
@@ -109,9 +120,65 @@ impl LocalQosPolicy {
     }
 }
 
+impl LocalQosPermit {
+    pub fn request(&self) -> &WorkRequest {
+        &self.request
+    }
+}
+
+impl LocalQosScheduler {
+    pub fn new(policy: LocalQosPolicy) -> Self {
+        Self {
+            policy,
+            state: LocalQosState::default(),
+        }
+    }
+
+    pub fn policy(&self) -> &LocalQosPolicy {
+        &self.policy
+    }
+
+    pub fn state(&self) -> &LocalQosState {
+        &self.state
+    }
+
+    pub fn admit(&self, request: &WorkRequest) -> QosAdmission {
+        self.policy.admit(&self.state, request)
+    }
+
+    pub fn try_start(
+        &mut self,
+        request: WorkRequest,
+    ) -> std::result::Result<LocalQosPermit, QosAdmission> {
+        match self.policy.admit(&self.state, &request) {
+            QosAdmission::Admit => {
+                if request.priority == WorkPriority::Background {
+                    self.state.running_background_operations = self
+                        .state
+                        .running_background_operations
+                        .saturating_add(request.estimated_operations);
+                }
+                Ok(LocalQosPermit { request })
+            }
+            admission => Err(admission),
+        }
+    }
+
+    pub fn finish(&mut self, permit: LocalQosPermit) {
+        if permit.request.priority == WorkPriority::Background {
+            self.state.running_background_operations = self
+                .state
+                .running_background_operations
+                .saturating_sub(permit.request.estimated_operations);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LocalQosPolicy, LocalQosState, QosAdmission, WorkClass, WorkRequest};
+    use super::{
+        LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+    };
 
     #[test]
     fn admits_foreground_work_without_budget_gate() {
@@ -168,5 +235,55 @@ mod tests {
             policy.admit(&state, &request),
             QosAdmission::Defer { reason } if reason.contains("above limit 12")
         ));
+    }
+
+    #[test]
+    fn scheduler_tracks_background_running_operations() {
+        let policy = LocalQosPolicy {
+            max_background_operations: Some(10),
+            max_total_background_operations: Some(12),
+            ..LocalQosPolicy::default()
+        };
+        let mut scheduler = LocalQosScheduler::new(policy);
+
+        let first = scheduler
+            .try_start(WorkRequest::background(WorkClass::Projection, 8))
+            .unwrap();
+        assert_eq!(scheduler.state().running_background_operations, 8);
+
+        let second = scheduler
+            .try_start(WorkRequest::background(WorkClass::Analytics, 5))
+            .unwrap_err();
+        assert!(matches!(
+            second,
+            QosAdmission::Defer { reason } if reason.contains("above limit 12")
+        ));
+        assert_eq!(scheduler.state().running_background_operations, 8);
+
+        scheduler.finish(first);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+
+        let second = scheduler
+            .try_start(WorkRequest::background(WorkClass::Analytics, 5))
+            .unwrap();
+        assert_eq!(scheduler.state().running_background_operations, 5);
+        scheduler.finish(second);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+    }
+
+    #[test]
+    fn scheduler_does_not_charge_foreground_work() {
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_total_background_operations: Some(1),
+            ..LocalQosPolicy::default()
+        });
+
+        let permit = scheduler
+            .try_start(WorkRequest::foreground(WorkClass::Query, usize::MAX))
+            .unwrap();
+        assert_eq!(scheduler.state().running_background_operations, 0);
+
+        scheduler.finish(permit);
+        assert_eq!(scheduler.state().running_background_operations, 0);
     }
 }

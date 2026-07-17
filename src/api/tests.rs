@@ -7,7 +7,7 @@ use super::{
     RecoveryMode, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
-use crate::qos::{LocalQosPolicy, LocalQosState};
+use crate::qos::{LocalQosPolicy, LocalQosScheduler, LocalQosState};
 use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
 };
@@ -4676,6 +4676,98 @@ fn background_derived_artifact_job_runs_when_qos_admits() {
         );
     }
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn scheduled_background_derived_artifact_job_tracks_running_budget() {
+    let path = unique_test_dir("scheduled_background_derived_artifact_job");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("MERGE (:Memory {id: 1, title: 'Root'})-[:LINKS]->(:Entity {id: 2, name: 'Mid'})")
+            .unwrap();
+        db.query("CALL project_graph('EntityGraph', ['Memory', 'Entity'], ['LINKS'])")
+            .unwrap();
+        db.checkpoint().unwrap();
+        db.query("CREATE (:Memory {id: 3, title: 'Later'})")
+            .unwrap();
+
+        db.schedule_derived_artifact_rebuild();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(4),
+            max_total_background_operations: Some(4),
+            ..LocalQosPolicy::default()
+        });
+
+        let report = db
+            .run_next_scheduled_background_derived_artifact_job(&mut scheduler, 4)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn scheduled_background_derived_artifact_job_defers_when_scheduler_is_full() {
+    let path = unique_test_dir("scheduled_background_derived_artifact_job_full");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 1, title: 'Root'})").unwrap();
+        db.query("CALL project_graph('EntityGraph', ['Memory'], [])")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 2, title: 'Later'})")
+            .unwrap();
+
+        db.schedule_derived_artifact_rebuild();
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(8),
+            max_total_background_operations: Some(8),
+            ..LocalQosPolicy::default()
+        });
+        let running = scheduler
+            .try_start(crate::WorkRequest::background(
+                crate::WorkClass::Analytics,
+                6,
+            ))
+            .unwrap();
+
+        let error = db
+            .run_next_scheduled_background_derived_artifact_job(&mut scheduler, 4)
+            .unwrap_err();
+
+        assert!(error.to_string().contains("deferred"));
+        assert_eq!(scheduler.state().running_background_operations, 6);
+        assert_eq!(
+            db.derived_artifact_jobs()[0].status,
+            DerivedArtifactJobStatus::Pending
+        );
+
+        scheduler.finish(running);
+        assert_eq!(scheduler.state().running_background_operations, 0);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn scheduled_background_derived_artifact_job_releases_budget_on_execution_error() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        read_only: true,
+        ..DatabaseConfig::default()
+    });
+    db.schedule_derived_artifact_rebuild();
+    let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+    let error = db
+        .run_next_scheduled_background_derived_artifact_job(&mut scheduler, 1)
+        .unwrap_err();
+
+    assert!(error.to_string().contains("read-only mode"));
+    assert_eq!(scheduler.state().running_background_operations, 0);
+    let jobs = db.derived_artifact_jobs();
+    assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[0].attempts, 0);
 }
 
 #[test]

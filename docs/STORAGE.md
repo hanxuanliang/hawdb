@@ -310,6 +310,12 @@ and atomically replace `projected_graphs.skein`.
 for these projected graph artifacts. Jobs expose pending/running/succeeded/failed
 state, attempts, and last error without adding threads or hiding rebuild
 failures.
+Internal background callers can route the same pending jobs through
+`Database::run_next_background_derived_artifact_job` for stateless admission or
+`Database::run_next_scheduled_background_derived_artifact_job` for the
+caller-driven `LocalQosScheduler` path. The scheduler only tracks running
+background operation budgets between start and finish; it does not own worker
+threads, reorder jobs, or gate foreground explicit rebuild requests.
 `Database::schedule_external_content_artifact_job` records content/blob parser
 work at the same orchestration boundary. Callers that need structured parser
 inputs can use `Database::schedule_external_content_artifact_job_with_payload`

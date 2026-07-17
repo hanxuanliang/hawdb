@@ -78,7 +78,10 @@ pub use nowledge_inventory::{
     scan_nowledge_query_inventory_to_json, scan_nowledge_query_inventory_with_options,
     NowledgeInventoryScanOptions,
 };
-pub use qos::{LocalQosPolicy, LocalQosState, QosAdmission, WorkClass, WorkPriority, WorkRequest};
+pub use qos::{
+    LocalQosPermit, LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass,
+    WorkPriority, WorkRequest,
+};
 pub use schema::{
     CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,
     ConstraintSubject, GraphStatistics, IndexDescriptor, IndexId, IndexKind, PropertyDescriptor,

@@ -1,7 +1,9 @@
 use super::{optional_u64_value, optional_usize_value, Database, QueryOutput};
 use crate::error::{Result, SkeinError};
 use crate::executor::Row;
-use crate::qos::{LocalQosPolicy, LocalQosState, QosAdmission, WorkClass, WorkRequest};
+use crate::qos::{
+    LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+};
 use crate::value::Value;
 use std::collections::BTreeMap;
 
@@ -266,6 +268,39 @@ impl Database {
                 "background derived artifact job rejected: {reason}"
             ))),
         }
+    }
+
+    pub fn run_next_scheduled_background_derived_artifact_job(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        estimated_operations: usize,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        let Some(job) = self
+            .derived_artifact_jobs
+            .iter()
+            .find(|job| job.status == DerivedArtifactJobStatus::Pending)
+        else {
+            return Ok(None);
+        };
+
+        let permit = match scheduler.try_start(job.background_work_request(estimated_operations)) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background derived artifact job deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background derived artifact job rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.run_next_derived_artifact_job();
+        scheduler.finish(permit);
+        result
     }
 
     pub fn run_next_external_content_artifact_job_with(

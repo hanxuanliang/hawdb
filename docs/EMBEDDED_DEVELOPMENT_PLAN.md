@@ -589,7 +589,11 @@ foreground user-triggered deltas can still use the direct API. Database-owned
 derived artifact jobs expose the same split through
 `Database::run_next_background_derived_artifact_job`, which admits internal
 background rebuild work through `LocalQosPolicy` while leaving the direct
-`run_next_derived_artifact_job` path available for explicit callers. Content
+`run_next_derived_artifact_job` path available for explicit callers. Callers
+that want the engine to track in-flight background operation budgets can use
+`LocalQosScheduler` with
+`Database::run_next_scheduled_background_derived_artifact_job`; this remains
+synchronous and caller-driven rather than a built-in thread pool. Content
 artifact jobs are scheduled at
 the same boundary; callers can attach structured job payloads for object
 references, checksums, parser hints, and projection targets. The default
