@@ -33,11 +33,17 @@ pub use api::{
     CanonicalStableIdMapping, Database, DatabaseConfig, DatabaseReadTransaction,
     DatabaseTransaction, DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
     GraphLightningBootstrapExport, GraphLightningBootstrapManifest, GraphLightningGraphStream,
-    GraphLightningGraphStreamValidation, KnowledgeGraphContextPath, KnowledgeGraphPathDirection,
-    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, NowledgeGraphAdapter,
-    NowledgeGraphExplainOutput, NowledgeGraphStatement, NowledgeGraphTransactionOutput,
-    QueryOutput, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    GraphLightningGraphStreamValidation, KnowledgeCandidate, KnowledgeCandidateScoreBreakdown,
+    KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntity,
+    KnowledgeEntityOutput, KnowledgeEntityRequest, KnowledgeEvidence, KnowledgeGraphContextPath,
+    KnowledgeGraphPath, KnowledgeGraphPathDirection, KnowledgeGraphSeed,
+    KnowledgeNeighborDirection, KnowledgeNeighborsOutput, KnowledgeNeighborsRequest,
+    KnowledgePathOutput, KnowledgePathRequest, KnowledgeRetrievalDiagnostics,
+    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, KnowledgeRetrieverCandidate,
+    KnowledgeRetrieverReport, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
+    KnowledgeTraversalDiagnostics, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
+    NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
@@ -83,3 +89,59 @@ pub use search::{
 };
 pub use store::{DurabilityPolicy, RecoveryMode, StorageReclamationWatermark, WalReplayConfig};
 pub use value::Value;
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        Database, KnowledgeEntityRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+        KnowledgePathRequest, KnowledgeSubgraphRequest,
+    };
+
+    #[test]
+    fn crate_root_exports_typed_knowledge_navigation_api() {
+        let mut db = Database::new();
+        db.query(
+            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})",
+        )
+        .unwrap();
+
+        let entity = db.knowledge_entity(&KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+        });
+        assert!(entity.entity.is_some());
+
+        let neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 4,
+            max_hops: 1,
+        });
+        assert_eq!(neighbors.diagnostics.path_count, 1);
+
+        let paths = db.knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        });
+        assert_eq!(paths.diagnostics.target_found, Some(true));
+
+        let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 4,
+            relationship_limit: 4,
+        });
+        assert_eq!(subgraph.diagnostics.node_count, 2);
+    }
+}
