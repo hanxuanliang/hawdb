@@ -730,6 +730,8 @@ fn retrieves_knowledge_through_database_facade() {
         .contains(&"content".to_string()));
     assert!(output.graph_seeds[0].score >= output.graph_seeds[1].score);
     assert_eq!(output.diagnostics.graph_context_path_count, 1);
+    assert_eq!(output.diagnostics.graph_context_node_count, 2);
+    assert_eq!(output.diagnostics.graph_context_relationship_count, 1);
     assert_eq!(output.diagnostics.fanout_reason_count, 1);
     assert!(output.diagnostics.warnings.is_empty());
     assert_eq!(output.fanout_reasons.len(), 1);
@@ -1543,6 +1545,8 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
     assert_eq!(output.diagnostics.graph_seed_returned_count, 0);
     assert_eq!(output.diagnostics.graph_seed_limit, 10);
     assert_eq!(output.diagnostics.graph_context_path_count, 0);
+    assert_eq!(output.diagnostics.graph_context_node_count, 0);
+    assert_eq!(output.diagnostics.graph_context_relationship_count, 0);
     assert_eq!(output.diagnostics.graph_context_limit, 0);
     assert_eq!(output.diagnostics.graph_context_max_hops, 1);
     assert_eq!(output.diagnostics.fanout_reason_count, 0);
