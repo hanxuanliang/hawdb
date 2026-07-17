@@ -434,6 +434,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_context_max_hops: usize,
     pub graph_context_truncated: bool,
     pub graph_context_truncation_reasons: Vec<String>,
+    pub graph_context_fallback_reasons: Vec<String>,
     pub fanout_reason_count: usize,
     pub fanout_reasons: Vec<String>,
     pub candidate_count: usize,
@@ -1968,6 +1969,17 @@ fn knowledge_graph_seed_candidate_set_report(
     }
 }
 
+fn knowledge_graph_context_fallback_reasons(request: &KnowledgeRetrievalRequest) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if request.graph_context_limit == 0 {
+        reasons.push("graph context expansion disabled by limit 0".to_string());
+    }
+    if request.graph_context_max_hops == 0 {
+        reasons.push("graph context expansion disabled by max_hops 0".to_string());
+    }
+    reasons
+}
+
 #[derive(Debug, Clone)]
 struct KnowledgeRetrievalDiagnosticsInput {
     graph_seed_candidate_count: usize,
@@ -2043,6 +2055,7 @@ fn knowledge_retrieval_diagnostics(
         graph_context_max_hops: request.graph_context_max_hops,
         graph_context_truncated: !input.graph_context_truncation_reasons.is_empty(),
         graph_context_truncation_reasons: input.graph_context_truncation_reasons,
+        graph_context_fallback_reasons: knowledge_graph_context_fallback_reasons(request),
         fanout_reason_count: input.fanout_reason_count,
         fanout_reasons: input.fanout_reasons,
         candidate_count: input.candidate_count,

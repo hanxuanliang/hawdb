@@ -528,7 +528,8 @@ reasons, and top candidate rank, score, provenance metadata, canonical node ID,
 matched spans, and graph context path count are exposed in one place.
 Retrieval diagnostics also report distinct graph-context node count and
 relationship count, matching the bounded traversal diagnostics used by typed
-knowledge navigation.
+knowledge navigation, and distinguish disabled graph-context budgets from
+runtime fan-out truncation through graph-context fallback reasons.
 Search child top candidates also carry projection freshness, while graph seed
 top candidates leave it empty because they are read directly from canonical
 graph state. Search child reports distinguish rank-window trimming from

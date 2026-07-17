@@ -1549,6 +1549,10 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
     assert_eq!(output.diagnostics.graph_context_relationship_count, 0);
     assert_eq!(output.diagnostics.graph_context_limit, 0);
     assert_eq!(output.diagnostics.graph_context_max_hops, 1);
+    assert_eq!(
+        output.diagnostics.graph_context_fallback_reasons,
+        vec!["graph context expansion disabled by limit 0".to_string()]
+    );
     assert_eq!(output.diagnostics.fanout_reason_count, 0);
     assert_eq!(output.diagnostics.candidate_count, 0);
     assert_eq!(output.diagnostics.candidate_limit, None);
@@ -1880,6 +1884,47 @@ fn retrieves_bounded_multi_hop_knowledge_context() {
     assert!(output.graph_context_paths.iter().any(|path| path.hop == 2
         && path.source_external_id.as_deref() == Some("mid")
         && path.target_external_id.as_deref() == Some("leaf")));
+}
+
+#[test]
+fn knowledge_retrieval_reports_graph_context_disabled_by_max_hops() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'root', title: 'Root traversal', content: 'Zero hop graph context'})-[:LINKS]->(:Entity {id: 'mid', name: 'Mid'})")
+            .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "root traversal".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 1,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 0,
+            graph_context_limit: 4,
+            graph_context_max_hops: 0,
+        },
+    );
+
+    assert_eq!(output.search.total_hits, 1);
+    assert!(output.graph_context_paths.is_empty());
+    assert_eq!(output.diagnostics.graph_context_path_count, 0);
+    assert_eq!(output.diagnostics.graph_context_node_count, 0);
+    assert_eq!(output.diagnostics.graph_context_relationship_count, 0);
+    assert_eq!(
+        output.diagnostics.graph_context_fallback_reasons,
+        vec!["graph context expansion disabled by max_hops 0".to_string()]
+    );
+    assert!(output.fanout_reasons.is_empty());
+    assert!(!output.diagnostics.graph_context_truncated);
 }
 
 #[test]
