@@ -70,7 +70,8 @@ Staging GC gates also group published-pointer verification errors before
 declaring artifacts deletable.
 Import-status reports add a machine-readable `resume_action`, optional
 caller-owned state-marker aggregation with active-state idempotency-key
-validation, and active-import `resource_retention` policy so automation can
+validation, optional caller-owned checkpoint-log aggregation with failure
+coordinates, and active-import `resource_retention` policy so automation can
 choose staging, publishing, active resume, completion, failure/cancel handling,
 quarantine/manual-repair, or artifact-retention handling without parsing
 human-readable error strings or deleting READY artifacts before publish.

@@ -1673,10 +1673,13 @@ fn graph_lightning_import_status(
     let mut published_errors = Vec::new();
     let mut resource_errors = Vec::new();
     let mut state_errors = Vec::new();
+    let mut checkpoint_errors = Vec::new();
     let mut staging_verification = None;
     let mut published_verification = None;
     let state_marker =
         graph_lightning_import_state_marker(staging_dir, &mut errors, &mut state_errors);
+    let checkpoint_log =
+        graph_lightning_import_checkpoint_log(staging_dir, &mut errors, &mut checkpoint_errors);
     let artifact_state = if !staging_catalog_present && published_pointer_present {
         push_grouped_error(
             &mut errors,
@@ -1732,19 +1735,22 @@ fn graph_lightning_import_status(
         &mut errors,
         &mut resource_errors,
     );
-    let decision =
-        if import_state == "QUARANTINED" || !resource_errors.is_empty() || !state_errors.is_empty()
-        {
-            "blocked"
-        } else {
-            "ready"
-        };
+    let decision = if import_state == "QUARANTINED"
+        || !resource_errors.is_empty()
+        || !state_errors.is_empty()
+        || !checkpoint_errors.is_empty()
+    {
+        "blocked"
+    } else {
+        "ready"
+    };
     Ok(serde_json::json!({
         "protocol": "graph-lightning-import-status",
         "protocol_version": 1,
         "import_state": import_state,
         "artifact_state": artifact_state,
         "state_marker": state_marker,
+        "checkpoint_log": checkpoint_log,
         "resume_action": resume_action,
         "resource_retention": resource_retention,
         "staging_catalog_present": staging_catalog_present,
@@ -1758,14 +1764,214 @@ fn graph_lightning_import_status(
             "published_errors": published_errors.len(),
             "resource_errors": resource_errors.len(),
             "state_errors": state_errors.len(),
+            "checkpoint_errors": checkpoint_errors.len(),
             "presence_error_messages": presence_errors,
             "staging_error_messages": staging_errors,
             "published_error_messages": published_errors,
             "resource_error_messages": resource_errors,
             "state_error_messages": state_errors,
+            "checkpoint_error_messages": checkpoint_errors,
             "errors": errors,
         },
     }))
+}
+
+fn graph_lightning_import_checkpoint_log(
+    staging_dir: &Path,
+    errors: &mut Vec<String>,
+    checkpoint_errors: &mut Vec<String>,
+) -> serde_json::Value {
+    let checkpoint_path = staging_dir.join("graph_lightning_import_checkpoints.jsonl");
+    if !checkpoint_path.exists() {
+        return serde_json::json!({
+            "present": false,
+            "path": "graph_lightning_import_checkpoints.jsonl",
+            "entry_count": 0,
+            "last_checkpoint": serde_json::Value::Null,
+            "failed_checkpoints": [],
+            "resume_summary": {
+                "last_stage": serde_json::Value::Null,
+                "last_source_range": serde_json::Value::Null,
+                "last_object_digest": serde_json::Value::Null,
+                "last_partition": serde_json::Value::Null,
+                "failed_source_ranges": [],
+                "failed_object_digests": [],
+                "failed_partitions": [],
+                "failed_validation_rules": [],
+            },
+            "checkpoint_gate": {
+                "decision": "ready",
+                "errors": [],
+            },
+        });
+    }
+
+    let content = match fs::read_to_string(&checkpoint_path) {
+        Ok(content) => content,
+        Err(error) => {
+            push_grouped_error(
+                errors,
+                checkpoint_errors,
+                format!("checkpoint log could not be read: {error}"),
+            );
+            return graph_lightning_import_checkpoint_blocked_json(checkpoint_errors);
+        }
+    };
+
+    let mut entries = Vec::new();
+    let mut failed = Vec::new();
+    let mut failed_source_ranges = BTreeSet::new();
+    let mut failed_object_digests = BTreeSet::new();
+    let mut failed_partitions = BTreeSet::new();
+    let mut failed_validation_rules = BTreeSet::new();
+    for (line_index, line) in content.lines().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let entry = match serde_json::from_str::<serde_json::Value>(trimmed) {
+            Ok(entry) => entry,
+            Err(error) => {
+                push_grouped_error(
+                    errors,
+                    checkpoint_errors,
+                    format!(
+                        "checkpoint log line {} is invalid JSON: {error}",
+                        line_index + 1
+                    ),
+                );
+                continue;
+            }
+        };
+        graph_lightning_validate_checkpoint_entry(
+            &entry,
+            line_index + 1,
+            errors,
+            checkpoint_errors,
+        );
+        if entry.get("status").and_then(serde_json::Value::as_str) == Some("failed") {
+            collect_string_field(&entry, "source_range", &mut failed_source_ranges);
+            collect_string_field(&entry, "object_digest", &mut failed_object_digests);
+            collect_string_field(&entry, "partition", &mut failed_partitions);
+            collect_string_field(&entry, "validation_rule", &mut failed_validation_rules);
+            failed.push(entry.clone());
+        }
+        entries.push(entry);
+    }
+
+    let last_checkpoint = entries.last().cloned().unwrap_or(serde_json::Value::Null);
+    let decision = if checkpoint_errors.is_empty() {
+        "ready"
+    } else {
+        "blocked"
+    };
+    serde_json::json!({
+        "present": true,
+        "path": "graph_lightning_import_checkpoints.jsonl",
+        "entry_count": entries.len(),
+        "last_checkpoint": last_checkpoint,
+        "failed_checkpoints": failed,
+        "resume_summary": {
+            "last_stage": last_checkpoint.get("stage").cloned().unwrap_or(serde_json::Value::Null),
+            "last_source_range": last_checkpoint.get("source_range").cloned().unwrap_or(serde_json::Value::Null),
+            "last_object_digest": last_checkpoint.get("object_digest").cloned().unwrap_or(serde_json::Value::Null),
+            "last_partition": last_checkpoint.get("partition").cloned().unwrap_or(serde_json::Value::Null),
+            "failed_source_ranges": failed_source_ranges.into_iter().collect::<Vec<_>>(),
+            "failed_object_digests": failed_object_digests.into_iter().collect::<Vec<_>>(),
+            "failed_partitions": failed_partitions.into_iter().collect::<Vec<_>>(),
+            "failed_validation_rules": failed_validation_rules.into_iter().collect::<Vec<_>>(),
+        },
+        "checkpoint_gate": {
+            "decision": decision,
+            "errors": checkpoint_errors,
+        },
+    })
+}
+
+fn graph_lightning_import_checkpoint_blocked_json(
+    checkpoint_errors: &[String],
+) -> serde_json::Value {
+    serde_json::json!({
+        "present": true,
+        "path": "graph_lightning_import_checkpoints.jsonl",
+        "entry_count": 0,
+        "last_checkpoint": serde_json::Value::Null,
+        "failed_checkpoints": [],
+        "resume_summary": {
+            "last_stage": serde_json::Value::Null,
+            "last_source_range": serde_json::Value::Null,
+            "last_object_digest": serde_json::Value::Null,
+            "last_partition": serde_json::Value::Null,
+            "failed_source_ranges": [],
+            "failed_object_digests": [],
+            "failed_partitions": [],
+            "failed_validation_rules": [],
+        },
+        "checkpoint_gate": {
+            "decision": "blocked",
+            "errors": checkpoint_errors,
+        },
+    })
+}
+
+fn graph_lightning_validate_checkpoint_entry(
+    entry: &serde_json::Value,
+    line_number: usize,
+    errors: &mut Vec<String>,
+    checkpoint_errors: &mut Vec<String>,
+) {
+    let stage = marker_string_field(entry, "stage");
+    if stage.is_none() {
+        push_grouped_error(
+            errors,
+            checkpoint_errors,
+            format!("checkpoint log line {line_number} missing stage"),
+        );
+    }
+    let status = marker_string_field(entry, "status");
+    if !matches!(status, Some("completed" | "failed")) {
+        push_grouped_error(
+            errors,
+            checkpoint_errors,
+            format!("checkpoint log line {line_number} has unsupported status"),
+        );
+    }
+    if status == Some("failed") {
+        for field in [
+            "source_range",
+            "object_digest",
+            "partition",
+            "validation_rule",
+        ] {
+            if marker_string_field(entry, field).is_none() {
+                push_grouped_error(
+                    errors,
+                    checkpoint_errors,
+                    format!("checkpoint log line {line_number} failed entry missing {field}"),
+                );
+            }
+        }
+    }
+    if matches!(
+        stage,
+        Some("object_uploaded" | "object_verified" | "merge_range_committed")
+    ) {
+        for field in ["import_id", "task_id", "fencing_token", "object_digest"] {
+            if marker_string_field(entry, field).is_none() {
+                push_grouped_error(
+                    errors,
+                    checkpoint_errors,
+                    format!("checkpoint log line {line_number} missing idempotency field {field}"),
+                );
+            }
+        }
+    }
+}
+
+fn collect_string_field(entry: &serde_json::Value, field: &str, output: &mut BTreeSet<String>) {
+    if let Some(value) = marker_string_field(entry, field) {
+        output.insert(value.to_string());
+    }
 }
 
 fn graph_lightning_import_state_marker(
@@ -3382,6 +3588,139 @@ mod tests {
         assert_eq!(report["resource_retention"]["action"], "none");
         assert_eq!(report["status_gate"]["decision"], "ready");
         assert_eq!(report["status_gate"]["state_errors"], 0);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_summarizes_checkpoint_log_failures() {
+        let staging_dir = unique_main_test_dir("graph_lightning_status_checkpoint_log_staging");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_checkpoint_log_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_state.json"),
+            serde_json::json!({
+                "protocol": "graph-lightning-import-state",
+                "protocol_version": 1,
+                "import_state": "UPLOADING",
+                "import_id": "import-1",
+                "task_id": "task-1",
+                "fencing_token": "fence-1",
+                "object_digest": "digest-1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_checkpoints.jsonl"),
+            [
+                serde_json::json!({
+                    "stage": "source_range_scanned",
+                    "status": "completed",
+                    "source_range": "node:0..10",
+                    "import_id": "import-1",
+                    "task_id": "task-1"
+                })
+                .to_string(),
+                serde_json::json!({
+                    "stage": "object_uploaded",
+                    "status": "failed",
+                    "source_range": "node:10..20",
+                    "partition": "p0",
+                    "object_digest": "digest-failed",
+                    "validation_rule": "multipart_checksum",
+                    "import_id": "import-1",
+                    "task_id": "task-1",
+                    "fencing_token": "fence-1"
+                })
+                .to_string(),
+            ]
+            .join("\n"),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "UPLOADING");
+        assert_eq!(report["checkpoint_log"]["present"], true);
+        assert_eq!(report["checkpoint_log"]["entry_count"], 2);
+        assert_eq!(
+            report["checkpoint_log"]["last_checkpoint"]["stage"],
+            "object_uploaded"
+        );
+        assert_eq!(
+            report["checkpoint_log"]["resume_summary"]["last_source_range"],
+            "node:10..20"
+        );
+        assert_eq!(
+            report["checkpoint_log"]["resume_summary"]["failed_source_ranges"],
+            serde_json::json!(["node:10..20"])
+        );
+        assert_eq!(
+            report["checkpoint_log"]["resume_summary"]["failed_object_digests"],
+            serde_json::json!(["digest-failed"])
+        );
+        assert_eq!(
+            report["checkpoint_log"]["resume_summary"]["failed_partitions"],
+            serde_json::json!(["p0"])
+        );
+        assert_eq!(
+            report["checkpoint_log"]["resume_summary"]["failed_validation_rules"],
+            serde_json::json!(["multipart_checksum"])
+        );
+        assert_eq!(
+            report["checkpoint_log"]["checkpoint_gate"]["decision"],
+            "ready"
+        );
+        assert_eq!(report["status_gate"]["checkpoint_errors"], 0);
+        assert_eq!(report["status_gate"]["decision"], "ready");
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_blocks_checkpoint_log_without_object_idempotency_key() {
+        let staging_dir =
+            unique_main_test_dir("graph_lightning_status_checkpoint_missing_key_staging");
+        let publish_dir =
+            unique_main_test_dir("graph_lightning_status_checkpoint_missing_key_target");
+        std::fs::create_dir_all(&staging_dir).unwrap();
+        std::fs::write(
+            staging_dir.join("graph_lightning_import_checkpoints.jsonl"),
+            serde_json::json!({
+                "stage": "object_uploaded",
+                "status": "completed",
+                "object_digest": "digest-1"
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["artifact_state"], "CREATED");
+        assert_eq!(
+            report["checkpoint_log"]["checkpoint_gate"]["decision"],
+            "blocked"
+        );
+        assert_eq!(report["status_gate"]["decision"], "blocked");
+        assert_eq!(report["status_gate"]["checkpoint_errors"], 3);
+        assert!(report["status_gate"]["checkpoint_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("missing idempotency field import_id")));
+        assert!(report["status_gate"]["checkpoint_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("missing idempotency field fencing_token")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }

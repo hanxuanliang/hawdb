@@ -179,7 +179,12 @@ groups presence, staging, published-pointer, state-marker, and resource errors
 for resume automation. Active coordinator states require the marker to carry the
 idempotent retry tuple `import_id`, `task_id`, `fencing_token`, and
 `object_digest`; missing fields quarantine the status report before retry. The
-report also includes machine-readable `resume_action`, `state_marker`, and
+report can also summarize an optional caller-owned
+`graph_lightning_import_checkpoints.jsonl` append log. Checkpoint entries keep
+resume/failure coordinates such as source range, object digest, partition, and
+validation rule; object-level checkpoints must include the same idempotent retry
+tuple before status automation treats them as resumable. The report also
+includes machine-readable `resume_action`, `state_marker`, `checkpoint_log`, and
 `resource_retention` fields that distinguish staging, publishing, active work,
 completed, canceled, failed, and quarantined/manual-repair states without
 requiring callers to parse human-readable error strings.
