@@ -4310,6 +4310,14 @@ fn estimate_aggregate_rows(
     input_rows.min(distinct_product).max(1)
 }
 
+fn estimate_id_in_rows(values: &[Value], input_rows: u64) -> u64 {
+    values
+        .iter()
+        .collect::<BTreeSet<_>>()
+        .len()
+        .min(input_rows as usize) as u64
+}
+
 fn estimate_node_property_filter_rows(
     predicate: &Predicate,
     input: &PhysicalPlan,
@@ -4346,6 +4354,16 @@ fn estimate_node_property_filter_rows(
             Some(rows)
         }
         Predicate::ConstantBool(value) => Some(if *value { input_rows } else { 0 }),
+        Predicate::IdEq { variable, .. } => {
+            physical_plan_node_label(input, variable).map(|_| input_rows.min(1))
+        }
+        Predicate::IdNotEq { variable, .. } => {
+            physical_plan_node_label(input, variable).map(|_| input_rows.saturating_sub(1))
+        }
+        Predicate::IdIn {
+            variable, values, ..
+        } => physical_plan_node_label(input, variable)
+            .map(|_| estimate_id_in_rows(values, input_rows)),
         Predicate::PropertyEq {
             variable, property, ..
         } => {
@@ -4694,6 +4712,16 @@ fn estimate_relationship_filter_rows(
             Some(rows)
         }
         Predicate::ConstantBool(value) => Some(if *value { input_rows } else { 0 }),
+        Predicate::IdEq { variable, .. } => {
+            physical_plan_relationship_type(input, variable).map(|_| input_rows.min(1))
+        }
+        Predicate::IdNotEq { variable, .. } => {
+            physical_plan_relationship_type(input, variable).map(|_| input_rows.saturating_sub(1))
+        }
+        Predicate::IdIn {
+            variable, values, ..
+        } => physical_plan_relationship_type(input, variable)
+            .map(|_| estimate_id_in_rows(values, input_rows)),
         Predicate::PropertyEq {
             variable, property, ..
         } => estimate_relationship_property_filter_rows(
@@ -6838,6 +6866,71 @@ mod tests {
             PlanCost {
                 estimated_rows: 900,
                 cost: 2_004,
+            }
+        );
+    }
+
+    #[test]
+    fn residual_relationship_id_in_uses_literal_list_width() {
+        let logical = LogicalPlan::Filter {
+            predicate: Predicate::IdIn {
+                variable: "r".to_string(),
+                values: vec![Value::Int(1), Value::Int(2), Value::Int(2)],
+            },
+            input: Box::new(LogicalPlan::Expand {
+                source_variable: "m".to_string(),
+                source_label: "Memory".to_string(),
+                rel_variable: Some("r".to_string()),
+                rel_type: "MENTIONS".to_string(),
+                rel_properties: BTreeMap::new(),
+                direction: RelationshipDirection::Outgoing,
+                target_variable: "e".to_string(),
+                target_label: "Entity".to_string(),
+                min_hops: 1,
+                max_hops: 1,
+                optional: false,
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 1_000), ("Entity".to_string(), 1_000)],
+                [("MENTIONS".to_string(), 4_000)],
+                [("MENTIONS".to_string(), 1_000)],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                    ),
+                    4_000,
+                )],
+                [(
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                        1,
+                    ),
+                    4_000,
+                )],
+                [],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+
+        assert_eq!(
+            trace.selected_plan_cost,
+            PlanCost {
+                estimated_rows: 2,
+                cost: 10_004,
             }
         );
     }

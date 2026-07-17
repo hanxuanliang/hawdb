@@ -228,6 +228,20 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "relationship_id_in_filter",
+            logical: relationship_id_in_filter_plan(),
+            catalog: relationship_id_in_filter_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 2,
+                cost: 10_004,
+            },
+            fingerprint_contains: "IdIn",
+            decision_contains: &[
+                "estimate AdjacencyExpand for Memory-[:MENTIONS*1..1]->Entity",
+                "selected physical plan cost: estimated_rows=2 cost=10004",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "source_memory_label_cross_pattern",
             logical: source_memory_label_cross_pattern_plan(),
             catalog: source_memory_label_cross_pattern_catalog(),
@@ -911,6 +925,59 @@ fn relationship_property_in_filter_catalog() -> OptimizerCatalog {
             ("MENTIONS".to_string(), "kind".to_string()),
             10,
         )]),
+    )
+}
+
+fn relationship_id_in_filter_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::IdIn {
+            variable: "r".to_string(),
+            values: vec![Value::Int(1), Value::Int(2), Value::Int(2)],
+        },
+        input: Box::new(LogicalPlan::Expand {
+            source_variable: "m".to_string(),
+            source_label: "Memory".to_string(),
+            rel_variable: Some("r".to_string()),
+            rel_type: "MENTIONS".to_string(),
+            rel_properties: BTreeMap::new(),
+            direction: RelationshipDirection::Outgoing,
+            target_variable: "e".to_string(),
+            target_label: "Entity".to_string(),
+            min_hops: 1,
+            max_hops: 1,
+            optional: false,
+            input: Box::new(memory_scan()),
+        }),
+    }
+}
+
+fn relationship_id_in_filter_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [("Memory".to_string(), 1_000), ("Entity".to_string(), 1_000)],
+            [("MENTIONS".to_string(), 4_000)],
+            [("MENTIONS".to_string(), 1_000)],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                ),
+                4_000,
+            )],
+            [(
+                (
+                    "Memory".to_string(),
+                    "MENTIONS".to_string(),
+                    "Entity".to_string(),
+                    1,
+                ),
+                4_000,
+            )],
+            [],
+            [],
+        ),
     )
 }
 

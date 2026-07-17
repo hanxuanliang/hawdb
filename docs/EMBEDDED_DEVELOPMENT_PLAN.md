@@ -787,7 +787,9 @@ Current implemented slice:
   filtered node variable's label and apply node-property distinct counts or
   histograms for equality, `IN`, and range predicates, so low-selectivity scan
   fallbacks and cross-pattern filters are not forced through the generic
-  half-selectivity fallback
+  half-selectivity fallback; residual read-side `id(variable)` filters use
+  one-row equality, input-minus-one inequality, and literal-list width estimates
+  once the selected physical plan proves the variable is a node or relationship
 - grouped aggregate cost estimation uses selected-plan variable labels/types
   and explicit node-property or relationship-property distinct counts for
   simple property group keys, while non-property or missing-statistics grouping
@@ -815,11 +817,12 @@ Current implemented slice:
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
   equality/inequality/`IN`/range/null selectivity, residual relationship-property
-  inequality/`IN`/null selectivity, residual string predicate selectivity without
-  double-counting full-text index candidates, constant/`OR` predicate
-  selectivity for optional parameter filters, grouped node-property aggregate cardinality,
-  selected-plan cost stability, deterministic fingerprints, and budget-fallback
-  paths without depending on a storage fixture
+  inequality/`IN`/null selectivity, residual read-side relationship-id filter
+  selectivity, residual string predicate selectivity without double-counting
+  full-text index candidates, constant/`OR` predicate selectivity for optional
+  parameter filters, grouped node-property aggregate cardinality, selected-plan
+  cost stability, deterministic fingerprints, and budget-fallback paths without
+  depending on a storage fixture
 
 Remaining Phase 4 work:
 
