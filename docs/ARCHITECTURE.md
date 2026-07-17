@@ -574,6 +574,14 @@ matched terms, score components, ranks, and graph context path count. This keeps
 raw evidence provenance explicit even though the search projection remains
 outside canonical graph storage.
 
+For resource-constrained embedded deployments, the application can update the
+caller-owned search projection incrementally from canonical graph changes.
+`SearchProjectionGraphDeltaRequest` maps bounded canonical node IDs into
+projection rows, carries delete document IDs, and exposes the same foreground,
+background-QoS, and scheduled-background facades as lower-level
+`SearchProjectionDelta`. This keeps FTS/vector projection maintenance
+incremental without writing search state into the graph WAL.
+
 Typed knowledge operations can bypass the search projection entirely when the
 caller already has graph identity. `Database::knowledge_entity` returns a
 canonical node snapshot by label and external ID, including node id, labels,

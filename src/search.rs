@@ -1332,7 +1332,10 @@ impl SearchIndex {
     }
 }
 
-fn projection_row_from_node(catalog: &Catalog, node: &NodeRecord) -> Option<SearchProjectionRow> {
+pub(crate) fn projection_row_from_node(
+    catalog: &Catalog,
+    node: &NodeRecord,
+) -> Option<SearchProjectionRow> {
     let kind = node.labels.iter().find_map(|label_id| {
         catalog
             .label_name(*label_id)

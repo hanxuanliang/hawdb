@@ -16,10 +16,10 @@ use crate::schema::{
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
-    SearchCandidateSetReport, SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode,
-    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
-    SearchRetrieverCandidateSetReport,
+    projection_row_from_node, SearchCandidateSetReport, SearchFusionWeights, SearchIndex,
+    SearchMatchedSpan, SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary,
+    SearchResultSet, SearchRetrieverCandidateSetReport,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -386,6 +386,35 @@ pub struct KnowledgeRetrievalRequest {
     pub graph_seed_limit: usize,
     pub graph_context_limit: usize,
     pub graph_context_max_hops: usize,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchProjectionGraphDeltaRequest {
+    pub upsert_node_ids: Vec<u64>,
+    pub delete_document_ids: Vec<String>,
+    pub max_operations: Option<usize>,
+}
+
+impl SearchProjectionGraphDeltaRequest {
+    pub fn operation_count(&self) -> usize {
+        self.upsert_node_ids.len() + self.delete_document_ids.len()
+    }
+
+    fn background_work_request(&self) -> WorkRequest {
+        WorkRequest::background(WorkClass::Projection, self.operation_count())
+    }
+
+    pub fn background_work_plan(&self, hint: BackgroundWorkHint) -> Option<BackgroundWorkPlan> {
+        let operation_count = self.operation_count();
+        if operation_count == 0 {
+            return None;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Projection,
+            operation_count,
+            hint,
+        ))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1290,11 +1319,35 @@ impl Database {
         delta.background_work_plan(hint)
     }
 
+    pub fn search_projection_graph_delta_background_work_plan(
+        &self,
+        request: &SearchProjectionGraphDeltaRequest,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        request.background_work_plan(hint)
+    }
+
+    pub fn build_search_projection_graph_delta(
+        &self,
+        request: &SearchProjectionGraphDeltaRequest,
+    ) -> Result<SearchProjectionDelta> {
+        search_projection_graph_delta_for(&self.catalog, &self.store, request)
+    }
+
     pub fn apply_search_projection_delta(
         &self,
         search_index: &mut SearchIndex,
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
+        search_index.apply_projection_delta(delta)
+    }
+
+    pub fn apply_search_projection_graph_delta(
+        &self,
+        search_index: &mut SearchIndex,
+        request: SearchProjectionGraphDeltaRequest,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let delta = self.build_search_projection_graph_delta(&request)?;
         search_index.apply_projection_delta(delta)
     }
 
@@ -1308,6 +1361,24 @@ impl Database {
         search_index.apply_background_projection_delta(policy, state, delta)
     }
 
+    pub fn apply_background_search_projection_graph_delta(
+        &self,
+        search_index: &mut SearchIndex,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        request: SearchProjectionGraphDeltaRequest,
+    ) -> Result<SearchProjectionDeltaReport> {
+        match policy.admit(state, &request.background_work_request()) {
+            QosAdmission::Admit => self.apply_search_projection_graph_delta(search_index, request),
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background search projection graph delta deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background search projection graph delta rejected: {reason}"
+            ))),
+        }
+    }
+
     pub fn apply_scheduled_background_search_projection_delta(
         &self,
         search_index: &mut SearchIndex,
@@ -1315,6 +1386,32 @@ impl Database {
         delta: SearchProjectionDelta,
     ) -> Result<SearchProjectionDeltaReport> {
         search_index.apply_scheduled_background_projection_delta(scheduler, delta)
+    }
+
+    pub fn apply_scheduled_background_search_projection_graph_delta(
+        &self,
+        search_index: &mut SearchIndex,
+        scheduler: &mut LocalQosScheduler,
+        request: SearchProjectionGraphDeltaRequest,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let permit = match scheduler.try_start(request.background_work_request()) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search projection graph delta deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background search projection graph delta rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.apply_search_projection_graph_delta(search_index, request);
+        scheduler.finish(permit);
+        result
     }
 
     pub fn retrieve_knowledge(
@@ -3072,6 +3169,39 @@ fn context_path_for_relationship(
         target_node_id: relationship.target.0,
         target_labels: node_label_names(catalog, target),
         target_external_id: Some(projected_node_external_id(target)),
+    })
+}
+
+fn search_projection_graph_delta_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &SearchProjectionGraphDeltaRequest,
+) -> Result<SearchProjectionDelta> {
+    let operation_count = request.operation_count();
+    if let Some(limit) = request.max_operations {
+        if operation_count > limit {
+            return Err(SkeinError::Storage(format!(
+                "search projection graph delta operation count {operation_count} exceeded configured limit {limit}"
+            )));
+        }
+    }
+
+    let mut upserts = Vec::new();
+    for node_id in &request.upsert_node_ids {
+        let node = store.node(NodeId(*node_id)).ok_or_else(|| {
+            SkeinError::Storage(format!(
+                "search projection graph delta missing node {node_id}"
+            ))
+        })?;
+        if let Some(row) = projection_row_from_node(catalog, node) {
+            upserts.push(row);
+        }
+    }
+
+    Ok(SearchProjectionDelta {
+        upserts,
+        deletes: request.delete_document_ids.clone(),
+        max_operations: request.max_operations,
     })
 }
 

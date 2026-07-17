@@ -4,7 +4,7 @@ use super::{
     KnowledgeEntityRequest, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
     KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgeRetrievalRequest,
     KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{BackgroundWorkHint, LocalQosPolicy, LocalQosScheduler, LocalQosState, WorkClass};
@@ -309,6 +309,170 @@ fn database_facade_scheduled_search_projection_delta_releases_background_budget(
     assert_eq!(scheduler.state().running_background_operations, 0);
     assert!(search_index.document("memory:old").is_some());
     assert!(search_index.document("memory:new").is_none());
+}
+
+#[test]
+fn database_facade_builds_search_projection_delta_from_graph_nodes() {
+    let mut db = Database::new();
+    let node_id = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Memory",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("new".to_string())),
+                (
+                    "title".to_string(),
+                    Value::String("Incremental graph projection".to_string()),
+                ),
+                (
+                    "content".to_string(),
+                    Value::String("Graph node changes can feed bounded FTS deltas".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+    let mut search_index = SearchIndex::in_memory();
+    search_index
+        .upsert_projection_row(search_projection_row("old", "Old projection", "Remove me"))
+        .unwrap();
+    let request = SearchProjectionGraphDeltaRequest {
+        upsert_node_ids: vec![node_id.0],
+        delete_document_ids: vec!["memory:old".to_string()],
+        max_operations: Some(2),
+    };
+
+    let plan = db
+        .search_projection_graph_delta_background_work_plan(
+            &request,
+            BackgroundWorkHint {
+                recent_delta_operations: 2,
+                ..BackgroundWorkHint::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(plan.request.class, WorkClass::Projection);
+    assert_eq!(plan.request.estimated_operations, 2);
+
+    let report = db
+        .apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+
+    assert_eq!(report.operation_count, 2);
+    assert_eq!(report.upserted_documents, 1);
+    assert_eq!(report.deleted_documents, 1);
+    assert!(search_index.document("memory:old").is_none());
+    assert!(search_index.document("memory:new").is_some());
+    let hits = search_index.search("bounded FTS", None, SearchMode::Text, 10);
+    assert_eq!(hits[0].id, "memory:new");
+}
+
+#[test]
+fn graph_search_projection_delta_budget_failure_keeps_projection_unchanged() {
+    let mut db = Database::new();
+    let node_id = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Memory",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("new".to_string())),
+                (
+                    "title".to_string(),
+                    Value::String("Rejected graph projection".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+    let mut search_index = SearchIndex::in_memory();
+    search_index
+        .upsert_projection_row(search_projection_row("old", "Old projection", "Keep me"))
+        .unwrap();
+
+    let error = db
+        .apply_search_projection_graph_delta(
+            &mut search_index,
+            SearchProjectionGraphDeltaRequest {
+                upsert_node_ids: vec![node_id.0],
+                delete_document_ids: vec!["memory:old".to_string()],
+                max_operations: Some(1),
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("operation count 2"));
+    assert!(search_index.document("memory:old").is_some());
+    assert!(search_index.document("memory:new").is_none());
+}
+
+#[test]
+fn background_graph_search_projection_delta_uses_qos_admission() {
+    let mut db = Database::new();
+    let node_id = db
+        .store
+        .create_node(
+            &mut db.catalog,
+            "Memory",
+            BTreeMap::from([
+                ("id".to_string(), Value::String("new".to_string())),
+                (
+                    "title".to_string(),
+                    Value::String("Deferred graph projection".to_string()),
+                ),
+            ]),
+        )
+        .unwrap();
+    let mut search_index = SearchIndex::in_memory();
+    search_index
+        .upsert_projection_row(search_projection_row("old", "Old projection", "Keep me"))
+        .unwrap();
+    let policy = LocalQosPolicy {
+        max_background_operations: Some(1),
+        ..LocalQosPolicy::default()
+    };
+
+    let error = db
+        .apply_background_search_projection_graph_delta(
+            &mut search_index,
+            &policy,
+            &LocalQosState::default(),
+            SearchProjectionGraphDeltaRequest {
+                upsert_node_ids: vec![node_id.0],
+                delete_document_ids: vec!["memory:old".to_string()],
+                max_operations: Some(2),
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("deferred"));
+    assert!(search_index.document("memory:old").is_some());
+    assert!(search_index.document("memory:new").is_none());
+}
+
+#[test]
+fn scheduled_graph_search_projection_delta_releases_budget_on_build_error() {
+    let db = Database::new();
+    let mut search_index = SearchIndex::in_memory();
+    search_index
+        .upsert_projection_row(search_projection_row("old", "Old projection", "Keep me"))
+        .unwrap();
+    let mut scheduler = LocalQosScheduler::new(LocalQosPolicy::default());
+
+    let error = db
+        .apply_scheduled_background_search_projection_graph_delta(
+            &mut search_index,
+            &mut scheduler,
+            SearchProjectionGraphDeltaRequest {
+                upsert_node_ids: vec![99],
+                delete_document_ids: vec!["memory:old".to_string()],
+                max_operations: Some(2),
+            },
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("missing node 99"));
+    assert_eq!(scheduler.state().running_background_operations, 0);
+    assert!(search_index.document("memory:old").is_some());
 }
 
 fn search_projection_row(external_id: &str, title: &str, body: &str) -> SearchProjectionRow {
