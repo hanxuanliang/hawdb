@@ -272,8 +272,14 @@ and property descriptors, validates the next state before appending WAL, and
 then writes all selected maintenance operations as one grouped WAL batch.
 `BACKFILL` descriptors advance to `VALIDATING`, `VALIDATING` descriptors advance
 to `PUBLIC` only after validation, and `GC` descriptors are tombstoned from the
-catalog. WAL replay applies descriptor GC before the database is exposed, while
-record pages and index artifacts remain separately rebuildable or reclaimable.
+catalog. Explicit callers use this direct path without local background
+admission. Internal maintenance loops can instead use
+`Database::run_background_schema_maintenance` with `LocalQosPolicy` or
+`Database::run_scheduled_background_schema_maintenance` with
+`LocalQosScheduler`; both wrappers charge schema maintenance to the `Mutation`
+background lane before any descriptor advancement or maintenance WAL append.
+WAL replay applies descriptor GC before the database is exposed, while record
+pages and index artifacts remain separately rebuildable or reclaimable.
 
 Checkpoint files include a statistics snapshot for observability and future
 costing: total node count, total relationship count, per-label counts,

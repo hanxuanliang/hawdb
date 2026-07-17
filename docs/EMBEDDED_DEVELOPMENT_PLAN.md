@@ -600,9 +600,16 @@ background rebuild work through `LocalQosPolicy` while leaving the direct
 that want the engine to track in-flight background operation budgets can use
 `LocalQosScheduler` with
 `Database::run_next_scheduled_background_derived_artifact_job`; this remains
-synchronous and caller-driven rather than a built-in thread pool. Content
-artifact jobs are scheduled at
-the same boundary; callers can attach structured job payloads for object
+synchronous and caller-driven rather than a built-in thread pool. Schema
+maintenance follows the same foreground/background split:
+`Database::run_schema_maintenance` remains the explicit, ungated caller path,
+while `Database::run_background_schema_maintenance` and
+`Database::run_scheduled_background_schema_maintenance` charge internal
+maintenance loops to the `Mutation` background lane before advancing schema
+descriptors or appending maintenance WAL. These wrappers preserve the existing
+single-batch validation semantics and only add admission/accounting. Content
+artifact jobs are scheduled at the same boundary; callers can attach structured
+job payloads for object
 references, checksums, parser hints, and projection targets. The default
 graph-kernel runner rejects those jobs while preserving the payload in the job
 report, and `Database::run_next_external_content_artifact_job_with` lets a

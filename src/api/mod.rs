@@ -7,6 +7,9 @@ use crate::optimizer::{
     OptimizerConfig, OptimizerTrace, PhysicalPlan,
 };
 use crate::planner;
+use crate::qos::{
+    LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+};
 use crate::schema::{
     Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics, IndexDescriptor,
     IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
@@ -989,6 +992,52 @@ impl Database {
             })
             .collect();
         Ok(QueryOutput { rows })
+    }
+
+    pub fn run_background_schema_maintenance(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        estimated_operations: usize,
+    ) -> Result<QueryOutput> {
+        let request = WorkRequest::background(WorkClass::Mutation, estimated_operations);
+        match policy.admit(state, &request) {
+            QosAdmission::Admit => self.run_schema_maintenance(),
+            QosAdmission::Defer { reason } => Err(SkeinError::Storage(format!(
+                "background schema maintenance deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason } => Err(SkeinError::Storage(format!(
+                "background schema maintenance rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn run_scheduled_background_schema_maintenance(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        estimated_operations: usize,
+    ) -> Result<QueryOutput> {
+        let permit = match scheduler.try_start(WorkRequest::background(
+            WorkClass::Mutation,
+            estimated_operations,
+        )) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background schema maintenance deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background schema maintenance rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.run_schema_maintenance();
+        scheduler.finish(permit);
+        result
     }
 
     pub fn projected_graph_statuses(&self) -> Vec<ProjectedGraphStatus> {
