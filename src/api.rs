@@ -406,6 +406,8 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub candidate_count: usize,
     pub candidate_total_count: usize,
     pub candidate_limit: Option<usize>,
+    pub candidate_truncated: bool,
+    pub candidate_truncation_reasons: Vec<String>,
     pub warnings: Vec<String>,
     pub empty_reasons: Vec<String>,
 }
@@ -1771,6 +1773,11 @@ fn knowledge_retrieval_diagnostics(
     if input.candidate_count == 0 {
         empty_reasons.push("retrieval produced no candidates".to_string());
     }
+    let candidate_truncation_reasons = knowledge_candidate_truncation_reasons(
+        input.candidate_total_count,
+        input.candidate_count,
+        request.candidate_limit,
+    );
     KnowledgeRetrievalDiagnostics {
         graph_commit_epoch,
         projection_source_graph_commit_epoch: projection_freshness.source_graph_commit_epoch,
@@ -1789,8 +1796,23 @@ fn knowledge_retrieval_diagnostics(
         candidate_count: input.candidate_count,
         candidate_total_count: input.candidate_total_count,
         candidate_limit: request.candidate_limit,
+        candidate_truncated: !candidate_truncation_reasons.is_empty(),
+        candidate_truncation_reasons,
         warnings: knowledge_retrieval_warnings(projection_freshness, graph_commit_epoch),
         empty_reasons,
+    }
+}
+
+fn knowledge_candidate_truncation_reasons(
+    candidate_total_count: usize,
+    candidate_count: usize,
+    candidate_limit: Option<usize>,
+) -> Vec<String> {
+    match candidate_limit {
+        Some(limit) if candidate_total_count > candidate_count => vec![format!(
+            "knowledge_candidate_limit {limit} returned from {candidate_total_count} merged candidates"
+        )],
+        _ => Vec::new(),
     }
 }
 
@@ -4105,6 +4127,8 @@ mod tests {
             output.diagnostics.candidate_total_count,
             output.diagnostics.candidate_count
         );
+        assert!(!output.diagnostics.candidate_truncated);
+        assert!(output.diagnostics.candidate_truncation_reasons.is_empty());
         assert_eq!(output.diagnostics.graph_context_path_count, 1);
         assert_eq!(output.graph_context_paths.len(), 1);
         assert!(output
@@ -5067,6 +5091,11 @@ mod tests {
         assert_eq!(output.diagnostics.candidate_limit, Some(1));
         assert_eq!(output.diagnostics.candidate_count, 1);
         assert_eq!(output.diagnostics.candidate_total_count, 3);
+        assert!(output.diagnostics.candidate_truncated);
+        assert_eq!(
+            output.diagnostics.candidate_truncation_reasons,
+            vec!["knowledge_candidate_limit 1 returned from 3 merged candidates".to_string()]
+        );
         assert_eq!(output.diagnostics.graph_seed_limit, 3);
         assert_eq!(output.diagnostics.graph_context_limit, 0);
         assert_eq!(
