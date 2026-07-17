@@ -85,6 +85,16 @@ fn public_nowledge_core_fixture_and_inventory_are_gate_ready() {
     assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
     assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
     assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
+    assert_eq!(bundle_json["migration_gate"]["shadow_total_checks"], 642);
+    assert_eq!(bundle_json["migration_gate"]["shadow_matched_checks"], 642);
+    assert_eq!(
+        bundle_json["migration_gate"]["shadow_primary_only_checks"],
+        0
+    );
+    assert_eq!(
+        bundle_json["migration_gate"]["shadow_evidence_present"],
+        true
+    );
 }
 
 #[test]
@@ -417,6 +427,10 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
         CompatibilityCutoverDecision::Blocked
     );
     assert_eq!(gate.shadow_decision, CompatibilityCutoverDecision::Blocked);
+    assert_eq!(gate.shadow_total_checks, 1);
+    assert_eq!(gate.shadow_matched_checks, 0);
+    assert_eq!(gate.shadow_primary_only_checks, 1);
+    assert!(!gate.shadow_evidence_present);
     assert_eq!(gate.fixture_mismatch_blockers, 1);
     assert_eq!(gate.inventory_blockers, 2);
     assert_eq!(gate.shadow_blockers, 1);
@@ -431,6 +445,10 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
     assert_eq!(gate_json["decision"], "blocked");
     assert_eq!(gate_json["inventory_decision"], "blocked");
     assert_eq!(gate_json["shadow_decision"], "blocked");
+    assert_eq!(gate_json["shadow_total_checks"], 1);
+    assert_eq!(gate_json["shadow_matched_checks"], 0);
+    assert_eq!(gate_json["shadow_primary_only_checks"], 1);
+    assert_eq!(gate_json["shadow_evidence_present"], false);
     assert_eq!(gate_json["fixture_mismatch_blockers"], 1);
     assert_eq!(gate_json["inventory_blockers"], 2);
     assert_eq!(gate_json["shadow_blockers"], 1);
@@ -503,6 +521,10 @@ fn migration_gate_bundle_reports_blocked_json() {
     assert_eq!(json["inventory_gate"]["decision"], "blocked");
     assert_eq!(json["cutover"]["decision"], "blocked");
     assert_eq!(json["migration_gate"]["decision"], "blocked");
+    assert_eq!(json["migration_gate"]["shadow_total_checks"], 1);
+    assert_eq!(json["migration_gate"]["shadow_matched_checks"], 0);
+    assert_eq!(json["migration_gate"]["shadow_primary_only_checks"], 1);
+    assert_eq!(json["migration_gate"]["shadow_evidence_present"], false);
     assert_eq!(json["migration_gate"]["fixture_mismatch_blockers"], 0);
     assert_eq!(json["migration_gate"]["inventory_blockers"], 2);
     assert_eq!(json["migration_gate"]["shadow_blockers"], 2);

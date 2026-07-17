@@ -375,12 +375,16 @@ advertised `capabilities`.
 
 The `migration_gate` object keeps the existing flattened `blockers` list for
 human-readable logs and also includes machine-readable
-`fixture_mismatch_blockers`, `inventory_blockers`, and `shadow_blockers` counts.
-It also includes matching `fixture_mismatch_blocker_messages`,
-`inventory_blocker_messages`, and `shadow_blocker_messages` arrays. Cutover
+`shadow_total_checks`, `shadow_matched_checks`,
+`shadow_primary_only_checks`, `shadow_evidence_present`,
+`fixture_mismatch_blockers`, `inventory_blockers`, and `shadow_blockers`
+counts. It also includes matching `fixture_mismatch_blocker_messages`,
+`inventory_blocker_messages`, and `shadow_blocker_messages` arrays.
+`shadow_evidence_present` is true only when at least one check matched through
+the shadow engine; primary-only checks do not count as parity evidence. Cutover
 automation should use those grouped fields to distinguish scanner coverage gaps,
-fixture wiring drift, and shadow parity failures without parsing blocker
-strings.
+fixture wiring drift, missing shadow evidence, and shadow parity failures
+without parsing blocker strings.
 
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is
