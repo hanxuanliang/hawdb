@@ -318,6 +318,33 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "entity_incoming_mention_optional_count",
+            logical: entity_incoming_mention_optional_count_plan(),
+            catalog: entity_incoming_mention_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 16,
+            },
+            fingerprint_contains: "OptionalRelationshipCountSumExec",
+            decision_contains: &[
+                "estimate OptionalRelationshipCountSum for Entity: seed_rows=1 leg_rows=[MENTIONS:in:10] estimated_rows=1 cost=16",
+                "selected physical plan cost: estimated_rows=1 cost=16",
+            ],
+        },
+        OptimizerSmokeCase {
+            name: "entity_incoming_mention_optional_degree",
+            logical: entity_incoming_mention_optional_degree_plan(),
+            catalog: entity_incoming_mention_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1_000,
+                cost: 12_004,
+            },
+            fingerprint_contains: "OptionalDegreeExec",
+            decision_contains: &[
+                "selected physical plan cost: estimated_rows=1000 cost=12004",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "endpoint_existence_cartesian_product",
             logical: endpoint_existence_cartesian_product_plan(),
             catalog: endpoint_existence_cartesian_product_catalog(),
@@ -1498,6 +1525,56 @@ fn thread_cleanup_optional_count_catalog() -> OptimizerCatalog {
             [(("Thread".to_string(), "id".to_string()), 1_000)],
             [],
         ),
+    )
+}
+
+fn entity_incoming_mention_optional_count_plan() -> LogicalPlan {
+    LogicalPlan::OptionalRelationshipCountSum {
+        variable: "e".to_string(),
+        label: "Entity".to_string(),
+        properties: BTreeMap::from([("id".to_string(), Value::String("entity-42".to_string()))]),
+        legs: vec![RelationshipCountLeg {
+            rel_type: "MENTIONS".to_string(),
+            direction: RelationshipDirection::Incoming,
+            distinct: false,
+            filter: None,
+        }],
+        output: "mention_count".to_string(),
+    }
+}
+
+fn entity_incoming_mention_optional_degree_plan() -> LogicalPlan {
+    LogicalPlan::OptionalDegree {
+        source_variable: "e".to_string(),
+        rel_type: "MENTIONS".to_string(),
+        rel_properties: BTreeMap::new(),
+        direction: RelationshipDirection::Incoming,
+        target_label: "Memory".to_string(),
+        target_properties: BTreeMap::new(),
+        alias: "mention_count".to_string(),
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "e".to_string(),
+            label: "Entity".to_string(),
+        }),
+    }
+}
+
+fn entity_incoming_mention_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Memory".to_string(), 10_000),
+                ("Entity".to_string(), 1_000),
+            ],
+            [("MENTIONS".to_string(), 5_000)],
+            [("MENTIONS".to_string(), 5_000)],
+            [],
+            [],
+            [(("Entity".to_string(), "id".to_string()), 1_000)],
+            [],
+        )
+        .with_relationship_type_target_counts([("MENTIONS".to_string(), 500)]),
     )
 }
 

@@ -893,7 +893,8 @@ Current implemented slice:
   community-to-synthesized-source coverage aggregate workload,
   entity bridge-span distinct-property aggregate workload,
   thread-cleanup optional relationship count-sum workload with seed/fanout cost
-  tracing,
+  tracing, incoming mention optional relationship count-sum and optional degree
+  workloads backed by relationship target statistics,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
   equality/inequality/`IN`/range/null selectivity, residual relationship-property
