@@ -309,9 +309,11 @@ The replacement should preserve the current local wrapper shape:
 `NowledgeGraphAdapter` is the typed front door for this local wrapper shape. It
 accepts `NowledgeGraphStatement` values containing Cypher text plus typed
 parameters, and exposes query, explain, and grouped mutation transaction
-execution through the same planner and storage paths as `Database`. This keeps
-the compatibility boundary parameterized and reviewable without adding an ACL
-layer to the embedded built-in core.
+execution through the same planner and storage paths as `Database`. It also
+forwards the typed knowledge navigation APIs for entity lookup, bounded
+neighbors, bounded paths, and bounded subgraph expansion, including traversal
+diagnostics. This keeps the compatibility boundary parameterized and reviewable
+without adding an ACL layer to the embedded built-in core.
 
 Migration gates use a machine-readable query inventory. `scan-nowledge-inventory`
 walks Nowledge Rust source files, extracts conservative Cypher string-literal

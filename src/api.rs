@@ -3457,6 +3457,28 @@ impl<'a> NowledgeGraphAdapter<'a> {
             commit_output,
         })
     }
+
+    pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
+        self.db.knowledge_entity(request)
+    }
+
+    pub fn knowledge_neighbors(
+        &self,
+        request: &KnowledgeNeighborsRequest,
+    ) -> KnowledgeNeighborsOutput {
+        self.db.knowledge_neighbors(request)
+    }
+
+    pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
+        self.db.knowledge_paths(request)
+    }
+
+    pub fn knowledge_subgraph(
+        &self,
+        request: &KnowledgeSubgraphRequest,
+    ) -> KnowledgeSubgraphOutput {
+        self.db.knowledge_subgraph(request)
+    }
 }
 
 impl DatabaseTransaction<'_> {
@@ -3863,6 +3885,67 @@ mod tests {
             .query("MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
             .unwrap();
         assert!(output.rows.is_empty());
+    }
+
+    #[test]
+    fn nowledge_graph_adapter_exposes_typed_knowledge_navigation() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})")
+            .unwrap();
+
+        let adapter = NowledgeGraphAdapter::new(&mut db);
+        let entity = adapter.knowledge_entity(&KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+        });
+        assert_eq!(entity.graph_commit_epoch, 1);
+        assert_eq!(
+            entity
+                .entity
+                .as_ref()
+                .and_then(|entity| entity.external_id.as_deref()),
+            Some("root")
+        );
+
+        let neighbors = adapter.knowledge_neighbors(&KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 4,
+            max_hops: 1,
+        });
+        assert_eq!(neighbors.paths.len(), 1);
+        assert_eq!(neighbors.diagnostics.path_count, 1);
+        assert_eq!(neighbors.diagnostics.fanout_reason_count, 0);
+
+        let paths = adapter.knowledge_paths(&KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        });
+        assert_eq!(paths.paths.len(), 1);
+        assert_eq!(paths.diagnostics.target_found, Some(true));
+        assert_eq!(paths.diagnostics.relationship_count, 1);
+
+        let subgraph = adapter.knowledge_subgraph(&KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 4,
+            relationship_limit: 4,
+        });
+        assert_eq!(subgraph.nodes.len(), 2);
+        assert_eq!(subgraph.relationships.len(), 1);
+        assert_eq!(subgraph.diagnostics.node_count, 2);
+        assert_eq!(subgraph.diagnostics.relationship_count, 1);
     }
 
     #[test]
