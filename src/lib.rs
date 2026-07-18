@@ -42,11 +42,11 @@ pub use api::{
     KnowledgeGraphPath, KnowledgeGraphPathDirection, KnowledgeGraphSeed,
     KnowledgeNeighborDirection, KnowledgeNeighborsOutput, KnowledgeNeighborsRequest,
     KnowledgePathOutput, KnowledgePathRequest, KnowledgeRetrievalDiagnostics,
-    KnowledgeRetrievalOutput, KnowledgeRetrievalRequest, KnowledgeRetrieverCandidate,
-    KnowledgeRetrieverReport, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
-    KnowledgeTraversalDiagnostics, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
-    NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
-    RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
+    KnowledgeRetrieverCandidate, KnowledgeRetrieverReport, KnowledgeSubgraphOutput,
+    KnowledgeSubgraphRequest, KnowledgeTraversalDiagnostics, NowledgeGraphAdapter,
+    NowledgeGraphExplainOutput, NowledgeGraphStatement, NowledgeGraphTransactionOutput,
+    QueryOutput, RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{
@@ -94,10 +94,10 @@ pub use schema::{
 };
 pub use search::{
     MetadataRepairOptions, MetadataRepairSummary, SearchAnalyzerLexicon,
-    SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchHit, SearchIndex,
-    SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionKind, SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchEmptyReasonCode,
+    SearchHit, SearchIndex, SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchProjectionKind, SearchProjectionRow, SearchRebuildOptions,
+    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
 };
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,

@@ -17,10 +17,10 @@ use crate::schema::{
 };
 use crate::search::{
     projection_row_from_node, MetadataRepairOptions, MetadataRepairSummary,
-    SearchCandidateSetReport, SearchDerivedArtifactReport, SearchFusionWeights, SearchIndex,
-    SearchMatchedSpan, SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchCandidateSetReport, SearchDerivedArtifactReport, SearchEmptyReasonCode,
+    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -523,7 +523,20 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub candidate_truncated: bool,
     pub candidate_truncation_reasons: Vec<String>,
     pub warnings: Vec<String>,
+    pub empty_reason_codes: Vec<KnowledgeRetrievalEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeRetrievalEmptyReasonCode {
+    SearchProjectionEmpty,
+    SearchMetadataFilterEmpty,
+    SearchRetrieverNoHits,
+    SearchLimitExcludedAllHits,
+    GraphSeedLimitZero,
+    GraphSeedNoCandidates,
+    CandidateLimitExcludedAllCandidates,
+    NoCandidates,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2489,21 +2502,35 @@ fn knowledge_retrieval_diagnostics(
     input: KnowledgeRetrievalDiagnosticsInput,
 ) -> KnowledgeRetrievalDiagnostics {
     let mut empty_reasons = Vec::new();
+    let mut empty_reason_codes = Vec::new();
     let candidate_truncation_reasons = knowledge_candidate_truncation_reasons(
         input.candidate_total_count,
         input.candidate_count,
         request.candidate_limit,
     );
     if input.candidate_count == 0 {
+        empty_reason_codes.extend(
+            search
+                .empty_reason_codes
+                .iter()
+                .map(knowledge_empty_reason_code_from_search),
+        );
         empty_reasons.extend(search.empty_reasons.iter().cloned());
         if input.candidate_total_count == 0 {
             if request.graph_seed_limit == 0 {
+                empty_reason_codes.push(KnowledgeRetrievalEmptyReasonCode::GraphSeedLimitZero);
                 empty_reasons.push("graph seed retriever disabled by limit 0".to_string());
             } else if input.graph_seed_candidate_count == 0 {
+                empty_reason_codes.push(KnowledgeRetrievalEmptyReasonCode::GraphSeedNoCandidates);
                 empty_reasons.push("graph seed retriever returned no candidates".to_string());
             }
         }
+        if !candidate_truncation_reasons.is_empty() {
+            empty_reason_codes
+                .push(KnowledgeRetrievalEmptyReasonCode::CandidateLimitExcludedAllCandidates);
+        }
         empty_reasons.extend(candidate_truncation_reasons.iter().cloned());
+        empty_reason_codes.push(KnowledgeRetrievalEmptyReasonCode::NoCandidates);
         empty_reasons.push("retrieval produced no candidates".to_string());
     }
     let graph_seed_truncation_reasons = knowledge_graph_seed_truncation_reasons(
@@ -2551,7 +2578,27 @@ fn knowledge_retrieval_diagnostics(
         candidate_truncated: !candidate_truncation_reasons.is_empty(),
         candidate_truncation_reasons,
         warnings: knowledge_retrieval_warnings(projection_freshness, graph_commit_epoch),
+        empty_reason_codes,
         empty_reasons,
+    }
+}
+
+fn knowledge_empty_reason_code_from_search(
+    code: &SearchEmptyReasonCode,
+) -> KnowledgeRetrievalEmptyReasonCode {
+    match code {
+        SearchEmptyReasonCode::ProjectionEmpty => {
+            KnowledgeRetrievalEmptyReasonCode::SearchProjectionEmpty
+        }
+        SearchEmptyReasonCode::MetadataFilterEmpty => {
+            KnowledgeRetrievalEmptyReasonCode::SearchMetadataFilterEmpty
+        }
+        SearchEmptyReasonCode::RetrieverNoHits => {
+            KnowledgeRetrievalEmptyReasonCode::SearchRetrieverNoHits
+        }
+        SearchEmptyReasonCode::LimitExcludedAllHits => {
+            KnowledgeRetrievalEmptyReasonCode::SearchLimitExcludedAllHits
+        }
     }
 }
 

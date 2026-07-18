@@ -4,9 +4,9 @@ use super::{
     ExternalContentArtifactRuntimeManifest, KnowledgeCandidateScoringPolicy,
     KnowledgeCandidateSource, KnowledgeEntityRequest, KnowledgeGraphPathDirection,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
+    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -1369,6 +1369,18 @@ fn knowledge_retrieval_empty_reasons_include_search_fallback_reasons() {
         .any(|reason| reason == "index has no vector rows"));
     assert!(output
         .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::SearchRetrieverNoHits));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::GraphSeedLimitZero));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
+    assert!(output
+        .diagnostics
         .empty_reasons
         .iter()
         .any(|reason| reason == "retrieval produced no candidates"));
@@ -1414,6 +1426,18 @@ fn knowledge_retrieval_empty_reasons_include_missing_query_embedding() {
         .empty_reasons
         .iter()
         .any(|reason| reason == "query embedding not provided"));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::SearchRetrieverNoHits));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::GraphSeedLimitZero));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
     let vector_report = output
         .retrievers
         .iter()
@@ -1466,6 +1490,18 @@ fn knowledge_retrieval_empty_reasons_include_empty_text_query() {
         .empty_reasons
         .iter()
         .any(|reason| reason == "query text produced no searchable terms"));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::SearchRetrieverNoHits));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::GraphSeedLimitZero));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
     let text_report = output
         .retrievers
         .iter()
@@ -2091,6 +2127,18 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
         .any(|reason| reason == "metadata filters matched no search documents"));
     assert!(output
         .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::SearchMetadataFilterEmpty));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::GraphSeedNoCandidates));
+    assert!(output
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
+    assert!(output
+        .diagnostics
         .empty_reasons
         .iter()
         .any(|reason| reason == "graph seed retriever returned no candidates"));
@@ -2129,6 +2177,18 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
         .empty_reasons
         .iter()
         .any(|reason| reason == "limit 0 returned from 1 matching hits"));
+    assert!(search_disabled_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::SearchLimitExcludedAllHits));
+    assert!(search_disabled_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::GraphSeedLimitZero));
+    assert!(search_disabled_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
     assert!(search_disabled_by_limit
         .diagnostics
         .empty_reasons

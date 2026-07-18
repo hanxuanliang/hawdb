@@ -150,6 +150,7 @@ pub struct SearchResultSet {
     pub limit: usize,
     pub truncated: bool,
     pub truncation_reasons: Vec<String>,
+    pub empty_reason_codes: Vec<SearchEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
     pub fallback_reasons: Vec<String>,
     pub retrievers: Vec<SearchRetrieverReport>,
@@ -158,6 +159,14 @@ pub struct SearchResultSet {
     pub fusion_weights: SearchFusionWeights,
     pub document_count: usize,
     pub filtered_document_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchEmptyReasonCode {
+    ProjectionEmpty,
+    MetadataFilterEmpty,
+    RetrieverNoHits,
+    LimitExcludedAllHits,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1157,12 +1166,19 @@ impl SearchIndex {
             &truncation_reasons,
             &fallback_reasons,
         );
+        let empty_reason_codes = search_empty_reason_codes(
+            hits.is_empty(),
+            document_count,
+            filtered_document_count,
+            total_hits,
+        );
         SearchResultSet {
             hits,
             total_hits,
             limit,
             truncated,
             truncation_reasons,
+            empty_reason_codes,
             empty_reasons,
             fallback_reasons,
             retrievers,
@@ -1482,6 +1498,27 @@ fn ranked_scores(scores: &BTreeMap<String, f64>) -> BTreeMap<String, usize> {
         .enumerate()
         .map(|(index, (id, _score))| (id, index + 1))
         .collect()
+}
+
+fn search_empty_reason_codes(
+    returned_empty: bool,
+    document_count: usize,
+    filtered_document_count: usize,
+    total_hits: usize,
+) -> Vec<SearchEmptyReasonCode> {
+    if !returned_empty {
+        return Vec::new();
+    }
+    if document_count == 0 {
+        return vec![SearchEmptyReasonCode::ProjectionEmpty];
+    }
+    if filtered_document_count == 0 {
+        return vec![SearchEmptyReasonCode::MetadataFilterEmpty];
+    }
+    if total_hits == 0 {
+        return vec![SearchEmptyReasonCode::RetrieverNoHits];
+    }
+    vec![SearchEmptyReasonCode::LimitExcludedAllHits]
 }
 
 fn search_empty_reasons(
@@ -3714,6 +3751,10 @@ mod tests {
 
         assert!(result.hits.is_empty());
         assert_eq!(
+            result.empty_reason_codes,
+            vec![SearchEmptyReasonCode::ProjectionEmpty]
+        );
+        assert_eq!(
             result.empty_reasons,
             vec!["search projection has no documents".to_string()]
         );
@@ -3747,6 +3788,10 @@ mod tests {
 
         assert!(result.hits.is_empty());
         assert_eq!(
+            result.empty_reason_codes,
+            vec![SearchEmptyReasonCode::MetadataFilterEmpty]
+        );
+        assert_eq!(
             result.empty_reasons,
             vec!["metadata filters matched no search documents".to_string()]
         );
@@ -3769,6 +3814,10 @@ mod tests {
 
         assert!(result.hits.is_empty());
         assert_eq!(
+            result.empty_reason_codes,
+            vec![SearchEmptyReasonCode::RetrieverNoHits]
+        );
+        assert_eq!(
             result.empty_reasons,
             vec!["search retrievers returned no hits inside filtered scope".to_string()]
         );
@@ -3790,6 +3839,10 @@ mod tests {
         let result = index.search_with_report("", None, SearchMode::Text, 10);
 
         assert!(result.hits.is_empty());
+        assert_eq!(
+            result.empty_reason_codes,
+            vec![SearchEmptyReasonCode::RetrieverNoHits]
+        );
         assert!(result
             .fallback_reasons
             .iter()
@@ -3828,6 +3881,10 @@ mod tests {
         assert!(result.hits.is_empty());
         assert_eq!(result.total_hits, 1);
         assert!(result.truncated);
+        assert_eq!(
+            result.empty_reason_codes,
+            vec![SearchEmptyReasonCode::LimitExcludedAllHits]
+        );
         assert_eq!(
             result.empty_reasons,
             vec!["limit 0 returned from 1 matching hits".to_string()]
