@@ -257,6 +257,7 @@ pub struct SearchCandidateSetReport {
 pub struct SearchRetrieverReport {
     pub name: String,
     pub available: bool,
+    pub input_candidate_set: SearchCandidateSetReport,
     pub candidate_count: usize,
     pub candidate_set: SearchRetrieverCandidateSetReport,
     pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
@@ -1152,6 +1153,7 @@ impl SearchIndex {
             SearchRetrieverReport {
                 name: "vector".to_string(),
                 available: vector_available && mode != SearchMode::Text,
+                input_candidate_set: candidate_set.clone(),
                 candidate_count: vector_scores.len(),
                 candidate_set: retriever_candidate_set_report(
                     vector_window_ranks.len(),
@@ -1166,6 +1168,7 @@ impl SearchIndex {
             SearchRetrieverReport {
                 name: "text".to_string(),
                 available: text_available && mode != SearchMode::Vector,
+                input_candidate_set: candidate_set.clone(),
                 candidate_count: text_scores.len(),
                 candidate_set: retriever_candidate_set_report(
                     text_window_ranks.len(),
@@ -2601,6 +2604,14 @@ mod tests {
             .expect("expected text retriever report");
         assert!(vector.available);
         assert!(text.available);
+        assert_eq!(vector.input_candidate_set, result.candidate_set);
+        assert_eq!(text.input_candidate_set, result.candidate_set);
+        assert_eq!(
+            vector.input_candidate_set.representation,
+            "sorted_document_ids"
+        );
+        assert_eq!(vector.input_candidate_set.cardinality, 3);
+        assert_eq!(vector.input_candidate_set.filtered_out_count, 0);
         assert_eq!(vector.candidate_count, 2);
         assert_eq!(text.candidate_count, 2);
         assert_eq!(
@@ -2729,6 +2740,17 @@ mod tests {
 
         assert_eq!(result.candidate_set.cardinality, 2);
         assert_eq!(result.candidate_set.filtered_out_count, 1);
+        let vector = result
+            .retrievers
+            .iter()
+            .find(|retriever| retriever.name == "vector")
+            .expect("expected vector retriever report");
+        assert_eq!(vector.input_candidate_set.cardinality, 2);
+        assert_eq!(vector.input_candidate_set.filtered_out_count, 1);
+        assert_eq!(
+            vector.input_candidate_set.metadata_filters,
+            BTreeMap::from([("scope".to_string(), "visible".to_string())])
+        );
         assert!(result
             .hits
             .iter()

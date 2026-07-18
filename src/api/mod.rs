@@ -886,6 +886,7 @@ impl KnowledgeRetrievalEmptyReasonCode {
 pub struct KnowledgeRetrieverReport {
     pub name: String,
     pub available: bool,
+    pub input_candidate_set: SearchCandidateSetReport,
     pub candidate_count: usize,
     pub candidate_set: SearchRetrieverCandidateSetReport,
     pub limit: Option<usize>,
@@ -2707,6 +2708,7 @@ fn knowledge_retriever_reports(
         .map(|report| KnowledgeRetrieverReport {
             name: report.name.clone(),
             available: report.available,
+            input_candidate_set: report.input_candidate_set.clone(),
             candidate_count: report.candidate_count,
             candidate_set: report.candidate_set.clone(),
             limit: Some(search.limit),
@@ -2760,6 +2762,10 @@ fn knowledge_retriever_reports(
     reports.push(KnowledgeRetrieverReport {
         name: "graph_seed".to_string(),
         available: graph_seed_input.limit > 0,
+        input_candidate_set: knowledge_graph_seed_input_candidate_set_report(
+            graph_seed_input.candidate_count,
+            graph_seed_input.graph_commit_epoch,
+        ),
         candidate_count: graph_seed_input.candidate_count,
         candidate_set: knowledge_graph_seed_candidate_set_report(
             graph_seeds.len(),
@@ -2937,6 +2943,22 @@ fn knowledge_graph_seed_candidate_set_report(
         exact: true,
         snapshot_source_graph_commit_epoch: Some(graph_commit_epoch),
         policy_epoch: None,
+    }
+}
+
+fn knowledge_graph_seed_input_candidate_set_report(
+    cardinality: usize,
+    graph_commit_epoch: u64,
+) -> SearchCandidateSetReport {
+    SearchCandidateSetReport {
+        id_space: "canonical_graph_node_id".to_string(),
+        representation: "filtered_node_ids".to_string(),
+        cardinality,
+        exact: true,
+        snapshot_source_graph_commit_epoch: Some(graph_commit_epoch),
+        policy_epoch: None,
+        filtered_out_count: 0,
+        metadata_filters: BTreeMap::new(),
     }
 }
 

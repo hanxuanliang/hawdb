@@ -1333,6 +1333,15 @@ fn retrieves_knowledge_through_database_facade() {
             && span.text == "Projection"
             && span.term == "projection"));
     assert!(output.evidence[0].text_score > 0.0);
+    let vector_report = output
+        .retrievers
+        .iter()
+        .find(|report| report.name == "vector")
+        .expect("vector retriever report");
+    assert_eq!(
+        vector_report.input_candidate_set,
+        output.search.candidate_set
+    );
     assert_eq!(output.graph_seeds.len(), 2);
     let graph_seed_report = output
         .retrievers
@@ -1341,6 +1350,22 @@ fn retrieves_knowledge_through_database_facade() {
         .expect("graph seed retriever report");
     assert!(graph_seed_report.available);
     assert_eq!(graph_seed_report.candidate_count, 2);
+    assert_eq!(
+        graph_seed_report.input_candidate_set.id_space,
+        "canonical_graph_node_id"
+    );
+    assert_eq!(
+        graph_seed_report.input_candidate_set.representation,
+        "filtered_node_ids"
+    );
+    assert_eq!(graph_seed_report.input_candidate_set.cardinality, 2);
+    assert_eq!(graph_seed_report.input_candidate_set.filtered_out_count, 0);
+    assert_eq!(
+        graph_seed_report
+            .input_candidate_set
+            .snapshot_source_graph_commit_epoch,
+        Some(output.graph_commit_epoch)
+    );
     assert_eq!(graph_seed_report.limit, Some(2));
     assert_eq!(graph_seed_report.rank_window, None);
     assert_eq!(graph_seed_report.fusion_weight, None);
@@ -2810,6 +2835,10 @@ fn knowledge_retrieval_applies_rank_window_to_hybrid_search() {
         .iter()
         .find(|report| report.name == "vector")
         .expect("vector knowledge retriever report");
+    assert_eq!(
+        vector_retriever.input_candidate_set,
+        output.search.candidate_set
+    );
     assert_eq!(vector_retriever.limit, Some(10));
     assert_eq!(vector_retriever.rank_window, Some(1));
     assert_eq!(vector_retriever.fusion_weight, Some(1.0));
