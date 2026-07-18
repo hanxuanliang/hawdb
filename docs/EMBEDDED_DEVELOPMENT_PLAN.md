@@ -302,6 +302,12 @@ routes through the WAL-backed `MATCH ... DELETE r` mutation path.
 Ordered batch relationship cleanup uses the same prefiltered endpoint-known
 contract and commits eligible deletes through one transaction-level grouped WAL
 batch.
+Endpoint-known relationship property updates are also exposed through typed
+single-row and ordered batch facades for weights, provenance, review fields, and
+other lightweight edge metadata. They validate endpoint labels, relationship
+types, filter properties, and assignment names, apply endpoint metadata filters
+before writing, skip idless projected endpoints, and commit eligible batch
+updates through one transaction-level grouped WAL batch.
 Page-level MVCC, physical page/segment reclamation, and concurrent writer
 coordination remain.
 

@@ -1624,6 +1624,75 @@ pub struct KnowledgeRelationshipDeleteOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpdateRequest {
+    pub source: KnowledgeEntityRequest,
+    pub target: KnowledgeEntityRequest,
+    pub relationship_type: String,
+    pub relationship_properties: BTreeMap<String, Value>,
+    pub assignments: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedRelationshipUpdateRequest {
+    pub update: KnowledgeRelationshipUpdateRequest,
+    pub source_metadata_filters: BTreeMap<String, String>,
+    pub target_metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpdateOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub source_node_id: Option<u64>,
+    pub target_node_id: Option<u64>,
+    pub matched: bool,
+    pub source_filtered_out: bool,
+    pub target_filtered_out: bool,
+    pub updated_relationship_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpdateBatchRequest {
+    pub updates: Vec<KnowledgeRelationshipUpdateRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedRelationshipUpdateBatchRequest {
+    pub updates: Vec<KnowledgeRelationshipUpdateRequest>,
+    pub source_metadata_filters: BTreeMap<String, String>,
+    pub target_metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpdateBatchRow {
+    pub source: KnowledgeEntityRequest,
+    pub target: KnowledgeEntityRequest,
+    pub relationship_type: String,
+    pub source_node_id: Option<u64>,
+    pub target_node_id: Option<u64>,
+    pub matched: bool,
+    pub source_filtered_out: bool,
+    pub target_filtered_out: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpdateBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeRelationshipUpdateBatchRow>,
+    pub matched_count: usize,
+    pub missing_endpoint_count: usize,
+    pub source_filtered_out_count: usize,
+    pub target_filtered_out_count: usize,
+    pub non_writable_count: usize,
+    pub updated_relationship_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipDeleteBatchRequest {
     pub deletes: Vec<KnowledgeRelationshipDeleteRequest>,
 }
@@ -3075,6 +3144,34 @@ impl Database {
         request: &KnowledgeScopedRelationshipDeleteRequest,
     ) -> Result<KnowledgeRelationshipDeleteOutput> {
         delete_scoped_knowledge_relationship_for(self, request)
+    }
+
+    pub fn update_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipUpdateRequest,
+    ) -> Result<KnowledgeRelationshipUpdateOutput> {
+        update_knowledge_relationship_for(self, request)
+    }
+
+    pub fn update_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpdateRequest,
+    ) -> Result<KnowledgeRelationshipUpdateOutput> {
+        update_scoped_knowledge_relationship_for(self, request)
+    }
+
+    pub fn update_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeRelationshipUpdateBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
+        update_knowledge_relationship_batch_for(self, request)
+    }
+
+    pub fn update_scoped_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpdateBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
+        update_scoped_knowledge_relationship_batch_for(self, request)
     }
 
     pub fn delete_knowledge_relationship_batch(
@@ -5455,6 +5552,348 @@ fn knowledge_relationship_delete_statement(
         "]->(target:{} {{id: $target_external_id}}) DELETE r",
         request.target.label
     ));
+    (cypher, parameters)
+}
+
+fn update_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeRelationshipUpdateRequest,
+) -> Result<KnowledgeRelationshipUpdateOutput> {
+    update_scoped_knowledge_relationship_for(
+        db,
+        &KnowledgeScopedRelationshipUpdateRequest {
+            update: request.clone(),
+            source_metadata_filters: BTreeMap::new(),
+            target_metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn update_scoped_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeScopedRelationshipUpdateRequest,
+) -> Result<KnowledgeRelationshipUpdateOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_relationship_update(&request.update)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let source = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.update.source.label.as_str(),
+        request.update.source.external_id.as_str(),
+    );
+    let target = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.update.target.label.as_str(),
+        request.update.target.external_id.as_str(),
+    );
+    let source_node_id = source.map(|node| node.id.0);
+    let target_node_id = target.map(|node| node.id.0);
+    let (Some(source), Some(target)) = (source, target) else {
+        return Ok(KnowledgeRelationshipUpdateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            updated_relationship_count: 0,
+            updated_property_count: 0,
+        });
+    };
+    if !node_has_external_id_property(source, request.update.source.external_id.as_str())
+        || !node_has_external_id_property(target, request.update.target.external_id.as_str())
+    {
+        return Ok(KnowledgeRelationshipUpdateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            updated_relationship_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let source_filtered_out = !request.source_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            source,
+            &request.source_metadata_filters,
+        );
+    let target_filtered_out = !request.target_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            target,
+            &request.target_metadata_filters,
+        );
+    if source_filtered_out || target_filtered_out {
+        return Ok(KnowledgeRelationshipUpdateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out,
+            target_filtered_out,
+            updated_relationship_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let (cypher, parameters) = knowledge_relationship_update_statement(&request.update);
+    let output = db.query_with_params(cypher.as_str(), &parameters)?;
+    let updated_relationship_count = output.rows.len();
+    Ok(KnowledgeRelationshipUpdateOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        source_node_id,
+        target_node_id,
+        matched: updated_relationship_count > 0,
+        source_filtered_out: false,
+        target_filtered_out: false,
+        updated_relationship_count,
+        updated_property_count: updated_relationship_count * request.update.assignments.len(),
+    })
+}
+
+fn update_knowledge_relationship_batch_for(
+    db: &mut Database,
+    request: &KnowledgeRelationshipUpdateBatchRequest,
+) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
+    update_scoped_knowledge_relationship_batch_for(
+        db,
+        &KnowledgeScopedRelationshipUpdateBatchRequest {
+            updates: request.updates.clone(),
+            source_metadata_filters: BTreeMap::new(),
+            target_metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn update_scoped_knowledge_relationship_batch_for(
+    db: &mut Database,
+    request: &KnowledgeScopedRelationshipUpdateBatchRequest,
+) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        validate_knowledge_relationship_update(update)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_endpoint_count = 0;
+    let mut source_filtered_out_count = 0;
+    let mut target_filtered_out_count = 0;
+    let mut non_writable_count = 0;
+    let mut eligible_updates = Vec::new();
+    let mut updated_property_count = 0;
+
+    for update in &request.updates {
+        let source = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            update.source.label.as_str(),
+            update.source.external_id.as_str(),
+        );
+        let target = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            update.target.label.as_str(),
+            update.target.external_id.as_str(),
+        );
+        let source_node_id = source.map(|node| node.id.0);
+        let target_node_id = target.map(|node| node.id.0);
+        let (Some(source), Some(target)) = (source, target) else {
+            missing_endpoint_count += 1;
+            rows.push(KnowledgeRelationshipUpdateBatchRow {
+                source: update.source.clone(),
+                target: update.target.clone(),
+                relationship_type: update.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                matched: false,
+                source_filtered_out: false,
+                target_filtered_out: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        if !node_has_external_id_property(source, update.source.external_id.as_str())
+            || !node_has_external_id_property(target, update.target.external_id.as_str())
+        {
+            non_writable_count += 1;
+            rows.push(KnowledgeRelationshipUpdateBatchRow {
+                source: update.source.clone(),
+                target: update.target.clone(),
+                relationship_type: update.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                matched: false,
+                source_filtered_out: false,
+                target_filtered_out: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let source_filtered_out = !request.source_metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(
+                &db.catalog,
+                source,
+                &request.source_metadata_filters,
+            );
+        let target_filtered_out = !request.target_metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(
+                &db.catalog,
+                target,
+                &request.target_metadata_filters,
+            );
+        if source_filtered_out || target_filtered_out {
+            if source_filtered_out {
+                source_filtered_out_count += 1;
+            }
+            if target_filtered_out {
+                target_filtered_out_count += 1;
+            }
+            rows.push(KnowledgeRelationshipUpdateBatchRow {
+                source: update.source.clone(),
+                target: update.target.clone(),
+                relationship_type: update.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                matched: false,
+                source_filtered_out,
+                target_filtered_out,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let row_updated_property_count = update.assignments.len();
+        matched_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push(update.clone());
+        rows.push(KnowledgeRelationshipUpdateBatchRow {
+            source: update.source.clone(),
+            target: update.target.clone(),
+            relationship_type: update.relationship_type.clone(),
+            source_node_id,
+            target_node_id,
+            matched: true,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeRelationshipUpdateBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_endpoint_count,
+            source_filtered_out_count,
+            target_filtered_out_count,
+            non_writable_count,
+            updated_relationship_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for update in &eligible_updates {
+        let (cypher, parameters) = knowledge_relationship_update_statement(update);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    let output = tx.commit()?;
+    let updated_relationship_count = output.rows.len();
+    Ok(KnowledgeRelationshipUpdateBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_endpoint_count,
+        source_filtered_out_count,
+        target_filtered_out_count,
+        non_writable_count,
+        updated_relationship_count,
+        updated_property_count,
+    })
+}
+
+fn validate_knowledge_relationship_update(
+    request: &KnowledgeRelationshipUpdateRequest,
+) -> Result<()> {
+    if request.assignments.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge relationship update requires at least one assignment".to_string(),
+        ));
+    }
+    validate_cypher_identifier(&request.source.label, "source label")?;
+    validate_cypher_identifier(&request.target.label, "target label")?;
+    validate_cypher_identifier(&request.relationship_type, "relationship type")?;
+    for property in request.relationship_properties.keys() {
+        validate_cypher_identifier(property, "relationship property")?;
+    }
+    for property in request.assignments.keys() {
+        validate_cypher_identifier(property, "relationship property")?;
+    }
+    Ok(())
+}
+
+fn knowledge_relationship_update_statement(
+    request: &KnowledgeRelationshipUpdateRequest,
+) -> (String, BTreeMap<String, Value>) {
+    let mut cypher = format!(
+        "MATCH (source:{} {{id: $source_external_id}})-[r:{}",
+        request.source.label, request.relationship_type
+    );
+    let mut parameters = BTreeMap::from([
+        (
+            "source_external_id".to_string(),
+            Value::String(request.source.external_id.clone()),
+        ),
+        (
+            "target_external_id".to_string(),
+            Value::String(request.target.external_id.clone()),
+        ),
+    ]);
+    if !request.relationship_properties.is_empty() {
+        cypher.push_str(" {");
+        for (index, (property, value)) in request.relationship_properties.iter().enumerate() {
+            if index > 0 {
+                cypher.push_str(", ");
+            }
+            let parameter_name = format!("relationship_filter_value_{index}");
+            cypher.push_str(&format!("{property}: ${parameter_name}"));
+            parameters.insert(parameter_name, value.clone());
+        }
+        cypher.push('}');
+    }
+    cypher.push_str(&format!(
+        "]->(target:{} {{id: $target_external_id}}) SET ",
+        request.target.label
+    ));
+    for (index, (property, value)) in request.assignments.iter().enumerate() {
+        if index > 0 {
+            cypher.push_str(", ");
+        }
+        let parameter_name = format!("relationship_update_value_{index}");
+        cypher.push_str(&format!("r.{property} = ${parameter_name}"));
+        parameters.insert(parameter_name, value.clone());
+    }
     (cypher, parameters)
 }
 
@@ -8402,6 +8841,34 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedRelationshipDeleteRequest,
     ) -> Result<KnowledgeRelationshipDeleteOutput> {
         self.db.delete_scoped_knowledge_relationship(request)
+    }
+
+    pub fn update_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipUpdateRequest,
+    ) -> Result<KnowledgeRelationshipUpdateOutput> {
+        self.db.update_knowledge_relationship(request)
+    }
+
+    pub fn update_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpdateRequest,
+    ) -> Result<KnowledgeRelationshipUpdateOutput> {
+        self.db.update_scoped_knowledge_relationship(request)
+    }
+
+    pub fn update_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeRelationshipUpdateBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
+        self.db.update_knowledge_relationship_batch(request)
+    }
+
+    pub fn update_scoped_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpdateBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpdateBatchOutput> {
+        self.db.update_scoped_knowledge_relationship_batch(request)
     }
 
     pub fn delete_knowledge_relationship_batch(
