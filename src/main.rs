@@ -1,5 +1,5 @@
 use skein::{
-    external_shadow_trace_report_json,
+    external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
@@ -858,6 +858,7 @@ fn add_cutover_evidence_report(
         .get("shadow_evidence_present")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let shadow_trace_health = external_shadow_trace_health_from_bundle(bundle);
     let mut blockers = Vec::new();
     if self_shadow {
         blockers.push("shadow run is protocol smoke, not previous-wrapper evidence");
@@ -875,6 +876,9 @@ fn add_cutover_evidence_report(
     }
     if !shadow_evidence_present {
         blockers.push("no matched shadow checks are present");
+    }
+    if shadow_trace_health.present && !shadow_trace_health.complete {
+        blockers.push("shadow trace is incomplete or unavailable");
     }
     if !migration_gate_ready {
         blockers.push("migration gate decision is not ready");
@@ -895,6 +899,11 @@ fn add_cutover_evidence_report(
             "ready_preflight": ready_preflight,
             "ready_engine_kind": ready_engine_kind,
             "shadow_evidence_present": shadow_evidence_present,
+            "shadow_trace_present": shadow_trace_health.present,
+            "shadow_trace_complete": shadow_trace_health.complete,
+            "shadow_trace_summary_available": shadow_trace_health.summary_available,
+            "shadow_trace_request_count_matches": shadow_trace_health.request_count_matches,
+            "shadow_trace_pending_request_count": shadow_trace_health.pending_request_count,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
         }),
@@ -3456,6 +3465,49 @@ mod tests {
                 .unwrap()
                 .len(),
             0
+        );
+        assert_eq!(bundle["cutover_evidence"]["shadow_trace_present"], false);
+        assert_eq!(bundle["cutover_evidence"]["shadow_trace_complete"], true);
+    }
+
+    #[test]
+    fn blocks_cutover_when_present_shadow_trace_is_incomplete() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready",
+                "shadow_evidence_present": true
+            },
+            "shadow_trace": {
+                "summary_available": true,
+                "request_count": 2,
+                "request_events": 2,
+                "pending_request_count": 1
+            }
+        });
+
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("previous_wrapper".to_string()),
+        };
+
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
+
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
+        assert_eq!(bundle["cutover_evidence"]["shadow_trace_present"], true);
+        assert_eq!(bundle["cutover_evidence"]["shadow_trace_complete"], false);
+        assert_eq!(
+            bundle["cutover_evidence"]["shadow_trace_pending_request_count"],
+            1
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["blockers"][0],
+            "shadow trace is incomplete or unavailable"
         );
     }
 

@@ -62,8 +62,9 @@ pub use compat::{
     build_compatibility_query_inventory_from_json_str, compatibility_cutover_report_to_json,
     compatibility_inventory_coverage_report_to_json, compatibility_inventory_gate_report_to_json,
     compatibility_migration_gate_bundle_to_json, compatibility_migration_gate_report_to_json,
-    compatibility_query_inventory_to_json, external_shadow_trace_report_json,
-    nowledge_memory_core_fixture, nowledge_memory_core_inventory, run_compatibility_fixture,
+    compatibility_query_inventory_to_json, external_shadow_trace_health_from_bundle,
+    external_shadow_trace_report_json, nowledge_memory_core_fixture,
+    nowledge_memory_core_inventory, run_compatibility_fixture,
     run_compatibility_fixture_with_shadow, CompatibilityCheck, CompatibilityCheckReport,
     CompatibilityCutoverDecision, CompatibilityCutoverPolicy, CompatibilityCutoverReport,
     CompatibilityFixture, CompatibilityInventoryCoveragePolicy,
@@ -73,8 +74,8 @@ pub use compat::{
     CompatibilityRollbackEvidence, CompatibilityShadowCheckReport, CompatibilityShadowEngine,
     CompatibilityShadowReport, CompatibilityShadowStatus, CypherFixtureCheck,
     CypherFixtureStatement, ExpectedErrorClass, ExpectedRows, ExternalShadowCommand,
-    ExternalShadowReady, ExternalShadowTraceSummary, ProjectedGraphFixtureCheck,
-    ProjectedGraphShadowOutput, EXTERNAL_SHADOW_PROTOCOL_VERSION,
+    ExternalShadowReady, ExternalShadowTraceHealth, ExternalShadowTraceSummary,
+    ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput, EXTERNAL_SHADOW_PROTOCOL_VERSION,
 };
 pub use cypher::RelationshipDirection;
 pub use error::{Result, SkeinError};

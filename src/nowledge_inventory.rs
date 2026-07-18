@@ -3,10 +3,11 @@ use crate::compat::{
     assess_compatibility_cypher_migration_gate_bundle_with_rollback,
     assess_query_inventory_cypher_coverage, build_compatibility_query_inventory,
     compatibility_inventory_coverage_report_to_json, compatibility_migration_gate_bundle_to_json,
-    external_shadow_trace_report_json, nowledge_memory_core_fixture,
-    run_compatibility_fixture_with_shadow, CompatibilityCutoverPolicy,
-    CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite, CompatibilityQueryInventory,
-    CompatibilityRollbackEvidence, CompatibilityShadowEngine, ExternalShadowReady,
+    external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
+    nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
+    CompatibilityCutoverPolicy, CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite,
+    CompatibilityQueryInventory, CompatibilityRollbackEvidence, CompatibilityShadowEngine,
+    ExternalShadowReady,
 };
 use crate::error::{Result, SkeinError};
 use crate::qos::{LocalQosPolicy, LocalQosState};
@@ -315,6 +316,7 @@ fn insert_cutover_evidence_json(
         .get("shadow_evidence_present")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
+    let shadow_trace_health = external_shadow_trace_health_from_bundle(bundle);
     let mut blockers = Vec::new();
     if self_shadow {
         blockers.push("shadow run is protocol smoke, not previous-wrapper evidence");
@@ -324,6 +326,9 @@ fn insert_cutover_evidence_json(
     }
     if !shadow_evidence_present {
         blockers.push("no matched shadow checks are present");
+    }
+    if shadow_trace_health.present && !shadow_trace_health.complete {
+        blockers.push("shadow trace is incomplete or unavailable");
     }
     if !migration_gate_ready {
         blockers.push("migration gate decision is not ready");
@@ -343,6 +348,11 @@ fn insert_cutover_evidence_json(
             "requires_shadow_evidence": true,
             "ready_preflight": ready_preflight,
             "shadow_evidence_present": shadow_evidence_present,
+            "shadow_trace_present": shadow_trace_health.present,
+            "shadow_trace_complete": shadow_trace_health.complete,
+            "shadow_trace_summary_available": shadow_trace_health.summary_available,
+            "shadow_trace_request_count_matches": shadow_trace_health.request_count_matches,
+            "shadow_trace_pending_request_count": shadow_trace_health.pending_request_count,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
         }),
@@ -1456,6 +1466,20 @@ mod tests {
             1
         );
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
+        assert_eq!(bundle["cutover_evidence"]["shadow_trace_present"], true);
+        assert_eq!(bundle["cutover_evidence"]["shadow_trace_complete"], true);
+        assert_eq!(
+            bundle["cutover_evidence"]["shadow_trace_summary_available"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["shadow_trace_request_count_matches"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["shadow_trace_pending_request_count"],
+            0
+        );
         assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);
         assert_eq!(bundle["migration_gate"]["rollback_required"], true);

@@ -382,6 +382,14 @@ preflight, produced at least one matched shadow check, and the migration gate
 decision is `ready`. Its `blockers` array is intended for CI and release gates
 that need to reject protocol smoke or incomplete shadow runs without rejoining
 the rest of the bundle fields.
+If a shadow trace is present, `cutover_evidence` also reports
+`shadow_trace_present`, `shadow_trace_complete`,
+`shadow_trace_summary_available`, `shadow_trace_request_count_matches`, and
+`shadow_trace_pending_request_count`. A present trace is complete only when it
+is readable, the reported request count matches request events in the trace,
+and no traced request remains pending. An incomplete present trace blocks
+cutover evidence; omitting trace logging does not by itself block cutover
+eligibility.
 
 The bundle includes a top-level `background_maintenance` object with the local
 Skein maintenance summary after the compatibility fixture run. It reports

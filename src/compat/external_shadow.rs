@@ -49,6 +49,15 @@ pub struct ExternalShadowTraceSummary {
     pub pending_op_counts: BTreeMap<String, u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExternalShadowTraceHealth {
+    pub present: bool,
+    pub complete: bool,
+    pub summary_available: Option<bool>,
+    pub request_count_matches: Option<bool>,
+    pub pending_request_count: Option<u64>,
+}
+
 pub struct ExternalShadowCommand {
     name: String,
     child: Child,
@@ -375,6 +384,43 @@ pub fn external_shadow_trace_report_json(
             "summary_available": false,
             "summary_error": error.to_string(),
         }),
+    }
+}
+
+pub fn external_shadow_trace_health_from_bundle(
+    bundle: &serde_json::Value,
+) -> ExternalShadowTraceHealth {
+    let Some(trace) = bundle.get("shadow_trace") else {
+        return ExternalShadowTraceHealth {
+            present: false,
+            complete: true,
+            summary_available: None,
+            request_count_matches: None,
+            pending_request_count: None,
+        };
+    };
+    let summary_available = trace
+        .get("summary_available")
+        .and_then(serde_json::Value::as_bool);
+    let request_count = trace
+        .get("request_count")
+        .and_then(serde_json::Value::as_u64);
+    let request_events = trace
+        .get("request_events")
+        .and_then(serde_json::Value::as_u64);
+    let request_count_matches = request_count.zip(request_events).map(|(a, b)| a == b);
+    let pending_request_count = trace
+        .get("pending_request_count")
+        .and_then(serde_json::Value::as_u64);
+    let complete = summary_available == Some(true)
+        && request_count_matches == Some(true)
+        && pending_request_count == Some(0);
+    ExternalShadowTraceHealth {
+        present: true,
+        complete,
+        summary_available,
+        request_count_matches,
+        pending_request_count,
     }
 }
 

@@ -15,7 +15,8 @@ use external_shadow::{
     decode_external_ready_response, decode_external_session_response,
 };
 pub use external_shadow::{
-    external_shadow_trace_report_json, ExternalShadowCommand, ExternalShadowReady,
+    external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
+    ExternalShadowCommand, ExternalShadowReady, ExternalShadowTraceHealth,
     ExternalShadowTraceSummary,
 };
 pub use inventory_gate::{
