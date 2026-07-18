@@ -3,11 +3,11 @@ use super::{
     CanonicalStableIdMapping, Database, DatabaseConfig, DerivedArtifactJobStatus,
     ExternalContentArtifactJobCompletion, ExternalContentArtifactRuntimeManifest,
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
-    KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-    KnowledgePathRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
-    KnowledgeSubgraphRequest, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeFallbackReasonCode, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
+    KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgeRetrievalEmptyReasonCode,
+    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, KnowledgeTruncationReasonCode,
+    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -80,6 +80,30 @@ fn knowledge_truncation_reason_codes_have_stable_string_encodings() {
         assert_eq!(name.parse::<KnowledgeTruncationReasonCode>(), Ok(code));
     }
     assert!("limit".parse::<KnowledgeTruncationReasonCode>().is_err());
+}
+
+#[test]
+fn knowledge_fallback_reason_codes_have_stable_string_encodings() {
+    let cases = [
+        (
+            KnowledgeFallbackReasonCode::GraphSeedLimitZero,
+            "graph_seed_limit_zero",
+        ),
+        (
+            KnowledgeFallbackReasonCode::GraphContextLimitZero,
+            "graph_context_limit_zero",
+        ),
+        (
+            KnowledgeFallbackReasonCode::GraphContextMaxHopsZero,
+            "graph_context_max_hops_zero",
+        ),
+    ];
+
+    for (code, name) in cases {
+        assert_eq!(code.as_str(), name);
+        assert_eq!(name.parse::<KnowledgeFallbackReasonCode>(), Ok(code));
+    }
+    assert!("disabled".parse::<KnowledgeFallbackReasonCode>().is_err());
 }
 
 #[test]
@@ -2176,6 +2200,10 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
         output.diagnostics.graph_context_fallback_reasons,
         vec!["graph context expansion disabled by limit 0".to_string()]
     );
+    assert_eq!(
+        output.diagnostics.graph_context_fallback_reason_codes,
+        vec![KnowledgeFallbackReasonCode::GraphContextLimitZero]
+    );
     assert_eq!(output.diagnostics.fanout_reason_count, 0);
     assert_eq!(output.diagnostics.candidate_count, 0);
     assert_eq!(output.diagnostics.candidate_limit, None);
@@ -2260,6 +2288,10 @@ fn knowledge_retrieval_diagnostics_explain_empty_metadata_scope() {
         .find(|report| report.name == "graph_seed")
         .expect("graph seed retriever report");
     assert!(!disabled_graph_seed_report.available);
+    assert_eq!(
+        disabled_graph_seed_report.knowledge_fallback_reason_codes,
+        vec![KnowledgeFallbackReasonCode::GraphSeedLimitZero]
+    );
     assert!(disabled_graph_seed_report
         .fallback_reasons
         .iter()
@@ -2576,6 +2608,10 @@ fn knowledge_retrieval_reports_graph_context_disabled_by_max_hops() {
     assert_eq!(
         output.diagnostics.graph_context_fallback_reasons,
         vec!["graph context expansion disabled by max_hops 0".to_string()]
+    );
+    assert_eq!(
+        output.diagnostics.graph_context_fallback_reason_codes,
+        vec![KnowledgeFallbackReasonCode::GraphContextMaxHopsZero]
     );
     assert!(output.fanout_reasons.is_empty());
     assert!(!output.diagnostics.graph_context_truncated);

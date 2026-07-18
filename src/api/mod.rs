@@ -590,6 +590,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_context_truncated: bool,
     pub graph_context_truncation_reason_codes: Vec<KnowledgeTruncationReasonCode>,
     pub graph_context_truncation_reasons: Vec<String>,
+    pub graph_context_fallback_reason_codes: Vec<KnowledgeFallbackReasonCode>,
     pub graph_context_fallback_reasons: Vec<String>,
     pub fanout_reason_count: usize,
     pub fanout_reasons: Vec<String>,
@@ -602,6 +603,36 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub warnings: Vec<String>,
     pub empty_reason_codes: Vec<KnowledgeRetrievalEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeFallbackReasonCode {
+    GraphSeedLimitZero,
+    GraphContextLimitZero,
+    GraphContextMaxHopsZero,
+}
+
+impl KnowledgeFallbackReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GraphSeedLimitZero => "graph_seed_limit_zero",
+            Self::GraphContextLimitZero => "graph_context_limit_zero",
+            Self::GraphContextMaxHopsZero => "graph_context_max_hops_zero",
+        }
+    }
+}
+
+impl FromStr for KnowledgeFallbackReasonCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "graph_seed_limit_zero" => Ok(Self::GraphSeedLimitZero),
+            "graph_context_limit_zero" => Ok(Self::GraphContextLimitZero),
+            "graph_context_max_hops_zero" => Ok(Self::GraphContextMaxHopsZero),
+            _ => Err("unknown knowledge fallback reason code"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -680,6 +711,7 @@ pub struct KnowledgeRetrieverReport {
     pub rank_window: Option<usize>,
     pub fusion_weight: Option<f64>,
     pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
+    pub knowledge_fallback_reason_codes: Vec<KnowledgeFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
     pub truncated: bool,
     pub truncation_reason_codes: Vec<KnowledgeTruncationReasonCode>,
@@ -2440,6 +2472,7 @@ fn knowledge_retriever_reports(
                 search.fusion_weights,
             ),
             fallback_reason_codes: report.fallback_reason_codes.clone(),
+            knowledge_fallback_reason_codes: Vec::new(),
             fallback_reasons: report.fallback_reasons.clone(),
             truncated: report.candidate_count > report.top_candidates.len(),
             truncation_reason_codes: knowledge_search_retriever_truncation_reason_codes(
@@ -2492,6 +2525,9 @@ fn knowledge_retriever_reports(
         rank_window: None,
         fusion_weight: None,
         fallback_reason_codes: Vec::new(),
+        knowledge_fallback_reason_codes: knowledge_graph_seed_fallback_reason_codes(
+            graph_seed_input.limit,
+        ),
         fallback_reasons: knowledge_graph_seed_fallback_reasons(graph_seed_input.limit),
         truncated: graph_seed_input.candidate_count > graph_seeds.len(),
         truncation_reason_codes: knowledge_graph_seed_truncation_reason_codes(
@@ -2636,6 +2672,16 @@ fn knowledge_graph_seed_fallback_reasons(graph_seed_limit: usize) -> Vec<String>
     }
 }
 
+fn knowledge_graph_seed_fallback_reason_codes(
+    graph_seed_limit: usize,
+) -> Vec<KnowledgeFallbackReasonCode> {
+    if graph_seed_limit == 0 {
+        vec![KnowledgeFallbackReasonCode::GraphSeedLimitZero]
+    } else {
+        Vec::new()
+    }
+}
+
 fn knowledge_graph_seed_candidate_set_report(
     cardinality: usize,
     graph_commit_epoch: u64,
@@ -2659,6 +2705,19 @@ fn knowledge_graph_context_fallback_reasons(request: &KnowledgeRetrievalRequest)
         reasons.push("graph context expansion disabled by max_hops 0".to_string());
     }
     reasons
+}
+
+fn knowledge_graph_context_fallback_reason_codes(
+    request: &KnowledgeRetrievalRequest,
+) -> Vec<KnowledgeFallbackReasonCode> {
+    let mut codes = Vec::new();
+    if request.graph_context_limit == 0 {
+        codes.push(KnowledgeFallbackReasonCode::GraphContextLimitZero);
+    }
+    if request.graph_context_max_hops == 0 {
+        codes.push(KnowledgeFallbackReasonCode::GraphContextMaxHopsZero);
+    }
+    codes
 }
 
 #[derive(Debug, Clone)]
@@ -2764,6 +2823,7 @@ fn knowledge_retrieval_diagnostics(
         graph_context_truncated: !input.graph_context_truncation_reasons.is_empty(),
         graph_context_truncation_reason_codes,
         graph_context_truncation_reasons: input.graph_context_truncation_reasons,
+        graph_context_fallback_reason_codes: knowledge_graph_context_fallback_reason_codes(request),
         graph_context_fallback_reasons: knowledge_graph_context_fallback_reasons(request),
         fanout_reason_count: input.fanout_reason_count,
         fanout_reasons: input.fanout_reasons,
