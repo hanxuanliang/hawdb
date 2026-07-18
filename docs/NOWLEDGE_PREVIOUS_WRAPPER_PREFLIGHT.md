@@ -237,6 +237,8 @@ cargo run --quiet --bin skein -- \
 ```
 
 The verifier checks wrapper identity consistency across the full contract,
-adapter smoke, migration gate, and replacement summary artifacts. It fails
-closed unless every stage is ready and the replacement summary has no blockers,
+adapter smoke, migration gate, storage recovery evidence, background
+maintenance evidence, and replacement summary artifacts. It fails closed unless
+every stage is ready, the storage/background evidence is explicitly required and
+present in the migration gate, and the replacement summary has no blockers,
 missing evidence, or next actions.

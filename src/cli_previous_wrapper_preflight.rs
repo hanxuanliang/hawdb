@@ -180,6 +180,77 @@ fn nowledge_previous_wrapper_preflight_check_json(
             ),
         ),
         preflight_check(
+            "storage_recovery",
+            [
+                bool_path(
+                    &migration_gate,
+                    &["cutover_evidence", "storage_recovery_required"],
+                ) == Some(true),
+                bool_path(
+                    &migration_gate,
+                    &["cutover_evidence", "storage_recovery_present"],
+                ) == Some(true),
+                bool_path(
+                    &migration_gate,
+                    &["cutover_evidence", "storage_recovery_ready"],
+                ) == Some(true),
+                bool_path(
+                    &migration_gate,
+                    &["cutover_evidence", "storage_recovery_protocol_matches"],
+                ) == Some(true),
+            ],
+            [
+                "cutover_evidence.storage_recovery_required",
+                "cutover_evidence.storage_recovery_present",
+                "cutover_evidence.storage_recovery_ready",
+                "cutover_evidence.storage_recovery_protocol_matches",
+            ],
+            blocker_codes(
+                &migration_gate,
+                &[
+                    &["cutover_evidence", "storage_recovery_blocker_codes"][..],
+                    &["cutover_evidence", "storage_recovery_blockers"][..],
+                ],
+            ),
+        ),
+        preflight_check(
+            "background_maintenance",
+            [
+                bool_path(
+                    &migration_gate,
+                    &["cutover_evidence", "background_maintenance_required"],
+                ) == Some(true),
+                bool_path(
+                    &migration_gate,
+                    &["cutover_evidence", "background_maintenance_present"],
+                ) == Some(true),
+                bool_path(
+                    &migration_gate,
+                    &["cutover_evidence", "background_maintenance_ready"],
+                ) == Some(true),
+                bool_path(
+                    &migration_gate,
+                    &[
+                        "cutover_evidence",
+                        "background_maintenance_protocol_matches",
+                    ],
+                ) == Some(true),
+            ],
+            [
+                "cutover_evidence.background_maintenance_required",
+                "cutover_evidence.background_maintenance_present",
+                "cutover_evidence.background_maintenance_ready",
+                "cutover_evidence.background_maintenance_protocol_matches",
+            ],
+            blocker_codes(
+                &migration_gate,
+                &[
+                    &["cutover_evidence", "background_maintenance_blocker_codes"][..],
+                    &["cutover_evidence", "background_maintenance_blockers"][..],
+                ],
+            ),
+        ),
+        preflight_check(
             "replacement_summary",
             [
                 bool_path(&replacement_summary, &["production_cutover_ready"]) == Some(true),
@@ -291,9 +362,20 @@ fn blocker_codes(value: &serde_json::Value, paths: &[&[&str]]) -> Vec<String> {
 }
 
 #[cfg(test)]
+fn check_by_name<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_json::Value {
+    report["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|check| check["name"] == name)
+        .unwrap()
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
-        nowledge_previous_wrapper_preflight_check_json, PreviousWrapperPreflightCheckInputs,
+        check_by_name, nowledge_previous_wrapper_preflight_check_json,
+        PreviousWrapperPreflightCheckInputs,
     };
 
     #[test]
@@ -333,8 +415,61 @@ mod tests {
             serde_json::json!(["replacement_summary"])
         );
         assert_eq!(
-            report["checks"][3]["blocker_codes"],
+            check_by_name(&report, "replacement_summary")["blocker_codes"],
             serde_json::json!(["cutover_evidence", "provide_eligible_cutover_evidence"])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_storage_recovery_evidence() {
+        let mut inputs = ready_inputs();
+        let cutover_evidence = inputs
+            .migration_gate
+            .as_mut()
+            .unwrap()
+            .get_mut("cutover_evidence")
+            .unwrap();
+        cutover_evidence["storage_recovery_ready"] = serde_json::json!(false);
+        cutover_evidence["storage_recovery_blocker_codes"] =
+            serde_json::json!(["wal_replay_unbounded"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["storage_recovery"])
+        );
+        assert_eq!(
+            check_by_name(&report, "storage_recovery")["blocker_codes"],
+            serde_json::json!(["wal_replay_unbounded"])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_background_maintenance_evidence() {
+        let mut inputs = ready_inputs();
+        let cutover_evidence = inputs
+            .migration_gate
+            .as_mut()
+            .unwrap()
+            .get_mut("cutover_evidence")
+            .unwrap();
+        cutover_evidence["background_maintenance_present"] = serde_json::json!(false);
+        cutover_evidence["background_maintenance_ready"] = serde_json::json!(false);
+        cutover_evidence["background_maintenance_blocker_codes"] =
+            serde_json::json!(["missing_evidence"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["background_maintenance"])
+        );
+        assert_eq!(
+            check_by_name(&report, "background_maintenance")["blocker_codes"],
+            serde_json::json!(["missing_evidence"])
         );
     }
 
@@ -384,6 +519,16 @@ mod tests {
                     "eligible": true,
                     "ready_engine_kind": "previous_wrapper",
                     "ready_wrapper_identity": "nowledge-previous-wrapper:test",
+                    "storage_recovery_required": true,
+                    "storage_recovery_present": true,
+                    "storage_recovery_ready": true,
+                    "storage_recovery_protocol_matches": true,
+                    "storage_recovery_blocker_codes": [],
+                    "background_maintenance_required": true,
+                    "background_maintenance_present": true,
+                    "background_maintenance_ready": true,
+                    "background_maintenance_protocol_matches": true,
+                    "background_maintenance_blocker_codes": [],
                     "blockers": []
                 },
                 "previous_wrapper_contract_evidence": {
