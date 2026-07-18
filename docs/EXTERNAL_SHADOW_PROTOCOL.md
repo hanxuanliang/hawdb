@@ -460,9 +460,14 @@ summary so the report can be paired with the transcript and its request
 sequence. When the trace can be read, `summary_available` is `true` and the
 object includes `trace_record_count`, `request_events`, `response_events`,
 `error_events`, `invalid_lines`, `completed_request_count`, and
-`pending_request_count`. If the trace cannot be read, `summary_available` is
-`false` and `summary_error` carries the local diagnostic; this does not rewrite
-the migration gate decision.
+`pending_request_count`. It also includes `request_op_counts`,
+`response_op_counts`, `error_op_counts`, and `pending_op_counts` maps keyed by
+shadow request operation, such as `ready`, `execute`, `execute_session`, and
+`project_graph`, so cutover diagnostics can identify which operation class is
+stalled or failing without copying Cypher text or parameter payloads into the
+bundle. If the trace cannot be read, `summary_available` is `false` and
+`summary_error` carries the local diagnostic; this does not rewrite the
+migration gate decision.
 
 Each request waits up to 30000 ms for one stdout response line by default.
 `--shadow-timeout-ms <ms>` overrides that per-request timeout. A timeout kills

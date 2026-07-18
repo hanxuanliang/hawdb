@@ -3574,21 +3574,35 @@ mod tests {
                 + r#"{"sequence":2,"event":"request","payload":{"op":"execute"}}"#
                 + "\n"
                 + r#"{"sequence":2,"event":"error","payload":{"message":"failed"}}"#
+                + "\n"
+                + r#"{"sequence":3,"event":"request","payload":{"op":"project_graph"}}"#
                 + "\n",
         )
         .unwrap();
 
-        add_shadow_trace_report(&mut bundle, trace_path.to_str().unwrap(), 2).unwrap();
+        add_shadow_trace_report(&mut bundle, trace_path.to_str().unwrap(), 3).unwrap();
 
         assert_eq!(bundle["shadow_trace"]["path"], trace_path.to_str().unwrap());
-        assert_eq!(bundle["shadow_trace"]["request_count"], 2);
+        assert_eq!(bundle["shadow_trace"]["request_count"], 3);
         assert_eq!(bundle["shadow_trace"]["summary_available"], true);
-        assert_eq!(bundle["shadow_trace"]["trace_record_count"], 4);
-        assert_eq!(bundle["shadow_trace"]["request_events"], 2);
+        assert_eq!(bundle["shadow_trace"]["trace_record_count"], 5);
+        assert_eq!(bundle["shadow_trace"]["request_events"], 3);
         assert_eq!(bundle["shadow_trace"]["response_events"], 1);
         assert_eq!(bundle["shadow_trace"]["error_events"], 1);
         assert_eq!(bundle["shadow_trace"]["completed_request_count"], 2);
-        assert_eq!(bundle["shadow_trace"]["pending_request_count"], 0);
+        assert_eq!(bundle["shadow_trace"]["pending_request_count"], 1);
+        assert_eq!(bundle["shadow_trace"]["request_op_counts"]["ready"], 1);
+        assert_eq!(bundle["shadow_trace"]["request_op_counts"]["execute"], 1);
+        assert_eq!(
+            bundle["shadow_trace"]["request_op_counts"]["project_graph"],
+            1
+        );
+        assert_eq!(bundle["shadow_trace"]["response_op_counts"]["ready"], 1);
+        assert_eq!(bundle["shadow_trace"]["error_op_counts"]["execute"], 1);
+        assert_eq!(
+            bundle["shadow_trace"]["pending_op_counts"]["project_graph"],
+            1
+        );
         std::fs::remove_file(trace_path).unwrap();
     }
 

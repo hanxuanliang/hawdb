@@ -1396,6 +1396,19 @@ mod tests {
             "#,
         )
         .unwrap();
+        let trace_path = root.join("shadow.jsonl");
+        fs::write(
+            &trace_path,
+            r#"{"sequence":1,"event":"request","payload":{"op":"ready"}}"#.to_string()
+                + "\n"
+                + r#"{"sequence":1,"event":"response","payload":{"ready":true}}"#
+                + "\n"
+                + r#"{"sequence":2,"event":"request","payload":{"op":"execute_session"}}"#
+                + "\n"
+                + r#"{"sequence":2,"event":"response","payload":{"ok":{"rows":[]}}}"#
+                + "\n",
+        )
+        .unwrap();
 
         let mut shadow = TestShadowEngine::default();
         let bundle = scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
@@ -1408,8 +1421,8 @@ mod tests {
                     capabilities: vec!["execute".to_string(), "project_graph".to_string()],
                     engine_kind: Some("previous_wrapper".to_string()),
                 }),
-                shadow_trace_path: Some("/tmp/skein-shadow.jsonl".to_string()),
-                shadow_request_count: Some(42),
+                shadow_trace_path: Some(trace_path.to_string_lossy().into_owned()),
+                shadow_request_count: Some(2),
                 include_cutover_evidence: true,
                 rollback: CompatibilityRollbackEvidence {
                     required: true,
@@ -1430,7 +1443,18 @@ mod tests {
             bundle["shadow_ready"]["protocol_version"],
             crate::EXTERNAL_SHADOW_PROTOCOL_VERSION
         );
-        assert_eq!(bundle["shadow_trace"]["request_count"], 42);
+        assert_eq!(bundle["shadow_trace"]["request_count"], 2);
+        assert_eq!(bundle["shadow_trace"]["summary_available"], true);
+        assert_eq!(bundle["shadow_trace"]["request_op_counts"]["ready"], 1);
+        assert_eq!(
+            bundle["shadow_trace"]["request_op_counts"]["execute_session"],
+            1
+        );
+        assert_eq!(bundle["shadow_trace"]["response_op_counts"]["ready"], 1);
+        assert_eq!(
+            bundle["shadow_trace"]["response_op_counts"]["execute_session"],
+            1
+        );
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
         assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);

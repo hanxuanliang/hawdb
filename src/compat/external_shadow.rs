@@ -43,6 +43,10 @@ pub struct ExternalShadowTraceSummary {
     pub invalid_lines: u64,
     pub completed_request_count: u64,
     pub pending_request_count: u64,
+    pub request_op_counts: BTreeMap<String, u64>,
+    pub response_op_counts: BTreeMap<String, u64>,
+    pub error_op_counts: BTreeMap<String, u64>,
+    pub pending_op_counts: BTreeMap<String, u64>,
 }
 
 pub struct ExternalShadowCommand {
@@ -360,6 +364,10 @@ pub fn external_shadow_trace_report_json(
             "invalid_lines": summary.invalid_lines,
             "completed_request_count": summary.completed_request_count,
             "pending_request_count": summary.pending_request_count,
+            "request_op_counts": summary.request_op_counts,
+            "response_op_counts": summary.response_op_counts,
+            "error_op_counts": summary.error_op_counts,
+            "pending_op_counts": summary.pending_op_counts,
         }),
         Err(error) => serde_json::json!({
             "path": trace_path,
@@ -378,6 +386,7 @@ fn summarize_external_shadow_trace(trace_path: &str) -> Result<ExternalShadowTra
     })?;
     let mut summary = ExternalShadowTraceSummary::default();
     let mut request_sequences = std::collections::BTreeSet::new();
+    let mut request_ops_by_sequence = BTreeMap::new();
     let mut terminal_sequences = std::collections::BTreeSet::new();
     for line in BufReader::new(file).lines() {
         let Ok(line) = line else {
@@ -393,20 +402,37 @@ fn summarize_external_shadow_trace(trace_path: &str) -> Result<ExternalShadowTra
         match record.get("event").and_then(serde_json::Value::as_str) {
             Some("request") => {
                 summary.request_events += 1;
+                let op = trace_record_op(&record);
+                increment_trace_op_count(&mut summary.request_op_counts, &op);
                 if let Some(sequence) = sequence {
                     request_sequences.insert(sequence);
+                    request_ops_by_sequence.insert(sequence, op);
                 }
             }
             Some("response") => {
                 summary.response_events += 1;
                 if let Some(sequence) = sequence {
                     terminal_sequences.insert(sequence);
+                    let op = request_ops_by_sequence
+                        .get(&sequence)
+                        .map(String::as_str)
+                        .unwrap_or("unknown");
+                    increment_trace_op_count(&mut summary.response_op_counts, op);
+                } else {
+                    increment_trace_op_count(&mut summary.response_op_counts, "unknown");
                 }
             }
             Some("error") => {
                 summary.error_events += 1;
                 if let Some(sequence) = sequence {
                     terminal_sequences.insert(sequence);
+                    let op = request_ops_by_sequence
+                        .get(&sequence)
+                        .map(String::as_str)
+                        .unwrap_or("unknown");
+                    increment_trace_op_count(&mut summary.error_op_counts, op);
+                } else {
+                    increment_trace_op_count(&mut summary.error_op_counts, "unknown");
                 }
             }
             _ => summary.invalid_lines += 1,
@@ -416,7 +442,28 @@ fn summarize_external_shadow_trace(trace_path: &str) -> Result<ExternalShadowTra
         request_sequences.intersection(&terminal_sequences).count() as u64;
     summary.pending_request_count =
         request_sequences.len() as u64 - summary.completed_request_count;
+    for sequence in request_sequences.difference(&terminal_sequences) {
+        let op = request_ops_by_sequence
+            .get(sequence)
+            .map(String::as_str)
+            .unwrap_or("unknown");
+        increment_trace_op_count(&mut summary.pending_op_counts, op);
+    }
     Ok(summary)
+}
+
+fn trace_record_op(record: &serde_json::Value) -> String {
+    record
+        .get("payload")
+        .and_then(|payload| payload.get("op"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|op| !op.is_empty())
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+fn increment_trace_op_count(counts: &mut BTreeMap<String, u64>, op: &str) {
+    *counts.entry(op.to_string()).or_insert(0) += 1;
 }
 
 impl ExternalShadowStdout {
