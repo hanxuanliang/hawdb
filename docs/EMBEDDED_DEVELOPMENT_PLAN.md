@@ -932,6 +932,12 @@ Current implemented slice:
   metadata and generic `PlanNode` traversal helpers, so diagnostics do not need
   to parse English explain text to detect operator mix or
   schema/mutation/access/traversal/relational/procedure composition
+- `OptimizerTrace::selected_plan_properties` exposes conservative delivered
+  physical properties for the chosen plan: embedded local plans report
+  single-node distribution, and only proven `SortExec` ordering plus
+  order-preserving unary wrappers are surfaced. This keeps property diagnostics
+  typed without overclaiming index or traversal ordering before enforcer rules
+  exist
 - `skein-optimizer` owns `OptimizationSearchReport`, `SearchMode`,
   `RuleEvent`, `RuleOutcome`, `SelectedPlanTrace`, and storage-independent
   rule identity/application/batch-runner abstractions, so group-budget fallback

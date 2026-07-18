@@ -9,10 +9,10 @@ use crate::planner::{
 };
 use crate::value::Value;
 pub use skein_optimizer::{
-    apply_rule_batch, plan_class_counts, plan_operator_counts, GroupId, Memo,
+    apply_rule_batch, plan_class_counts, plan_operator_counts, Distribution, GroupId, Memo,
     OptimizationSearchReport, OptimizerConfig, OptimizerRule, OptimizerTrace, PhysicalPlanClass,
-    PhysicalPlanKind, PlanCost, PlanCostBreakdown, RuleApplication, RuleEvent, RuleId, RuleKind,
-    RuleOutcome, RulePromise, SelectedPlanTrace,
+    PhysicalPlanKind, PhysicalProperties, PlanCost, PlanCostBreakdown, RuleApplication, RuleEvent,
+    RuleId, RuleKind, RuleOutcome, RulePromise, SelectedPlanTrace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -4060,9 +4060,52 @@ fn selected_plan_trace(plan: &PhysicalPlan, catalog: &OptimizerCatalog) -> Selec
         fingerprint: plan.fingerprint(),
         cost: selected_plan_cost,
         cost_breakdown: estimate_physical_plan_cost_breakdown(plan, catalog),
+        properties: selected_plan_properties(plan),
         operator_counts: plan_operator_counts(plan),
         class_counts: plan_class_counts(plan),
     }
+}
+
+fn selected_plan_properties(plan: &PhysicalPlan) -> PhysicalProperties {
+    let ordering = match plan {
+        PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. } => selected_plan_properties(input).ordering,
+        PhysicalPlan::SortExec { items, .. } => sort_ordering_keys(items),
+        _ => Vec::new(),
+    };
+    PhysicalProperties {
+        distribution: Distribution::Single,
+        ordering,
+    }
+}
+
+fn sort_ordering_keys(items: &[SortItem]) -> Vec<String> {
+    items.iter().map(sort_ordering_key).collect()
+}
+
+fn sort_ordering_key(item: &SortItem) -> String {
+    let mut output = String::new();
+    match &item.key {
+        SortKey::Property { variable, property } => {
+            output.push_str(variable);
+            output.push('.');
+            output.push_str(property);
+        }
+        SortKey::Id { variable } => {
+            output.push_str("id(");
+            output.push_str(variable);
+            output.push(')');
+        }
+        SortKey::Expression(expression) => write_projection_expression(&mut output, expression),
+        SortKey::Column(column) => output.push_str(column),
+    }
+    output.push(' ');
+    match item.direction {
+        SortDirection::Asc => output.push_str("asc"),
+        SortDirection::Desc => output.push_str("desc"),
+    }
+    output
 }
 
 fn order_single_row_cartesian_product_children(
@@ -7547,14 +7590,14 @@ fn write_sort_list(output: &mut String, items: &[SortItem]) {
 #[cfg(test)]
 mod tests {
     use super::{
-        CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
-        OptimizerConfig, PhysicalPlan, PhysicalPlanChildren, PhysicalPlanClass, PhysicalPlanKind,
-        PlanCost, RuleOutcome,
+        CascadesOptimizer, Distribution, OptimizerCatalog, OptimizerCatalogIndexes,
+        OptimizerCatalogStatistics, OptimizerConfig, PhysicalPlan, PhysicalPlanChildren,
+        PhysicalPlanClass, PhysicalPlanKind, PlanCost, RuleOutcome,
     };
     use crate::cypher::RelationshipDirection;
     use crate::planner::{
         AggregateFunction, AggregateTarget, Aggregation, LogicalPlan, Predicate, Projection,
-        ProjectionExpression, RelationshipCountLeg,
+        ProjectionExpression, RelationshipCountLeg, SortDirection, SortItem, SortKey,
     };
     use crate::value::Value;
     use std::collections::BTreeMap;
@@ -7710,6 +7753,45 @@ mod tests {
         assert_eq!(
             fallback_trace.selected_plan_cost_breakdown.as_plan_cost(),
             fallback_trace.selected_plan_cost
+        );
+    }
+
+    #[test]
+    fn selected_plan_properties_report_distribution_and_sort_ordering() {
+        let logical = LogicalPlan::Limit {
+            offset: 0,
+            limit: Some(10),
+            input: Box::new(LogicalPlan::Project {
+                items: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "m".to_string(),
+                        property: "title".to_string(),
+                    },
+                    name: "title".to_string(),
+                }],
+                input: Box::new(LogicalPlan::Sort {
+                    items: vec![SortItem {
+                        key: SortKey::Column("title".to_string()),
+                        direction: SortDirection::Asc,
+                    }],
+                    input: Box::new(LogicalPlan::NodeScan {
+                        variable: "m".to_string(),
+                        label: "Memory".to_string(),
+                    }),
+                }),
+            }),
+        };
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &OptimizerCatalog::default());
+
+        assert_eq!(
+            trace.selected_plan_properties.distribution,
+            Distribution::Single
+        );
+        assert_eq!(
+            trace.selected_plan_properties.ordering,
+            vec!["title asc".to_string()]
         );
     }
 

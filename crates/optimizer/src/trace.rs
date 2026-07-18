@@ -1,4 +1,5 @@
 use crate::cost::{PlanCost, PlanCostBreakdown};
+use crate::properties::PhysicalProperties;
 use crate::search::RuleEvent;
 use std::collections::BTreeMap;
 
@@ -20,6 +21,7 @@ pub struct OptimizerTrace {
     pub selected_plan_fingerprint: String,
     pub selected_plan_cost: PlanCost,
     pub selected_plan_cost_breakdown: PlanCostBreakdown,
+    pub selected_plan_properties: PhysicalProperties,
     pub selected_plan_operator_counts: BTreeMap<String, usize>,
     pub selected_plan_class_counts: BTreeMap<String, usize>,
     pub warnings: Vec<String>,

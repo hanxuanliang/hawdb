@@ -25,6 +25,16 @@ impl PhysicalProperties {
     }
 }
 
+impl Distribution {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Distribution::Any => "any",
+            Distribution::Single => "single",
+            Distribution::Hash(_) => "hash",
+        }
+    }
+}
+
 fn distribution_satisfies(actual: &Distribution, required: &Distribution) -> bool {
     match required {
         Distribution::Any => true,
@@ -70,5 +80,15 @@ mod tests {
         };
 
         assert!(actual.satisfies(&required));
+    }
+
+    #[test]
+    fn distribution_exposes_stable_names() {
+        assert_eq!(Distribution::Any.as_str(), "any");
+        assert_eq!(Distribution::Single.as_str(), "single");
+        assert_eq!(
+            Distribution::Hash(vec!["space_id".to_string()]).as_str(),
+            "hash"
+        );
     }
 }

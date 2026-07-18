@@ -3105,6 +3105,7 @@ fn explain_output_json(
             "sequential_io": output.trace.selected_plan_cost_breakdown.sequential_io,
             "output_rows": output.trace.selected_plan_cost_breakdown.output_rows,
         },
+        "selected_plan_properties": physical_properties_json(&output.trace.selected_plan_properties),
         "selected_plan_operator_counts": output.trace.selected_plan_operator_counts,
         "selected_plan_class_counts": output.trace.selected_plan_class_counts,
         "warnings": output.trace.warnings,
@@ -3116,6 +3117,32 @@ fn explain_output_json(
             .map(rule_event_json)
             .collect::<Vec<_>>(),
     })
+}
+
+fn physical_properties_json(
+    properties: &skein::optimizer::PhysicalProperties,
+) -> serde_json::Value {
+    serde_json::json!({
+        "distribution": distribution_json(&properties.distribution),
+        "ordering": properties.ordering,
+    })
+}
+
+fn distribution_json(distribution: &skein::optimizer::Distribution) -> serde_json::Value {
+    match distribution {
+        skein::optimizer::Distribution::Any | skein::optimizer::Distribution::Single => {
+            serde_json::json!({
+                "kind": distribution.as_str(),
+                "keys": [],
+            })
+        }
+        skein::optimizer::Distribution::Hash(keys) => {
+            serde_json::json!({
+                "kind": distribution.as_str(),
+                "keys": keys,
+            })
+        }
+    }
 }
 
 fn rule_event_json(event: &skein::optimizer::RuleEvent) -> serde_json::Value {
@@ -3649,6 +3676,10 @@ mod tests {
                     sequential_io: 12,
                     output_rows: 0,
                 },
+                selected_plan_properties: skein::optimizer::PhysicalProperties {
+                    distribution: skein::optimizer::Distribution::Single,
+                    ordering: vec!["title asc".to_string()],
+                },
                 selected_plan_operator_counts: operator_counts,
                 selected_plan_class_counts: class_counts,
                 warnings: vec!["diagnostic warning".to_string()],
@@ -3675,6 +3706,11 @@ mod tests {
         assert_eq!(json["selected_plan_cost_breakdown"]["cpu"], 10);
         assert_eq!(json["selected_plan_cost_breakdown"]["random_io"], 20);
         assert_eq!(json["selected_plan_cost_breakdown"]["sequential_io"], 12);
+        assert_eq!(
+            json["selected_plan_properties"]["distribution"]["kind"],
+            "single"
+        );
+        assert_eq!(json["selected_plan_properties"]["ordering"][0], "title asc");
         assert_eq!(json["selected_plan_operator_counts"]["SeqNodeScan"], 1);
         assert_eq!(json["selected_plan_class_counts"]["access"], 1);
         assert_eq!(json["warnings"][0], "diagnostic warning");
