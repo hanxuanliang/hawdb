@@ -151,6 +151,7 @@ pub struct SearchResultSet {
     pub total_hits: usize,
     pub limit: usize,
     pub truncated: bool,
+    pub truncation_reason_codes: Vec<SearchTruncationReasonCode>,
     pub truncation_reasons: Vec<String>,
     pub empty_reason_codes: Vec<SearchEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
@@ -162,6 +163,30 @@ pub struct SearchResultSet {
     pub fusion_weights: SearchFusionWeights,
     pub document_count: usize,
     pub filtered_document_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchTruncationReasonCode {
+    LimitExceeded,
+}
+
+impl SearchTruncationReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchTruncationReasonCode::LimitExceeded => "limit_exceeded",
+        }
+    }
+}
+
+impl FromStr for SearchTruncationReasonCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "limit_exceeded" => Ok(SearchTruncationReasonCode::LimitExceeded),
+            _ => Err("unknown search truncation reason code"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1221,6 +1246,11 @@ impl SearchIndex {
         } else {
             Vec::new()
         };
+        let truncation_reason_codes = if truncated {
+            vec![SearchTruncationReasonCode::LimitExceeded]
+        } else {
+            Vec::new()
+        };
         let empty_reasons = search_empty_reasons(
             hits.is_empty(),
             document_count,
@@ -1240,6 +1270,7 @@ impl SearchIndex {
             total_hits,
             limit,
             truncated,
+            truncation_reason_codes,
             truncation_reasons,
             empty_reason_codes,
             empty_reasons,
@@ -3160,6 +3191,21 @@ mod tests {
     }
 
     #[test]
+    fn search_truncation_reason_codes_have_stable_string_encodings() {
+        assert_eq!(
+            SearchTruncationReasonCode::LimitExceeded.as_str(),
+            "limit_exceeded"
+        );
+        assert_eq!(
+            "limit_exceeded".parse::<SearchTruncationReasonCode>(),
+            Ok(SearchTruncationReasonCode::LimitExceeded)
+        );
+        assert!("rank_window_exceeded"
+            .parse::<SearchTruncationReasonCode>()
+            .is_err());
+    }
+
+    #[test]
     fn search_report_exposes_missing_query_embedding_reason() {
         let mut index = SearchIndex::in_memory();
         index
@@ -3848,6 +3894,10 @@ mod tests {
         assert_eq!(result.total_hits, 3);
         assert_eq!(result.limit, 2);
         assert!(result.truncated);
+        assert_eq!(
+            result.truncation_reason_codes,
+            vec![SearchTruncationReasonCode::LimitExceeded]
+        );
         assert_eq!(result.truncation_reasons.len(), 1);
         assert!(result.truncation_reasons[0].contains("limit 2"));
         assert!(result.truncation_reasons[0].contains("3 matching hits"));

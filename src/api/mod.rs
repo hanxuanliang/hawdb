@@ -21,7 +21,7 @@ use crate::search::{
     SearchFallbackReasonCode, SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode,
     SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
     SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
-    SearchRetrieverCandidateSetReport,
+    SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -570,6 +570,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_candidate_filtered_out_count: usize,
     pub search_limit: usize,
     pub search_truncated: bool,
+    pub search_truncation_reason_codes: Vec<SearchTruncationReasonCode>,
     pub search_truncation_reasons: Vec<String>,
     pub search_fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub search_fallback_reasons: Vec<String>,
@@ -2645,6 +2646,7 @@ fn knowledge_retrieval_diagnostics(
         search_candidate_filtered_out_count: search.candidate_set.filtered_out_count,
         search_limit: search.limit,
         search_truncated: search.truncated,
+        search_truncation_reason_codes: search.truncation_reason_codes.clone(),
         search_truncation_reasons: search.truncation_reasons.clone(),
         search_fallback_reason_codes: search.fallback_reason_codes.clone(),
         search_fallback_reasons: search.fallback_reasons.clone(),

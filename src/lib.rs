@@ -99,7 +99,7 @@ pub use search::{
     SearchFallbackReasonCode, SearchHit, SearchIndex, SearchMode, SearchProjectionDelta,
     SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionKind,
     SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
-    SearchRetrieverCandidateSetReport,
+    SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
 };
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,

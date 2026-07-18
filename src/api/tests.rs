@@ -19,7 +19,7 @@ use crate::schema::{
 use crate::search::{
     MetadataRepairOptions, SearchDocument, SearchFallbackReasonCode, SearchFusionWeights,
     SearchIndex, SearchMode, SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow,
-    SearchRebuildOptions,
+    SearchRebuildOptions, SearchTruncationReasonCode,
 };
 use crate::store::{NodeId, DENSE_ADJACENCY_DEGREE_THRESHOLD};
 use crate::Value;
@@ -1048,6 +1048,10 @@ fn retrieves_knowledge_through_database_facade() {
     assert!(!output.diagnostics.projection_metadata_repair_needed);
     assert_eq!(output.diagnostics.search_limit, 1);
     assert!(output.diagnostics.search_truncated);
+    assert_eq!(
+        output.diagnostics.search_truncation_reason_codes,
+        vec![SearchTruncationReasonCode::LimitExceeded]
+    );
     assert_eq!(
         output.diagnostics.search_truncation_reasons,
         vec!["limit 1 returned from 2 matching hits".to_string()]
