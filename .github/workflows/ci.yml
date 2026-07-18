@@ -226,6 +226,30 @@ jobs:
             "blockers": []
           }
           JSON
+          cat > "$root/contract-report.json" <<'JSON'
+          {
+            "required_contract_ready": true,
+            "required_contract_blocker_codes": [],
+            "previous_wrapper_contract_evidence": {
+              "ready": true,
+              "evidence_kind": "previous_wrapper_contract",
+              "wrapper_identity": "nowledge-previous-wrapper:ci-smoke",
+              "requires_full_contract_ready": true,
+              "requires_wrapper_identity": true,
+              "blocker_codes": [],
+              "blockers": []
+            }
+          }
+          JSON
+          cat > "$root/adapter-smoke.json" <<'JSON'
+          {
+            "adapter_smoke_ready": true,
+            "engine_kind": "previous_wrapper",
+            "wrapper_identity": "nowledge-previous-wrapper:ci-smoke",
+            "primary_only_checks": 0,
+            "blocker_codes": []
+          }
+          JSON
           mkdir -p "$root/crates/nmem-graph/src"
           cat > "$root/crates/nmem-graph/src/repo.rs" <<'RS'
           pub fn query() -> &'static str {
@@ -280,6 +304,32 @@ jobs:
           grep -q '"previous_wrapper_contract_evidence"' "$root/replacement.json"
           grep -q '"wrapper_identity": "nowledge-previous-wrapper:ci-smoke"' "$root/replacement.json"
           grep -q "nowledge replacement summary is not production cutover ready" "$root/replacement.err"
+          cargo run --quiet --bin skein -- \
+            nowledge-previous-wrapper-preflight-check \
+            --wrapper-identity "nowledge-previous-wrapper:ci-smoke" \
+            --contract-evidence-json "$root/contract-report.json" \
+            --adapter-smoke-json "$root/adapter-smoke.json" \
+            --migration-gate-json "$root/gate.json" \
+            --replacement-summary-json "$root/replacement.json" \
+            > "$root/preflight.json"
+          grep -q '"protocol": "skein-nowledge-previous-wrapper-preflight-check"' "$root/preflight.json"
+          grep -q '"ready": false' "$root/preflight.json"
+          grep -q '"migration_gate"' "$root/preflight.json"
+          grep -q '"replacement_summary"' "$root/preflight.json"
+          if cargo run --quiet --bin skein -- \
+            nowledge-previous-wrapper-preflight-check \
+            --require-ready \
+            --wrapper-identity "nowledge-previous-wrapper:ci-smoke" \
+            --contract-evidence-json "$root/contract-report.json" \
+            --adapter-smoke-json "$root/adapter-smoke.json" \
+            --migration-gate-json "$root/gate.json" \
+            --replacement-summary-json "$root/replacement.json" \
+            > "$root/preflight-required.json" 2> "$root/preflight-required.err"; then
+            echo "expected protocol smoke preflight bundle to fail readiness"
+            exit 1
+          fi
+          grep -q '"ready": false' "$root/preflight-required.json"
+          grep -q "nowledge previous-wrapper preflight is not ready" "$root/preflight-required.err"
 
       - name: Migration gate blocked smoke
         run: |
