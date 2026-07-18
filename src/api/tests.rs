@@ -7632,6 +7632,14 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     assert_eq!(ranked[0].plan.request.class, WorkClass::Projection);
     assert_eq!(ranked[0].plan.request.class.as_str(), "projection");
     assert_eq!(ranked[0].plan.request.priority.as_str(), "background");
+    assert_eq!(
+        "projection".parse::<WorkClass>(),
+        Ok(ranked[0].plan.request.class)
+    );
+    assert_eq!(
+        "background".parse::<crate::WorkPriority>(),
+        Ok(ranked[0].plan.request.priority)
+    );
     assert!(matches!(ranked[0].decision.admission, QosAdmission::Admit));
     assert!(ranked[0]
         .decision

@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkPriority {
     Foreground,
@@ -23,6 +25,18 @@ impl WorkPriority {
     }
 }
 
+impl FromStr for WorkPriority {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "foreground" => Ok(WorkPriority::Foreground),
+            "background" => Ok(WorkPriority::Background),
+            _ => Err("unknown work priority"),
+        }
+    }
+}
+
 impl WorkClass {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -32,6 +46,22 @@ impl WorkClass {
             WorkClass::Import => "import",
             WorkClass::Analytics => "analytics",
             WorkClass::Shadow => "shadow",
+        }
+    }
+}
+
+impl FromStr for WorkClass {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "query" => Ok(WorkClass::Query),
+            "mutation" => Ok(WorkClass::Mutation),
+            "projection" => Ok(WorkClass::Projection),
+            "import" => Ok(WorkClass::Import),
+            "analytics" => Ok(WorkClass::Analytics),
+            "shadow" => Ok(WorkClass::Shadow),
+            _ => Err("unknown work class"),
         }
     }
 }
@@ -531,6 +561,15 @@ mod tests {
     fn work_priorities_have_stable_string_encodings() {
         assert_eq!(WorkPriority::Foreground.as_str(), "foreground");
         assert_eq!(WorkPriority::Background.as_str(), "background");
+        assert_eq!(
+            "foreground".parse::<WorkPriority>(),
+            Ok(WorkPriority::Foreground)
+        );
+        assert_eq!(
+            "background".parse::<WorkPriority>(),
+            Ok(WorkPriority::Background)
+        );
+        assert!("foreground_work".parse::<WorkPriority>().is_err());
     }
 
     #[test]
@@ -541,6 +580,13 @@ mod tests {
         assert_eq!(WorkClass::Import.as_str(), "import");
         assert_eq!(WorkClass::Analytics.as_str(), "analytics");
         assert_eq!(WorkClass::Shadow.as_str(), "shadow");
+        assert_eq!("query".parse::<WorkClass>(), Ok(WorkClass::Query));
+        assert_eq!("mutation".parse::<WorkClass>(), Ok(WorkClass::Mutation));
+        assert_eq!("projection".parse::<WorkClass>(), Ok(WorkClass::Projection));
+        assert_eq!("import".parse::<WorkClass>(), Ok(WorkClass::Import));
+        assert_eq!("analytics".parse::<WorkClass>(), Ok(WorkClass::Analytics));
+        assert_eq!("shadow".parse::<WorkClass>(), Ok(WorkClass::Shadow));
+        assert!("maintenance".parse::<WorkClass>().is_err());
     }
 
     #[test]
