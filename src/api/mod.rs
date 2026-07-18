@@ -1062,6 +1062,8 @@ pub struct KnowledgeSubgraphOutput {
 pub struct KnowledgeTraversalDiagnostics {
     pub seed_found: bool,
     pub target_found: Option<bool>,
+    pub input_candidate_set: SearchCandidateSetReport,
+    pub candidate_set: SearchRetrieverCandidateSetReport,
     pub path_count: usize,
     pub node_count: usize,
     pub relationship_count: usize,
@@ -3526,6 +3528,7 @@ fn knowledge_neighbors_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                graph_commit_epoch: store.commit_epoch(),
                 seed_found: false,
                 target_found: None,
                 path_count: 0,
@@ -3559,6 +3562,7 @@ fn knowledge_neighbors_for(
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
+                            graph_commit_epoch: store.commit_epoch(),
                             seed_found: true,
                             target_found: None,
                             path_count: 0,
@@ -3595,6 +3599,7 @@ fn knowledge_neighbors_for(
         graph_commit_epoch: store.commit_epoch(),
         seed_node_id: Some(seed.id.0),
         diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch: store.commit_epoch(),
             seed_found: true,
             target_found: None,
             path_count: paths.len(),
@@ -3646,6 +3651,7 @@ fn knowledge_paths_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                graph_commit_epoch: store.commit_epoch(),
                 seed_found: false,
                 target_found: Some(target_node_id.is_some()),
                 path_count: 0,
@@ -3680,6 +3686,7 @@ fn knowledge_paths_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                graph_commit_epoch: store.commit_epoch(),
                 seed_found: true,
                 target_found: Some(false),
                 path_count: 0,
@@ -3713,6 +3720,7 @@ fn knowledge_paths_for(
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
+                            graph_commit_epoch: store.commit_epoch(),
                             seed_found: true,
                             target_found: Some(true),
                             path_count: 0,
@@ -3751,6 +3759,7 @@ fn knowledge_paths_for(
         source_node_id,
         target_node_id,
         diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch: store.commit_epoch(),
             seed_found: true,
             target_found: Some(true),
             path_count: paths.len(),
@@ -3792,6 +3801,7 @@ fn knowledge_subgraph_for(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                graph_commit_epoch: store.commit_epoch(),
                 seed_found: false,
                 target_found: None,
                 path_count: 0,
@@ -3825,6 +3835,7 @@ fn knowledge_subgraph_for(
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
+                            graph_commit_epoch: store.commit_epoch(),
                             seed_found: true,
                             target_found: None,
                             path_count: 0,
@@ -3861,6 +3872,7 @@ fn knowledge_subgraph_for(
         graph_commit_epoch: store.commit_epoch(),
         seed_node_id: Some(seed.id.0),
         diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch: store.commit_epoch(),
             seed_found: true,
             target_found: None,
             path_count: relationships.len(),
@@ -3884,6 +3896,7 @@ fn knowledge_subgraph_for(
 }
 
 struct KnowledgeTraversalDiagnosticInput {
+    graph_commit_epoch: u64,
     seed_found: bool,
     target_found: Option<bool>,
     path_count: usize,
@@ -3904,9 +3917,13 @@ fn knowledge_traversal_diagnostics(
 ) -> KnowledgeTraversalDiagnostics {
     let fallback_reason_codes = knowledge_traversal_fallback_reason_codes(&input);
     let fallback_reasons = knowledge_traversal_fallback_reasons(&input);
+    let input_candidate_set = knowledge_traversal_input_candidate_set_report(&input);
+    let candidate_set = knowledge_traversal_candidate_set_report(&input);
     KnowledgeTraversalDiagnostics {
         seed_found: input.seed_found,
         target_found: input.target_found,
+        input_candidate_set,
+        candidate_set,
         path_count: input.path_count,
         node_count: input.node_count,
         relationship_count: input.relationship_count,
@@ -3920,6 +3937,54 @@ fn knowledge_traversal_diagnostics(
         path_limit: input.path_limit,
         node_limit: input.node_limit,
         relationship_limit: input.relationship_limit,
+    }
+}
+
+fn knowledge_traversal_input_candidate_set_report(
+    input: &KnowledgeTraversalDiagnosticInput,
+) -> SearchCandidateSetReport {
+    let cardinality = match input.target_found {
+        Some(target_found) => usize::from(input.seed_found) + usize::from(target_found),
+        None => usize::from(input.seed_found),
+    };
+    SearchCandidateSetReport {
+        id_space: "canonical_graph_node_id".to_string(),
+        representation: "traversal_seed_node_ids".to_string(),
+        cardinality,
+        exact: true,
+        snapshot_source_graph_commit_epoch: Some(input.graph_commit_epoch),
+        policy_epoch: None,
+        filtered_out_count: 0,
+        metadata_filters: BTreeMap::new(),
+    }
+}
+
+fn knowledge_traversal_candidate_set_report(
+    input: &KnowledgeTraversalDiagnosticInput,
+) -> SearchRetrieverCandidateSetReport {
+    let (id_space, representation, cardinality) =
+        if input.node_limit.is_some() || input.relationship_limit.is_some() {
+            (
+                "mixed_graph_id",
+                "subgraph_node_and_relationship_ids",
+                input.node_count + input.relationship_count,
+            )
+        } else if input.target_found.is_some() {
+            ("canonical_graph_path", "bounded_paths", input.path_count)
+        } else {
+            (
+                "canonical_graph_relationship_id",
+                "neighbor_relationship_ids",
+                input.relationship_count,
+            )
+        };
+    SearchRetrieverCandidateSetReport {
+        id_space: id_space.to_string(),
+        representation: representation.to_string(),
+        cardinality,
+        exact: true,
+        snapshot_source_graph_commit_epoch: Some(input.graph_commit_epoch),
+        policy_epoch: None,
     }
 }
 

@@ -3581,6 +3581,27 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
     assert_eq!(outgoing.diagnostics.fanout_reason_count, 0);
     assert_eq!(outgoing.diagnostics.max_hops, 2);
     assert_eq!(outgoing.diagnostics.path_limit, Some(8));
+    assert_eq!(
+        outgoing.diagnostics.input_candidate_set.representation,
+        "traversal_seed_node_ids"
+    );
+    assert_eq!(outgoing.diagnostics.input_candidate_set.cardinality, 1);
+    assert_eq!(
+        outgoing.diagnostics.candidate_set.id_space,
+        "canonical_graph_relationship_id"
+    );
+    assert_eq!(
+        outgoing.diagnostics.candidate_set.representation,
+        "neighbor_relationship_ids"
+    );
+    assert_eq!(outgoing.diagnostics.candidate_set.cardinality, 2);
+    assert_eq!(
+        outgoing
+            .diagnostics
+            .candidate_set
+            .snapshot_source_graph_commit_epoch,
+        Some(outgoing.graph_commit_epoch)
+    );
     assert!(outgoing.fanout_reasons.is_empty());
     assert!(outgoing
         .paths
@@ -3951,6 +3972,27 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
     assert_eq!(output.diagnostics.fanout_reason_count, 0);
     assert_eq!(output.diagnostics.max_hops, 2);
     assert_eq!(output.diagnostics.path_limit, Some(4));
+    assert_eq!(
+        output.diagnostics.input_candidate_set.representation,
+        "traversal_seed_node_ids"
+    );
+    assert_eq!(output.diagnostics.input_candidate_set.cardinality, 2);
+    assert_eq!(
+        output.diagnostics.candidate_set.id_space,
+        "canonical_graph_path"
+    );
+    assert_eq!(
+        output.diagnostics.candidate_set.representation,
+        "bounded_paths"
+    );
+    assert_eq!(output.diagnostics.candidate_set.cardinality, 1);
+    assert_eq!(
+        output
+            .diagnostics
+            .input_candidate_set
+            .snapshot_source_graph_commit_epoch,
+        Some(output.graph_commit_epoch)
+    );
     assert!(output.fanout_reasons.is_empty());
     let path = &output.paths[0];
     assert_eq!(path.segments.len(), 2);
@@ -4235,6 +4277,24 @@ fn retrieves_bounded_knowledge_subgraph_without_search_projection() {
     assert_eq!(output.diagnostics.max_hops, 2);
     assert_eq!(output.diagnostics.node_limit, Some(8));
     assert_eq!(output.diagnostics.relationship_limit, Some(8));
+    assert_eq!(
+        output.diagnostics.input_candidate_set.representation,
+        "traversal_seed_node_ids"
+    );
+    assert_eq!(output.diagnostics.input_candidate_set.cardinality, 1);
+    assert_eq!(output.diagnostics.candidate_set.id_space, "mixed_graph_id");
+    assert_eq!(
+        output.diagnostics.candidate_set.representation,
+        "subgraph_node_and_relationship_ids"
+    );
+    assert_eq!(output.diagnostics.candidate_set.cardinality, 5);
+    assert_eq!(
+        output
+            .diagnostics
+            .candidate_set
+            .snapshot_source_graph_commit_epoch,
+        Some(output.graph_commit_epoch)
+    );
     assert!(output.fanout_reasons.is_empty());
     assert!(output
         .nodes
