@@ -8667,8 +8667,9 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
     let search_index = SearchIndex::in_memory();
     let search_delta_request = SearchProjectionGraphDeltaRequest {
         upsert_node_ids: vec![0],
+        delete_document_ids: vec!["memory:old".to_string()],
+        max_operations: Some(4),
         complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
-        ..SearchProjectionGraphDeltaRequest::default()
     };
     let mut class_limits = [None; crate::WORK_CLASS_COUNT];
     class_limits[WorkClass::Projection.as_index()] = Some(2);
@@ -8695,7 +8696,7 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
     assert_eq!(summary.admitted_count, 1);
     assert_eq!(summary.deferred_count, 1);
     assert_eq!(summary.rejected_count, 0);
-    assert_eq!(summary.admitted_estimated_operations, 1);
+    assert_eq!(summary.admitted_estimated_operations, 2);
     assert_eq!(summary.deferred_estimated_operations, 3);
     assert_eq!(
         summary.top_admitted_kind,
@@ -8715,6 +8716,26 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
     assert_eq!(admitted.work_class_name, "projection");
     assert_eq!(admitted.priority_name, "background");
     assert!(admitted.has_executable_search_projection_graph_delta);
+    assert_eq!(
+        admitted.search_projection_graph_delta_operation_count,
+        Some(2)
+    );
+    assert_eq!(
+        admitted.search_projection_graph_delta_upsert_node_count,
+        Some(1)
+    );
+    assert_eq!(
+        admitted.search_projection_graph_delta_delete_document_count,
+        Some(1)
+    );
+    assert_eq!(
+        admitted.search_projection_graph_delta_complete_through_graph_commit_epoch,
+        Some(db.store.commit_epoch())
+    );
+    assert_eq!(
+        admitted.search_projection_graph_delta_max_operations,
+        Some(4)
+    );
     assert!(admitted.admission_code_name.is_none());
     assert!(admitted
         .reason_code_names
@@ -8731,6 +8752,20 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
         Some("class_background_limit_exceeded")
     );
     assert!(!deferred.has_executable_search_projection_graph_delta);
+    assert_eq!(deferred.search_projection_graph_delta_operation_count, None);
+    assert_eq!(
+        deferred.search_projection_graph_delta_upsert_node_count,
+        None
+    );
+    assert_eq!(
+        deferred.search_projection_graph_delta_delete_document_count,
+        None
+    );
+    assert_eq!(
+        deferred.search_projection_graph_delta_complete_through_graph_commit_epoch,
+        None
+    );
+    assert_eq!(deferred.search_projection_graph_delta_max_operations, None);
     assert!(deferred
         .reason_code_names
         .contains(&"admission_deferred".to_string()));

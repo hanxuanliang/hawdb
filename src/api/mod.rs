@@ -527,6 +527,11 @@ pub struct BackgroundMaintenanceSummaryItem {
     pub reason_code_names: Vec<String>,
     pub reasons: Vec<String>,
     pub has_executable_search_projection_graph_delta: bool,
+    pub search_projection_graph_delta_operation_count: Option<usize>,
+    pub search_projection_graph_delta_upsert_node_count: Option<usize>,
+    pub search_projection_graph_delta_delete_document_count: Option<usize>,
+    pub search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
+    pub search_projection_graph_delta_max_operations: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -652,6 +657,7 @@ impl BackgroundMaintenanceSummary {
 impl BackgroundMaintenanceSummaryItem {
     fn from_ranked(ranked: RankedBackgroundMaintenance) -> Self {
         let admission_code = ranked.decision.admission.code();
+        let search_projection_graph_delta = ranked.search_projection_graph_delta.as_ref();
         Self {
             kind: ranked.kind,
             name: ranked.name,
@@ -672,9 +678,18 @@ impl BackgroundMaintenanceSummaryItem {
                 .map(|code| code.as_str().to_string())
                 .collect(),
             reasons: ranked.decision.reasons,
-            has_executable_search_projection_graph_delta: ranked
-                .search_projection_graph_delta
-                .is_some(),
+            has_executable_search_projection_graph_delta: search_projection_graph_delta.is_some(),
+            search_projection_graph_delta_operation_count: search_projection_graph_delta
+                .map(SearchProjectionGraphDeltaRequest::operation_count),
+            search_projection_graph_delta_upsert_node_count: search_projection_graph_delta
+                .map(|request| request.upsert_node_ids.len()),
+            search_projection_graph_delta_delete_document_count: search_projection_graph_delta
+                .map(|request| request.delete_document_ids.len()),
+            search_projection_graph_delta_complete_through_graph_commit_epoch:
+                search_projection_graph_delta
+                    .and_then(|request| request.complete_through_graph_commit_epoch),
+            search_projection_graph_delta_max_operations: search_projection_graph_delta
+                .and_then(|request| request.max_operations),
         }
     }
 }

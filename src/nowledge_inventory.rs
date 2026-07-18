@@ -398,6 +398,11 @@ fn background_maintenance_summary_to_json(
                     "reason_codes": &item.reason_code_names,
                     "reasons": &item.reasons,
                     "has_executable_search_projection_graph_delta": item.has_executable_search_projection_graph_delta,
+                    "search_projection_graph_delta_operation_count": item.search_projection_graph_delta_operation_count,
+                    "search_projection_graph_delta_upsert_node_count": item.search_projection_graph_delta_upsert_node_count,
+                    "search_projection_graph_delta_delete_document_count": item.search_projection_graph_delta_delete_document_count,
+                    "search_projection_graph_delta_complete_through_graph_commit_epoch": item.search_projection_graph_delta_complete_through_graph_commit_epoch,
+                    "search_projection_graph_delta_max_operations": item.search_projection_graph_delta_max_operations,
                 })
             })
             .collect::<Vec<_>>(),
@@ -1292,6 +1297,32 @@ mod tests {
             .any(|item| item["work_class"] == "projection"
                 && item["priority"] == "background"
                 && item["admission"] == "admit"));
+        let executable_delta = bundle["background_maintenance"]["ranked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["has_executable_search_projection_graph_delta"] == true)
+            .unwrap();
+        assert!(
+            executable_delta["search_projection_graph_delta_operation_count"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            executable_delta["search_projection_graph_delta_upsert_node_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            executable_delta["search_projection_graph_delta_delete_document_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(executable_delta
+            ["search_projection_graph_delta_complete_through_graph_commit_epoch"]
+            .as_u64()
+            .is_some());
         assert_eq!(
             bundle["migration_gate"]["blockers"]
                 .as_array()

@@ -623,10 +623,14 @@ surface that gathers pending schema maintenance, property-index projection
 rebuilds, search rebuild/repair work, graph-derived search deltas, and external
 content artifact jobs into named `BackgroundWorkPlan`s. The API returns ranked
 plans and QoS decisions only; it does not spawn workers or execute background
-work on behalf of the embedded application. Tenant budget hints below a
-candidate's estimated operations are ranked as deferred background work, while
-foreground user-triggered rebuilds, deltas, and repairs can still use the direct
-APIs. Database-owned
+work on behalf of the embedded application. Executable search-projection graph
+delta candidates expose operation counts, upsert/delete counts, optional
+max-operation limits, and the complete-through graph commit epoch, so the
+application can distinguish bounded incremental FTS maintenance from
+freshness-lag planning signals. Tenant budget hints below a candidate's
+estimated operations are ranked as deferred background work, while foreground
+user-triggered rebuilds, deltas, and repairs can still use the direct APIs.
+Database-owned
 derived artifact jobs expose the same split through
 `Database::run_next_background_derived_artifact_job`, which admits internal
 background rebuild work through `LocalQosPolicy` while leaving the direct

@@ -387,9 +387,12 @@ The bundle includes a top-level `background_maintenance` object with the local
 Skein maintenance summary after the compatibility fixture run. It reports
 candidate counts, admitted/deferred/rejected operation totals, stable work
 class/priority/admission strings, reason codes, and whether a search projection
-delta candidate carries an executable request. This object is resource
-readiness evidence for caller-owned scheduling; it does not change the
-compatibility or cutover decision.
+delta candidate carries an executable request. Executable search deltas also
+report operation, upsert, delete, max-operation, and complete-through graph
+commit epoch fields so caller-owned schedulers can distinguish precise
+incremental projection work from planning-only freshness signals. This object
+is resource readiness evidence for caller-owned scheduling; it does not change
+the compatibility or cutover decision.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
