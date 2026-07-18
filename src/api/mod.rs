@@ -1330,10 +1330,30 @@ pub struct KnowledgeScopedEntityRequest {
     pub metadata_filters: BTreeMap<String, String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityBatchRequest {
+    pub entities: Vec<KnowledgeEntityRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedEntityBatchRequest {
+    pub entities: Vec<KnowledgeEntityRequest>,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityOutput {
     pub graph_commit_epoch: u64,
     pub entity: Option<KnowledgeEntity>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeEntityBatchOutput {
+    pub graph_commit_epoch: u64,
+    pub entities: Vec<Option<KnowledgeEntity>>,
+    pub found_count: usize,
+    pub missing_count: usize,
+    pub filtered_out_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2619,11 +2639,25 @@ impl Database {
         knowledge_entity_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_entity_batch(
+        &self,
+        request: &KnowledgeEntityBatchRequest,
+    ) -> KnowledgeEntityBatchOutput {
+        knowledge_entity_batch_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> KnowledgeEntityOutput {
         knowledge_scoped_entity_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_entity_batch(
+        &self,
+        request: &KnowledgeScopedEntityBatchRequest,
+    ) -> KnowledgeEntityBatchOutput {
+        knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_neighbors(
@@ -3880,14 +3914,14 @@ fn knowledge_entity_for(
     store: &GraphStore,
     request: &KnowledgeEntityRequest,
 ) -> KnowledgeEntityOutput {
-    knowledge_scoped_entity_for(
-        catalog,
-        store,
-        &KnowledgeScopedEntityRequest {
-            entity: request.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
+    let entity = match knowledge_scoped_entity_match(catalog, store, request, &BTreeMap::new()) {
+        KnowledgeScopedEntityMatch::Found(entity) => Some(entity),
+        KnowledgeScopedEntityMatch::Missing | KnowledgeScopedEntityMatch::FilteredOut => None,
+    };
+    KnowledgeEntityOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        entity,
+    }
 }
 
 fn knowledge_scoped_entity_for(
@@ -3895,21 +3929,101 @@ fn knowledge_scoped_entity_for(
     store: &GraphStore,
     request: &KnowledgeScopedEntityRequest,
 ) -> KnowledgeEntityOutput {
-    let entity = seed_node_by_label_and_external_id(
+    let entity = match knowledge_scoped_entity_match(
         catalog,
         store,
-        request.entity.label.as_str(),
-        request.entity.external_id.as_str(),
-    )
-    .filter(|node| {
-        request.metadata_filters.is_empty()
-            || knowledge_graph_seed_matches_filters(catalog, node, &request.metadata_filters)
-    })
-    .map(|node| knowledge_entity_from_node(catalog, node));
+        &request.entity,
+        &request.metadata_filters,
+    ) {
+        KnowledgeScopedEntityMatch::Found(entity) => Some(entity),
+        KnowledgeScopedEntityMatch::Missing | KnowledgeScopedEntityMatch::FilteredOut => None,
+    };
     KnowledgeEntityOutput {
         graph_commit_epoch: store.commit_epoch(),
         entity,
     }
+}
+
+fn knowledge_entity_batch_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeEntityBatchRequest,
+) -> KnowledgeEntityBatchOutput {
+    knowledge_scoped_entity_batch_for(
+        catalog,
+        store,
+        &KnowledgeScopedEntityBatchRequest {
+            entities: request.entities.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn knowledge_scoped_entity_batch_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeScopedEntityBatchRequest,
+) -> KnowledgeEntityBatchOutput {
+    let mut entities = Vec::with_capacity(request.entities.len());
+    let mut found_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    for entity_request in &request.entities {
+        match knowledge_scoped_entity_match(
+            catalog,
+            store,
+            entity_request,
+            &request.metadata_filters,
+        ) {
+            KnowledgeScopedEntityMatch::Found(entity) => {
+                found_count += 1;
+                entities.push(Some(entity));
+            }
+            KnowledgeScopedEntityMatch::Missing => {
+                missing_count += 1;
+                entities.push(None);
+            }
+            KnowledgeScopedEntityMatch::FilteredOut => {
+                filtered_out_count += 1;
+                entities.push(None);
+            }
+        }
+    }
+    KnowledgeEntityBatchOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        entities,
+        found_count,
+        missing_count,
+        filtered_out_count,
+    }
+}
+
+enum KnowledgeScopedEntityMatch {
+    Found(KnowledgeEntity),
+    Missing,
+    FilteredOut,
+}
+
+fn knowledge_scoped_entity_match(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeEntityRequest,
+    metadata_filters: &BTreeMap<String, String>,
+) -> KnowledgeScopedEntityMatch {
+    let Some(node) = seed_node_by_label_and_external_id(
+        catalog,
+        store,
+        request.label.as_str(),
+        request.external_id.as_str(),
+    ) else {
+        return KnowledgeScopedEntityMatch::Missing;
+    };
+    if !metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(catalog, node, metadata_filters)
+    {
+        return KnowledgeScopedEntityMatch::FilteredOut;
+    }
+    KnowledgeScopedEntityMatch::Found(knowledge_entity_from_node(catalog, node))
 }
 
 fn knowledge_neighbors_for(
@@ -6401,11 +6515,25 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_entity(request)
     }
 
+    pub fn knowledge_entity_batch(
+        &self,
+        request: &KnowledgeEntityBatchRequest,
+    ) -> KnowledgeEntityBatchOutput {
+        self.db.knowledge_entity_batch(request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> KnowledgeEntityOutput {
         self.db.knowledge_scoped_entity(request)
+    }
+
+    pub fn knowledge_scoped_entity_batch(
+        &self,
+        request: &KnowledgeScopedEntityBatchRequest,
+    ) -> KnowledgeEntityBatchOutput {
+        self.db.knowledge_scoped_entity_batch(request)
     }
 
     pub fn knowledge_neighbors(
@@ -6814,11 +6942,25 @@ impl DatabaseReadTransaction {
         knowledge_entity_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_entity_batch(
+        &self,
+        request: &KnowledgeEntityBatchRequest,
+    ) -> KnowledgeEntityBatchOutput {
+        knowledge_entity_batch_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> KnowledgeEntityOutput {
         knowledge_scoped_entity_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_entity_batch(
+        &self,
+        request: &KnowledgeScopedEntityBatchRequest,
+    ) -> KnowledgeEntityBatchOutput {
+        knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_neighbors(

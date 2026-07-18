@@ -2,10 +2,11 @@ use super::{
     validate_graph_lightning_graph_stream, BackgroundMaintenanceKind, BackgroundMaintenanceOptions,
     CanonicalStableIdMapping, Database, DatabaseConfig, DerivedArtifactJobStatus,
     ExternalContentArtifactJobCompletion, ExternalContentArtifactRuntimeManifest,
-    KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
-    KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeScopedEntityRequest,
+    KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityBatchRequest,
+    KnowledgeEntityRequest, KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode,
+    KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgePathRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
+    KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityRequest,
     KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest, KnowledgeScopedSubgraphRequest,
     KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode,
     NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
@@ -3671,6 +3672,97 @@ fn scoped_knowledge_entity_filters_by_metadata() {
 
     assert_eq!(filtered.graph_commit_epoch, 1);
     assert!(filtered.entity.is_none());
+}
+
+#[test]
+fn retrieves_knowledge_entity_batch_in_request_order() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1', title: 'First'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2', title: 'Second'})")
+        .unwrap();
+
+    let output = db.knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_2".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "missing".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+        ],
+    });
+
+    assert_eq!(output.graph_commit_epoch, 2);
+    assert_eq!(output.entities.len(), 3);
+    assert_eq!(output.found_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.filtered_out_count, 0);
+    assert_eq!(
+        output.entities[0]
+            .as_ref()
+            .and_then(|entity| entity.external_id.as_deref()),
+        Some("memory_2")
+    );
+    assert!(output.entities[1].is_none());
+    assert_eq!(
+        output.entities[2]
+            .as_ref()
+            .and_then(|entity| entity.external_id.as_deref()),
+        Some("memory_1")
+    );
+}
+
+#[test]
+fn scoped_knowledge_entity_batch_reports_filtered_and_missing_items() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'memory_1', title: 'First', source_id: 'thread_1', space_id: ''})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2', title: 'Second', source_id: 'thread_2', space_id: 'default'})")
+        .unwrap();
+
+    let output = db.knowledge_scoped_entity_batch(&KnowledgeScopedEntityBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_2".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "missing".to_string(),
+            },
+        ],
+        metadata_filters: BTreeMap::from([
+            ("source_id".to_string(), "thread_1".to_string()),
+            ("space_id".to_string(), "default".to_string()),
+        ]),
+    });
+
+    assert_eq!(output.graph_commit_epoch, 2);
+    assert_eq!(output.entities.len(), 3);
+    assert_eq!(output.found_count, 1);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.filtered_out_count, 1);
+    assert_eq!(
+        output.entities[0]
+            .as_ref()
+            .and_then(|entity| entity.external_id.as_deref()),
+        Some("memory_1")
+    );
+    assert!(output.entities[1].is_none());
+    assert!(output.entities[2].is_none());
 }
 
 #[test]
@@ -11314,6 +11406,24 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
     });
     assert_eq!(scoped_entity.graph_commit_epoch, 1);
     assert!(scoped_entity.entity.is_some());
+    let entity_batch = read_tx.knowledge_entity_batch(&KnowledgeEntityBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "root".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "leaf".to_string(),
+            },
+        ],
+    });
+    assert_eq!(entity_batch.graph_commit_epoch, 1);
+    assert_eq!(entity_batch.found_count, 1);
+    assert_eq!(entity_batch.missing_count, 1);
+    assert_eq!(entity_batch.filtered_out_count, 0);
+    assert!(entity_batch.entities[0].is_some());
+    assert!(entity_batch.entities[1].is_none());
 
     let snapshot_neighbors = read_tx.knowledge_neighbors(&KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
