@@ -113,6 +113,26 @@ jobs:
           grep -q '"full_contract_not_checked"' "$root/full.json"
           grep -q "fixture contract command check failed" "$root/full.err"
 
+      - name: Storage recovery report smoke
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          TMPDIR="$root" cargo run --quiet --bin skein -- > "$root/demo.out"
+          db="$root/skein-demo"
+          cargo run --quiet --bin skein -- \
+            storage-recovery-report \
+            --max-wal-replay-entries 100 \
+            --require-durable \
+            --require-checkpoint-boundary \
+            --require-bounded-wal-replay \
+            --require-clean-tail \
+            "$db" > "$root/recovery.json"
+          grep -q '"protocol": "skein-storage-recovery-report"' "$root/recovery.json"
+          grep -q '"durable_recovery_observed": true' "$root/recovery.json"
+          grep -q '"checkpoint_boundary_present": true' "$root/recovery.json"
+          grep -q '"wal_replay_bounded": true' "$root/recovery.json"
+          grep -q '"torn_tail_clean": true' "$root/recovery.json"
+
       - name: Migration gate smoke
         run: |
           set -euo pipefail
