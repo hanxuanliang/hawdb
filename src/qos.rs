@@ -90,6 +90,18 @@ pub enum QosAdmissionCode {
     TenantBudgetExceeded,
 }
 
+impl QosAdmissionCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QosAdmissionCode::BackgroundDisabled => "background_disabled",
+            QosAdmissionCode::PerWorkLimitExceeded => "per_work_limit_exceeded",
+            QosAdmissionCode::TotalBackgroundLimitExceeded => "total_background_limit_exceeded",
+            QosAdmissionCode::ClassBackgroundLimitExceeded => "class_background_limit_exceeded",
+            QosAdmissionCode::TenantBudgetExceeded => "tenant_budget_exceeded",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalQosPermit {
     request: WorkRequest,
@@ -494,6 +506,30 @@ mod tests {
     };
 
     #[test]
+    fn qos_admission_codes_have_stable_string_encodings() {
+        assert_eq!(
+            QosAdmissionCode::BackgroundDisabled.as_str(),
+            "background_disabled"
+        );
+        assert_eq!(
+            QosAdmissionCode::PerWorkLimitExceeded.as_str(),
+            "per_work_limit_exceeded"
+        );
+        assert_eq!(
+            QosAdmissionCode::TotalBackgroundLimitExceeded.as_str(),
+            "total_background_limit_exceeded"
+        );
+        assert_eq!(
+            QosAdmissionCode::ClassBackgroundLimitExceeded.as_str(),
+            "class_background_limit_exceeded"
+        );
+        assert_eq!(
+            QosAdmissionCode::TenantBudgetExceeded.as_str(),
+            "tenant_budget_exceeded"
+        );
+    }
+
+    #[test]
     fn admits_foreground_work_without_budget_gate() {
         let policy = LocalQosPolicy::default();
         let request = WorkRequest::foreground(WorkClass::Query, usize::MAX);
@@ -515,6 +551,10 @@ mod tests {
         let admission = policy.admit(&LocalQosState::default(), &request);
 
         assert_eq!(admission.code(), Some(QosAdmissionCode::BackgroundDisabled));
+        assert_eq!(
+            admission.code().map(QosAdmissionCode::as_str),
+            Some("background_disabled")
+        );
         assert!(matches!(
             admission,
             QosAdmission::Defer { reason, .. } if reason.contains("disabled")
@@ -534,6 +574,10 @@ mod tests {
         assert_eq!(
             admission.code(),
             Some(QosAdmissionCode::PerWorkLimitExceeded)
+        );
+        assert_eq!(
+            admission.code().map(QosAdmissionCode::as_str),
+            Some("per_work_limit_exceeded")
         );
         assert!(matches!(
             admission,
@@ -559,6 +603,10 @@ mod tests {
         assert_eq!(
             admission.code(),
             Some(QosAdmissionCode::TotalBackgroundLimitExceeded)
+        );
+        assert_eq!(
+            admission.code().map(QosAdmissionCode::as_str),
+            Some("total_background_limit_exceeded")
         );
         assert!(matches!(
             admission,
@@ -665,6 +713,10 @@ mod tests {
         assert_eq!(
             decision.admission.code(),
             Some(QosAdmissionCode::TenantBudgetExceeded)
+        );
+        assert_eq!(
+            decision.admission.code().map(QosAdmissionCode::as_str),
+            Some("tenant_budget_exceeded")
         );
         assert_eq!(
             decision.admission.reason(),
@@ -889,6 +941,10 @@ mod tests {
         assert_eq!(
             same_class.code(),
             Some(QosAdmissionCode::ClassBackgroundLimitExceeded)
+        );
+        assert_eq!(
+            same_class.code().map(QosAdmissionCode::as_str),
+            Some("class_background_limit_exceeded")
         );
         assert!(matches!(
             same_class,
