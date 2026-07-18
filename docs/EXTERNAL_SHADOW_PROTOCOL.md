@@ -135,6 +135,7 @@ heavy, the example also supports:
 
 ```text
 cargo run --example nowledge_previous_wrapper_shadow_adapter -- [--command-timeout-ms <ms>] --command <program> [args...]
+cargo run --example nowledge_previous_wrapper_shadow_adapter -- --persistent-command <program> [args...]
 ```
 
 In this mode the adapter keeps the Skein external-shadow JSON-lines protocol on
@@ -160,6 +161,11 @@ outside Skein while still producing `engine_kind: "previous_wrapper"` shadow
 evidence through the shared protocol server. `--command-timeout-ms` bounds each
 delegated command invocation so a hung wrapper fails with a direct adapter error
 instead of only surfacing as an outer shadow request timeout.
+Use `--persistent-command` for real wrapper validation when startup, graph open,
+or connection setup is expensive. In this mode the adapter starts one child
+process, sends one JSON request per line, and expects one JSON response line per
+request. Request timeouts are enforced by the outer shadow command
+`--shadow-timeout-ms` gate rather than by respawning the child per operation.
 
 To generate the exact production-shaped fixture contract for a wrapper shim,
 use:

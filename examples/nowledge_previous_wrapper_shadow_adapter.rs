@@ -5,8 +5,8 @@ use skein::{
     QueryOutput, Result, SkeinError, Value,
 };
 use std::collections::BTreeMap;
-use std::io::{self, BufReader, Write};
-use std::process::{Command, Output, Stdio};
+use std::io::{self, BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,14 @@ fn previous_wrapper_from_args() -> Result<PreviousWrapperAdapter> {
                     timeout,
                 }));
             }
+            "--persistent-command" => {
+                let Some(program) = args.next() else {
+                    return Err(SkeinError::Semantic(command_usage()));
+                };
+                return Ok(PreviousWrapperAdapter::PersistentCommand(
+                    PersistentCommandPreviousWrapper::spawn(program, args.collect())?,
+                ));
+            }
             "--help" | "-h" => return Err(SkeinError::Semantic(command_usage())),
             other => {
                 return Err(SkeinError::Semantic(format!(
@@ -65,7 +73,7 @@ fn parse_timeout_ms(value: &str) -> Result<u64> {
 }
 
 fn command_usage() -> String {
-    "usage: nowledge_previous_wrapper_shadow_adapter [--command-timeout-ms <ms>] [--command <program> [args...]]".to_string()
+    "usage: nowledge_previous_wrapper_shadow_adapter [--command-timeout-ms <ms>] [--command <program> [args...]] [--persistent-command <program> [args...]]".to_string()
 }
 
 trait PreviousWrapperGraph {
@@ -97,6 +105,7 @@ type JsonRow = BTreeMap<String, serde_json::Value>;
 enum PreviousWrapperAdapter {
     Unavailable(UnavailablePreviousWrapper),
     Command(CommandPreviousWrapper),
+    PersistentCommand(PersistentCommandPreviousWrapper),
 }
 
 impl PreviousWrapperGraph for PreviousWrapperAdapter {
@@ -108,6 +117,7 @@ impl PreviousWrapperGraph for PreviousWrapperAdapter {
         match self {
             Self::Unavailable(graph) => graph.query(cypher, parameters),
             Self::Command(graph) => graph.query(cypher, parameters),
+            Self::PersistentCommand(graph) => graph.query(cypher, parameters),
         }
     }
 
@@ -118,6 +128,7 @@ impl PreviousWrapperGraph for PreviousWrapperAdapter {
         match self {
             Self::Unavailable(graph) => graph.execute_session(statements),
             Self::Command(graph) => graph.execute_session(statements),
+            Self::PersistentCommand(graph) => graph.execute_session(statements),
         }
     }
 
@@ -128,6 +139,7 @@ impl PreviousWrapperGraph for PreviousWrapperAdapter {
         match self {
             Self::Unavailable(graph) => graph.project_graph(request),
             Self::Command(graph) => graph.project_graph(request),
+            Self::PersistentCommand(graph) => graph.project_graph(request),
         }
     }
 }
@@ -219,6 +231,114 @@ impl PreviousWrapperGraph for CommandPreviousWrapper {
     ) -> Result<ExternalShadowProjectGraphReply> {
         let reply = self.invoke(command_project_graph_request(request))?;
         parse_project_graph_reply(&reply)
+    }
+}
+
+struct PersistentCommandPreviousWrapper {
+    program: String,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl PreviousWrapperGraph for PersistentCommandPreviousWrapper {
+    fn query(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<Vec<JsonRow>> {
+        let reply = self.invoke(command_query_request(cypher, parameters))?;
+        parse_rows_reply(&reply, "query")
+    }
+
+    fn execute_session(
+        &mut self,
+        statements: &[ExternalShadowStatementRequest],
+    ) -> Result<Vec<Vec<JsonRow>>> {
+        let reply = self.invoke(command_session_request(statements))?;
+        parse_session_reply(&reply)
+    }
+
+    fn project_graph(
+        &mut self,
+        request: &ExternalShadowProjectGraphRequest,
+    ) -> Result<ExternalShadowProjectGraphReply> {
+        let reply = self.invoke(command_project_graph_request(request))?;
+        parse_project_graph_reply(&reply)
+    }
+}
+
+impl PersistentCommandPreviousWrapper {
+    fn spawn(program: String, args: Vec<String>) -> Result<Self> {
+        let mut child = Command::new(&program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| {
+                SkeinError::Execution(format!(
+                    "failed to spawn persistent previous-wrapper command '{program}': {error}"
+                ))
+            })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            let _ = child.kill();
+            SkeinError::Execution(
+                "persistent previous-wrapper command stdin is not available".to_string(),
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            let _ = child.kill();
+            SkeinError::Execution(
+                "persistent previous-wrapper command stdout is not available".to_string(),
+            )
+        })?;
+        Ok(Self {
+            program,
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn invoke(&mut self, request: serde_json::Value) -> Result<serde_json::Value> {
+        writeln!(self.stdin, "{request}").map_err(|error| {
+            SkeinError::Execution(format!(
+                "failed to write persistent previous-wrapper command request: {error}"
+            ))
+        })?;
+        self.stdin.flush().map_err(|error| {
+            SkeinError::Execution(format!(
+                "failed to flush persistent previous-wrapper command request: {error}"
+            ))
+        })?;
+        let mut line = String::new();
+        let bytes = self.stdout.read_line(&mut line).map_err(|error| {
+            SkeinError::Execution(format!(
+                "failed to read persistent previous-wrapper command response: {error}"
+            ))
+        })?;
+        if bytes == 0 {
+            return Err(SkeinError::Execution(format!(
+                "persistent previous-wrapper command '{}' closed stdout",
+                self.program
+            )));
+        }
+        serde_json::from_str(&line).map_err(|error| {
+            SkeinError::Execution(format!(
+                "persistent previous-wrapper command returned invalid JSON: {error}; stdout: {}",
+                line.trim()
+            ))
+        })
+    }
+}
+
+impl Drop for PersistentCommandPreviousWrapper {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
     }
 }
 
@@ -579,5 +699,28 @@ mod tests {
                 reason: Some("wrapper does not expose projection metadata yet".to_string())
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn persistent_command_adapter_reuses_json_lines_process() {
+        let mut wrapper = PersistentCommandPreviousWrapper::spawn(
+            "/bin/sh".to_string(),
+            vec![
+                "-c".to_string(),
+                "i=0; while IFS= read -r line; do i=$((i + 1)); printf '{\"rows\":[{\"request_index\":%s}]}\\n' \"$i\"; done".to_string(),
+            ],
+        )
+        .unwrap();
+
+        let first = wrapper
+            .query("MATCH (m:Memory) RETURN m", &BTreeMap::new())
+            .unwrap();
+        let second = wrapper
+            .query("MATCH (e:Entity) RETURN e", &BTreeMap::new())
+            .unwrap();
+
+        assert_eq!(first[0]["request_index"], 1);
+        assert_eq!(second[0]["request_index"], 2);
     }
 }
