@@ -163,6 +163,11 @@ chunk counts before WAL, applies optional current-state filtering, reports
 missing/idless/duplicate rows without writing, writes `lifecycle_state`,
 optional `chunk_count`, and `updated_at`, and commits eligible Source rows
 through one grouped WAL batch.
+Memory lifecycle metadata writes are covered by a typed batch for the Nowledge
+`metadata`, `is_latest`, `lifecycle_state`, and `updated_at` update shape. The
+wrapper validates Memory ids and non-empty lifecycle states before WAL, reports
+missing/idless/duplicate rows without writing, and commits eligible Memory rows
+through one grouped WAL batch.
 
 ## Current Direction
 

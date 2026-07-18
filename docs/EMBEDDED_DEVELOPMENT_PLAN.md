@@ -156,7 +156,9 @@ The typed knowledge facade also covers endpoint-known entity lookup,
 create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
 normalized-space batch moves, memory access/click-dwell touches, ordered batch
 mutation, source memory-count adjustments, source lifecycle updates, and grouped
-WAL commits for eligible lifecycle rows.
+WAL commits for eligible lifecycle rows. Memory lifecycle metadata updates are
+also exposed as a typed batch for the Nowledge `metadata`/`is_latest`/
+`lifecycle_state`/`updated_at` write shape.
 `DatabaseConfig` provides read-only operation and bounded read-result
 configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,

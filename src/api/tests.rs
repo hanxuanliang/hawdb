@@ -7,7 +7,8 @@ use super::{
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
     KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeMemoryAccessTouch, KnowledgeMemoryLifecycleBatchRequest,
+    KnowledgeMemoryLifecycleUpdate, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePathRequest, KnowledgePropertyBatchRequest,
     KnowledgePropertyUpdateBatchRequest, KnowledgePropertyUpdateRequest,
     KnowledgeRelationshipCreateBatchRequest, KnowledgeRelationshipCreateRequest,
@@ -5460,6 +5461,197 @@ fn typed_source_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("chunk_count"),
             Some(&Some(Value::Int(3)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_memory_lifecycle_batch_for_metadata_state() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1', metadata: '{}', is_latest: true, lifecycle_state: 'active', updated_at: 1})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2', metadata: '{}', is_latest: true, lifecycle_state: 'active', updated_at: 1})")
+        .unwrap();
+
+    let output = db
+        .update_knowledge_memory_lifecycle_batch(&KnowledgeMemoryLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeMemoryLifecycleUpdate {
+                    memory_id: "memory_1".to_string(),
+                    metadata: Value::String("{\"archived\":true}".to_string()),
+                    is_latest: false,
+                    lifecycle_state: "archived".to_string(),
+                    updated_at: Value::String("2026-07-19T13:00:00Z".to_string()),
+                },
+                KnowledgeMemoryLifecycleUpdate {
+                    memory_id: "memory_2".to_string(),
+                    metadata: Value::String("{\"reviewed\":true}".to_string()),
+                    is_latest: true,
+                    lifecycle_state: "active".to_string(),
+                    updated_at: Value::String("2026-07-19T13:01:00Z".to_string()),
+                },
+                KnowledgeMemoryLifecycleUpdate {
+                    memory_id: "memory_2".to_string(),
+                    metadata: Value::String("{\"duplicate\":true}".to_string()),
+                    is_latest: false,
+                    lifecycle_state: "archived".to_string(),
+                    updated_at: Value::String("2026-07-19T13:02:00Z".to_string()),
+                },
+                KnowledgeMemoryLifecycleUpdate {
+                    memory_id: "missing".to_string(),
+                    metadata: Value::String("{}".to_string()),
+                    is_latest: false,
+                    lifecycle_state: "archived".to_string(),
+                    updated_at: Value::String("2026-07-19T13:03:00Z".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 3);
+    assert_eq!(output.rows.len(), 4);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 2);
+    assert_eq!(output.updated_property_count, 8);
+    assert_eq!(output.rows[0].updated_property_count, 4);
+    assert_eq!(output.rows[1].updated_property_count, 4);
+    assert!(output.rows[2].duplicate);
+    assert!(!output.rows[3].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_2".to_string(),
+            },
+        ],
+        property_names: vec![
+            "metadata".to_string(),
+            "is_latest".to_string(),
+            "lifecycle_state".to_string(),
+            "updated_at".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("metadata"),
+        Some(&Some(Value::String("{\"archived\":true}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("is_latest"),
+        Some(&Some(Value::Bool(false)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("lifecycle_state"),
+        Some(&Some(Value::String("archived".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("metadata"),
+        Some(&Some(Value::String("{\"reviewed\":true}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("lifecycle_state"),
+        Some(&Some(Value::String("active".to_string())))
+    );
+}
+
+#[test]
+fn memory_lifecycle_batch_rejects_empty_state_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1', lifecycle_state: 'active'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_memory_lifecycle_batch(&KnowledgeMemoryLifecycleBatchRequest {
+            updates: vec![KnowledgeMemoryLifecycleUpdate {
+                memory_id: "memory_1".to_string(),
+                metadata: Value::String("{}".to_string()),
+                is_latest: true,
+                lifecycle_state: String::new(),
+                updated_at: Value::String("2026-07-19T13:00:00Z".to_string()),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty lifecycle state"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_memory_lifecycle_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1', metadata: '{}', is_latest: true, lifecycle_state: 'active'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'memory_2', metadata: '{}', is_latest: true, lifecycle_state: 'active'})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_memory_lifecycle_batch(&KnowledgeMemoryLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeMemoryLifecycleUpdate {
+                    memory_id: "memory_1".to_string(),
+                    metadata: Value::String("{\"state\":\"archived\"}".to_string()),
+                    is_latest: false,
+                    lifecycle_state: "archived".to_string(),
+                    updated_at: Value::String("2026-07-19T13:00:00Z".to_string()),
+                },
+                KnowledgeMemoryLifecycleUpdate {
+                    memory_id: "memory_2".to_string(),
+                    metadata: Value::String("{\"state\":\"active\"}".to_string()),
+                    is_latest: true,
+                    lifecycle_state: "active".to_string(),
+                    updated_at: Value::String("2026-07-19T13:01:00Z".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            property_names: vec!["metadata".to_string(), "is_latest".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("metadata"),
+            Some(&Some(Value::String("{\"state\":\"archived\"}".to_string())))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("is_latest"),
+            Some(&Some(Value::Bool(false)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("metadata"),
+            Some(&Some(Value::String("{\"state\":\"active\"}".to_string())))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
