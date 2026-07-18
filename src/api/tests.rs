@@ -4734,6 +4734,41 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
 }
 
 #[test]
+fn plan_cache_misses_after_index_descriptor_changes() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+
+    let before_index = db.explain_query(query).unwrap();
+    let cached_before_index = db.explain_query(query).unwrap();
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+    let after_index = db.explain_query(query).unwrap();
+
+    assert!(before_index.trace.selected_plan.contains("SeqNodeScan"));
+    assert!(!before_index.trace.selected_plan.contains("IndexNodeSeek"));
+    assert!(cached_before_index
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "plan cache hit: exact parameterized physical plan"));
+    assert!(
+        after_index
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision
+                == "plan cache miss: optimized exact parameterized physical plan")
+    );
+    assert!(after_index.trace.selected_plan.contains("IndexNodeSeek"));
+    assert!(!after_index.trace.selected_plan.contains("SeqNodeScan"));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.hits, 1);
+    assert!(stats.misses >= 3);
+}
+
+#[test]
 fn plan_cache_evicts_least_frequently_used_plan() {
     let db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(2),
