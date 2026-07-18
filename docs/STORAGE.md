@@ -150,9 +150,13 @@ declared count agreement, duplicate node/relationship IDs, and relationship
 endpoint integrity.
 `skein graph-lightning-bootstrap-bundle [--require-ready] <database-path>`
 prints one machine-readable bootstrap evidence bundle containing the manifest,
-the GraphStream validation report, and a ready/blocked export gate decision. Use
-this as the CI or upload preflight entry point when the caller needs one JSON
-artifact instead of separate manifest and verifier commands. The export gate
+the GraphStream validation report, the source database's open-time storage
+recovery report, and a ready/blocked export gate decision. Use this as the CI or
+upload preflight entry point when the caller needs one JSON artifact instead of
+separate manifest and verifier commands. The storage recovery evidence records
+the actual open configuration used by the bundle command; callers that require
+strict or bounded WAL replay as a hard gate should also run
+`storage-recovery-report` with the matching `--require-*` flags. The export gate
 keeps a flattened `blockers` list for logs and also reports manifest and
 GraphStream blocker counts plus grouped blocker messages so import automation
 can distinguish snapshot readiness failures from stream artifact failures

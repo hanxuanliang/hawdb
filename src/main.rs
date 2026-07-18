@@ -351,7 +351,11 @@ fn main() -> Result<()> {
             }
             let mut db = Database::open(path)?;
             let export = db.prepare_graph_lightning_bootstrap_export()?;
-            let rendered = graph_lightning_bootstrap_bundle_json(&export);
+            let rendered = graph_lightning_bootstrap_bundle_json_with_storage_recovery(
+                &export,
+                db.storage_version(),
+                &db.storage_recovery_report(),
+            );
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
             if require_ready
                 && rendered
@@ -388,7 +392,12 @@ fn main() -> Result<()> {
             }
             let mut db = Database::open(database_path)?;
             let export = db.prepare_graph_lightning_bootstrap_export()?;
-            let catalog = stage_graph_lightning_bootstrap_export(&export, staging_dir)?;
+            let catalog = stage_graph_lightning_bootstrap_export_with_storage_recovery(
+                &export,
+                staging_dir,
+                db.storage_version(),
+                &db.storage_recovery_report(),
+            )?;
             println!("{}", serde_json::to_string_pretty(&catalog).unwrap());
             if require_ready
                 && catalog
@@ -988,8 +997,28 @@ fn graph_lightning_bootstrap_manifest_json(
     })
 }
 
+#[cfg(test)]
 fn graph_lightning_bootstrap_bundle_json(
     export: &skein::GraphLightningBootstrapExport,
+) -> serde_json::Value {
+    graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(export, None)
+}
+
+fn graph_lightning_bootstrap_bundle_json_with_storage_recovery(
+    export: &skein::GraphLightningBootstrapExport,
+    storage_version: &str,
+    storage_recovery: &StorageRecoveryReport,
+) -> serde_json::Value {
+    let storage_recovery_json = storage_recovery_report_json(storage_version, storage_recovery);
+    graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
+        export,
+        Some(storage_recovery_json),
+    )
+}
+
+fn graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
+    export: &skein::GraphLightningBootstrapExport,
+    storage_recovery: Option<serde_json::Value>,
 ) -> serde_json::Value {
     let graph_stream_validation = export
         .graph_stream
@@ -1010,7 +1039,7 @@ fn graph_lightning_bootstrap_bundle_json(
     } else {
         "blocked"
     };
-    serde_json::json!({
+    let mut bundle = serde_json::json!({
         "protocol": "graph-lightning-bootstrap-bundle",
         "manifest": graph_lightning_bootstrap_manifest_json(&export.manifest),
         "graph_stream_validation": graph_lightning_graph_stream_validation_json(&graph_stream_validation),
@@ -1022,16 +1051,49 @@ fn graph_lightning_bootstrap_bundle_json(
             "graph_stream_blocker_messages": graph_stream_blocker_messages,
             "blockers": blockers,
         },
-    })
+    });
+    if let Some(storage_recovery) = storage_recovery {
+        bundle
+            .as_object_mut()
+            .expect("bootstrap bundle JSON must be an object")
+            .insert("storage_recovery".to_string(), storage_recovery);
+    }
+    bundle
 }
 
+#[cfg(test)]
 fn stage_graph_lightning_bootstrap_export(
     export: &skein::GraphLightningBootstrapExport,
     staging_dir: impl AsRef<Path>,
 ) -> Result<serde_json::Value> {
+    stage_graph_lightning_bootstrap_export_with_optional_storage_recovery(export, staging_dir, None)
+}
+
+fn stage_graph_lightning_bootstrap_export_with_storage_recovery(
+    export: &skein::GraphLightningBootstrapExport,
+    staging_dir: impl AsRef<Path>,
+    storage_version: &str,
+    storage_recovery: &StorageRecoveryReport,
+) -> Result<serde_json::Value> {
+    let storage_recovery_json = storage_recovery_report_json(storage_version, storage_recovery);
+    stage_graph_lightning_bootstrap_export_with_optional_storage_recovery(
+        export,
+        staging_dir,
+        Some(storage_recovery_json),
+    )
+}
+
+fn stage_graph_lightning_bootstrap_export_with_optional_storage_recovery(
+    export: &skein::GraphLightningBootstrapExport,
+    staging_dir: impl AsRef<Path>,
+    storage_recovery: Option<serde_json::Value>,
+) -> Result<serde_json::Value> {
     let staging_dir = staging_dir.as_ref();
     fs::create_dir_all(staging_dir)?;
-    let bundle = graph_lightning_bootstrap_bundle_json(export);
+    let bundle = graph_lightning_bootstrap_bundle_json_with_optional_storage_recovery(
+        export,
+        storage_recovery,
+    );
     let manifest = graph_lightning_bootstrap_manifest_json(&export.manifest);
     let graph_stream_validation = export
         .graph_stream
@@ -2887,6 +2949,7 @@ mod tests {
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
         add_shadow_trace_report, canonical_snapshot_validation_json, cutover_evidence_is_eligible,
         enforce_storage_recovery_requirements, graph_lightning_bootstrap_bundle_json,
+        graph_lightning_bootstrap_bundle_json_with_storage_recovery,
         graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
         graph_lightning_bootstrap_manifest_usage, graph_lightning_gc_staging_report,
         graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
@@ -3448,6 +3511,54 @@ mod tests {
             .as_array()
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn bootstrap_bundle_can_include_storage_recovery_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
+            .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let recovery = StorageRecoveryReport {
+            durable: true,
+            recovery_mode: RecoveryMode::TolerateTornTail,
+            max_wal_replay_entries: Some(32),
+            checkpoint_epoch: Some(1),
+            checkpoint_commit_epoch: Some(export.manifest.graph_commit_epoch),
+            wal_present: true,
+            wal_replay_start_lsn: Some(1),
+            next_lsn_after_replay: Some(1),
+            replayed_wal_entries: 0,
+            torn_tail_ignored: false,
+            torn_tail_reason: None,
+            recovered_commit_epoch: export.manifest.graph_commit_epoch,
+        };
+
+        let json = graph_lightning_bootstrap_bundle_json_with_storage_recovery(
+            &export,
+            "skein-storage-v1",
+            &recovery,
+        );
+
+        assert_eq!(
+            json["storage_recovery"]["protocol"],
+            "skein-storage-recovery-report"
+        );
+        assert_eq!(
+            json["storage_recovery"]["storage_version"],
+            "skein-storage-v1"
+        );
+        assert_eq!(json["storage_recovery"]["max_wal_replay_entries"], 32);
+        assert_eq!(
+            json["storage_recovery"]["recovered_commit_epoch"],
+            json["manifest"]["graph_commit_epoch"]
+        );
+        assert_eq!(
+            json["storage_recovery"]["readiness"]["wal_replay_bounded"],
+            true
+        );
+        assert_eq!(json["manifest"]["protocol"], "graph-lightning-bootstrap");
+        assert_eq!(json["export_gate"]["decision"], "ready");
     }
 
     #[test]
