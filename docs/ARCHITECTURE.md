@@ -268,9 +268,10 @@ Skein should use a Cascades model similar to Chryso:
 - `PhysicalProperties`: required and delivered ordering, distinctness, and
   binding properties.
 - `OptimizerTrace`: deterministic diagnostics for rules, groups, candidates,
-  costs, warnings, and search limits. If a logical plan exceeds
-  `OptimizerConfig::max_groups`, Skein does not build an oversized memo; it
-  records a budget warning and selects a deterministic direct physical fallback.
+  costs, warnings, search limits, and selected physical plan operator/class
+  histograms. If a logical plan exceeds `OptimizerConfig::max_groups`, Skein
+  does not build an oversized memo; it records a budget warning and selects a
+  deterministic direct physical fallback.
 
 Unlike Chryso, Skein needs graph-specific properties:
 

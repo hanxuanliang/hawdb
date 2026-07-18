@@ -1963,6 +1963,8 @@ impl CascadesOptimizer {
             let selected_plan = plan.explain(0);
             let selected_plan_fingerprint = plan.fingerprint();
             let selected_plan_cost = estimate_physical_plan_cost(&plan, catalog);
+            let selected_plan_operator_counts = physical_plan_operator_counts(&plan);
+            let selected_plan_class_counts = physical_plan_class_counts(&plan);
             decisions.push(format_selected_plan_cost(selected_plan_cost));
             return (
                 plan,
@@ -1971,6 +1973,8 @@ impl CascadesOptimizer {
                     selected_plan,
                     selected_plan_fingerprint,
                     selected_plan_cost,
+                    selected_plan_operator_counts,
+                    selected_plan_class_counts,
                     warnings: vec![format!(
                         "optimizer memo budget exceeded: required_groups={required_groups} max_groups={}; used deterministic direct physical fallback",
                         self.config.max_groups
@@ -1986,6 +1990,8 @@ impl CascadesOptimizer {
         let selected_plan = plan.explain(0);
         let selected_plan_fingerprint = plan.fingerprint();
         let selected_plan_cost = estimate_physical_plan_cost(&plan, catalog);
+        let selected_plan_operator_counts = physical_plan_operator_counts(&plan);
+        let selected_plan_class_counts = physical_plan_class_counts(&plan);
         decisions.push(format_selected_plan_cost(selected_plan_cost));
         (
             plan,
@@ -1994,6 +2000,8 @@ impl CascadesOptimizer {
                 selected_plan,
                 selected_plan_fingerprint,
                 selected_plan_cost,
+                selected_plan_operator_counts,
+                selected_plan_class_counts,
                 warnings: Vec::new(),
                 decisions,
             },
@@ -4050,6 +4058,34 @@ fn format_selected_plan_cost(cost: PlanCost) -> String {
         "selected physical plan cost: estimated_rows={} cost={}",
         cost.estimated_rows, cost.cost
     )
+}
+
+fn physical_plan_operator_counts(plan: &PhysicalPlan) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    visit_physical_plan(plan, &mut |node| {
+        *counts.entry(node.kind().as_str().to_string()).or_default() += 1;
+    });
+    counts
+}
+
+fn physical_plan_class_counts(plan: &PhysicalPlan) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    visit_physical_plan(plan, &mut |node| {
+        *counts.entry(node.class().as_str().to_string()).or_default() += 1;
+    });
+    counts
+}
+
+fn visit_physical_plan(plan: &PhysicalPlan, visitor: &mut impl FnMut(&PhysicalPlan)) {
+    visitor(plan);
+    match plan.children() {
+        PhysicalPlanChildren::None => {}
+        PhysicalPlanChildren::Unary(input) => visit_physical_plan(input, visitor),
+        PhysicalPlanChildren::Binary(left, right) => {
+            visit_physical_plan(left, visitor);
+            visit_physical_plan(right, visitor);
+        }
+    }
 }
 
 fn order_single_row_cartesian_product_children(
@@ -6754,6 +6790,79 @@ mod tests {
         assert_eq!(right.kind(), PhysicalPlanKind::SeqNodeScan);
         assert_eq!(left.class(), PhysicalPlanClass::Access);
         assert_eq!(right.class(), PhysicalPlanClass::Access);
+    }
+
+    #[test]
+    fn optimizer_trace_reports_physical_plan_operator_and_class_counts() {
+        let logical = LogicalPlan::Project {
+            items: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "title".to_string(),
+                },
+                name: "title".to_string(),
+            }],
+            input: Box::new(LogicalPlan::Filter {
+                predicate: Predicate::PropertyEq {
+                    variable: "m".to_string(),
+                    property: "id".to_string(),
+                    value: Value::Int(1),
+                },
+                input: Box::new(LogicalPlan::NodeScan {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                }),
+            }),
+        };
+        let catalog = OptimizerCatalog::new(
+            OptimizerCatalogIndexes::new([("Memory".to_string(), "id".to_string())], [], [], []),
+            OptimizerCatalogStatistics::new(
+                [("Memory".to_string(), 100)],
+                [],
+                [],
+                [],
+                [],
+                [(("Memory".to_string(), "id".to_string()), 100)],
+                [],
+            ),
+        );
+
+        let (_, trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 16 })
+            .optimize_with_catalog(&logical, &catalog);
+        assert_eq!(
+            trace.selected_plan_operator_counts.get("ProjectExec"),
+            Some(&1)
+        );
+        assert_eq!(
+            trace.selected_plan_operator_counts.get("IndexNodeSeek"),
+            Some(&1)
+        );
+        assert_eq!(trace.selected_plan_operator_counts.get("FilterExec"), None);
+        assert_eq!(trace.selected_plan_class_counts.get("relational"), Some(&1));
+        assert_eq!(trace.selected_plan_class_counts.get("access"), Some(&1));
+
+        let (_, fallback_trace) = CascadesOptimizer::new(OptimizerConfig { max_groups: 1 })
+            .optimize_with_catalog(&logical, &catalog);
+        assert_eq!(
+            fallback_trace
+                .selected_plan_operator_counts
+                .get("ProjectExec"),
+            Some(&1)
+        );
+        assert_eq!(
+            fallback_trace
+                .selected_plan_operator_counts
+                .get("IndexNodeSeek"),
+            Some(&1)
+        );
+        assert_eq!(
+            fallback_trace.selected_plan_class_counts.get("relational"),
+            Some(&1)
+        );
+        assert_eq!(
+            fallback_trace.selected_plan_class_counts.get("access"),
+            Some(&1)
+        );
     }
 
     #[test]

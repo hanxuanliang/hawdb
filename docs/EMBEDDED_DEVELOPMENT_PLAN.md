@@ -917,6 +917,11 @@ Current implemented slice:
   selected input cardinality, so selective seek inputs no longer make the trace
   report full-label expand cost; endpoint cartesian products report estimated
   left/right rows, output rows, and product cost
+- `OptimizerTrace::selected_plan_operator_counts` and
+  `OptimizerTrace::selected_plan_class_counts` expose stable selected-plan
+  histograms derived from physical plan metadata, so diagnostics do not need to
+  parse English explain text to detect operator mix or schema/mutation/access/
+  traversal/relational/procedure composition
 - endpoint cartesian products whose flattened inputs all estimate to one row
   choose a stable left-deep physical input order by child cost and fingerprint,
   covering Nowledge endpoint-existence checks without changing broader
