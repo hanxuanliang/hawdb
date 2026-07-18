@@ -13,9 +13,10 @@ use super::{
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest,
-    KnowledgeGraphPathDirection, KnowledgeLabelLifecycleBatchRequest,
-    KnowledgeLabelLifecycleUpdate, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
+    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeLabelLifecycleBatchRequest, KnowledgeLabelLifecycleUpdate,
+    KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
     KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
@@ -7983,6 +7984,140 @@ fn typed_graph_meta_stamp_persists_as_one_wal_batch_and_replays() {
         assert_eq!(rows.rows[0].get("resolution"), Some(&Value::Float(1.0)));
         assert_eq!(rows.rows[0].get("count"), Some(&Value::Int(0)));
         assert_eq!(rows.rows[0].get("computed"), Some(&Value::Null));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_graph_meta_by_meta_id_for_nowledge_algorithm_state() {
+    let mut db = Database::new();
+    db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, community_detection_applied: false, pagerank_computed_at: 100})")
+        .unwrap();
+
+    let output = db
+        .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+            meta_id: "main".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, 1);
+    assert!(output.found);
+    let meta = output.meta.unwrap();
+    assert_eq!(meta.meta_id.as_deref(), Some("main"));
+    assert_eq!(
+        meta.properties.get("pagerank_applied"),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        meta.properties.get("community_detection_applied"),
+        Some(&Value::Bool(false))
+    );
+    assert_eq!(
+        meta.properties.get("pagerank_computed_at"),
+        Some(&Value::Int(100))
+    );
+
+    let missing = db
+        .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+            meta_id: "missing".to_string(),
+        })
+        .unwrap();
+    assert_eq!(missing.graph_commit_epoch, 1);
+    assert!(!missing.found);
+    assert!(missing.meta.is_none());
+}
+
+#[test]
+fn graph_meta_read_and_delete_reject_empty_meta_id_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let read_error = db
+        .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+            meta_id: String::new(),
+        })
+        .unwrap_err();
+    assert!(read_error.to_string().contains("non-empty meta id"));
+
+    let delete_error = db
+        .delete_knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+            meta_id: String::new(),
+        })
+        .unwrap_err();
+    assert!(delete_error.to_string().contains("non-empty meta id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn graph_meta_delete_missing_does_not_write_wal() {
+    let path = unique_test_dir("graph_meta_delete_missing");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
+            .unwrap();
+    }
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    {
+        let mut db = Database::open(&path).unwrap();
+        let graph_commit_epoch_before = db.store.commit_epoch();
+        let output = db
+            .delete_knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+                meta_id: "missing".to_string(),
+            })
+            .unwrap();
+        assert_eq!(output.graph_commit_epoch_before, graph_commit_epoch_before);
+        assert_eq!(output.graph_commit_epoch_after, graph_commit_epoch_before);
+        assert!(output.node_id.is_none());
+        assert!(!output.matched);
+        assert!(!output.deleted);
+    }
+    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal_after, wal_before);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn typed_graph_meta_delete_persists_and_replays() {
+    let path = unique_test_dir("typed_graph_meta_delete_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
+            .unwrap();
+        db.query("CREATE (:GraphMeta {meta_id: 'community', community_detection_applied: true})")
+            .unwrap();
+    }
+    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_batch_count = setup_wal.matches("\tbatch\t").count();
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .delete_knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+                meta_id: "main".to_string(),
+            })
+            .unwrap();
+        assert!(output.matched);
+        assert!(output.deleted);
+        assert!(output.node_id.is_some());
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("delete_node"));
+    assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);
+    {
+        let db = Database::open(&path).unwrap();
+        let main = db
+            .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+                meta_id: "main".to_string(),
+            })
+            .unwrap();
+        assert!(!main.found);
+        let community = db
+            .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
+                meta_id: "community".to_string(),
+            })
+            .unwrap();
+        assert!(community.found);
     }
     std::fs::remove_dir_all(path).unwrap();
 }

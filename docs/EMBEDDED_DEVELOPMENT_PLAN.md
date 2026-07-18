@@ -399,6 +399,12 @@ non-empty Community ids and names, non-negative numeric counters, and finite
 resolutions before WAL, reports existing, missing, duplicate, and non-writable
 rows, fixes detection-result `algorithm` to `louvain`, and commits eligible
 creates plus summary updates through one grouped WAL batch.
+GraphMeta state reads and cleanup deletes used by PageRank, community
+detection, and fixture reset paths are available as
+`Database::knowledge_graph_meta` and `Database::delete_knowledge_graph_meta`.
+They use `meta_id` as the explicit identity, reject empty identities before
+WAL, preserve missing-row no-write semantics, and route eligible deletes
+through the WAL-backed `DELETE` path.
 Community node cleanup for replace-community and undo-community flows is
 available as `Database::delete_knowledge_communities`. It scans only
 `Community` nodes, supports the two Nowledge cleanup modes (`DELETE` and

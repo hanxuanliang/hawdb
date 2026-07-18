@@ -2223,6 +2223,34 @@ pub struct KnowledgeGraphMetaStampBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaRequest {
+    pub meta_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMeta {
+    pub meta_id: Option<String>,
+    pub node_id: u64,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaOutput {
+    pub graph_commit_epoch: u64,
+    pub found: bool,
+    pub meta: Option<KnowledgeGraphMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaDeleteOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSchemaMigrationApply {
     pub migration_id: String,
     pub applied_at: Value,
@@ -4236,6 +4264,20 @@ impl Database {
         request: &KnowledgeGraphMetaStampBatchRequest,
     ) -> Result<KnowledgeGraphMetaStampBatchOutput> {
         stamp_knowledge_graph_meta_batch_for(self, request)
+    }
+
+    pub fn knowledge_graph_meta(
+        &self,
+        request: &KnowledgeGraphMetaRequest,
+    ) -> Result<KnowledgeGraphMetaOutput> {
+        knowledge_graph_meta_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn delete_knowledge_graph_meta(
+        &mut self,
+        request: &KnowledgeGraphMetaRequest,
+    ) -> Result<KnowledgeGraphMetaDeleteOutput> {
+        delete_knowledge_graph_meta_for(self, request)
     }
 
     pub fn apply_knowledge_schema_migrations_batch(
@@ -9121,6 +9163,98 @@ fn knowledge_community_cleanup_statement(
     let verb = if detach { "DETACH DELETE" } else { "DELETE" };
     Ok((
         format!("MATCH (c:Community) WHERE id(c) = $node_id {verb} c"),
+        BTreeMap::from([("node_id".to_string(), Value::Int(node_id))]),
+    ))
+}
+
+fn knowledge_graph_meta_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeGraphMetaRequest,
+) -> Result<KnowledgeGraphMetaOutput> {
+    validate_graph_meta_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let meta = node_by_label_property_external_id(
+        catalog,
+        store,
+        "GraphMeta",
+        "meta_id",
+        &request.meta_id,
+    )
+    .map(knowledge_graph_meta_from_node);
+    Ok(KnowledgeGraphMetaOutput {
+        graph_commit_epoch,
+        found: meta.is_some(),
+        meta,
+    })
+}
+
+fn delete_knowledge_graph_meta_for(
+    db: &mut Database,
+    request: &KnowledgeGraphMetaRequest,
+) -> Result<KnowledgeGraphMetaDeleteOutput> {
+    db.ensure_writable()?;
+    validate_graph_meta_request(request)?;
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let Some(node_id) = node_by_label_property_external_id(
+        &db.catalog,
+        &db.store,
+        "GraphMeta",
+        "meta_id",
+        &request.meta_id,
+    )
+    .map(|node| node.id) else {
+        return Ok(KnowledgeGraphMetaDeleteOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            node_id: None,
+            matched: false,
+            deleted: false,
+        });
+    };
+
+    let (cypher, parameters) = knowledge_graph_meta_delete_statement(node_id)?;
+    let mut tx = db.begin_transaction();
+    tx.query_with_params(cypher.as_str(), &parameters)?;
+    tx.commit()?;
+
+    Ok(KnowledgeGraphMetaDeleteOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        node_id: Some(node_id.0),
+        matched: true,
+        deleted: true,
+    })
+}
+
+fn validate_graph_meta_request(request: &KnowledgeGraphMetaRequest) -> Result<()> {
+    if request.meta_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge graph meta request requires a non-empty meta id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_graph_meta_from_node(node: &NodeRecord) -> KnowledgeGraphMeta {
+    KnowledgeGraphMeta {
+        meta_id: node
+            .properties
+            .get("meta_id")
+            .map(value_to_external_id)
+            .filter(|meta_id| !meta_id.is_empty()),
+        node_id: node.id.0,
+        properties: node.properties.clone(),
+    }
+}
+
+fn knowledge_graph_meta_delete_statement(
+    node_id: NodeId,
+) -> Result<(String, BTreeMap<String, Value>)> {
+    let node_id = i64::try_from(node_id.0)
+        .map_err(|_| SkeinError::Semantic("node id does not fit Cypher integer".to_string()))?;
+    Ok((
+        "MATCH (m:GraphMeta) WHERE id(m) = $node_id DELETE m".to_string(),
         BTreeMap::from([("node_id".to_string(), Value::Int(node_id))]),
     ))
 }
@@ -14613,6 +14747,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeGraphMetaStampBatchRequest,
     ) -> Result<KnowledgeGraphMetaStampBatchOutput> {
         self.db.stamp_knowledge_graph_meta_batch(request)
+    }
+
+    pub fn knowledge_graph_meta(
+        &self,
+        request: &KnowledgeGraphMetaRequest,
+    ) -> Result<KnowledgeGraphMetaOutput> {
+        self.db.knowledge_graph_meta(request)
+    }
+
+    pub fn delete_knowledge_graph_meta(
+        &mut self,
+        request: &KnowledgeGraphMetaRequest,
+    ) -> Result<KnowledgeGraphMetaDeleteOutput> {
+        self.db.delete_knowledge_graph_meta(request)
     }
 
     pub fn apply_knowledge_schema_migrations_batch(
