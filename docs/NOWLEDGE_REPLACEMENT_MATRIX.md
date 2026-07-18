@@ -228,6 +228,13 @@ validates job ids, job types, progress percentages, progress messages, and
 failure messages before WAL, reports missing, existing, status-mismatched, and
 duplicate jobs without writing, and commits eligible creates/updates through
 one grouped WAL batch.
+AugmentationJob stale/orphan interrupt writes are covered by
+`Database::interrupt_knowledge_augmentation_jobs` for the Nowledge
+`interrupt_orphaned_jobs` shape. The wrapper scans only `AugmentationJob`
+nodes in `pending` or `running` state, validates the interruption reason before
+WAL, marks eligible jobs as `failed` with the production interruption message,
+does not write WAL when no eligible jobs exist, and commits eligible updates
+through one grouped WAL batch.
 Source-reference relationship cleanup is covered by a typed API for Nowledge
 memory/source delete flows. `Database::delete_knowledge_source_reference_relationships`
 scans only `RELATES_TO.source_reference`, rejects empty references before WAL,

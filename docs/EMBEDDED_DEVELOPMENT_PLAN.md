@@ -405,6 +405,12 @@ available as `Database::delete_knowledge_communities`. It scans only
 `DETACH DELETE`), preserves non-Community endpoint nodes under detach cleanup,
 does not write WAL when no Community nodes exist, and commits eligible deletes
 through one grouped WAL batch.
+AugmentationJob stale/orphan interruption used by background job cleanup is
+available as `Database::interrupt_knowledge_augmentation_jobs`. It scans only
+`AugmentationJob` nodes in `pending` or `running` state, validates the
+interruption reason before WAL, marks eligible jobs as `failed` with the
+production interruption message, does not write WAL when no eligible jobs
+exist, and commits eligible updates through one grouped WAL batch.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.

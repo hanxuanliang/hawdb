@@ -2314,6 +2314,31 @@ pub struct KnowledgeAugmentationJobLifecycleBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeAugmentationJobInterruptRequest {
+    pub error_message: String,
+    pub completed_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeAugmentationJobInterruptRow {
+    pub job_id: Option<String>,
+    pub node_id: u64,
+    pub previous_status: String,
+    pub interrupted: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeAugmentationJobInterruptOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeAugmentationJobInterruptRow>,
+    pub candidate_count: usize,
+    pub interrupted_count: usize,
+    pub updated_property_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
@@ -4177,6 +4202,13 @@ impl Database {
         request: &KnowledgeAugmentationJobLifecycleBatchRequest,
     ) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
         update_knowledge_augmentation_jobs_batch_for(self, request)
+    }
+
+    pub fn interrupt_knowledge_augmentation_jobs(
+        &mut self,
+        request: &KnowledgeAugmentationJobInterruptRequest,
+    ) -> Result<KnowledgeAugmentationJobInterruptOutput> {
+        interrupt_knowledge_augmentation_jobs_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -9698,6 +9730,97 @@ fn augmentation_job_create_statement(
     (cypher, parameters)
 }
 
+fn interrupt_knowledge_augmentation_jobs_for(
+    db: &mut Database,
+    request: &KnowledgeAugmentationJobInterruptRequest,
+) -> Result<KnowledgeAugmentationJobInterruptOutput> {
+    db.ensure_writable()?;
+    if request.error_message.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge augmentation job interrupt requires a non-empty error message".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let Some(label_id) = db.catalog.label_id("AugmentationJob") else {
+        return Ok(KnowledgeAugmentationJobInterruptOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows: Vec::new(),
+            candidate_count: 0,
+            interrupted_count: 0,
+            updated_property_count: 0,
+        });
+    };
+
+    let mut rows = db
+        .store
+        .scan_nodes(Some(label_id))
+        .filter_map(|node| {
+            let previous_status = augmentation_job_status(node)?;
+            matches!(previous_status.as_str(), "pending" | "running").then(|| {
+                KnowledgeAugmentationJobInterruptRow {
+                    job_id: node
+                        .properties
+                        .get("job_id")
+                        .map(value_to_external_id)
+                        .filter(|job_id| !job_id.is_empty()),
+                    node_id: node.id.0,
+                    previous_status,
+                    interrupted: true,
+                    updated_property_count: 4,
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.node_id);
+
+    if rows.is_empty() {
+        return Ok(KnowledgeAugmentationJobInterruptOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            candidate_count: 0,
+            interrupted_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let assignments = BTreeMap::from([
+        ("status".to_string(), Value::String("failed".to_string())),
+        (
+            "message".to_string(),
+            Value::String("Interrupted before completion".to_string()),
+        ),
+        (
+            "error_message".to_string(),
+            Value::String(request.error_message.clone()),
+        ),
+        ("completed_at".to_string(), request.completed_at.clone()),
+    ]);
+    let mut tx = db.begin_transaction();
+    for row in &rows {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("AugmentationJob", row.node_id, &assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+    let interrupted_count = rows.len();
+    let updated_property_count = rows
+        .iter()
+        .map(|row| row.updated_property_count)
+        .sum::<usize>();
+
+    Ok(KnowledgeAugmentationJobInterruptOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        candidate_count: rows.len(),
+        rows,
+        interrupted_count,
+        updated_property_count,
+    })
+}
+
 fn delete_knowledge_entity_for(
     db: &mut Database,
     request: &KnowledgeEntityDeleteRequest,
@@ -14293,6 +14416,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeAugmentationJobLifecycleBatchRequest,
     ) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
         self.db.update_knowledge_augmentation_jobs_batch(request)
+    }
+
+    pub fn interrupt_knowledge_augmentation_jobs(
+        &mut self,
+        request: &KnowledgeAugmentationJobInterruptRequest,
+    ) -> Result<KnowledgeAugmentationJobInterruptOutput> {
+        self.db.interrupt_knowledge_augmentation_jobs(request)
     }
 
     pub fn delete_knowledge_entity(
