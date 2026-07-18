@@ -5516,6 +5516,9 @@ fn equality_index_seek_from_conjunction(
     ) {
         return Some(plan);
     }
+    let label_count = catalog.label_count(label);
+    let scan_cost = label_count.saturating_add(4);
+    let mut best_candidate: Option<(u64, PhysicalPlan, String)> = None;
     for predicate in predicates {
         let Predicate::PropertyEq {
             variable,
@@ -5528,16 +5531,14 @@ fn equality_index_seek_from_conjunction(
         if variable != scan_variable || !catalog.has_property_index(label, property) {
             continue;
         }
-        let label_count = catalog.label_count(label);
         let distinct_count = catalog.distinct_count(label, property).max(1);
         let estimated_rows = label_count.div_ceil(distinct_count).max(1);
-        let scan_cost = label_count.saturating_add(4);
         let seek_cost = estimated_rows.saturating_mul(2).saturating_add(1);
         if seek_cost <= scan_cost {
-            decisions.push(format!(
+            let decision = format!(
                 "choose IndexNodeSeek for {label}.{property} in conjunction: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} distinct_count={distinct_count}"
-            ));
-            return Some(PhysicalPlan::FilterExec {
+            );
+            let plan = PhysicalPlan::FilterExec {
                 predicate: full_predicate.clone(),
                 input: Box::new(PhysicalPlan::IndexNodeSeek {
                     variable: variable.clone(),
@@ -5545,7 +5546,13 @@ fn equality_index_seek_from_conjunction(
                     property: property.clone(),
                     value: value.clone(),
                 }),
-            });
+            };
+            if best_candidate
+                .as_ref()
+                .is_none_or(|(best_cost, _, _)| seek_cost < *best_cost)
+            {
+                best_candidate = Some((seek_cost, plan, decision));
+            }
         }
     }
     for predicate in predicates {
@@ -5560,23 +5567,21 @@ fn equality_index_seek_from_conjunction(
         if variable != scan_variable || !catalog.has_property_index(label, property) {
             continue;
         }
-        let label_count = catalog.label_count(label);
         let distinct_count = catalog.distinct_count(label, property).max(1);
         let rows_per_value = label_count.div_ceil(distinct_count).max(1);
         let estimated_rows = rows_per_value
             .saturating_mul(values.len() as u64)
             .min(label_count)
             .max(1);
-        let scan_cost = label_count.saturating_add(4);
         let seek_cost = estimated_rows
             .saturating_mul(2)
             .saturating_add(values.len() as u64);
         if seek_cost <= scan_cost {
-            decisions.push(format!(
+            let decision = format!(
                 "choose IndexNodeMultiSeek for {label}.{property} in conjunction: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} distinct_count={distinct_count} value_count={}",
                 values.len()
-            ));
-            return Some(PhysicalPlan::FilterExec {
+            );
+            let plan = PhysicalPlan::FilterExec {
                 predicate: full_predicate.clone(),
                 input: Box::new(PhysicalPlan::IndexNodeMultiSeek {
                     variable: variable.clone(),
@@ -5584,8 +5589,18 @@ fn equality_index_seek_from_conjunction(
                     property: property.clone(),
                     values: values.clone(),
                 }),
-            });
+            };
+            if best_candidate
+                .as_ref()
+                .is_none_or(|(best_cost, _, _)| seek_cost < *best_cost)
+            {
+                best_candidate = Some((seek_cost, plan, decision));
+            }
         }
+    }
+    if let Some((_, plan, decision)) = best_candidate {
+        decisions.push(decision);
+        return Some(plan);
     }
     None
 }

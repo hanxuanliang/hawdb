@@ -898,7 +898,8 @@ Current implemented slice:
   `IndexNodeSeek`, and low-selectivity predicates can keep the scan path with an
   explainable optimizer trace decision; indexed property-list predicates can
   choose `IndexNodeMultiSeek` for Nowledge feed and source coverage shapes such
-  as `WHERE c.id IN $ids`
+  as `WHERE c.id IN $ids`, including cost-based selection among equality and
+  list predicates inside the same conjunction
 - metadata-aware expand cardinality estimates for bounded outgoing patterns:
   the optimizer consumes label/type/label path counts and relationship fanout
   summaries, applies relationship-property distinct counts for property pattern

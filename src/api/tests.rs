@@ -5209,6 +5209,57 @@ fn explicit_index_ddl_enables_index_multi_seek_plans_for_property_in() {
 }
 
 #[test]
+fn indexed_property_in_parameter_list_keeps_residual_filters() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'a', title: 'A', lifecycle_state: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'b', title: 'B', lifecycle_state: 'archived'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'c', title: 'C', lifecycle_state: 'active'})")
+        .unwrap();
+    for id in 0..32 {
+        db.query(&format!(
+            "CREATE (:Memory {{id: 'extra-{id}', title: 'Extra {id}', lifecycle_state: 'active'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Memory(id)").unwrap();
+
+    let parameters = BTreeMap::from([(
+        "ids".to_string(),
+        Value::List(vec![
+            Value::String("a".to_string()),
+            Value::String("b".to_string()),
+            Value::String("a".to_string()),
+        ]),
+    )]);
+    let cypher =
+        "MATCH (m:Memory) WHERE m.id IN $ids AND m.lifecycle_state = 'active' RETURN m.id AS id";
+
+    let explain = db.explain_query_with_params(cypher, &parameters).unwrap();
+    let physical_plan = explain.physical_plan.explain(0);
+    assert!(physical_plan.contains("IndexNodeMultiSeek"));
+    assert!(physical_plan.contains("FilterExec"));
+    assert!(explain
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision.contains("choose IndexNodeMultiSeek")));
+
+    let output = db
+        .query_with_params(
+            "MATCH (m:Memory) WHERE m.id IN $ids AND m.lifecycle_state = 'active' RETURN m.id AS id ORDER BY id ASC",
+            &parameters,
+        )
+        .unwrap();
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(
+        output.rows[0].get("id"),
+        Some(&Value::String("a".to_string()))
+    );
+}
+
+#[test]
 fn composite_index_ddl_enables_composite_index_seek_plans() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {kind: 'note', source_id: 'a', title: 'One'})")
