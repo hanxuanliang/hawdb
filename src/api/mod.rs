@@ -1445,6 +1445,39 @@ pub struct KnowledgePropertyUpdateOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePropertyUpdateBatchRequest {
+    pub updates: Vec<KnowledgePropertyUpdateRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedPropertyUpdateBatchRequest {
+    pub updates: Vec<KnowledgePropertyUpdateRequest>,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePropertyUpdateBatchRow {
+    pub entity: KnowledgeEntityRequest,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub filtered_out: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePropertyUpdateBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgePropertyUpdateBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub filtered_out_count: usize,
+    pub non_writable_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -2958,6 +2991,20 @@ impl Database {
         request: &KnowledgeScopedPropertyUpdateRequest,
     ) -> Result<KnowledgePropertyUpdateOutput> {
         update_scoped_knowledge_properties_for(self, request)
+    }
+
+    pub fn update_knowledge_properties_batch(
+        &mut self,
+        request: &KnowledgePropertyUpdateBatchRequest,
+    ) -> Result<KnowledgePropertyUpdateBatchOutput> {
+        update_knowledge_properties_batch_for(self, request)
+    }
+
+    pub fn update_scoped_knowledge_properties_batch(
+        &mut self,
+        request: &KnowledgeScopedPropertyUpdateBatchRequest,
+    ) -> Result<KnowledgePropertyUpdateBatchOutput> {
+        update_scoped_knowledge_properties_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -4586,19 +4633,11 @@ fn update_scoped_knowledge_properties_for(
     }
     let node_id = seed.id.0;
 
-    let mut cypher = format!(
-        "MATCH (n:{}) WHERE id(n) = $node_id SET ",
-        request.update.entity.label
+    let (cypher, parameters) = knowledge_property_update_statement(
+        request.update.entity.label.as_str(),
+        node_id,
+        &request.update.assignments,
     );
-    let mut parameters = BTreeMap::from([("node_id".to_string(), Value::Int(node_id as i64))]);
-    for (index, (property, value)) in request.update.assignments.iter().enumerate() {
-        if index > 0 {
-            cypher.push_str(", ");
-        }
-        let parameter_name = format!("value_{index}");
-        cypher.push_str(&format!("n.{property} = ${parameter_name}"));
-        parameters.insert(parameter_name, value.clone());
-    }
     db.query_with_params(cypher.as_str(), &parameters)?;
     Ok(KnowledgePropertyUpdateOutput {
         graph_commit_epoch_before,
@@ -4607,6 +4646,159 @@ fn update_scoped_knowledge_properties_for(
         matched: true,
         filtered_out: false,
         updated_property_count: request.update.assignments.len(),
+    })
+}
+
+fn knowledge_property_update_statement(
+    label: &str,
+    node_id: u64,
+    assignments: &BTreeMap<String, Value>,
+) -> (String, BTreeMap<String, Value>) {
+    let mut cypher = format!("MATCH (n:{label}) WHERE id(n) = $node_id SET ");
+    let mut parameters = BTreeMap::from([("node_id".to_string(), Value::Int(node_id as i64))]);
+    for (index, (property, value)) in assignments.iter().enumerate() {
+        if index > 0 {
+            cypher.push_str(", ");
+        }
+        let parameter_name = format!("value_{index}");
+        cypher.push_str(&format!("n.{property} = ${parameter_name}"));
+        parameters.insert(parameter_name, value.clone());
+    }
+    (cypher, parameters)
+}
+
+fn update_knowledge_properties_batch_for(
+    db: &mut Database,
+    request: &KnowledgePropertyUpdateBatchRequest,
+) -> Result<KnowledgePropertyUpdateBatchOutput> {
+    update_scoped_knowledge_properties_batch_for(
+        db,
+        &KnowledgeScopedPropertyUpdateBatchRequest {
+            updates: request.updates.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn update_scoped_knowledge_properties_batch_for(
+    db: &mut Database,
+    request: &KnowledgeScopedPropertyUpdateBatchRequest,
+) -> Result<KnowledgePropertyUpdateBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.assignments.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge property batch update requires every row to have at least one assignment"
+                    .to_string(),
+            ));
+        }
+        validate_cypher_identifier(&update.entity.label, "label")?;
+        for property in update.assignments.keys() {
+            validate_cypher_identifier(property, "property")?;
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_property_count = 0;
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            update.entity.label.as_str(),
+            update.entity.external_id.as_str(),
+        ) else {
+            missing_count += 1;
+            rows.push(KnowledgePropertyUpdateBatchRow {
+                entity: update.entity.clone(),
+                node_id: None,
+                matched: false,
+                filtered_out: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id.0;
+        if !node_has_external_id_property(seed, update.entity.external_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgePropertyUpdateBatchRow {
+                entity: update.entity.clone(),
+                node_id: Some(node_id),
+                matched: false,
+                filtered_out: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !request.metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(&db.catalog, seed, &request.metadata_filters)
+        {
+            filtered_out_count += 1;
+            rows.push(KnowledgePropertyUpdateBatchRow {
+                entity: update.entity.clone(),
+                node_id: Some(node_id),
+                matched: false,
+                filtered_out: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let row_updated_property_count = update.assignments.len();
+        matched_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((update.clone(), node_id));
+        rows.push(KnowledgePropertyUpdateBatchRow {
+            entity: update.entity.clone(),
+            node_id: Some(node_id),
+            matched: true,
+            filtered_out: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgePropertyUpdateBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            filtered_out_count,
+            non_writable_count,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (update, node_id) in &eligible_updates {
+        let (cypher, parameters) = knowledge_property_update_statement(
+            update.entity.label.as_str(),
+            *node_id,
+            &update.assignments,
+        );
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+    Ok(KnowledgePropertyUpdateBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        filtered_out_count,
+        non_writable_count,
+        updated_property_count,
     })
 }
 
@@ -8126,6 +8318,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedPropertyUpdateRequest,
     ) -> Result<KnowledgePropertyUpdateOutput> {
         self.db.update_scoped_knowledge_properties(request)
+    }
+
+    pub fn update_knowledge_properties_batch(
+        &mut self,
+        request: &KnowledgePropertyUpdateBatchRequest,
+    ) -> Result<KnowledgePropertyUpdateBatchOutput> {
+        self.db.update_knowledge_properties_batch(request)
+    }
+
+    pub fn update_scoped_knowledge_properties_batch(
+        &mut self,
+        request: &KnowledgeScopedPropertyUpdateBatchRequest,
+    ) -> Result<KnowledgePropertyUpdateBatchOutput> {
+        self.db.update_scoped_knowledge_properties_batch(request)
     }
 
     pub fn delete_knowledge_entity(

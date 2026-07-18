@@ -274,6 +274,10 @@ The mutable typed knowledge facade also exposes exact-identity property updates
 for lightweight metadata, review-status, and access-field writes; it validates
 identifiers, binds assignment values as parameters, and routes through the
 existing WAL-backed `MATCH ... SET` mutation path.
+Ordered batch property updates use the same typed identity contract for
+metadata, review-status, and access-field fan-out, report missing, filtered, and
+idless non-writable rows, and commit eligible updates through one
+transaction-level grouped WAL batch.
 Endpoint-known entity lifecycle cleanup is also exposed as typed detach-delete
 over real external `id` properties, with optional metadata filters and the same
 WAL-backed `MATCH ... DETACH DELETE` mutation path.
