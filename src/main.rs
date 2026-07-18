@@ -1,5 +1,6 @@
 use skein::{
-    external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
+    external_shadow_ready_missing_capabilities, external_shadow_trace_health_from_bundle,
+    external_shadow_trace_report_json,
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
@@ -8,6 +9,7 @@ use skein::{
     ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
     NowledgeCypherMigrationGateJsonOptions, RecoveryMode, Result, SkeinError,
     StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -844,6 +846,7 @@ fn add_cutover_evidence_report(
     };
     let ready_preflight = shadow_ready.is_some();
     let ready_engine_kind = shadow_ready.and_then(|ready| ready.engine_kind.as_deref());
+    let ready_missing_capabilities = external_shadow_ready_missing_capabilities(shadow_ready);
     let migration_gate = bundle
         .get("migration_gate")
         .and_then(serde_json::Value::as_object)
@@ -874,6 +877,9 @@ fn add_cutover_evidence_report(
             blockers.push("shadow ready engine_kind is not previous_wrapper");
         }
     }
+    if ready_preflight && !ready_missing_capabilities.is_empty() {
+        blockers.push("shadow ready response missing required capabilities");
+    }
     if !shadow_evidence_present {
         blockers.push("no matched shadow checks are present");
     }
@@ -895,9 +901,11 @@ fn add_cutover_evidence_report(
             "requires_previous_wrapper": true,
             "requires_ready_preflight": true,
             "requires_ready_engine_kind": "previous_wrapper",
+            "requires_ready_capabilities": REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
             "requires_shadow_evidence": true,
             "ready_preflight": ready_preflight,
             "ready_engine_kind": ready_engine_kind,
+            "ready_missing_capabilities": ready_missing_capabilities,
             "shadow_evidence_present": shadow_evidence_present,
             "shadow_trace_present": shadow_trace_health.present,
             "shadow_trace_complete": shadow_trace_health.complete,
@@ -3460,6 +3468,13 @@ mod tests {
             "previous_wrapper"
         );
         assert_eq!(
+            bundle["cutover_evidence"]["ready_missing_capabilities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
+        assert_eq!(
             bundle["cutover_evidence"]["blockers"]
                 .as_array()
                 .unwrap()
@@ -3468,6 +3483,35 @@ mod tests {
         );
         assert_eq!(bundle["cutover_evidence"]["shadow_trace_present"], false);
         assert_eq!(bundle["cutover_evidence"]["shadow_trace_complete"], true);
+    }
+
+    #[test]
+    fn blocks_cutover_when_ready_missing_required_capabilities() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready",
+                "shadow_evidence_present": true
+            }
+        });
+
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec!["execute".to_string(), "project_graph".to_string()],
+            engine_kind: Some("previous_wrapper".to_string()),
+        };
+
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
+
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
+        assert_eq!(
+            bundle["cutover_evidence"]["ready_missing_capabilities"][0],
+            "execute_session"
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["blockers"][0],
+            "shadow ready response missing required capabilities"
+        );
     }
 
     #[test]

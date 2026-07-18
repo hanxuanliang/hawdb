@@ -3,11 +3,12 @@ use crate::compat::{
     assess_compatibility_cypher_migration_gate_bundle_with_rollback,
     assess_query_inventory_cypher_coverage, build_compatibility_query_inventory,
     compatibility_inventory_coverage_report_to_json, compatibility_migration_gate_bundle_to_json,
-    external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
-    nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
-    CompatibilityCutoverPolicy, CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite,
-    CompatibilityQueryInventory, CompatibilityRollbackEvidence, CompatibilityShadowEngine,
-    ExternalShadowReady,
+    external_shadow_ready_missing_capabilities, external_shadow_trace_health_from_bundle,
+    external_shadow_trace_report_json, nowledge_memory_core_fixture,
+    run_compatibility_fixture_with_shadow, CompatibilityCutoverPolicy,
+    CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite, CompatibilityQueryInventory,
+    CompatibilityRollbackEvidence, CompatibilityShadowEngine, ExternalShadowReady,
+    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 use crate::error::{Result, SkeinError};
 use crate::qos::{LocalQosPolicy, LocalQosState};
@@ -237,7 +238,12 @@ fn add_shadow_metadata_to_migration_gate_json(
         )?;
     }
     if options.include_cutover_evidence {
-        insert_cutover_evidence_json(bundle, options.self_shadow, ready_preflight)?;
+        insert_cutover_evidence_json(
+            bundle,
+            options.self_shadow,
+            ready_preflight,
+            options.shadow_ready.as_ref(),
+        )?;
     }
     Ok(())
 }
@@ -301,6 +307,7 @@ fn insert_cutover_evidence_json(
     bundle: &mut serde_json::Value,
     self_shadow: bool,
     ready_preflight: bool,
+    shadow_ready: Option<&ExternalShadowReady>,
 ) -> Result<()> {
     let migration_gate = bundle
         .get("migration_gate")
@@ -312,6 +319,7 @@ fn insert_cutover_evidence_json(
         .get("decision")
         .and_then(serde_json::Value::as_str)
         == Some("ready");
+    let ready_missing_capabilities = external_shadow_ready_missing_capabilities(shadow_ready);
     let shadow_evidence_present = migration_gate
         .get("shadow_evidence_present")
         .and_then(serde_json::Value::as_bool)
@@ -323,6 +331,9 @@ fn insert_cutover_evidence_json(
     }
     if !ready_preflight {
         blockers.push("shadow ready preflight was not executed");
+    }
+    if ready_preflight && !ready_missing_capabilities.is_empty() {
+        blockers.push("shadow ready response missing required capabilities");
     }
     if !shadow_evidence_present {
         blockers.push("no matched shadow checks are present");
@@ -345,8 +356,10 @@ fn insert_cutover_evidence_json(
             },
             "requires_previous_wrapper": true,
             "requires_ready_preflight": true,
+            "requires_ready_capabilities": REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
             "requires_shadow_evidence": true,
             "ready_preflight": ready_preflight,
+            "ready_missing_capabilities": ready_missing_capabilities,
             "shadow_evidence_present": shadow_evidence_present,
             "shadow_trace_present": shadow_trace_health.present,
             "shadow_trace_complete": shadow_trace_health.complete,
@@ -1428,7 +1441,11 @@ mod tests {
                 shadow_name: Some("previous-wrapper".to_string()),
                 shadow_ready: Some(ExternalShadowReady {
                     protocol_version: crate::EXTERNAL_SHADOW_PROTOCOL_VERSION,
-                    capabilities: vec!["execute".to_string(), "project_graph".to_string()],
+                    capabilities: vec![
+                        "execute".to_string(),
+                        "execute_session".to_string(),
+                        "project_graph".to_string(),
+                    ],
                     engine_kind: Some("previous_wrapper".to_string()),
                 }),
                 shadow_trace_path: Some(trace_path.to_string_lossy().into_owned()),
@@ -1466,6 +1483,13 @@ mod tests {
             1
         );
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
+        assert_eq!(
+            bundle["cutover_evidence"]["ready_missing_capabilities"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         assert_eq!(bundle["cutover_evidence"]["shadow_trace_present"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_trace_complete"], true);
         assert_eq!(

@@ -19,6 +19,8 @@ use std::time::Duration;
 const DEFAULT_EXTERNAL_SHADOW_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const EXTERNAL_SHADOW_STDERR_TAIL_BYTES: usize = 8192;
 const EXTERNAL_SHADOW_STDOUT_TAIL_BYTES: usize = 2048;
+pub const REQUIRED_EXTERNAL_SHADOW_CAPABILITIES: [&str; 3] =
+    ["execute", "execute_session", "project_graph"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShadowStatementRole {
@@ -205,11 +207,7 @@ impl ExternalShadowCommand {
         let response = self.request(serde_json::json!({
             "op": "ready",
             "required_protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
-            "required_capabilities": [
-                "execute",
-                "execute_session",
-                "project_graph"
-            ],
+            "required_capabilities": REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
         }))?;
         decode_external_ready_response(&self.name, response)
     }
@@ -422,6 +420,19 @@ pub fn external_shadow_trace_health_from_bundle(
         request_count_matches,
         pending_request_count,
     }
+}
+
+pub fn external_shadow_ready_missing_capabilities(
+    ready: Option<&ExternalShadowReady>,
+) -> Vec<&'static str> {
+    let Some(ready) = ready else {
+        return REQUIRED_EXTERNAL_SHADOW_CAPABILITIES.to_vec();
+    };
+    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES
+        .iter()
+        .copied()
+        .filter(|capability| !ready.capabilities.iter().any(|value| value == capability))
+        .collect()
 }
 
 fn summarize_external_shadow_trace(trace_path: &str) -> Result<ExternalShadowTraceSummary> {
@@ -935,7 +946,7 @@ pub(super) fn decode_external_ready_response(
         )));
     }
     let capabilities = required_string_array(engine_name, ok, "capabilities")?;
-    for capability in ["execute", "execute_session", "project_graph"] {
+    for capability in REQUIRED_EXTERNAL_SHADOW_CAPABILITIES {
         if !capabilities.iter().any(|value| value == capability) {
             return Err(SkeinError::Execution(format!(
                 "shadow engine '{engine_name}' ready response missing required capability '{capability}'"

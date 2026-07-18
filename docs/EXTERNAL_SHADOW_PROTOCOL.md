@@ -378,10 +378,13 @@ previous-wrapper parity evidence.
 
 The bundle also includes a top-level `cutover_evidence` object. `eligible` is
 true only when the run used previous-wrapper evidence, executed the ready
-preflight, produced at least one matched shadow check, and the migration gate
-decision is `ready`. Its `blockers` array is intended for CI and release gates
-that need to reject protocol smoke or incomplete shadow runs without rejoining
-the rest of the bundle fields.
+preflight, advertised all required ready capabilities, produced at least one
+matched shadow check, and the migration gate decision is `ready`.
+`requires_ready_capabilities` lists the required capabilities and
+`ready_missing_capabilities` lists any capability missing from the ready
+response. Its `blockers` array is intended for CI and release gates that need
+to reject protocol smoke or incomplete shadow runs without rejoining the rest
+of the bundle fields.
 If a shadow trace is present, `cutover_evidence` also reports
 `shadow_trace_present`, `shadow_trace_complete`,
 `shadow_trace_summary_available`, `shadow_trace_request_count_matches`, and
