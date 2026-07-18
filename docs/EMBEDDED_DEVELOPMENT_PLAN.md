@@ -926,9 +926,9 @@ Current implemented slice:
 - `OptimizerTrace::selected_plan_operator_counts` and
   `OptimizerTrace::selected_plan_class_counts` expose stable selected-plan
   histograms derived from crate-owned physical plan kind/class/children
-  metadata, so diagnostics do not need to parse English explain text to detect
-  operator mix or schema/mutation/access/traversal/relational/procedure
-  composition
+  metadata and generic `PlanNode` traversal helpers, so diagnostics do not need
+  to parse English explain text to detect operator mix or
+  schema/mutation/access/traversal/relational/procedure composition
 - `skein-optimizer` owns `OptimizationSearchReport`, `SearchMode`,
   `RuleEvent`, `RuleOutcome`, and `SelectedPlanTrace`, so group-budget fallback
   warnings and selected-plan trace materialization are crate-level optimizer

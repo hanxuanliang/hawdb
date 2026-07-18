@@ -7,7 +7,10 @@ pub mod trace;
 
 pub use cost::{PlanCost, PlanCostBreakdown};
 pub use memo::{GroupId, Memo, MemoGroup};
-pub use operator::{PhysicalPlanClass, PhysicalPlanKind, PlanChildren};
+pub use operator::{
+    plan_class_counts, plan_operator_counts, visit_plan, PhysicalPlanClass, PhysicalPlanKind,
+    PlanChildren, PlanNode,
+};
 pub use properties::{Distribution, PhysicalProperties, RequiredProperties};
 pub use search::{OptimizationSearchReport, RuleEvent, RuleOutcome, SearchMode, SelectedPlanTrace};
 pub use trace::{OptimizerConfig, OptimizerTrace};

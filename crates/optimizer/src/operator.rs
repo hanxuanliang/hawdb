@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PhysicalPlanKind {
     CreateNodeLabel,
@@ -70,6 +72,18 @@ pub enum PlanChildren<'a, P> {
     None,
     Unary(&'a P),
     Binary(&'a P, &'a P),
+}
+
+pub trait PlanNode {
+    fn kind(&self) -> PhysicalPlanKind;
+
+    fn children(&self) -> PlanChildren<'_, Self>
+    where
+        Self: Sized;
+
+    fn class(&self) -> PhysicalPlanClass {
+        self.kind().class()
+    }
 }
 
 impl PhysicalPlanKind {
@@ -233,9 +247,49 @@ impl<'a, P> PlanChildren<'a, P> {
     }
 }
 
+pub fn plan_operator_counts<P>(plan: &P) -> BTreeMap<String, usize>
+where
+    P: PlanNode,
+{
+    let mut counts = BTreeMap::new();
+    visit_plan(plan, &mut |node| {
+        *counts.entry(node.kind().as_str().to_string()).or_default() += 1;
+    });
+    counts
+}
+
+pub fn plan_class_counts<P>(plan: &P) -> BTreeMap<String, usize>
+where
+    P: PlanNode,
+{
+    let mut counts = BTreeMap::new();
+    visit_plan(plan, &mut |node| {
+        *counts.entry(node.class().as_str().to_string()).or_default() += 1;
+    });
+    counts
+}
+
+pub fn visit_plan<P>(plan: &P, visitor: &mut impl FnMut(&P))
+where
+    P: PlanNode,
+{
+    visitor(plan);
+    match plan.children() {
+        PlanChildren::None => {}
+        PlanChildren::Unary(input) => visit_plan(input, visitor),
+        PlanChildren::Binary(left, right) => {
+            visit_plan(left, visitor);
+            visit_plan(right, visitor);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PhysicalPlanClass, PhysicalPlanKind, PlanChildren};
+    use super::{
+        plan_class_counts, plan_operator_counts, visit_plan, PhysicalPlanClass, PhysicalPlanKind,
+        PlanChildren, PlanNode,
+    };
 
     #[test]
     fn physical_plan_kind_exposes_stable_strings_and_classes() {
@@ -275,5 +329,57 @@ mod tests {
         let left = "left";
         let right = "right";
         assert_eq!(PlanChildren::Binary(&left, &right).len(), 2);
+    }
+
+    #[derive(Debug)]
+    enum TestPlan {
+        Seek,
+        Project(Box<TestPlan>),
+        Join(Box<TestPlan>, Box<TestPlan>),
+    }
+
+    impl PlanNode for TestPlan {
+        fn kind(&self) -> PhysicalPlanKind {
+            match self {
+                TestPlan::Seek => PhysicalPlanKind::IndexNodeSeek,
+                TestPlan::Project(_) => PhysicalPlanKind::ProjectExec,
+                TestPlan::Join(_, _) => PhysicalPlanKind::NodeCartesianProductExec,
+            }
+        }
+
+        fn children(&self) -> PlanChildren<'_, Self> {
+            match self {
+                TestPlan::Seek => PlanChildren::None,
+                TestPlan::Project(input) => PlanChildren::Unary(input),
+                TestPlan::Join(left, right) => PlanChildren::Binary(left, right),
+            }
+        }
+    }
+
+    #[test]
+    fn plan_node_helpers_traverse_without_knowing_plan_payloads() {
+        let plan = TestPlan::Project(Box::new(TestPlan::Join(
+            Box::new(TestPlan::Seek),
+            Box::new(TestPlan::Seek),
+        )));
+
+        let mut visit_order = Vec::new();
+        visit_plan(&plan, &mut |node| {
+            visit_order.push(node.kind().as_str());
+        });
+
+        assert_eq!(
+            visit_order,
+            vec![
+                "ProjectExec",
+                "NodeCartesianProductExec",
+                "IndexNodeSeek",
+                "IndexNodeSeek"
+            ]
+        );
+        assert_eq!(plan_operator_counts(&plan)["IndexNodeSeek"], 2);
+        assert_eq!(plan_operator_counts(&plan)["ProjectExec"], 1);
+        assert_eq!(plan_class_counts(&plan)["access"], 2);
+        assert_eq!(plan_class_counts(&plan)["relational"], 2);
     }
 }

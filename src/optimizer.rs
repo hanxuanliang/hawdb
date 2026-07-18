@@ -9,8 +9,9 @@ use crate::planner::{
 };
 use crate::value::Value;
 pub use skein_optimizer::{
-    GroupId, OptimizationSearchReport, OptimizerConfig, OptimizerTrace, PhysicalPlanClass,
-    PhysicalPlanKind, PlanCost, PlanCostBreakdown, SelectedPlanTrace,
+    plan_class_counts, plan_operator_counts, GroupId, OptimizationSearchReport, OptimizerConfig,
+    OptimizerTrace, PhysicalPlanClass, PhysicalPlanKind, PlanCost, PlanCostBreakdown,
+    SelectedPlanTrace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -4033,36 +4034,8 @@ fn selected_plan_trace(plan: &PhysicalPlan, catalog: &OptimizerCatalog) -> Selec
         fingerprint: plan.fingerprint(),
         cost: selected_plan_cost,
         cost_breakdown: estimate_physical_plan_cost_breakdown(plan, catalog),
-        operator_counts: physical_plan_operator_counts(plan),
-        class_counts: physical_plan_class_counts(plan),
-    }
-}
-
-fn physical_plan_operator_counts(plan: &PhysicalPlan) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    visit_physical_plan(plan, &mut |node| {
-        *counts.entry(node.kind().as_str().to_string()).or_default() += 1;
-    });
-    counts
-}
-
-fn physical_plan_class_counts(plan: &PhysicalPlan) -> BTreeMap<String, usize> {
-    let mut counts = BTreeMap::new();
-    visit_physical_plan(plan, &mut |node| {
-        *counts.entry(node.class().as_str().to_string()).or_default() += 1;
-    });
-    counts
-}
-
-fn visit_physical_plan(plan: &PhysicalPlan, visitor: &mut impl FnMut(&PhysicalPlan)) {
-    visitor(plan);
-    match plan.children() {
-        PhysicalPlanChildren::None => {}
-        PhysicalPlanChildren::Unary(input) => visit_physical_plan(input, visitor),
-        PhysicalPlanChildren::Binary(left, right) => {
-            visit_physical_plan(left, visitor);
-            visit_physical_plan(right, visitor);
-        }
+        operator_counts: plan_operator_counts(plan),
+        class_counts: plan_class_counts(plan),
     }
 }
 

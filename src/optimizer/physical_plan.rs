@@ -1,5 +1,5 @@
 use super::PhysicalPlan;
-use skein_optimizer::{PhysicalPlanClass, PhysicalPlanKind, PlanChildren};
+use skein_optimizer::{PhysicalPlanClass, PhysicalPlanKind, PlanChildren, PlanNode};
 
 pub type PhysicalPlanChildren<'a> = PlanChildren<'a, PhysicalPlan>;
 
@@ -112,5 +112,15 @@ impl PhysicalPlan {
             | PhysicalPlan::LimitExec { input, .. } => PlanChildren::Unary(input),
             _ => PlanChildren::None,
         }
+    }
+}
+
+impl PlanNode for PhysicalPlan {
+    fn kind(&self) -> PhysicalPlanKind {
+        PhysicalPlan::kind(self)
+    }
+
+    fn children(&self) -> PhysicalPlanChildren<'_> {
+        PhysicalPlan::children(self)
     }
 }
