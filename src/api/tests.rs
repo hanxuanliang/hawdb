@@ -6,14 +6,15 @@ use super::{
     KnowledgeEntityRequest, KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode,
     KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgePathRequest, KnowledgePropertyBatchRequest, KnowledgePropertyUpdateRequest,
-    KnowledgeRelationshipsRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
+    KnowledgeRelationshipCreateRequest, KnowledgeRelationshipsRequest,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
     KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityRequest,
     KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
     KnowledgeScopedPropertyBatchRequest, KnowledgeScopedPropertyUpdateRequest,
-    KnowledgeScopedRelationshipsRequest, KnowledgeScopedSubgraphRequest, KnowledgeSubgraphRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipsRequest,
+    KnowledgeScopedSubgraphRequest, KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -4046,6 +4047,256 @@ fn typed_knowledge_property_update_persists_and_replays_from_wal() {
         assert_eq!(
             output.rows[0].properties.get("title"),
             Some(&Some(Value::String("New".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn creates_knowledge_relationship_through_typed_api() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1', title: 'First'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_1', name: 'Skein'})")
+        .unwrap();
+
+    let output = db
+        .create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+            source: KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_1".to_string(),
+            },
+            relationship_type: "MENTIONS".to_string(),
+            properties: BTreeMap::from([
+                ("confidence".to_string(), Value::Float(0.9)),
+                ("mention_count".to_string(), Value::Int(1)),
+            ]),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 3);
+    assert_eq!(output.source_node_id, Some(0));
+    assert_eq!(output.target_node_id, Some(1));
+    assert!(output.matched);
+    assert!(!output.source_filtered_out);
+    assert!(!output.target_filtered_out);
+    assert_eq!(output.created_relationship_count, 1);
+
+    let relationships = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
+        seeds: vec![KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+        }],
+        relationship_type: Some("MENTIONS".to_string()),
+        direction: KnowledgeNeighborDirection::Outgoing,
+        limit_per_seed: 4,
+    });
+    assert_eq!(relationships.relationship_count, 1);
+    assert_eq!(
+        relationships.groups[0].relationships[0]
+            .target_external_id
+            .as_deref(),
+        Some("entity_1")
+    );
+    assert_eq!(
+        relationships.groups[0].relationships[0]
+            .relationship_properties
+            .get("mention_count"),
+        Some(&Value::Int(1))
+    );
+}
+
+#[test]
+fn scoped_knowledge_relationship_create_does_not_write_filtered_endpoint() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'memory_1', title: 'First', source_id: 'thread_1', space_id: ''})",
+    )
+    .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_1', name: 'Skein', space_id: 'default'})")
+        .unwrap();
+
+    let output = db
+        .create_scoped_knowledge_relationship(&KnowledgeScopedRelationshipCreateRequest {
+            create: KnowledgeRelationshipCreateRequest {
+                source: KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                target: KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "entity_1".to_string(),
+                },
+                relationship_type: "MENTIONS".to_string(),
+                properties: BTreeMap::new(),
+            },
+            source_metadata_filters: BTreeMap::from([(
+                "source_id".to_string(),
+                "thread_2".to_string(),
+            )]),
+            target_metadata_filters: BTreeMap::from([(
+                "space_id".to_string(),
+                "default".to_string(),
+            )]),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 2);
+    assert_eq!(output.source_node_id, Some(0));
+    assert_eq!(output.target_node_id, Some(1));
+    assert!(!output.matched);
+    assert!(output.source_filtered_out);
+    assert!(!output.target_filtered_out);
+    assert_eq!(output.created_relationship_count, 0);
+    let relationships = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
+        seeds: vec![KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+        }],
+        relationship_type: Some("MENTIONS".to_string()),
+        direction: KnowledgeNeighborDirection::Outgoing,
+        limit_per_seed: 4,
+    });
+    assert_eq!(relationships.relationship_count, 0);
+}
+
+#[test]
+fn knowledge_relationship_create_rejects_invalid_identifiers() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
+
+    let error = db
+        .create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+            source: KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_1".to_string(),
+            },
+            relationship_type: "MENTIONS-WITH-DASH".to_string(),
+            properties: BTreeMap::new(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("relationship type identifier"));
+    assert_eq!(db.store.commit_epoch(), 2);
+}
+
+#[test]
+fn knowledge_relationship_create_does_not_write_projected_idless_identity() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {title: 'Idless memory'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
+
+    let output = db
+        .create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+            source: KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "0".to_string(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_1".to_string(),
+            },
+            relationship_type: "MENTIONS".to_string(),
+            properties: BTreeMap::new(),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 2);
+    assert_eq!(output.source_node_id, Some(0));
+    assert_eq!(output.target_node_id, Some(1));
+    assert!(!output.matched);
+    assert_eq!(output.created_relationship_count, 0);
+}
+
+#[test]
+fn read_only_database_rejects_typed_knowledge_relationship_create() {
+    let path = unique_test_dir("read_only_typed_knowledge_relationship_create");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+        db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
+    }
+    {
+        let mut db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                read_only: true,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        let error = db
+            .create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+                source: KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                target: KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "entity_1".to_string(),
+                },
+                relationship_type: "MENTIONS".to_string(),
+                properties: BTreeMap::new(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("read-only"));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn typed_knowledge_relationship_create_persists_and_replays_from_wal() {
+    let path = unique_test_dir("typed_knowledge_relationship_create_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+        db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
+        db.create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+            source: KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_1".to_string(),
+            },
+            relationship_type: "MENTIONS".to_string(),
+            properties: BTreeMap::from([("confidence".to_string(), Value::Float(0.7))]),
+        })
+        .unwrap();
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("create_rel"));
+    {
+        let db = Database::open(&path).unwrap();
+        let output = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
+            seeds: vec![KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            }],
+            relationship_type: Some("MENTIONS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit_per_seed: 4,
+        });
+        assert_eq!(output.relationship_count, 1);
+        assert_eq!(
+            output.groups[0].relationships[0]
+                .relationship_properties
+                .get("confidence"),
+            Some(&Value::Float(0.7))
         );
     }
     std::fs::remove_dir_all(path).unwrap();

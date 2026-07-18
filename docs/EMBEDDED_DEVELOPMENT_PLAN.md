@@ -274,6 +274,11 @@ The mutable typed knowledge facade also exposes exact-identity property updates
 for lightweight metadata, review-status, and access-field writes; it validates
 identifiers, binds assignment values as parameters, and routes through the
 existing WAL-backed `MATCH ... SET` mutation path.
+It also exposes exact-identity relationship creation for endpoint-known
+Nowledge writes such as mentions, source provenance, labels, evolution, and
+compaction links; endpoint filters are applied before writing, relationship
+properties are parameter-bound, and the write routes through the existing
+WAL-backed `MATCH ... CREATE` mutation path.
 Page-level MVCC, physical page/segment reclamation, and concurrent writer
 coordination remain.
 

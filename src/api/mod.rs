@@ -1444,6 +1444,33 @@ pub struct KnowledgePropertyUpdateOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipCreateRequest {
+    pub source: KnowledgeEntityRequest,
+    pub target: KnowledgeEntityRequest,
+    pub relationship_type: String,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedRelationshipCreateRequest {
+    pub create: KnowledgeRelationshipCreateRequest,
+    pub source_metadata_filters: BTreeMap<String, String>,
+    pub target_metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipCreateOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub source_node_id: Option<u64>,
+    pub target_node_id: Option<u64>,
+    pub matched: bool,
+    pub source_filtered_out: bool,
+    pub target_filtered_out: bool,
+    pub created_relationship_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {
     pub node_id: u64,
@@ -2774,6 +2801,20 @@ impl Database {
         request: &KnowledgeScopedPropertyUpdateRequest,
     ) -> Result<KnowledgePropertyUpdateOutput> {
         update_scoped_knowledge_properties_for(self, request)
+    }
+
+    pub fn create_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipCreateRequest,
+    ) -> Result<KnowledgeRelationshipCreateOutput> {
+        create_knowledge_relationship_for(self, request)
+    }
+
+    pub fn create_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipCreateRequest,
+    ) -> Result<KnowledgeRelationshipCreateOutput> {
+        create_scoped_knowledge_relationship_for(self, request)
     }
 
     pub fn knowledge_neighbors(
@@ -4340,6 +4381,146 @@ fn update_scoped_knowledge_properties_for(
         filtered_out: false,
         updated_property_count: request.update.assignments.len(),
     })
+}
+
+fn create_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeRelationshipCreateRequest,
+) -> Result<KnowledgeRelationshipCreateOutput> {
+    create_scoped_knowledge_relationship_for(
+        db,
+        &KnowledgeScopedRelationshipCreateRequest {
+            create: request.clone(),
+            source_metadata_filters: BTreeMap::new(),
+            target_metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn create_scoped_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeScopedRelationshipCreateRequest,
+) -> Result<KnowledgeRelationshipCreateOutput> {
+    db.ensure_writable()?;
+    validate_cypher_identifier(&request.create.source.label, "source label")?;
+    validate_cypher_identifier(&request.create.target.label, "target label")?;
+    validate_cypher_identifier(&request.create.relationship_type, "relationship type")?;
+    for property in request.create.properties.keys() {
+        validate_cypher_identifier(property, "relationship property")?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let source = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.create.source.label.as_str(),
+        request.create.source.external_id.as_str(),
+    );
+    let target = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.create.target.label.as_str(),
+        request.create.target.external_id.as_str(),
+    );
+    let source_node_id = source.map(|node| node.id.0);
+    let target_node_id = target.map(|node| node.id.0);
+    let (Some(source), Some(target)) = (source, target) else {
+        return Ok(KnowledgeRelationshipCreateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            created_relationship_count: 0,
+        });
+    };
+    if !node_has_external_id_property(source, request.create.source.external_id.as_str())
+        || !node_has_external_id_property(target, request.create.target.external_id.as_str())
+    {
+        return Ok(KnowledgeRelationshipCreateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            created_relationship_count: 0,
+        });
+    }
+
+    let source_filtered_out = !request.source_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            source,
+            &request.source_metadata_filters,
+        );
+    let target_filtered_out = !request.target_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            target,
+            &request.target_metadata_filters,
+        );
+    if source_filtered_out || target_filtered_out {
+        return Ok(KnowledgeRelationshipCreateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out,
+            target_filtered_out,
+            created_relationship_count: 0,
+        });
+    }
+
+    let mut cypher = format!(
+        "MATCH (source:{} {{id: $source_external_id}}), (target:{} {{id: $target_external_id}}) CREATE (source)-[:{}",
+        request.create.source.label, request.create.target.label, request.create.relationship_type
+    );
+    let mut parameters = BTreeMap::from([
+        (
+            "source_external_id".to_string(),
+            Value::String(request.create.source.external_id.clone()),
+        ),
+        (
+            "target_external_id".to_string(),
+            Value::String(request.create.target.external_id.clone()),
+        ),
+    ]);
+    if !request.create.properties.is_empty() {
+        cypher.push_str(" {");
+        for (index, (property, value)) in request.create.properties.iter().enumerate() {
+            if index > 0 {
+                cypher.push_str(", ");
+            }
+            let parameter_name = format!("relationship_value_{index}");
+            cypher.push_str(&format!("{property}: ${parameter_name}"));
+            parameters.insert(parameter_name, value.clone());
+        }
+        cypher.push('}');
+    }
+    cypher.push_str("]->(target)");
+
+    db.query_with_params(cypher.as_str(), &parameters)?;
+    Ok(KnowledgeRelationshipCreateOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        source_node_id,
+        target_node_id,
+        matched: true,
+        source_filtered_out: false,
+        target_filtered_out: false,
+        created_relationship_count: 1,
+    })
+}
+
+fn node_has_external_id_property(node: &NodeRecord, external_id: &str) -> bool {
+    node.properties
+        .get("id")
+        .is_some_and(|value| value_to_external_id(value) == external_id)
 }
 
 fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
@@ -7029,6 +7210,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedPropertyUpdateRequest,
     ) -> Result<KnowledgePropertyUpdateOutput> {
         self.db.update_scoped_knowledge_properties(request)
+    }
+
+    pub fn create_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipCreateRequest,
+    ) -> Result<KnowledgeRelationshipCreateOutput> {
+        self.db.create_knowledge_relationship(request)
+    }
+
+    pub fn create_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipCreateRequest,
+    ) -> Result<KnowledgeRelationshipCreateOutput> {
+        self.db.create_scoped_knowledge_relationship(request)
     }
 
     pub fn knowledge_neighbors(
