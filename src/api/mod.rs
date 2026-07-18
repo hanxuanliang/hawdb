@@ -623,6 +623,127 @@ pub struct KnowledgeFanoutReasonDetail {
     pub degree: Option<usize>,
 }
 
+impl KnowledgeFanoutReasonDetail {
+    fn dense_adjacency(
+        operation: &str,
+        relationship_type: &str,
+        direction: &str,
+        node_id: u64,
+        degree: usize,
+    ) -> Self {
+        Self {
+            code: KnowledgeFanoutReasonCode::DenseAdjacency,
+            message: format!(
+                "{operation} dense_adjacency {relationship_type} {direction} node {node_id} degree {degree}"
+            ),
+            operation: Some(operation.to_string()),
+            limit: None,
+            total: None,
+            seed_hit_id: None,
+            node_id: Some(node_id),
+            relationship_type: Some(relationship_type.to_string()),
+            direction: Some(direction.to_string()),
+            degree: Some(degree),
+        }
+    }
+
+    fn graph_context_limit(limit: usize, seed_hit_id: &str) -> Self {
+        Self {
+            code: KnowledgeFanoutReasonCode::GraphContextLimitReached,
+            message: format!(
+                "graph_context_limit {limit} reached while expanding hit {seed_hit_id}"
+            ),
+            operation: Some("graph_context".to_string()),
+            limit: Some(limit),
+            total: None,
+            seed_hit_id: Some(seed_hit_id.to_string()),
+            node_id: None,
+            relationship_type: None,
+            direction: None,
+            degree: None,
+        }
+    }
+
+    fn graph_seed_limit(limit: usize, total: usize) -> Self {
+        Self {
+            code: KnowledgeFanoutReasonCode::GraphSeedLimitReached,
+            message: format!(
+                "knowledge_graph_seed_limit {limit} returned from {total} matching graph seeds"
+            ),
+            operation: Some("graph_seed".to_string()),
+            limit: Some(limit),
+            total: Some(total),
+            seed_hit_id: None,
+            node_id: None,
+            relationship_type: None,
+            direction: None,
+            degree: None,
+        }
+    }
+
+    fn candidate_limit(limit: usize, total: usize) -> Self {
+        Self {
+            code: KnowledgeFanoutReasonCode::CandidateLimitReached,
+            message: format!(
+                "knowledge_candidate_limit {limit} returned from {total} merged candidates"
+            ),
+            operation: Some("candidate".to_string()),
+            limit: Some(limit),
+            total: Some(total),
+            seed_hit_id: None,
+            node_id: None,
+            relationship_type: None,
+            direction: None,
+            degree: None,
+        }
+    }
+
+    fn path_limit(operation: &str, limit: usize, target: &str) -> Self {
+        Self {
+            code: KnowledgeFanoutReasonCode::PathLimitReached,
+            message: format!("{operation} limit {limit} reached while expanding {target}"),
+            operation: Some(operation.to_string()),
+            limit: Some(limit),
+            total: None,
+            seed_hit_id: None,
+            node_id: None,
+            relationship_type: None,
+            direction: None,
+            degree: None,
+        }
+    }
+
+    fn node_limit(limit: usize) -> Self {
+        Self {
+            code: KnowledgeFanoutReasonCode::NodeLimitReached,
+            message: format!("knowledge_subgraph node_limit {limit} reached"),
+            operation: Some("knowledge_subgraph".to_string()),
+            limit: Some(limit),
+            total: None,
+            seed_hit_id: None,
+            node_id: None,
+            relationship_type: None,
+            direction: None,
+            degree: None,
+        }
+    }
+
+    fn relationship_limit(limit: usize) -> Self {
+        Self {
+            code: KnowledgeFanoutReasonCode::RelationshipLimitReached,
+            message: format!("knowledge_subgraph relationship_limit {limit} reached"),
+            operation: Some("knowledge_subgraph".to_string()),
+            limit: Some(limit),
+            total: None,
+            seed_hit_id: None,
+            node_id: None,
+            relationship_type: None,
+            direction: None,
+            degree: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeFanoutReasonCode {
     DenseAdjacency,
@@ -2170,13 +2291,13 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 policy_epoch: None,
             },
         );
-        let (graph_seeds, graph_seed_candidate_count, graph_seed_fanout_reasons) = self
+        let (graph_seeds, graph_seed_candidate_count, graph_seed_fanout_details) = self
             .search_knowledge_graph_seeds(
                 &request.query_text,
                 request.graph_seed_limit,
                 &request.metadata_filters,
             );
-        let (graph_context_paths, fanout_reasons, graph_context_truncation_reasons) = self
+        let (graph_context_paths, fanout_details, graph_context_truncation_reasons) = self
             .expand_knowledge_context(
                 &search,
                 &graph_seeds,
@@ -2198,7 +2319,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 graph_commit_epoch,
             },
         );
-        let (candidates, candidate_total_count, candidate_fanout_reasons) = self
+        let (candidates, candidate_total_count, candidate_fanout_details) = self
             .knowledge_candidates(
                 &search,
                 &evidence,
@@ -2207,11 +2328,11 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 request.candidate_limit,
                 request.candidate_scoring,
             );
-        let mut fanout_reasons = fanout_reasons;
-        fanout_reasons.extend(graph_seed_fanout_reasons);
-        fanout_reasons.extend(candidate_fanout_reasons);
-        let fanout_reason_codes = knowledge_fanout_reason_codes(&fanout_reasons);
-        let fanout_reason_details = knowledge_fanout_reason_details(&fanout_reasons);
+        let mut fanout_reason_details = fanout_details;
+        fanout_reason_details.extend(graph_seed_fanout_details);
+        fanout_reason_details.extend(candidate_fanout_details);
+        let fanout_reason_codes = knowledge_fanout_reason_codes(&fanout_reason_details);
+        let fanout_reasons = knowledge_fanout_reason_messages(&fanout_reason_details);
         let diagnostics = knowledge_retrieval_diagnostics(
             &search,
             request,
@@ -2224,8 +2345,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 graph_context_node_count: knowledge_context_path_node_count(&graph_context_paths),
                 graph_context_relationship_count: graph_context_paths.len(),
                 graph_context_truncation_reasons,
-                fanout_reason_count: fanout_reasons.len(),
-                fanout_reasons: fanout_reasons.clone(),
+                fanout_reason_details: fanout_reason_details.clone(),
                 candidate_count: candidates.len(),
                 candidate_total_count,
             },
@@ -2252,7 +2372,11 @@ impl KnowledgeRetrievalGraphContext<'_> {
         graph_seeds: &[KnowledgeGraphSeed],
         graph_context_limit: usize,
         graph_context_max_hops: usize,
-    ) -> (Vec<KnowledgeGraphContextPath>, Vec<String>, Vec<String>) {
+    ) -> (
+        Vec<KnowledgeGraphContextPath>,
+        Vec<KnowledgeFanoutReasonDetail>,
+        Vec<String>,
+    ) {
         let mut paths = Vec::new();
         let mut fanout_reasons = Vec::new();
         let mut truncation_reasons = Vec::new();
@@ -2305,11 +2429,12 @@ impl KnowledgeRetrievalGraphContext<'_> {
                     continue;
                 }
                 if paths.len() >= graph_context_limit {
-                    let reason = format!(
-                        "graph_context_limit {graph_context_limit} reached while expanding hit {seed_hit_id}"
+                    let detail = KnowledgeFanoutReasonDetail::graph_context_limit(
+                        graph_context_limit,
+                        &seed_hit_id,
                     );
-                    fanout_reasons.push(reason.clone());
-                    truncation_reasons.push(reason);
+                    truncation_reasons.push(detail.message.clone());
+                    fanout_reasons.push(detail);
                     return (paths, fanout_reasons, truncation_reasons);
                 }
                 let Some(path) = self.context_path_for_relationship(
@@ -2410,7 +2535,11 @@ impl KnowledgeRetrievalGraphContext<'_> {
         graph_context_paths: &[KnowledgeGraphContextPath],
         candidate_limit: Option<usize>,
         scoring: KnowledgeCandidateScoringPolicy,
-    ) -> (Vec<KnowledgeCandidate>, usize, Vec<String>) {
+    ) -> (
+        Vec<KnowledgeCandidate>,
+        usize,
+        Vec<KnowledgeFanoutReasonDetail>,
+    ) {
         let mut candidates = search
             .hits
             .iter()
@@ -2501,9 +2630,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         if let Some(limit) = candidate_limit {
             candidates.truncate(limit);
             if total > limit {
-                fanout_reasons.push(format!(
-                    "knowledge_candidate_limit {limit} returned from {total} merged candidates"
-                ));
+                fanout_reasons.push(KnowledgeFanoutReasonDetail::candidate_limit(limit, total));
             }
         }
         (candidates, total, fanout_reasons)
@@ -2514,7 +2641,11 @@ impl KnowledgeRetrievalGraphContext<'_> {
         query_text: &str,
         limit: usize,
         metadata_filters: &BTreeMap<String, String>,
-    ) -> (Vec<KnowledgeGraphSeed>, usize, Vec<String>) {
+    ) -> (
+        Vec<KnowledgeGraphSeed>,
+        usize,
+        Vec<KnowledgeFanoutReasonDetail>,
+    ) {
         if limit == 0 {
             return (Vec::new(), 0, Vec::new());
         }
@@ -2550,9 +2681,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let total = scored.len();
         scored.truncate(limit);
         let fanout_reasons = if total > limit {
-            vec![format!(
-                "knowledge_graph_seed_limit {limit} returned from {total} matching graph seeds"
-            )]
+            vec![KnowledgeFanoutReasonDetail::graph_seed_limit(limit, total)]
         } else {
             Vec::new()
         };
@@ -2843,8 +2972,7 @@ struct KnowledgeRetrievalDiagnosticsInput {
     graph_context_node_count: usize,
     graph_context_relationship_count: usize,
     graph_context_truncation_reasons: Vec<String>,
-    fanout_reason_count: usize,
-    fanout_reasons: Vec<String>,
+    fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     candidate_count: usize,
     candidate_total_count: usize,
 }
@@ -2940,10 +3068,10 @@ fn knowledge_retrieval_diagnostics(
         graph_context_truncation_reasons: input.graph_context_truncation_reasons,
         graph_context_fallback_reason_codes: knowledge_graph_context_fallback_reason_codes(request),
         graph_context_fallback_reasons: knowledge_graph_context_fallback_reasons(request),
-        fanout_reason_count: input.fanout_reason_count,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reasons),
-        fanout_reason_details: knowledge_fanout_reason_details(&input.fanout_reasons),
-        fanout_reasons: input.fanout_reasons,
+        fanout_reason_count: input.fanout_reason_details.len(),
+        fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reason_details),
+        fanout_reasons: knowledge_fanout_reason_messages(&input.fanout_reason_details),
+        fanout_reason_details: input.fanout_reason_details,
         candidate_count: input.candidate_count,
         candidate_total_count: input.candidate_total_count,
         candidate_limit: request.candidate_limit,
@@ -2956,98 +3084,17 @@ fn knowledge_retrieval_diagnostics(
     }
 }
 
-fn knowledge_fanout_reason_codes(reasons: &[String]) -> Vec<KnowledgeFanoutReasonCode> {
-    reasons
+fn knowledge_fanout_reason_codes(
+    details: &[KnowledgeFanoutReasonDetail],
+) -> Vec<KnowledgeFanoutReasonCode> {
+    details.iter().map(|detail| detail.code).collect()
+}
+
+fn knowledge_fanout_reason_messages(details: &[KnowledgeFanoutReasonDetail]) -> Vec<String> {
+    details
         .iter()
-        .filter_map(|reason| knowledge_fanout_reason_code(reason))
+        .map(|detail| detail.message.clone())
         .collect()
-}
-
-fn knowledge_fanout_reason_details(reasons: &[String]) -> Vec<KnowledgeFanoutReasonDetail> {
-    reasons
-        .iter()
-        .filter_map(|reason| knowledge_fanout_reason_detail(reason))
-        .collect()
-}
-
-fn knowledge_fanout_reason_code(reason: &str) -> Option<KnowledgeFanoutReasonCode> {
-    if reason.contains(" dense_adjacency ") {
-        Some(KnowledgeFanoutReasonCode::DenseAdjacency)
-    } else if reason.starts_with("graph_context_limit ") {
-        Some(KnowledgeFanoutReasonCode::GraphContextLimitReached)
-    } else if reason.starts_with("knowledge_graph_seed_limit ") {
-        Some(KnowledgeFanoutReasonCode::GraphSeedLimitReached)
-    } else if reason.starts_with("knowledge_candidate_limit ") {
-        Some(KnowledgeFanoutReasonCode::CandidateLimitReached)
-    } else if reason.starts_with("knowledge_neighbors limit ")
-        || reason.starts_with("knowledge_paths limit ")
-    {
-        Some(KnowledgeFanoutReasonCode::PathLimitReached)
-    } else if reason.starts_with("knowledge_subgraph node_limit ") {
-        Some(KnowledgeFanoutReasonCode::NodeLimitReached)
-    } else if reason.starts_with("knowledge_subgraph relationship_limit ") {
-        Some(KnowledgeFanoutReasonCode::RelationshipLimitReached)
-    } else {
-        None
-    }
-}
-
-fn knowledge_fanout_reason_detail(reason: &str) -> Option<KnowledgeFanoutReasonDetail> {
-    let code = knowledge_fanout_reason_code(reason)?;
-    let parts = reason.split_whitespace().collect::<Vec<_>>();
-    let mut detail = KnowledgeFanoutReasonDetail {
-        code,
-        message: reason.to_string(),
-        operation: None,
-        limit: None,
-        total: None,
-        seed_hit_id: None,
-        node_id: None,
-        relationship_type: None,
-        direction: None,
-        degree: None,
-    };
-
-    match code {
-        KnowledgeFanoutReasonCode::DenseAdjacency => {
-            if parts.len() >= 8 {
-                detail.operation = Some(parts[0].to_string());
-                detail.relationship_type = Some(parts[2].to_string());
-                detail.direction = Some(parts[3].to_string());
-                detail.node_id = parts[5].parse::<u64>().ok();
-                detail.degree = parts[7].parse::<usize>().ok();
-            }
-        }
-        KnowledgeFanoutReasonCode::GraphContextLimitReached => {
-            detail.operation = Some("graph_context".to_string());
-            detail.limit = parts.get(1).and_then(|value| value.parse::<usize>().ok());
-            detail.seed_hit_id = parts.last().map(|value| (*value).to_string());
-        }
-        KnowledgeFanoutReasonCode::GraphSeedLimitReached => {
-            detail.operation = Some("graph_seed".to_string());
-            detail.limit = parts.get(1).and_then(|value| value.parse::<usize>().ok());
-            detail.total = parts.get(4).and_then(|value| value.parse::<usize>().ok());
-        }
-        KnowledgeFanoutReasonCode::CandidateLimitReached => {
-            detail.operation = Some("candidate".to_string());
-            detail.limit = parts.get(1).and_then(|value| value.parse::<usize>().ok());
-            detail.total = parts.get(4).and_then(|value| value.parse::<usize>().ok());
-        }
-        KnowledgeFanoutReasonCode::PathLimitReached => {
-            detail.operation = parts.first().map(|value| (*value).to_string());
-            detail.limit = parts.get(2).and_then(|value| value.parse::<usize>().ok());
-        }
-        KnowledgeFanoutReasonCode::NodeLimitReached => {
-            detail.operation = Some("knowledge_subgraph".to_string());
-            detail.limit = parts.get(2).and_then(|value| value.parse::<usize>().ok());
-        }
-        KnowledgeFanoutReasonCode::RelationshipLimitReached => {
-            detail.operation = Some("knowledge_subgraph".to_string());
-            detail.limit = parts.get(2).and_then(|value| value.parse::<usize>().ok());
-        }
-    }
-
-    Some(detail)
 }
 
 fn knowledge_empty_reason_code_from_search(
@@ -3317,8 +3364,7 @@ fn knowledge_neighbors_for(
                 path_count: 0,
                 node_count: 0,
                 relationship_count: 0,
-                fanout_reason_count: 0,
-                fanout_reasons: Vec::new(),
+                fanout_reason_details: Vec::new(),
                 missing_seed_identity: Some(knowledge_identity_description(
                     request.label.as_str(),
                     request.external_id.as_str(),
@@ -3351,8 +3397,7 @@ fn knowledge_neighbors_for(
                             path_count: 0,
                             node_count: 0,
                             relationship_count: 0,
-                            fanout_reason_count: 0,
-                            fanout_reasons: Vec::new(),
+                            fanout_reason_details: Vec::new(),
                             missing_seed_identity: None,
                             missing_target_identity: None,
                             missing_relationship_type: Some(name.to_string()),
@@ -3367,7 +3412,7 @@ fn knowledge_neighbors_for(
         },
         None => None,
     };
-    let (paths, fanout_reasons) = expand_knowledge_neighbors_for(
+    let (paths, fanout_reason_details) = expand_knowledge_neighbors_for(
         catalog,
         store,
         KnowledgeNeighborExpansion {
@@ -3388,8 +3433,7 @@ fn knowledge_neighbors_for(
             path_count: paths.len(),
             node_count: knowledge_context_path_node_count(&paths),
             relationship_count: paths.len(),
-            fanout_reason_count: fanout_reasons.len(),
-            fanout_reasons: fanout_reasons.clone(),
+            fanout_reason_details: fanout_reason_details.clone(),
             missing_seed_identity: None,
             missing_target_identity: None,
             missing_relationship_type: None,
@@ -3399,9 +3443,9 @@ fn knowledge_neighbors_for(
             relationship_limit: None,
         }),
         paths,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
-        fanout_reason_details: knowledge_fanout_reason_details(&fanout_reasons),
-        fanout_reasons,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
+        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
+        fanout_reason_details,
     }
 }
 
@@ -3440,8 +3484,7 @@ fn knowledge_paths_for(
                 path_count: 0,
                 node_count: 0,
                 relationship_count: 0,
-                fanout_reason_count: 0,
-                fanout_reasons: Vec::new(),
+                fanout_reason_details: Vec::new(),
                 missing_seed_identity: Some(knowledge_identity_description(
                     request.source_label.as_str(),
                     request.source_external_id.as_str(),
@@ -3475,8 +3518,7 @@ fn knowledge_paths_for(
                 path_count: 0,
                 node_count: 0,
                 relationship_count: 0,
-                fanout_reason_count: 0,
-                fanout_reasons: Vec::new(),
+                fanout_reason_details: Vec::new(),
                 missing_seed_identity: None,
                 missing_target_identity: Some(knowledge_identity_description(
                     request.target_label.as_str(),
@@ -3509,8 +3551,7 @@ fn knowledge_paths_for(
                             path_count: 0,
                             node_count: 0,
                             relationship_count: 0,
-                            fanout_reason_count: 0,
-                            fanout_reasons: Vec::new(),
+                            fanout_reason_details: Vec::new(),
                             missing_seed_identity: None,
                             missing_target_identity: None,
                             missing_relationship_type: Some(name.to_string()),
@@ -3526,7 +3567,7 @@ fn knowledge_paths_for(
         None => None,
     };
 
-    let (paths, fanout_reasons) = expand_knowledge_paths_for(
+    let (paths, fanout_reason_details) = expand_knowledge_paths_for(
         catalog,
         store,
         KnowledgePathExpansion {
@@ -3548,8 +3589,7 @@ fn knowledge_paths_for(
             path_count: paths.len(),
             node_count: knowledge_graph_path_node_count(&paths),
             relationship_count: paths.iter().map(|path| path.segments.len()).sum::<usize>(),
-            fanout_reason_count: fanout_reasons.len(),
-            fanout_reasons: fanout_reasons.clone(),
+            fanout_reason_details: fanout_reason_details.clone(),
             missing_seed_identity: None,
             missing_target_identity: None,
             missing_relationship_type: None,
@@ -3559,9 +3599,9 @@ fn knowledge_paths_for(
             relationship_limit: None,
         }),
         paths,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
-        fanout_reason_details: knowledge_fanout_reason_details(&fanout_reasons),
-        fanout_reasons,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
+        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
+        fanout_reason_details,
     }
 }
 
@@ -3590,8 +3630,7 @@ fn knowledge_subgraph_for(
                 path_count: 0,
                 node_count: 0,
                 relationship_count: 0,
-                fanout_reason_count: 0,
-                fanout_reasons: Vec::new(),
+                fanout_reason_details: Vec::new(),
                 missing_seed_identity: Some(knowledge_identity_description(
                     request.label.as_str(),
                     request.external_id.as_str(),
@@ -3624,8 +3663,7 @@ fn knowledge_subgraph_for(
                             path_count: 0,
                             node_count: 0,
                             relationship_count: 0,
-                            fanout_reason_count: 0,
-                            fanout_reasons: Vec::new(),
+                            fanout_reason_details: Vec::new(),
                             missing_seed_identity: None,
                             missing_target_identity: None,
                             missing_relationship_type: Some(name.to_string()),
@@ -3640,7 +3678,7 @@ fn knowledge_subgraph_for(
         },
         None => None,
     };
-    let (nodes, relationships, fanout_reasons) = expand_knowledge_subgraph_for(
+    let (nodes, relationships, fanout_reason_details) = expand_knowledge_subgraph_for(
         catalog,
         store,
         KnowledgeSubgraphExpansion {
@@ -3661,8 +3699,7 @@ fn knowledge_subgraph_for(
             path_count: relationships.len(),
             node_count: nodes.len(),
             relationship_count: relationships.len(),
-            fanout_reason_count: fanout_reasons.len(),
-            fanout_reasons: fanout_reasons.clone(),
+            fanout_reason_details: fanout_reason_details.clone(),
             missing_seed_identity: None,
             missing_target_identity: None,
             missing_relationship_type: None,
@@ -3673,9 +3710,9 @@ fn knowledge_subgraph_for(
         }),
         nodes,
         relationships,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
-        fanout_reason_details: knowledge_fanout_reason_details(&fanout_reasons),
-        fanout_reasons,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
+        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
+        fanout_reason_details,
     }
 }
 
@@ -3685,8 +3722,7 @@ struct KnowledgeTraversalDiagnosticInput {
     path_count: usize,
     node_count: usize,
     relationship_count: usize,
-    fanout_reason_count: usize,
-    fanout_reasons: Vec<String>,
+    fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     missing_seed_identity: Option<String>,
     missing_target_identity: Option<String>,
     missing_relationship_type: Option<String>,
@@ -3707,10 +3743,10 @@ fn knowledge_traversal_diagnostics(
         path_count: input.path_count,
         node_count: input.node_count,
         relationship_count: input.relationship_count,
-        fanout_reason_count: input.fanout_reason_count,
-        fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reasons),
-        fanout_reason_details: knowledge_fanout_reason_details(&input.fanout_reasons),
-        fanout_reasons: input.fanout_reasons,
+        fanout_reason_count: input.fanout_reason_details.len(),
+        fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reason_details),
+        fanout_reasons: knowledge_fanout_reason_messages(&input.fanout_reason_details),
+        fanout_reason_details: input.fanout_reason_details,
         fallback_reason_codes,
         fallback_reasons,
         max_hops: input.max_hops,
@@ -3840,7 +3876,10 @@ fn expand_knowledge_neighbors_for(
     catalog: &Catalog,
     store: &GraphStore,
     expansion: KnowledgeNeighborExpansion<'_>,
-) -> (Vec<KnowledgeGraphContextPath>, Vec<String>) {
+) -> (
+    Vec<KnowledgeGraphContextPath>,
+    Vec<KnowledgeFanoutReasonDetail>,
+) {
     let mut paths = Vec::new();
     let mut fanout_reasons = Vec::new();
     let mut seen_relationships = BTreeSet::new();
@@ -3876,9 +3915,10 @@ fn expand_knowledge_neighbors_for(
                 continue;
             }
             if paths.len() >= expansion.limit {
-                fanout_reasons.push(format!(
-                    "knowledge_neighbors limit {} reached while expanding {}",
-                    expansion.limit, expansion.seed_hit_id
+                fanout_reasons.push(KnowledgeFanoutReasonDetail::path_limit(
+                    "knowledge_neighbors",
+                    expansion.limit,
+                    expansion.seed_hit_id,
                 ));
                 return (paths, fanout_reasons);
             }
@@ -3906,7 +3946,7 @@ fn expand_knowledge_paths_for(
     catalog: &Catalog,
     store: &GraphStore,
     expansion: KnowledgePathExpansion,
-) -> (Vec<KnowledgeGraphPath>, Vec<String>) {
+) -> (Vec<KnowledgeGraphPath>, Vec<KnowledgeFanoutReasonDetail>) {
     let mut paths = Vec::new();
     let mut fanout_reasons = Vec::new();
     let mut reported_dense_groups = BTreeSet::new();
@@ -3957,9 +3997,10 @@ fn expand_knowledge_paths_for(
             next_path.push(segment);
             if edge.next_node == expansion.target_node_id {
                 if paths.len() >= expansion.limit {
-                    fanout_reasons.push(format!(
-                        "knowledge_paths limit {} reached while expanding path",
-                        expansion.limit
+                    fanout_reasons.push(KnowledgeFanoutReasonDetail::path_limit(
+                        "knowledge_paths",
+                        expansion.limit,
+                        "path",
                     ));
                     return (paths, fanout_reasons);
                 }
@@ -3984,7 +4025,7 @@ fn expand_knowledge_subgraph_for(
 ) -> (
     Vec<KnowledgeEntity>,
     Vec<KnowledgeGraphContextPath>,
-    Vec<String>,
+    Vec<KnowledgeFanoutReasonDetail>,
 ) {
     let mut nodes = Vec::new();
     let mut relationships = Vec::new();
@@ -3995,7 +4036,7 @@ fn expand_knowledge_subgraph_for(
     let mut frontier = VecDeque::from([(expansion.seed_node_id, 0usize)]);
 
     if expansion.node_limit == 0 {
-        fanout_reasons.push("knowledge_subgraph node_limit 0 reached".to_string());
+        fanout_reasons.push(KnowledgeFanoutReasonDetail::node_limit(0));
         return (nodes, relationships, fanout_reasons);
     }
     if let Some(seed) = store.node(expansion.seed_node_id) {
@@ -4031,16 +4072,14 @@ fn expand_knowledge_subgraph_for(
             }
             let new_node = !seen_nodes.contains(&edge.next_node.0);
             if new_node && nodes.len() >= expansion.node_limit {
-                fanout_reasons.push(format!(
-                    "knowledge_subgraph node_limit {} reached",
-                    expansion.node_limit
+                fanout_reasons.push(KnowledgeFanoutReasonDetail::node_limit(
+                    expansion.node_limit,
                 ));
                 return (nodes, relationships, fanout_reasons);
             }
             if relationships.len() >= expansion.relationship_limit {
-                fanout_reasons.push(format!(
-                    "knowledge_subgraph relationship_limit {} reached",
-                    expansion.relationship_limit
+                fanout_reasons.push(KnowledgeFanoutReasonDetail::relationship_limit(
+                    expansion.relationship_limit,
                 ));
                 return (nodes, relationships, fanout_reasons);
             }
@@ -4118,7 +4157,7 @@ fn record_dense_adjacency_diagnostics(
     context: DenseAdjacencyDiagnosticContext<'_>,
     node_id: NodeId,
     reported_dense_groups: &mut BTreeSet<String>,
-    fanout_reasons: &mut Vec<String>,
+    fanout_reasons: &mut Vec<KnowledgeFanoutReasonDetail>,
 ) {
     for adjacency_direction in adjacency_directions_for_request(context.requested_direction) {
         let stats = match context.relationship_type {
@@ -4145,9 +4184,12 @@ fn record_dense_adjacency_diagnostics(
                 context.operation, node_id.0
             );
             if reported_dense_groups.insert(key) {
-                fanout_reasons.push(format!(
-                    "{} dense_adjacency {rel_type_name} {direction} node {} degree {}",
-                    context.operation, node_id.0, stats.degree
+                fanout_reasons.push(KnowledgeFanoutReasonDetail::dense_adjacency(
+                    context.operation,
+                    rel_type_name,
+                    direction,
+                    node_id.0,
+                    stats.degree,
                 ));
             }
         }
