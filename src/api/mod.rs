@@ -1466,6 +1466,39 @@ pub struct KnowledgeEntityDeleteOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityDeleteBatchRequest {
+    pub label: String,
+    pub external_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedEntityDeleteBatchRequest {
+    pub delete: KnowledgeEntityDeleteBatchRequest,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityDeleteBatchRow {
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub filtered_out: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityDeleteBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeEntityDeleteBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub filtered_out_count: usize,
+    pub non_writable_count: usize,
+    pub deleted_node_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipCreateRequest {
     pub source: KnowledgeEntityRequest,
     pub target: KnowledgeEntityRequest,
@@ -2863,6 +2896,20 @@ impl Database {
         request: &KnowledgeScopedEntityDeleteRequest,
     ) -> Result<KnowledgeEntityDeleteOutput> {
         delete_scoped_knowledge_entity_for(self, request)
+    }
+
+    pub fn delete_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeEntityDeleteBatchRequest,
+    ) -> Result<KnowledgeEntityDeleteBatchOutput> {
+        delete_knowledge_entity_batch_for(self, request)
+    }
+
+    pub fn delete_scoped_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeScopedEntityDeleteBatchRequest,
+    ) -> Result<KnowledgeEntityDeleteBatchOutput> {
+        delete_scoped_knowledge_entity_batch_for(self, request)
     }
 
     pub fn create_knowledge_relationship(
@@ -4535,6 +4582,131 @@ fn delete_scoped_knowledge_entity_for(
         node_id: Some(node_id),
         matched: deleted_node_count > 0,
         filtered_out: false,
+        deleted_node_count,
+    })
+}
+
+fn delete_knowledge_entity_batch_for(
+    db: &mut Database,
+    request: &KnowledgeEntityDeleteBatchRequest,
+) -> Result<KnowledgeEntityDeleteBatchOutput> {
+    delete_scoped_knowledge_entity_batch_for(
+        db,
+        &KnowledgeScopedEntityDeleteBatchRequest {
+            delete: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn delete_scoped_knowledge_entity_batch_for(
+    db: &mut Database,
+    request: &KnowledgeScopedEntityDeleteBatchRequest,
+) -> Result<KnowledgeEntityDeleteBatchOutput> {
+    db.ensure_writable()?;
+    validate_cypher_identifier(&request.delete.label, "label")?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.delete.external_ids.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    let mut non_writable_count = 0;
+    let mut eligible_external_ids = Vec::new();
+    let mut seen_eligible_external_ids = BTreeSet::new();
+
+    for external_id in &request.delete.external_ids {
+        let Some(seed) = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            request.delete.label.as_str(),
+            external_id.as_str(),
+        ) else {
+            missing_count += 1;
+            rows.push(KnowledgeEntityDeleteBatchRow {
+                external_id: external_id.clone(),
+                node_id: None,
+                matched: false,
+                filtered_out: false,
+                non_writable: false,
+            });
+            continue;
+        };
+        let node_id = seed.id.0;
+        if !node_has_external_id_property(seed, external_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeEntityDeleteBatchRow {
+                external_id: external_id.clone(),
+                node_id: Some(node_id),
+                matched: false,
+                filtered_out: false,
+                non_writable: true,
+            });
+            continue;
+        }
+        if !request.metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(&db.catalog, seed, &request.metadata_filters)
+        {
+            filtered_out_count += 1;
+            rows.push(KnowledgeEntityDeleteBatchRow {
+                external_id: external_id.clone(),
+                node_id: Some(node_id),
+                matched: false,
+                filtered_out: true,
+                non_writable: false,
+            });
+            continue;
+        }
+
+        matched_count += 1;
+        if seen_eligible_external_ids.insert(external_id.clone()) {
+            eligible_external_ids.push(external_id.clone());
+        }
+        rows.push(KnowledgeEntityDeleteBatchRow {
+            external_id: external_id.clone(),
+            node_id: Some(node_id),
+            matched: true,
+            filtered_out: false,
+            non_writable: false,
+        });
+    }
+
+    if eligible_external_ids.is_empty() {
+        return Ok(KnowledgeEntityDeleteBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            filtered_out_count,
+            non_writable_count,
+            deleted_node_count: 0,
+        });
+    }
+
+    let cypher = format!(
+        "MATCH (n:{}) WHERE n.id IN $external_ids DETACH DELETE n",
+        request.delete.label
+    );
+    let parameters = BTreeMap::from([(
+        "external_ids".to_string(),
+        Value::List(
+            eligible_external_ids
+                .into_iter()
+                .map(Value::String)
+                .collect(),
+        ),
+    )]);
+    let output = db.query_with_params(cypher.as_str(), &parameters)?;
+    let deleted_node_count = output.rows.len();
+    Ok(KnowledgeEntityDeleteBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        filtered_out_count,
+        non_writable_count,
         deleted_node_count,
     })
 }
@@ -7519,6 +7691,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedEntityDeleteRequest,
     ) -> Result<KnowledgeEntityDeleteOutput> {
         self.db.delete_scoped_knowledge_entity(request)
+    }
+
+    pub fn delete_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeEntityDeleteBatchRequest,
+    ) -> Result<KnowledgeEntityDeleteBatchOutput> {
+        self.db.delete_knowledge_entity_batch(request)
+    }
+
+    pub fn delete_scoped_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeScopedEntityDeleteBatchRequest,
+    ) -> Result<KnowledgeEntityDeleteBatchOutput> {
+        self.db.delete_scoped_knowledge_entity_batch(request)
     }
 
     pub fn create_knowledge_relationship(

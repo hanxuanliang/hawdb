@@ -277,6 +277,12 @@ existing WAL-backed `MATCH ... SET` mutation path.
 Endpoint-known entity lifecycle cleanup is also exposed as typed detach-delete
 over real external `id` properties, with optional metadata filters and the same
 WAL-backed `MATCH ... DETACH DELETE` mutation path.
+Same-label endpoint-known lifecycle cleanup also has an ordered batch typed
+facade for Nowledge `id IN [...]` cleanup paths; it resolves each external id
+through the typed identity guard, reports missing, filtered, and idless
+non-writable rows, deduplicates eligible ids, and routes the actual write
+through one parameterized WAL-backed `MATCH ... WHERE n.id IN $external_ids`
+plus `DETACH DELETE n` mutation.
 It also exposes exact-identity relationship creation for endpoint-known
 Nowledge writes such as mentions, source provenance, labels, evolution, and
 compaction links; endpoint filters are applied before writing, relationship
