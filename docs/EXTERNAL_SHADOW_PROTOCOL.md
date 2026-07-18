@@ -203,6 +203,11 @@ the real wrapper. The report distinguishes selected-subset readiness from
 Use `--require-full-contract` in CI or release validation when the command must
 exit successfully only after the complete exported contract has been selected,
 checked, and matched.
+The checker report also includes `full_contract_blocker_codes`,
+`full_contract_blockers`, `required_contract_blocker_codes`, and
+`required_contract_blockers`. These fields distinguish a healthy selected slice
+from full-contract readiness with stable codes such as
+`full_contract_not_checked` and `selected_subset_not_ready`.
 By default the checker spawns the command once per request, which is useful for
 small smoke shims. Use `--persistent-command` before the program when validating
 the real wrapper against the full contract; the checker keeps one JSON-lines

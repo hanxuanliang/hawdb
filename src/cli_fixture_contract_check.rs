@@ -720,6 +720,39 @@ fn command_check_report_json(
     let selected_subset_ready = failures.is_empty()
         && stats.selected_checks > 0
         && stats.matched_checks == stats.checked_checks;
+    let full_contract_ready = full_contract_checked && selected_subset_ready;
+    let required_contract_ready = if options.require_full_contract {
+        full_contract_ready
+    } else {
+        selected_subset_ready
+    };
+    let full_contract_readiness = contract_readiness_report(
+        full_contract_ready,
+        &[
+            (
+                full_contract_checked,
+                "full_contract_not_checked",
+                "full contract was not checked",
+            ),
+            (
+                selected_subset_ready,
+                "selected_subset_not_ready",
+                "selected subset is not ready",
+            ),
+        ],
+    );
+    let required_contract_readiness = if options.require_full_contract {
+        full_contract_readiness.clone()
+    } else {
+        contract_readiness_report(
+            required_contract_ready,
+            &[(
+                selected_subset_ready,
+                "selected_subset_not_ready",
+                "selected subset is not ready",
+            )],
+        )
+    };
     let failure_summary = failure_summary_json(&failures, stats.stopped_after_first_failure);
     serde_json::json!({
         "protocol": "skein-nowledge-fixture-contract-command-check",
@@ -744,14 +777,44 @@ fn command_check_report_json(
         },
         "selected_subset_ready": selected_subset_ready,
         "full_contract_checked": full_contract_checked,
-        "full_contract_ready": full_contract_checked && selected_subset_ready,
-        "required_contract_ready": if options.require_full_contract {
-            full_contract_checked && selected_subset_ready
-        } else {
-            selected_subset_ready
-        },
+        "full_contract_ready": full_contract_ready,
+        "full_contract_blocker_codes": full_contract_readiness.blocker_codes,
+        "full_contract_blockers": full_contract_readiness.blockers,
+        "required_contract_ready": required_contract_ready,
+        "required_contract_blocker_codes": required_contract_readiness.blocker_codes,
+        "required_contract_blockers": required_contract_readiness.blockers,
         "contract_command_check_ready": selected_subset_ready,
     })
+}
+
+#[derive(Clone)]
+struct ContractReadinessReport {
+    blocker_codes: Vec<&'static str>,
+    blockers: Vec<&'static str>,
+}
+
+fn contract_readiness_report(
+    ready: bool,
+    checks: &[(bool, &'static str, &'static str)],
+) -> ContractReadinessReport {
+    if ready {
+        return ContractReadinessReport {
+            blocker_codes: Vec::new(),
+            blockers: Vec::new(),
+        };
+    }
+    let mut blocker_codes = Vec::new();
+    let mut blockers = Vec::new();
+    for (condition, code, blocker) in checks {
+        if !*condition {
+            blocker_codes.push(*code);
+            blockers.push(*blocker);
+        }
+    }
+    ContractReadinessReport {
+        blocker_codes,
+        blockers,
+    }
 }
 
 fn fixture_command_mode_json(mode: FixtureCommandMode) -> &'static str {
@@ -1054,6 +1117,14 @@ mod tests {
         assert_eq!(report["full_contract_checked"], false);
         assert_eq!(report["selected_subset_ready"], true);
         assert_eq!(report["required_contract_ready"], true);
+        assert_eq!(
+            report["full_contract_blocker_codes"],
+            serde_json::json!(["full_contract_not_checked"])
+        );
+        assert_eq!(
+            report["required_contract_blocker_codes"],
+            serde_json::json!([])
+        );
         assert_eq!(report["contract_command_check_ready"], true);
     }
 
@@ -1123,6 +1194,14 @@ mod tests {
         assert_eq!(report["selected_subset_ready"], true);
         assert_eq!(report["full_contract_ready"], false);
         assert_eq!(report["required_contract_ready"], false);
+        assert_eq!(
+            report["required_contract_blocker_codes"],
+            serde_json::json!(["full_contract_not_checked"])
+        );
+        assert_eq!(
+            report["required_contract_blockers"],
+            serde_json::json!(["full contract was not checked"])
+        );
         assert_eq!(report["contract_command_check_ready"], true);
     }
 
