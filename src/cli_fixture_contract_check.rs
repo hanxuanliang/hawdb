@@ -176,6 +176,7 @@ fn check_contract_command(
     if selected_check_count == 0 {
         failures.push(serde_json::json!({
             "phase": "selection",
+            "code": "no_checks_selected",
             "name": serde_json::Value::Null,
             "index": serde_json::Value::Null,
             "message": "no fixture checks selected",
@@ -761,8 +762,10 @@ fn fixture_command_mode_json(mode: FixtureCommandMode) -> &'static str {
 }
 
 fn failure_json(phase: &str, value: &serde_json::Value, message: String) -> serde_json::Value {
+    let code = failure_code(phase, &message);
     serde_json::json!({
         "phase": phase,
+        "code": code,
         "name": value.get("name").cloned().unwrap_or(serde_json::Value::Null),
         "index": value.get("index").cloned().unwrap_or(serde_json::Value::Null),
         "message": message,
@@ -782,12 +785,18 @@ fn failure_summary_json(
     stopped_after_first_failure: bool,
 ) -> serde_json::Value {
     let mut phase_counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut code_counts = std::collections::BTreeMap::<String, usize>::new();
     for failure in failures {
         let phase = failure
             .get("phase")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("unknown");
         *phase_counts.entry(phase.to_string()).or_default() += 1;
+        let code = failure
+            .get("code")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        *code_counts.entry(code.to_string()).or_default() += 1;
     }
     let first_failure = failures.first();
     let first_check_failure = failures
@@ -795,6 +804,7 @@ fn failure_summary_json(
         .find(|failure| failure.get("phase").and_then(serde_json::Value::as_str) == Some("check"));
     serde_json::json!({
         "failed_phase_counts": phase_counts,
+        "failed_code_counts": code_counts,
         "first_failure": first_failure.cloned().unwrap_or(serde_json::Value::Null),
         "first_failed_check_index": first_check_failure
             .and_then(|failure| failure.get("index"))
@@ -814,6 +824,73 @@ fn failure_summary_json(
             .unwrap_or(serde_json::Value::Null),
         "stopped_after_first_failure": stopped_after_first_failure,
     })
+}
+
+fn failure_code(phase: &str, message: &str) -> &'static str {
+    if phase == "fixture_setup" {
+        return "fixture_setup_failed";
+    }
+    if message == "no fixture checks selected" {
+        return "no_checks_selected";
+    }
+    if message == "project_graph returned primary_only" {
+        return "project_graph_primary_only";
+    }
+    if message.starts_with("unsupported fixture contract check kind") {
+        return "unsupported_check_kind";
+    }
+    if message == "fixture contract check missing kind" {
+        return "missing_check_kind";
+    }
+    if message.contains("row count mismatch") {
+        return "row_count_mismatch";
+    }
+    if message.contains("ordered row mismatch") {
+        return "ordered_row_mismatch";
+    }
+    if message.contains("unordered row mismatch") {
+        return "unordered_row_mismatch";
+    }
+    if message.contains("project_graph mismatch") {
+        return "project_graph_mismatch";
+    }
+    if message.contains("execute_session reply missing results") {
+        return "execute_session_missing_results";
+    }
+    if message.contains("execute_session reply had no results") {
+        return "execute_session_empty_results";
+    }
+    if message.contains("command reply missing rows array") {
+        return "command_missing_rows";
+    }
+    if message.contains("expected_rows missing kind") {
+        return "expected_rows_missing_kind";
+    }
+    if message.starts_with("unsupported expected_rows kind") {
+        return "unsupported_expected_rows_kind";
+    }
+    if message.contains("expected_rows missing") {
+        return "malformed_expected_rows";
+    }
+    if message.contains("fixture contract command timed out") {
+        return "command_timeout";
+    }
+    if message.contains("returned invalid JSON") {
+        return "command_invalid_json";
+    }
+    if message.contains("failed to spawn") {
+        return "command_spawn_failed";
+    }
+    if message.contains("exited with") {
+        return "command_exit_failed";
+    }
+    if message.contains("persistent fixture contract command") {
+        return "persistent_command_failed";
+    }
+    if message.contains("fixture contract command") {
+        return "command_failed";
+    }
+    "check_failed"
 }
 
 fn parse_positive_usize(flag: &str, value: &str) -> Result<usize> {
@@ -902,6 +979,11 @@ mod tests {
         assert_eq!(report["matched_checks"], 0);
         assert_eq!(report["failed_checks"], 1);
         assert_eq!(report["contract_command_check_ready"], false);
+        assert_eq!(report["failures"][0]["code"], "row_count_mismatch");
+        assert_eq!(
+            report["failure_summary"]["failed_code_counts"]["row_count_mismatch"],
+            1
+        );
     }
 
     #[test]
@@ -1082,6 +1164,11 @@ mod tests {
         assert_eq!(report["checked_checks"], 0);
         assert_eq!(report["failed_checks"], 1);
         assert_eq!(report["failures"][0]["phase"], "selection");
+        assert_eq!(report["failures"][0]["code"], "no_checks_selected");
+        assert_eq!(
+            report["failure_summary"]["failed_code_counts"]["no_checks_selected"],
+            1
+        );
         assert_eq!(report["contract_command_check_ready"], false);
     }
 
@@ -1226,6 +1313,10 @@ mod tests {
         assert_eq!(report["checked_checks"], 1);
         assert_eq!(report["failed_checks"], 1);
         assert_eq!(report["failure_summary"]["failed_phase_counts"]["check"], 1);
+        assert_eq!(
+            report["failure_summary"]["failed_code_counts"]["row_count_mismatch"],
+            1
+        );
         assert_eq!(report["failure_summary"]["first_failed_check_index"], 0);
         assert_eq!(
             report["failure_summary"]["suggested_check_name"],

@@ -212,6 +212,10 @@ Use `--stop-after-first-failure` when iterating on a failing wrapper to avoid
 secondary failures after state divergence. Reports include `failure_summary`
 with phase counts, the first failed check index/name, suggested
 `--start-check`/`--check-name` values, and whether the checker stopped early.
+Each failure also carries a stable `code` such as `row_count_mismatch`,
+`project_graph_primary_only`, `command_timeout`, or `command_invalid_json`, and
+`failure_summary.failed_code_counts` aggregates those codes so wrapper bring-up
+automation does not need to parse human-readable messages.
 
 ## `execute`
 
