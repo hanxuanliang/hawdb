@@ -8250,6 +8250,7 @@ fn background_maintenance_includes_stale_search_projection_graph_delta() {
         candidates[0].plan.hint.recent_delta_operations,
         usize::try_from(db.store.commit_epoch()).unwrap()
     );
+    assert!(candidates[0].search_projection_graph_delta.is_none());
 
     let ranked = db.rank_background_maintenance(
         Some(&search_index),
@@ -8271,6 +8272,7 @@ fn background_maintenance_includes_stale_search_projection_graph_delta() {
         ranked[0].kind,
         BackgroundMaintenanceKind::SearchProjectionGraphDelta
     );
+    assert!(ranked[0].search_projection_graph_delta.is_none());
     assert!(ranked[0]
         .decision
         .reason_codes
@@ -8322,12 +8324,13 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     db.schedule_external_content_artifact_job("source-parse", "parse");
 
     let search_index = SearchIndex::in_memory();
+    let search_delta_request = SearchProjectionGraphDeltaRequest {
+        upsert_node_ids: vec![0],
+        complete_through_graph_commit_epoch: Some(2),
+        ..SearchProjectionGraphDeltaRequest::default()
+    };
     let options = BackgroundMaintenanceOptions {
-        search_projection_graph_delta: Some(SearchProjectionGraphDeltaRequest {
-            upsert_node_ids: vec![0],
-            complete_through_graph_commit_epoch: Some(2),
-            ..SearchProjectionGraphDeltaRequest::default()
-        }),
+        search_projection_graph_delta: Some(search_delta_request.clone()),
         external_content_artifact_estimated_operations: 1,
         ..BackgroundMaintenanceOptions::default()
     };
@@ -8353,6 +8356,14 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     assert!(kinds.contains(&BackgroundMaintenanceKind::SearchProjectionRebuild));
     assert!(kinds.contains(&BackgroundMaintenanceKind::GraphLightningBootstrapExport));
     assert!(kinds.contains(&BackgroundMaintenanceKind::ExternalContentArtifactJob));
+    let graph_delta_candidate = candidates
+        .iter()
+        .find(|candidate| candidate.kind == BackgroundMaintenanceKind::SearchProjectionGraphDelta)
+        .unwrap();
+    assert_eq!(
+        graph_delta_candidate.search_projection_graph_delta.as_ref(),
+        Some(&search_delta_request)
+    );
     for candidate in &candidates {
         assert_eq!(candidate.name, candidate.kind.as_str());
         assert_eq!(
@@ -8375,6 +8386,10 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     assert_eq!(
         ranked[0].kind,
         BackgroundMaintenanceKind::SearchProjectionGraphDelta
+    );
+    assert_eq!(
+        ranked[0].search_projection_graph_delta.as_ref(),
+        Some(&search_delta_request)
     );
     assert_eq!(ranked[0].kind.as_str(), ranked[0].name);
     assert_eq!(

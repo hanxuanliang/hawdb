@@ -464,6 +464,7 @@ pub struct BackgroundMaintenanceCandidate {
     pub kind: BackgroundMaintenanceKind,
     pub name: String,
     pub plan: BackgroundWorkPlan,
+    pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -472,6 +473,7 @@ pub struct RankedBackgroundMaintenance {
     pub name: String,
     pub plan: BackgroundWorkPlan,
     pub decision: BackgroundWorkDecision,
+    pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -538,7 +540,16 @@ impl BackgroundMaintenanceCandidate {
             kind,
             name: kind.as_str().to_string(),
             plan,
+            search_projection_graph_delta: None,
         }
+    }
+
+    pub fn with_search_projection_graph_delta(
+        mut self,
+        request: SearchProjectionGraphDeltaRequest,
+    ) -> Self {
+        self.search_projection_graph_delta = Some(request);
+        self
     }
 }
 
@@ -2069,10 +2080,13 @@ impl Database {
                 ),
             };
             if let Some(plan) = plan {
-                candidates.push(BackgroundMaintenanceCandidate::new(
-                    BackgroundMaintenanceKind::SearchProjectionGraphDelta,
-                    plan,
-                ));
+                candidates.push(
+                    BackgroundMaintenanceCandidate::new(
+                        BackgroundMaintenanceKind::SearchProjectionGraphDelta,
+                        plan,
+                    )
+                    .with_search_projection_graph_delta(delta_request.clone()),
+                );
             }
         } else if options.include_search_projection_graph_delta_freshness {
             if let Some(search_index) = search_index {
@@ -2166,6 +2180,7 @@ impl Database {
                     name: candidate.name.clone(),
                     plan: candidate.plan.clone(),
                     decision: ranked.decision,
+                    search_projection_graph_delta: candidate.search_projection_graph_delta.clone(),
                 }
             })
             .collect()
