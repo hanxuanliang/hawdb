@@ -156,6 +156,13 @@ WAL, treats missing or `NULL` `memory_count` as zero, rejects non-integer
 current counts without writing that row, preserves duplicate same-source
 adjustments in request order, materializes floor-decrement results as `0`, and
 commits eligible per-source updates through one grouped WAL batch.
+Source lifecycle writes are covered by a typed batch for Nowledge extracted
+mark-indexed, indexed `chunk_count`, and direct lifecycle-state updates. The
+wrapper validates Source ids, target/current lifecycle states, and non-negative
+chunk counts before WAL, applies optional current-state filtering, reports
+missing/idless/duplicate rows without writing, writes `lifecycle_state`,
+optional `chunk_count`, and `updated_at`, and commits eligible Source rows
+through one grouped WAL batch.
 
 ## Current Direction
 

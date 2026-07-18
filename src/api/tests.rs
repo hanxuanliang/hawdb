@@ -23,7 +23,8 @@ use super::{
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
-    KnowledgeScopedSubgraphRequest, KnowledgeSourceMemoryCountAdjustment,
+    KnowledgeScopedSubgraphRequest, KnowledgeSourceLifecycleBatchRequest,
+    KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchRequest, KnowledgeSubgraphRequest,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
     NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
@@ -5248,6 +5249,217 @@ fn typed_source_memory_count_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("memory_count"),
             Some(&Some(Value::Int(1)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_source_lifecycle_batch_for_nowledge_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_1', lifecycle_state: 'extracted', updated_at: 1})")
+        .unwrap();
+    db.query(
+        "CREATE (:Source {id: 'source_2', lifecycle_state: 'parsed', chunk_count: 0, updated_at: 1})",
+    )
+    .unwrap();
+    db.query("CREATE (:Source {id: 'source_3', lifecycle_state: 'parsed', updated_at: 1})")
+        .unwrap();
+
+    let output = db
+        .update_knowledge_source_lifecycle_batch(&KnowledgeSourceLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeSourceLifecycleUpdate {
+                    source_id: "source_1".to_string(),
+                    current_lifecycle_state: Some("extracted".to_string()),
+                    lifecycle_state: "indexed".to_string(),
+                    chunk_count: None,
+                    updated_at: Value::String("2026-07-19T12:00:00Z".to_string()),
+                },
+                KnowledgeSourceLifecycleUpdate {
+                    source_id: "source_2".to_string(),
+                    current_lifecycle_state: None,
+                    lifecycle_state: "indexed".to_string(),
+                    chunk_count: Some(8),
+                    updated_at: Value::String("2026-07-19T12:01:00Z".to_string()),
+                },
+                KnowledgeSourceLifecycleUpdate {
+                    source_id: "source_3".to_string(),
+                    current_lifecycle_state: Some("extracted".to_string()),
+                    lifecycle_state: "indexed".to_string(),
+                    chunk_count: None,
+                    updated_at: Value::String("2026-07-19T12:02:00Z".to_string()),
+                },
+                KnowledgeSourceLifecycleUpdate {
+                    source_id: "source_2".to_string(),
+                    current_lifecycle_state: None,
+                    lifecycle_state: "archived".to_string(),
+                    chunk_count: None,
+                    updated_at: Value::String("2026-07-19T12:03:00Z".to_string()),
+                },
+                KnowledgeSourceLifecycleUpdate {
+                    source_id: "missing".to_string(),
+                    current_lifecycle_state: None,
+                    lifecycle_state: "indexed".to_string(),
+                    chunk_count: None,
+                    updated_at: Value::String("2026-07-19T12:04:00Z".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 3);
+    assert_eq!(output.graph_commit_epoch_after, 4);
+    assert_eq!(output.rows.len(), 5);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.filtered_out_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 2);
+    assert_eq!(output.updated_property_count, 5);
+    assert_eq!(output.rows[0].updated_property_count, 2);
+    assert_eq!(output.rows[1].updated_property_count, 3);
+    assert!(output.rows[2].filtered_out);
+    assert!(output.rows[3].duplicate);
+    assert!(!output.rows[4].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "source_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "source_2".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "source_3".to_string(),
+            },
+        ],
+        property_names: vec![
+            "lifecycle_state".to_string(),
+            "chunk_count".to_string(),
+            "updated_at".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("lifecycle_state"),
+        Some(&Some(Value::String("indexed".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("updated_at"),
+        Some(&Some(Value::String("2026-07-19T12:00:00Z".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("lifecycle_state"),
+        Some(&Some(Value::String("indexed".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("chunk_count"),
+        Some(&Some(Value::Int(8)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("updated_at"),
+        Some(&Some(Value::String("2026-07-19T12:01:00Z".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("lifecycle_state"),
+        Some(&Some(Value::String("parsed".to_string())))
+    );
+}
+
+#[test]
+fn source_lifecycle_batch_rejects_invalid_rows_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_1', lifecycle_state: 'parsed'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_source_lifecycle_batch(&KnowledgeSourceLifecycleBatchRequest {
+            updates: vec![KnowledgeSourceLifecycleUpdate {
+                source_id: "source_1".to_string(),
+                current_lifecycle_state: None,
+                lifecycle_state: "indexed".to_string(),
+                chunk_count: Some(-1),
+                updated_at: Value::String("2026-07-19T12:00:00Z".to_string()),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-negative chunk count"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_source_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_source_lifecycle_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Source {id: 'source_1', lifecycle_state: 'extracted', chunk_count: 0})")
+            .unwrap();
+        db.query("CREATE (:Source {id: 'source_2', lifecycle_state: 'parsed', chunk_count: 0})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_source_lifecycle_batch(&KnowledgeSourceLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeSourceLifecycleUpdate {
+                    source_id: "source_1".to_string(),
+                    current_lifecycle_state: Some("extracted".to_string()),
+                    lifecycle_state: "indexed".to_string(),
+                    chunk_count: None,
+                    updated_at: Value::String("2026-07-19T12:00:00Z".to_string()),
+                },
+                KnowledgeSourceLifecycleUpdate {
+                    source_id: "source_2".to_string(),
+                    current_lifecycle_state: None,
+                    lifecycle_state: "indexed".to_string(),
+                    chunk_count: Some(3),
+                    updated_at: Value::String("2026-07-19T12:01:00Z".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Source".to_string(),
+                    external_id: "source_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Source".to_string(),
+                    external_id: "source_2".to_string(),
+                },
+            ],
+            property_names: vec!["lifecycle_state".to_string(), "chunk_count".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("lifecycle_state"),
+            Some(&Some(Value::String("indexed".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("lifecycle_state"),
+            Some(&Some(Value::String("indexed".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("chunk_count"),
+            Some(&Some(Value::Int(3)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
