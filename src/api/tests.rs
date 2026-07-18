@@ -5,9 +5,9 @@ use super::{
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
     KnowledgeFallbackReasonCode, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
     KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgeRetrievalEmptyReasonCode,
-    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, KnowledgeTruncationReasonCode,
-    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -104,6 +104,51 @@ fn knowledge_fallback_reason_codes_have_stable_string_encodings() {
         assert_eq!(name.parse::<KnowledgeFallbackReasonCode>(), Ok(code));
     }
     assert!("disabled".parse::<KnowledgeFallbackReasonCode>().is_err());
+}
+
+#[test]
+fn knowledge_traversal_fallback_reason_codes_have_stable_string_encodings() {
+    let cases = [
+        (
+            KnowledgeTraversalFallbackReasonCode::SeedNotFound,
+            "seed_not_found",
+        ),
+        (
+            KnowledgeTraversalFallbackReasonCode::TargetNotFound,
+            "target_not_found",
+        ),
+        (
+            KnowledgeTraversalFallbackReasonCode::MaxHopsZero,
+            "max_hops_zero",
+        ),
+        (
+            KnowledgeTraversalFallbackReasonCode::PathLimitZero,
+            "path_limit_zero",
+        ),
+        (
+            KnowledgeTraversalFallbackReasonCode::NodeLimitZero,
+            "node_limit_zero",
+        ),
+        (
+            KnowledgeTraversalFallbackReasonCode::RelationshipLimitZero,
+            "relationship_limit_zero",
+        ),
+        (
+            KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound,
+            "relationship_type_not_found",
+        ),
+    ];
+
+    for (code, name) in cases {
+        assert_eq!(code.as_str(), name);
+        assert_eq!(
+            name.parse::<KnowledgeTraversalFallbackReasonCode>(),
+            Ok(code)
+        );
+    }
+    assert!("missing"
+        .parse::<KnowledgeTraversalFallbackReasonCode>()
+        .is_err());
 }
 
 #[test]
@@ -3393,6 +3438,10 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
         unknown_type.diagnostics.fallback_reasons,
         vec!["relationship type DOES_NOT_EXIST not found".to_string()]
     );
+    assert_eq!(
+        unknown_type.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound]
+    );
 }
 
 #[test]
@@ -3511,6 +3560,10 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
         disabled.diagnostics.fallback_reasons,
         vec!["path traversal disabled by limit 0".to_string()]
     );
+    assert_eq!(
+        disabled.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::PathLimitZero]
+    );
     assert_eq!(disabled.diagnostics.fanout_reasons, disabled.fanout_reasons);
 
     let missing = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
@@ -3528,6 +3581,10 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(
         missing.diagnostics.fallback_reasons,
         vec!["seed Memory:missing not found".to_string()]
+    );
+    assert_eq!(
+        missing.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::SeedNotFound]
     );
     assert_eq!(missing.diagnostics.path_limit, Some(8));
     assert!(missing.paths.is_empty());
@@ -3742,6 +3799,10 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         unknown_type.diagnostics.fallback_reasons,
         vec!["relationship type DOES_NOT_EXIST not found".to_string()]
     );
+    assert_eq!(
+        unknown_type.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound]
+    );
 
     let limited = db.knowledge_paths(&KnowledgePathRequest {
         source_label: "Memory".to_string(),
@@ -3780,6 +3841,10 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         disabled.diagnostics.fallback_reasons,
         vec!["traversal disabled by max_hops 0".to_string()]
     );
+    assert_eq!(
+        disabled.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::MaxHopsZero]
+    );
 
     let missing = db.knowledge_paths(&KnowledgePathRequest {
         source_label: "Memory".to_string(),
@@ -3799,6 +3864,10 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(
         missing.diagnostics.fallback_reasons,
         vec!["target Entity:missing not found".to_string()]
+    );
+    assert_eq!(
+        missing.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::TargetNotFound]
     );
     assert!(missing.paths.is_empty());
 
@@ -3820,6 +3889,10 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(
         missing_source.diagnostics.fallback_reasons,
         vec!["seed Memory:missing not found".to_string()]
+    );
+    assert_eq!(
+        missing_source.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::SeedNotFound]
     );
     assert!(missing_source.paths.is_empty());
 
@@ -3843,6 +3916,13 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         vec![
             "seed Memory:missing-source not found".to_string(),
             "target Entity:missing-target not found".to_string()
+        ]
+    );
+    assert_eq!(
+        missing_both.diagnostics.fallback_reason_codes,
+        vec![
+            KnowledgeTraversalFallbackReasonCode::SeedNotFound,
+            KnowledgeTraversalFallbackReasonCode::TargetNotFound
         ]
     );
     assert!(missing_both.paths.is_empty());
@@ -4011,6 +4091,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         node_disabled.diagnostics.fallback_reasons,
         vec!["subgraph traversal disabled by node_limit 0".to_string()]
     );
+    assert_eq!(
+        node_disabled.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::NodeLimitZero]
+    );
 
     let relationship_disabled = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
         label: "Memory".to_string(),
@@ -4026,6 +4110,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert_eq!(
         relationship_disabled.diagnostics.fallback_reasons,
         vec!["subgraph traversal disabled by relationship_limit 0".to_string()]
+    );
+    assert_eq!(
+        relationship_disabled.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::RelationshipLimitZero]
     );
 
     let unknown_type = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
@@ -4048,6 +4136,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         unknown_type.diagnostics.fallback_reasons,
         vec!["relationship type DOES_NOT_EXIST not found".to_string()]
     );
+    assert_eq!(
+        unknown_type.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound]
+    );
 
     let missing = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
         label: "Memory".to_string(),
@@ -4066,6 +4158,10 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert_eq!(
         missing.diagnostics.fallback_reasons,
         vec!["seed Memory:missing not found".to_string()]
+    );
+    assert_eq!(
+        missing.diagnostics.fallback_reason_codes,
+        vec![KnowledgeTraversalFallbackReasonCode::SeedNotFound]
     );
     assert!(missing.nodes.is_empty());
     assert!(missing.relationships.is_empty());

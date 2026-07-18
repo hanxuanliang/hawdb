@@ -873,11 +873,54 @@ pub struct KnowledgeTraversalDiagnostics {
     pub relationship_count: usize,
     pub fanout_reason_count: usize,
     pub fanout_reasons: Vec<String>,
+    pub fallback_reason_codes: Vec<KnowledgeTraversalFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
     pub max_hops: usize,
     pub path_limit: Option<usize>,
     pub node_limit: Option<usize>,
     pub relationship_limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeTraversalFallbackReasonCode {
+    SeedNotFound,
+    TargetNotFound,
+    MaxHopsZero,
+    PathLimitZero,
+    NodeLimitZero,
+    RelationshipLimitZero,
+    RelationshipTypeNotFound,
+}
+
+impl KnowledgeTraversalFallbackReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SeedNotFound => "seed_not_found",
+            Self::TargetNotFound => "target_not_found",
+            Self::MaxHopsZero => "max_hops_zero",
+            Self::PathLimitZero => "path_limit_zero",
+            Self::NodeLimitZero => "node_limit_zero",
+            Self::RelationshipLimitZero => "relationship_limit_zero",
+            Self::RelationshipTypeNotFound => "relationship_type_not_found",
+        }
+    }
+}
+
+impl FromStr for KnowledgeTraversalFallbackReasonCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "seed_not_found" => Ok(Self::SeedNotFound),
+            "target_not_found" => Ok(Self::TargetNotFound),
+            "max_hops_zero" => Ok(Self::MaxHopsZero),
+            "path_limit_zero" => Ok(Self::PathLimitZero),
+            "node_limit_zero" => Ok(Self::NodeLimitZero),
+            "relationship_limit_zero" => Ok(Self::RelationshipLimitZero),
+            "relationship_type_not_found" => Ok(Self::RelationshipTypeNotFound),
+            _ => Err("unknown knowledge traversal fallback reason code"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -3468,6 +3511,7 @@ struct KnowledgeTraversalDiagnosticInput {
 fn knowledge_traversal_diagnostics(
     input: KnowledgeTraversalDiagnosticInput,
 ) -> KnowledgeTraversalDiagnostics {
+    let fallback_reason_codes = knowledge_traversal_fallback_reason_codes(&input);
     let fallback_reasons = knowledge_traversal_fallback_reasons(&input);
     KnowledgeTraversalDiagnostics {
         seed_found: input.seed_found,
@@ -3477,12 +3521,41 @@ fn knowledge_traversal_diagnostics(
         relationship_count: input.relationship_count,
         fanout_reason_count: input.fanout_reason_count,
         fanout_reasons: input.fanout_reasons,
+        fallback_reason_codes,
         fallback_reasons,
         max_hops: input.max_hops,
         path_limit: input.path_limit,
         node_limit: input.node_limit,
         relationship_limit: input.relationship_limit,
     }
+}
+
+fn knowledge_traversal_fallback_reason_codes(
+    input: &KnowledgeTraversalDiagnosticInput,
+) -> Vec<KnowledgeTraversalFallbackReasonCode> {
+    let mut codes = Vec::new();
+    if input.missing_seed_identity.is_some() {
+        codes.push(KnowledgeTraversalFallbackReasonCode::SeedNotFound);
+    }
+    if input.missing_target_identity.is_some() {
+        codes.push(KnowledgeTraversalFallbackReasonCode::TargetNotFound);
+    }
+    if input.max_hops == 0 {
+        codes.push(KnowledgeTraversalFallbackReasonCode::MaxHopsZero);
+    }
+    if input.path_limit == Some(0) {
+        codes.push(KnowledgeTraversalFallbackReasonCode::PathLimitZero);
+    }
+    if input.node_limit == Some(0) {
+        codes.push(KnowledgeTraversalFallbackReasonCode::NodeLimitZero);
+    }
+    if input.relationship_limit == Some(0) {
+        codes.push(KnowledgeTraversalFallbackReasonCode::RelationshipLimitZero);
+    }
+    if input.missing_relationship_type.is_some() {
+        codes.push(KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound);
+    }
+    codes
 }
 
 fn knowledge_traversal_fallback_reasons(input: &KnowledgeTraversalDiagnosticInput) -> Vec<String> {

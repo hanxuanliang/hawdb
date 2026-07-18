@@ -45,11 +45,11 @@ pub use api::{
     KnowledgePathOutput, KnowledgePathRequest, KnowledgeRetrievalDiagnostics,
     KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
     KnowledgeRetrieverCandidate, KnowledgeRetrieverReport, KnowledgeSubgraphOutput,
-    KnowledgeSubgraphRequest, KnowledgeTraversalDiagnostics, KnowledgeTruncationReasonCode,
-    NowledgeGraphAdapter, NowledgeGraphExplainOutput, NowledgeGraphStatement,
-    NowledgeGraphTransactionOutput, QueryOutput, RankedBackgroundMaintenance,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    KnowledgeSubgraphRequest, KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
+    NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
+    RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
