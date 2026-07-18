@@ -9,7 +9,8 @@ use crate::optimizer::{
 use crate::planner;
 use crate::qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy,
-    LocalQosScheduler, LocalQosState, QosAdmission, WorkClass, WorkRequest,
+    LocalQosScheduler, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass, WorkPriority,
+    WorkRequest,
 };
 use crate::schema::{
     Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics, IndexDescriptor,
@@ -494,6 +495,40 @@ pub struct RankedBackgroundMaintenance {
     pub search_projection_graph_delta: Option<SearchProjectionGraphDeltaRequest>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct BackgroundMaintenanceSummary {
+    pub total_candidates: usize,
+    pub admitted_count: usize,
+    pub deferred_count: usize,
+    pub rejected_count: usize,
+    pub total_estimated_operations: usize,
+    pub admitted_estimated_operations: usize,
+    pub deferred_estimated_operations: usize,
+    pub rejected_estimated_operations: usize,
+    pub top_admitted_kind: Option<BackgroundMaintenanceKind>,
+    pub top_admitted_name: Option<String>,
+    pub ranked: Vec<BackgroundMaintenanceSummaryItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundMaintenanceSummaryItem {
+    pub kind: BackgroundMaintenanceKind,
+    pub name: String,
+    pub work_class: WorkClass,
+    pub work_class_name: String,
+    pub priority: WorkPriority,
+    pub priority_name: String,
+    pub estimated_operations: usize,
+    pub admission: QosAdmission,
+    pub admission_name: String,
+    pub admission_code: Option<QosAdmissionCode>,
+    pub admission_code_name: Option<String>,
+    pub score: u64,
+    pub reason_code_names: Vec<String>,
+    pub reasons: Vec<String>,
+    pub has_executable_search_projection_graph_delta: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundMaintenanceKind {
     SchemaMaintenance,
@@ -568,6 +603,79 @@ impl BackgroundMaintenanceCandidate {
     ) -> Self {
         self.search_projection_graph_delta = Some(request);
         self
+    }
+}
+
+impl BackgroundMaintenanceSummary {
+    fn from_ranked(ranked: Vec<RankedBackgroundMaintenance>) -> Self {
+        let mut summary = Self {
+            total_candidates: ranked.len(),
+            ..Self::default()
+        };
+
+        for ranked_item in ranked {
+            let item = BackgroundMaintenanceSummaryItem::from_ranked(ranked_item);
+            summary.total_estimated_operations = summary
+                .total_estimated_operations
+                .saturating_add(item.estimated_operations);
+            match item.admission {
+                QosAdmission::Admit => {
+                    summary.admitted_count += 1;
+                    summary.admitted_estimated_operations = summary
+                        .admitted_estimated_operations
+                        .saturating_add(item.estimated_operations);
+                    if summary.top_admitted_kind.is_none() {
+                        summary.top_admitted_kind = Some(item.kind);
+                        summary.top_admitted_name = Some(item.name.clone());
+                    }
+                }
+                QosAdmission::Defer { .. } => {
+                    summary.deferred_count += 1;
+                    summary.deferred_estimated_operations = summary
+                        .deferred_estimated_operations
+                        .saturating_add(item.estimated_operations);
+                }
+                QosAdmission::Reject { .. } => {
+                    summary.rejected_count += 1;
+                    summary.rejected_estimated_operations = summary
+                        .rejected_estimated_operations
+                        .saturating_add(item.estimated_operations);
+                }
+            }
+            summary.ranked.push(item);
+        }
+
+        summary
+    }
+}
+
+impl BackgroundMaintenanceSummaryItem {
+    fn from_ranked(ranked: RankedBackgroundMaintenance) -> Self {
+        let admission_code = ranked.decision.admission.code();
+        Self {
+            kind: ranked.kind,
+            name: ranked.name,
+            work_class: ranked.plan.request.class,
+            work_class_name: ranked.plan.request.class.as_str().to_string(),
+            priority: ranked.plan.request.priority,
+            priority_name: ranked.plan.request.priority.as_str().to_string(),
+            estimated_operations: ranked.plan.request.estimated_operations,
+            admission_name: qos_admission_name(&ranked.decision.admission).to_string(),
+            admission_code,
+            admission_code_name: admission_code.map(|code| code.as_str().to_string()),
+            admission: ranked.decision.admission,
+            score: ranked.decision.score,
+            reason_code_names: ranked
+                .decision
+                .reason_codes
+                .iter()
+                .map(|code| code.as_str().to_string())
+                .collect(),
+            reasons: ranked.decision.reasons,
+            has_executable_search_projection_graph_delta: ranked
+                .search_projection_graph_delta
+                .is_some(),
+        }
     }
 }
 
@@ -2300,6 +2408,17 @@ impl Database {
                 }
             })
             .collect()
+    }
+
+    pub fn background_maintenance_summary(
+        &self,
+        search_index: Option<&SearchIndex>,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: BackgroundMaintenanceOptions,
+    ) -> BackgroundMaintenanceSummary {
+        let ranked = self.rank_background_maintenance(search_index, policy, state, options);
+        BackgroundMaintenanceSummary::from_ranked(ranked)
     }
 
     pub fn build_search_projection_graph_delta(
@@ -4584,6 +4703,14 @@ fn adjacency_direction_name(adjacency_direction: AdjacencyDirection) -> &'static
     match adjacency_direction {
         AdjacencyDirection::Outgoing => "outgoing",
         AdjacencyDirection::Incoming => "incoming",
+    }
+}
+
+fn qos_admission_name(admission: &QosAdmission) -> &'static str {
+    match admission {
+        QosAdmission::Admit => "admit",
+        QosAdmission::Defer { .. } => "defer",
+        QosAdmission::Reject { .. } => "reject",
     }
 }
 

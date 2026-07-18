@@ -8289,6 +8289,17 @@ fn background_maintenance_candidates_are_empty_without_pending_work() {
             BackgroundMaintenanceOptions::default(),
         )
         .is_empty());
+    let summary = db.background_maintenance_summary(
+        Some(&search_index),
+        &LocalQosPolicy::default(),
+        &LocalQosState::default(),
+        BackgroundMaintenanceOptions::default(),
+    );
+    assert_eq!(summary.total_candidates, 0);
+    assert_eq!(summary.admitted_count, 0);
+    assert_eq!(summary.deferred_count, 0);
+    assert!(summary.top_admitted_kind.is_none());
+    assert!(summary.ranked.is_empty());
 }
 
 #[test]
@@ -8594,6 +8605,86 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
         ),
         QosAdmission::Admit
     );
+}
+
+#[test]
+fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 1, title: 'One'})").unwrap();
+    db.query("CREATE (:Memory {id: 2, title: 'Two'})").unwrap();
+    db.query("CREATE (:Memory {id: 3, title: 'Three'})")
+        .unwrap();
+
+    let search_index = SearchIndex::in_memory();
+    let search_delta_request = SearchProjectionGraphDeltaRequest {
+        upsert_node_ids: vec![0],
+        complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
+        ..SearchProjectionGraphDeltaRequest::default()
+    };
+    let mut class_limits = [None; crate::WORK_CLASS_COUNT];
+    class_limits[WorkClass::Projection.as_index()] = Some(2);
+    let policy = LocalQosPolicy {
+        max_background_operations_by_class: class_limits,
+        ..LocalQosPolicy::default()
+    };
+    let summary = db.background_maintenance_summary(
+        Some(&search_index),
+        &policy,
+        &LocalQosState::default(),
+        BackgroundMaintenanceOptions {
+            search_projection_graph_delta: Some(search_delta_request),
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_metadata_repair: false,
+            include_graph_lightning_bootstrap_export: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+
+    assert_eq!(summary.total_candidates, 2);
+    assert_eq!(summary.admitted_count, 1);
+    assert_eq!(summary.deferred_count, 1);
+    assert_eq!(summary.rejected_count, 0);
+    assert_eq!(summary.admitted_estimated_operations, 1);
+    assert_eq!(summary.deferred_estimated_operations, 3);
+    assert_eq!(
+        summary.top_admitted_kind,
+        Some(BackgroundMaintenanceKind::SearchProjectionGraphDelta)
+    );
+    assert_eq!(
+        summary.top_admitted_name.as_deref(),
+        Some("search_projection_graph_delta")
+    );
+
+    let admitted = summary
+        .ranked
+        .iter()
+        .find(|item| item.admission_name == "admit")
+        .unwrap();
+    assert_eq!(admitted.name, "search_projection_graph_delta");
+    assert_eq!(admitted.work_class_name, "projection");
+    assert_eq!(admitted.priority_name, "background");
+    assert!(admitted.has_executable_search_projection_graph_delta);
+    assert!(admitted.admission_code_name.is_none());
+    assert!(admitted
+        .reason_code_names
+        .contains(&"recent_delta_operations".to_string()));
+
+    let deferred = summary
+        .ranked
+        .iter()
+        .find(|item| item.admission_name == "defer")
+        .unwrap();
+    assert_eq!(deferred.name, "search_projection_rebuild");
+    assert_eq!(
+        deferred.admission_code_name.as_deref(),
+        Some("class_background_limit_exceeded")
+    );
+    assert!(!deferred.has_executable_search_projection_graph_delta);
+    assert!(deferred
+        .reason_code_names
+        .contains(&"admission_deferred".to_string()));
 }
 
 #[test]
