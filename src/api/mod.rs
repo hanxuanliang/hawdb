@@ -1570,6 +1570,41 @@ pub struct KnowledgePropertyUpdateBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeNormalizedSpaceMoveBatchRequest {
+    pub label: String,
+    pub identity_property: String,
+    pub external_ids: Vec<String>,
+    pub source_space_id: Option<String>,
+    pub target_space_id: String,
+    pub updated_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeNormalizedSpaceMoveBatchRow {
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub moved: bool,
+    pub source_mismatch: bool,
+    pub already_in_target: bool,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeNormalizedSpaceMoveBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeNormalizedSpaceMoveBatchRow>,
+    pub moved_external_ids: Vec<String>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub source_mismatch_count: usize,
+    pub already_in_target_count: usize,
+    pub duplicate_count: usize,
+    pub moved_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3268,6 +3303,13 @@ impl Database {
         request: &KnowledgeScopedPropertyUpdateBatchRequest,
     ) -> Result<KnowledgePropertyUpdateBatchOutput> {
         update_scoped_knowledge_properties_batch_for(self, request)
+    }
+
+    pub fn move_knowledge_normalized_space_batch(
+        &mut self,
+        request: &KnowledgeNormalizedSpaceMoveBatchRequest,
+    ) -> Result<KnowledgeNormalizedSpaceMoveBatchOutput> {
+        move_knowledge_normalized_space_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -5598,6 +5640,153 @@ fn update_scoped_knowledge_properties_batch_for(
         filtered_out_count,
         non_writable_count,
         updated_property_count,
+    })
+}
+
+fn move_knowledge_normalized_space_batch_for(
+    db: &mut Database,
+    request: &KnowledgeNormalizedSpaceMoveBatchRequest,
+) -> Result<KnowledgeNormalizedSpaceMoveBatchOutput> {
+    db.ensure_writable()?;
+    validate_cypher_identifier(&request.label, "label")?;
+    validate_cypher_identifier(&request.identity_property, "identity property")?;
+    if request.target_space_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge normalized space move requires a non-empty target space id".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.external_ids.len());
+    let mut moved_external_ids = Vec::new();
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut source_mismatch_count = 0;
+    let mut already_in_target_count = 0;
+    let mut duplicate_count = 0;
+    let mut eligible_updates = Vec::new();
+    let mut pending_node_ids = BTreeSet::new();
+
+    for external_id in &request.external_ids {
+        let Some(node) = node_by_label_property_external_id(
+            &db.catalog,
+            &db.store,
+            request.label.as_str(),
+            request.identity_property.as_str(),
+            external_id.as_str(),
+        ) else {
+            missing_count += 1;
+            rows.push(KnowledgeNormalizedSpaceMoveBatchRow {
+                external_id: external_id.clone(),
+                node_id: None,
+                matched: false,
+                moved: false,
+                source_mismatch: false,
+                already_in_target: false,
+                duplicate: false,
+            });
+            continue;
+        };
+        matched_count += 1;
+        let node_id = node.id.0;
+        let normalized_space_id = normalized_node_space_id(node);
+        if request
+            .source_space_id
+            .as_deref()
+            .is_some_and(|source_space_id| normalized_space_id != source_space_id)
+        {
+            source_mismatch_count += 1;
+            rows.push(KnowledgeNormalizedSpaceMoveBatchRow {
+                external_id: external_id.clone(),
+                node_id: Some(node_id),
+                matched: true,
+                moved: false,
+                source_mismatch: true,
+                already_in_target: false,
+                duplicate: false,
+            });
+            continue;
+        }
+        if normalized_space_id == request.target_space_id {
+            already_in_target_count += 1;
+            rows.push(KnowledgeNormalizedSpaceMoveBatchRow {
+                external_id: external_id.clone(),
+                node_id: Some(node_id),
+                matched: true,
+                moved: false,
+                source_mismatch: false,
+                already_in_target: true,
+                duplicate: false,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node.id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeNormalizedSpaceMoveBatchRow {
+                external_id: external_id.clone(),
+                node_id: Some(node_id),
+                matched: true,
+                moved: false,
+                source_mismatch: false,
+                already_in_target: false,
+                duplicate: true,
+            });
+            continue;
+        }
+
+        let mut assignments = BTreeMap::from([(
+            "space_id".to_string(),
+            Value::String(request.target_space_id.clone()),
+        )]);
+        if let Some(updated_at) = &request.updated_at {
+            assignments.insert("updated_at".to_string(), updated_at.clone());
+        }
+        eligible_updates.push((node.id, assignments));
+        moved_external_ids.push(external_id.clone());
+        rows.push(KnowledgeNormalizedSpaceMoveBatchRow {
+            external_id: external_id.clone(),
+            node_id: Some(node_id),
+            matched: true,
+            moved: true,
+            source_mismatch: false,
+            already_in_target: false,
+            duplicate: false,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeNormalizedSpaceMoveBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            moved_external_ids,
+            matched_count,
+            missing_count,
+            source_mismatch_count,
+            already_in_target_count,
+            duplicate_count,
+            moved_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement(request.label.as_str(), node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+    Ok(KnowledgeNormalizedSpaceMoveBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        moved_external_ids,
+        matched_count,
+        missing_count,
+        source_mismatch_count,
+        already_in_target_count,
+        duplicate_count,
+        moved_count: eligible_updates.len(),
     })
 }
 
@@ -8548,6 +8737,21 @@ fn seed_node_by_label_and_external_id<'a>(
         .find(|node| projected_node_external_id(node) == external_id)
 }
 
+fn node_by_label_property_external_id<'a>(
+    catalog: &Catalog,
+    store: &'a GraphStore,
+    label: &str,
+    property: &str,
+    external_id: &str,
+) -> Option<&'a NodeRecord> {
+    let label_id = catalog.label_id(label)?;
+    store.scan_nodes(Some(label_id)).find(|node| {
+        node.properties
+            .get(property)
+            .is_some_and(|value| value_to_external_id(value) == external_id)
+    })
+}
+
 fn context_path_for_relationship(
     catalog: &Catalog,
     store: &GraphStore,
@@ -9930,6 +10134,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedPropertyUpdateBatchRequest,
     ) -> Result<KnowledgePropertyUpdateBatchOutput> {
         self.db.update_scoped_knowledge_properties_batch(request)
+    }
+
+    pub fn move_knowledge_normalized_space_batch(
+        &mut self,
+        request: &KnowledgeNormalizedSpaceMoveBatchRequest,
+    ) -> Result<KnowledgeNormalizedSpaceMoveBatchOutput> {
+        self.db.move_knowledge_normalized_space_batch(request)
     }
 
     pub fn delete_knowledge_entity(

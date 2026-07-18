@@ -7,13 +7,14 @@ use super::{
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
     KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
-    KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgePropertyBatchRequest,
-    KnowledgePropertyUpdateBatchRequest, KnowledgePropertyUpdateRequest,
-    KnowledgeRelationshipCreateBatchRequest, KnowledgeRelationshipCreateRequest,
-    KnowledgeRelationshipDeleteBatchRequest, KnowledgeRelationshipDeleteRequest,
-    KnowledgeRelationshipUpdateBatchRequest, KnowledgeRelationshipUpdateRequest,
-    KnowledgeRelationshipUpsertBatchRequest, KnowledgeRelationshipUpsertRequest,
-    KnowledgeRelationshipsRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
+    KnowledgeNeighborsRequest, KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePathRequest,
+    KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,
+    KnowledgePropertyUpdateRequest, KnowledgeRelationshipCreateBatchRequest,
+    KnowledgeRelationshipCreateRequest, KnowledgeRelationshipDeleteBatchRequest,
+    KnowledgeRelationshipDeleteRequest, KnowledgeRelationshipUpdateBatchRequest,
+    KnowledgeRelationshipUpdateRequest, KnowledgeRelationshipUpsertBatchRequest,
+    KnowledgeRelationshipUpsertRequest, KnowledgeRelationshipsRequest,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
     KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityDeleteBatchRequest,
     KnowledgeScopedEntityDeleteRequest, KnowledgeScopedEntityRequest,
     KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
@@ -4743,6 +4744,147 @@ fn updates_knowledge_properties_batch_through_typed_api() {
         row.rows[1].properties.get("title"),
         Some(&Some(Value::String("New 2".to_string())))
     );
+}
+
+#[test]
+fn moves_thread_normalized_space_batch_by_identity_property() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'storage-1', thread_id: 'thread-1', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'storage-2', thread_id: 'thread-2', space_id: 'default'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'storage-3', thread_id: 'thread-3', space_id: 'team'})")
+        .unwrap();
+
+    let output = db
+        .move_knowledge_normalized_space_batch(&KnowledgeNormalizedSpaceMoveBatchRequest {
+            label: "Thread".to_string(),
+            identity_property: "thread_id".to_string(),
+            external_ids: vec![
+                "thread-1".to_string(),
+                "thread-2".to_string(),
+                "thread-3".to_string(),
+                "thread-2".to_string(),
+                "missing".to_string(),
+            ],
+            source_space_id: Some("default".to_string()),
+            target_space_id: "team".to_string(),
+            updated_at: Some(Value::String("2026-07-19".to_string())),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 3);
+    assert_eq!(output.graph_commit_epoch_after, 4);
+    assert_eq!(output.matched_count, 4);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.source_mismatch_count, 1);
+    assert_eq!(output.already_in_target_count, 0);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.moved_count, 2);
+    assert_eq!(
+        output.moved_external_ids,
+        vec!["thread-1".to_string(), "thread-2".to_string()]
+    );
+    assert!(output.rows[0].moved);
+    assert!(output.rows[1].moved);
+    assert!(output.rows[2].source_mismatch);
+    assert!(output.rows[3].duplicate);
+    assert!(!output.rows[4].matched);
+
+    let rows = db
+        .query("MATCH (t:Thread) RETURN t.thread_id, t.space_id, t.updated_at ORDER BY t.thread_id")
+        .unwrap();
+    assert_eq!(
+        rows.rows[0].get("t.space_id"),
+        Some(&Value::String("team".to_string()))
+    );
+    assert_eq!(
+        rows.rows[0].get("t.updated_at"),
+        Some(&Value::String("2026-07-19".to_string()))
+    );
+    assert_eq!(
+        rows.rows[1].get("t.space_id"),
+        Some(&Value::String("team".to_string()))
+    );
+    assert_eq!(
+        rows.rows[2].get("t.space_id"),
+        Some(&Value::String("team".to_string()))
+    );
+}
+
+#[test]
+fn knowledge_normalized_space_move_batch_rejects_invalid_identifiers() {
+    let mut db = Database::new();
+    let error = db
+        .move_knowledge_normalized_space_batch(&KnowledgeNormalizedSpaceMoveBatchRequest {
+            label: "Thread".to_string(),
+            identity_property: "thread-id".to_string(),
+            external_ids: vec!["thread-1".to_string()],
+            source_space_id: None,
+            target_space_id: "team".to_string(),
+            updated_at: None,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("identity property identifier"));
+    assert_eq!(db.store.commit_epoch(), 0);
+}
+
+#[test]
+fn typed_knowledge_normalized_space_move_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_knowledge_normalized_space_move_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1', space_id: ''})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'memory_2', space_id: 'default'})")
+            .unwrap();
+        let batch_count_before_move = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.move_knowledge_normalized_space_batch(&KnowledgeNormalizedSpaceMoveBatchRequest {
+            label: "Memory".to_string(),
+            identity_property: "id".to_string(),
+            external_ids: vec!["memory_1".to_string(), "memory_2".to_string()],
+            source_space_id: Some("default".to_string()),
+            target_space_id: "archive".to_string(),
+            updated_at: None,
+        })
+        .unwrap();
+        let batch_count_after_move = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_move, batch_count_before_move + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            property_names: vec!["space_id".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("space_id"),
+            Some(&Some(Value::String("archive".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("space_id"),
+            Some(&Some(Value::String("archive".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
