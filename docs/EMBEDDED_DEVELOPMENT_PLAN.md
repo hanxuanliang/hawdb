@@ -160,9 +160,11 @@ WAL commits for eligible lifecycle rows. Memory lifecycle metadata updates are
 also exposed as a typed batch for the Nowledge `metadata`/`is_latest`/
 `lifecycle_state`/`updated_at` write shape. Skill usage-stat updates are exposed
 as a typed batch for Nowledge `use_count`, optional `success_rate`,
-`last_activity_at`, `updated_at`, and `metadata` writes. Thread metadata updates
-are exposed as a typed batch for Nowledge `metadata` writes with optional
-`updated_at` stamping.
+`last_activity_at`, `updated_at`, and `metadata` writes. Skill lifecycle and
+write-state updates are exposed as a typed batch for Nowledge stage changes,
+rejections, promotions, compiled metadata, draft bundle writes, content hashes,
+and `updated_at` stamping. Thread metadata updates are exposed as a typed batch
+for Nowledge `metadata` writes with optional `updated_at` stamping.
 `DatabaseConfig` provides read-only operation and bounded read-result
 configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,

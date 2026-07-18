@@ -174,6 +174,13 @@ Skill usage-stat writes are covered by a typed batch for Nowledge
 counts, and bounded numeric success rates before WAL, reports missing,
 idless, and duplicate rows without writing, and commits eligible Skill rows
 through one grouped WAL batch.
+Skill lifecycle/write-state updates are covered by a typed batch for Nowledge
+stage changes, rejection timestamps, promotion rationale, compiled version
+metadata, draft bundle writes, content hashes, bundle paths, triggers, tools,
+write origin, and `updated_at` stamping. The wrapper validates Skill ids,
+non-empty stages, and non-empty write origins before WAL, reports missing,
+idless, and duplicate rows without writing, and commits eligible Skill rows
+through one grouped WAL batch.
 Thread metadata writes are covered by a typed batch for Nowledge `metadata`
 updates with optional `updated_at` stamping. The wrapper validates Thread ids
 before WAL, reports missing, idless, and duplicate rows without writing, keeps

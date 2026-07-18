@@ -1791,6 +1791,54 @@ pub struct KnowledgeSkillUsageStatsBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillLifecycleUpdate {
+    pub skill_id: String,
+    pub stage: Option<String>,
+    pub rejected_at: Option<Value>,
+    pub rationale: Option<Value>,
+    pub version: Option<Value>,
+    pub title: Option<Value>,
+    pub name: Option<Value>,
+    pub description: Option<Value>,
+    pub triggers: Option<Value>,
+    pub tools: Option<Value>,
+    pub bundle_path: Option<Value>,
+    pub content_hash: Option<Value>,
+    pub write_origin: Option<String>,
+    pub metadata: Option<Value>,
+    pub updated_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillLifecycleBatchRequest {
+    pub updates: Vec<KnowledgeSkillLifecycleUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillLifecycleBatchRow {
+    pub skill_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillLifecycleBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSkillLifecycleBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMetadataUpdate {
     pub thread_id: String,
     pub metadata: Value,
@@ -3567,6 +3615,13 @@ impl Database {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         update_knowledge_skill_usage_stats_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_skill_lifecycle_batch(
+        &mut self,
+        request: &KnowledgeSkillLifecycleBatchRequest,
+    ) -> Result<KnowledgeSkillLifecycleBatchOutput> {
+        update_knowledge_skill_lifecycle_batch_for(self, request)
     }
 
     pub fn update_knowledge_thread_metadata_batch(
@@ -6859,6 +6914,194 @@ fn validate_skill_success_rate(value: &Value) -> Result<()> {
         Err(SkeinError::Semantic(
             "knowledge skill usage stats update requires success rate between 0 and 1".to_string(),
         ))
+    }
+}
+
+fn update_knowledge_skill_lifecycle_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSkillLifecycleBatchRequest,
+) -> Result<KnowledgeSkillLifecycleBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.skill_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge skill lifecycle update requires a non-empty skill id".to_string(),
+            ));
+        }
+        if update.stage.as_deref().is_some_and(str::is_empty) {
+            return Err(SkeinError::Semantic(
+                "knowledge skill lifecycle update requires a non-empty stage".to_string(),
+            ));
+        }
+        if update.write_origin.as_deref().is_some_and(str::is_empty) {
+            return Err(SkeinError::Semantic(
+                "knowledge skill lifecycle update requires a non-empty write origin".to_string(),
+            ));
+        }
+        if !skill_lifecycle_update_has_business_field(update) {
+            return Err(SkeinError::Semantic(
+                "knowledge skill lifecycle update requires at least one lifecycle field"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Skill", &update.skill_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeSkillLifecycleBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.skill_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeSkillLifecycleBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeSkillLifecycleBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let assignments = skill_lifecycle_assignments(update);
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeSkillLifecycleBatchRow {
+            skill_id: update.skill_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeSkillLifecycleBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Skill", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeSkillLifecycleBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
+}
+
+fn skill_lifecycle_update_has_business_field(update: &KnowledgeSkillLifecycleUpdate) -> bool {
+    update.stage.is_some()
+        || update.rejected_at.is_some()
+        || update.rationale.is_some()
+        || update.version.is_some()
+        || update.title.is_some()
+        || update.name.is_some()
+        || update.description.is_some()
+        || update.triggers.is_some()
+        || update.tools.is_some()
+        || update.bundle_path.is_some()
+        || update.content_hash.is_some()
+        || update.write_origin.is_some()
+        || update.metadata.is_some()
+}
+
+fn skill_lifecycle_assignments(update: &KnowledgeSkillLifecycleUpdate) -> BTreeMap<String, Value> {
+    let mut assignments = BTreeMap::new();
+    if let Some(stage) = &update.stage {
+        assignments.insert("stage".to_string(), Value::String(stage.clone()));
+    }
+    insert_optional_assignment(&mut assignments, "rejected_at", &update.rejected_at);
+    insert_optional_assignment(&mut assignments, "rationale", &update.rationale);
+    insert_optional_assignment(&mut assignments, "version", &update.version);
+    insert_optional_assignment(&mut assignments, "title", &update.title);
+    insert_optional_assignment(&mut assignments, "name", &update.name);
+    insert_optional_assignment(&mut assignments, "description", &update.description);
+    insert_optional_assignment(&mut assignments, "triggers", &update.triggers);
+    insert_optional_assignment(&mut assignments, "tools", &update.tools);
+    insert_optional_assignment(&mut assignments, "bundle_path", &update.bundle_path);
+    insert_optional_assignment(&mut assignments, "content_hash", &update.content_hash);
+    if let Some(write_origin) = &update.write_origin {
+        assignments.insert(
+            "write_origin".to_string(),
+            Value::String(write_origin.clone()),
+        );
+    }
+    insert_optional_assignment(&mut assignments, "metadata", &update.metadata);
+    assignments.insert("updated_at".to_string(), update.updated_at.clone());
+    assignments
+}
+
+fn insert_optional_assignment(
+    assignments: &mut BTreeMap<String, Value>,
+    property_name: &str,
+    value: &Option<Value>,
+) {
+    if let Some(value) = value {
+        assignments.insert(property_name.to_string(), value.clone());
     }
 }
 
@@ -11371,6 +11614,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         self.db.update_knowledge_skill_usage_stats_batch(request)
+    }
+
+    pub fn update_knowledge_skill_lifecycle_batch(
+        &mut self,
+        request: &KnowledgeSkillLifecycleBatchRequest,
+    ) -> Result<KnowledgeSkillLifecycleBatchOutput> {
+        self.db.update_knowledge_skill_lifecycle_batch(request)
     }
 
     pub fn update_knowledge_thread_metadata_batch(

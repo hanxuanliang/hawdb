@@ -24,7 +24,8 @@ use super::{
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
-    KnowledgeScopedSubgraphRequest, KnowledgeSkillUsageStatsBatchRequest,
+    KnowledgeScopedSubgraphRequest, KnowledgeSkillLifecycleBatchRequest,
+    KnowledgeSkillLifecycleUpdate, KnowledgeSkillUsageStatsBatchRequest,
     KnowledgeSkillUsageStatsUpdate, KnowledgeSourceLifecycleBatchRequest,
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchRequest, KnowledgeSubgraphRequest,
@@ -5869,6 +5870,304 @@ fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("metadata"),
             Some(&Some(Value::String("{\"runs\":5}".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+fn skill_lifecycle_update(skill_id: &str) -> KnowledgeSkillLifecycleUpdate {
+    KnowledgeSkillLifecycleUpdate {
+        skill_id: skill_id.to_string(),
+        stage: None,
+        rejected_at: None,
+        rationale: None,
+        version: None,
+        title: None,
+        name: None,
+        description: None,
+        triggers: None,
+        tools: None,
+        bundle_path: None,
+        content_hash: None,
+        write_origin: None,
+        metadata: None,
+        updated_at: Value::Int(1),
+    }
+}
+
+#[test]
+fn updates_skill_lifecycle_batch_for_nowledge_shapes() {
+    let mut db = Database::new();
+    for skill_id in [
+        "skill_reject",
+        "skill_compiled",
+        "skill_promote",
+        "skill_draft",
+        "skill_content",
+    ] {
+        db.query(format!("CREATE (:Skill {{id: '{skill_id}', stage: 'candidate', metadata: '{{}}', updated_at: 1}})").as_str())
+            .unwrap();
+    }
+
+    let output = db
+        .update_knowledge_skill_lifecycle_batch(&KnowledgeSkillLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeSkillLifecycleUpdate {
+                    stage: Some("rejected".to_string()),
+                    rejected_at: Some(Value::Int(201)),
+                    updated_at: Value::Int(202),
+                    ..skill_lifecycle_update("skill_reject")
+                },
+                KnowledgeSkillLifecycleUpdate {
+                    version: Some(Value::Int(2)),
+                    title: Some(Value::String("compiled-skill".to_string())),
+                    name: Some(Value::String("compiled-skill".to_string())),
+                    description: Some(Value::String("compiled description".to_string())),
+                    content_hash: Some(Value::String("hash-compiled-rest".to_string())),
+                    bundle_path: Some(Value::String("/tmp/compiled-rest".to_string())),
+                    metadata: Some(Value::String("{\"compiled\":true}".to_string())),
+                    updated_at: Value::Int(401),
+                    ..skill_lifecycle_update("skill_compiled")
+                },
+                KnowledgeSkillLifecycleUpdate {
+                    stage: Some("promotable".to_string()),
+                    rationale: Some(Value::String("ready to promote".to_string())),
+                    updated_at: Value::Int(1_700_000_032),
+                    ..skill_lifecycle_update("skill_promote")
+                },
+                KnowledgeSkillLifecycleUpdate {
+                    stage: Some("draft".to_string()),
+                    name: Some(Value::String("mcp-skill".to_string())),
+                    description: Some(Value::String("compiled skill".to_string())),
+                    triggers: Some(Value::List(vec![Value::String("compile".to_string())])),
+                    tools: Some(Value::List(vec![Value::String("shell".to_string())])),
+                    bundle_path: Some(Value::String("/tmp/mcp-skill".to_string())),
+                    content_hash: Some(Value::String("hash-write".to_string())),
+                    write_origin: Some("compiler".to_string()),
+                    updated_at: Value::Int(1_700_000_033),
+                    ..skill_lifecycle_update("skill_draft")
+                },
+                KnowledgeSkillLifecycleUpdate {
+                    content_hash: Some(Value::String("hash-updated".to_string())),
+                    metadata: Some(Value::String("{\"updated\":true}".to_string())),
+                    updated_at: Value::Int(701),
+                    ..skill_lifecycle_update("skill_content")
+                },
+                KnowledgeSkillLifecycleUpdate {
+                    stage: Some("active".to_string()),
+                    updated_at: Value::Int(800),
+                    ..skill_lifecycle_update("skill_draft")
+                },
+                KnowledgeSkillLifecycleUpdate {
+                    stage: Some("active".to_string()),
+                    updated_at: Value::Int(900),
+                    ..skill_lifecycle_update("missing")
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 5);
+    assert_eq!(output.graph_commit_epoch_after, 6);
+    assert_eq!(output.rows.len(), 7);
+    assert_eq!(output.matched_count, 5);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 5);
+    assert_eq!(output.updated_property_count, 26);
+    assert_eq!(output.rows[0].updated_property_count, 3);
+    assert_eq!(output.rows[1].updated_property_count, 8);
+    assert_eq!(output.rows[2].updated_property_count, 3);
+    assert_eq!(output.rows[3].updated_property_count, 9);
+    assert_eq!(output.rows[4].updated_property_count, 3);
+    assert!(output.rows[5].duplicate);
+    assert!(!output.rows[6].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Skill".to_string(),
+                external_id: "skill_reject".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Skill".to_string(),
+                external_id: "skill_compiled".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Skill".to_string(),
+                external_id: "skill_promote".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Skill".to_string(),
+                external_id: "skill_draft".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Skill".to_string(),
+                external_id: "skill_content".to_string(),
+            },
+        ],
+        property_names: vec![
+            "stage".to_string(),
+            "rejected_at".to_string(),
+            "rationale".to_string(),
+            "version".to_string(),
+            "title".to_string(),
+            "name".to_string(),
+            "description".to_string(),
+            "triggers".to_string(),
+            "tools".to_string(),
+            "bundle_path".to_string(),
+            "content_hash".to_string(),
+            "write_origin".to_string(),
+            "metadata".to_string(),
+            "updated_at".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("stage"),
+        Some(&Some(Value::String("rejected".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("rejected_at"),
+        Some(&Some(Value::Int(201)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("version"),
+        Some(&Some(Value::Int(2)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("content_hash"),
+        Some(&Some(Value::String("hash-compiled-rest".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("stage"),
+        Some(&Some(Value::String("promotable".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("rationale"),
+        Some(&Some(Value::String("ready to promote".to_string())))
+    );
+    assert_eq!(
+        rows.rows[3].properties.get("stage"),
+        Some(&Some(Value::String("draft".to_string())))
+    );
+    assert_eq!(
+        rows.rows[3].properties.get("triggers"),
+        Some(&Some(Value::List(vec![Value::String(
+            "compile".to_string()
+        )])))
+    );
+    assert_eq!(
+        rows.rows[3].properties.get("write_origin"),
+        Some(&Some(Value::String("compiler".to_string())))
+    );
+    assert_eq!(
+        rows.rows[4].properties.get("content_hash"),
+        Some(&Some(Value::String("hash-updated".to_string())))
+    );
+    assert_eq!(
+        rows.rows[4].properties.get("metadata"),
+        Some(&Some(Value::String("{\"updated\":true}".to_string())))
+    );
+}
+
+#[test]
+fn skill_lifecycle_batch_rejects_empty_stage_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'skill_1', stage: 'candidate'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_skill_lifecycle_batch(&KnowledgeSkillLifecycleBatchRequest {
+            updates: vec![KnowledgeSkillLifecycleUpdate {
+                stage: Some(String::new()),
+                updated_at: Value::Int(100),
+                ..skill_lifecycle_update("skill_1")
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty stage"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_skill_lifecycle_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query(
+            "CREATE (:Skill {id: 'skill_1', stage: 'candidate', metadata: '{}', updated_at: 1})",
+        )
+        .unwrap();
+        db.query("CREATE (:Skill {id: 'skill_2', stage: 'draft', metadata: '{}', updated_at: 1})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_skill_lifecycle_batch(&KnowledgeSkillLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeSkillLifecycleUpdate {
+                    stage: Some("promotable".to_string()),
+                    rationale: Some(Value::String("ready".to_string())),
+                    updated_at: Value::Int(100),
+                    ..skill_lifecycle_update("skill_1")
+                },
+                KnowledgeSkillLifecycleUpdate {
+                    content_hash: Some(Value::String("hash-updated".to_string())),
+                    metadata: Some(Value::String("{\"updated\":true}".to_string())),
+                    updated_at: Value::Int(200),
+                    ..skill_lifecycle_update("skill_2")
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Skill".to_string(),
+                    external_id: "skill_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Skill".to_string(),
+                    external_id: "skill_2".to_string(),
+                },
+            ],
+            property_names: vec![
+                "stage".to_string(),
+                "rationale".to_string(),
+                "content_hash".to_string(),
+                "metadata".to_string(),
+            ],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("stage"),
+            Some(&Some(Value::String("promotable".to_string())))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("rationale"),
+            Some(&Some(Value::String("ready".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("content_hash"),
+            Some(&Some(Value::String("hash-updated".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("metadata"),
+            Some(&Some(Value::String("{\"updated\":true}".to_string())))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
