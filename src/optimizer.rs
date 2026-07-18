@@ -373,6 +373,9 @@ pub enum PhysicalPlan {
     },
 }
 
+mod physical_plan;
+pub use physical_plan::{PhysicalPlanChildren, PhysicalPlanClass, PhysicalPlanKind};
+
 impl PhysicalPlan {
     pub fn fingerprint(&self) -> String {
         let mut output = String::new();
@@ -6672,7 +6675,8 @@ fn write_sort_list(output: &mut String, items: &[SortItem]) {
 mod tests {
     use super::{
         CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
-        OptimizerConfig, PlanCost,
+        OptimizerConfig, PhysicalPlan, PhysicalPlanChildren, PhysicalPlanClass, PhysicalPlanKind,
+        PlanCost,
     };
     use crate::cypher::RelationshipDirection;
     use crate::planner::{
@@ -6681,6 +6685,76 @@ mod tests {
     };
     use crate::value::Value;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn physical_plan_metadata_describes_kind_class_and_children() {
+        let plan = PhysicalPlan::ProjectExec {
+            items: vec![Projection {
+                expression: ProjectionExpression::Property {
+                    variable: "m".to_string(),
+                    property: "title".to_string(),
+                },
+                name: "title".to_string(),
+            }],
+            input: Box::new(PhysicalPlan::FilterExec {
+                predicate: Predicate::PropertyEq {
+                    variable: "m".to_string(),
+                    property: "id".to_string(),
+                    value: Value::Int(1),
+                },
+                input: Box::new(PhysicalPlan::IndexNodeSeek {
+                    variable: "m".to_string(),
+                    label: "Memory".to_string(),
+                    property: "id".to_string(),
+                    value: Value::Int(1),
+                }),
+            }),
+        };
+
+        assert_eq!(plan.kind(), PhysicalPlanKind::ProjectExec);
+        assert_eq!(plan.kind().as_str(), "ProjectExec");
+        assert_eq!(plan.class(), PhysicalPlanClass::Relational);
+        assert_eq!(plan.class().as_str(), "relational");
+        assert_eq!(plan.children().len(), 1);
+
+        let PhysicalPlanChildren::Unary(filter) = plan.children() else {
+            panic!("project should expose a unary child");
+        };
+        assert_eq!(filter.kind(), PhysicalPlanKind::FilterExec);
+        assert_eq!(filter.class(), PhysicalPlanClass::Relational);
+
+        let PhysicalPlanChildren::Unary(seek) = filter.children() else {
+            panic!("filter should expose a unary child");
+        };
+        assert_eq!(seek.kind(), PhysicalPlanKind::IndexNodeSeek);
+        assert_eq!(seek.class(), PhysicalPlanClass::Access);
+        assert!(seek.children().is_empty());
+    }
+
+    #[test]
+    fn physical_plan_metadata_describes_binary_children() {
+        let plan = PhysicalPlan::NodeCartesianProductExec {
+            left: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            }),
+            right: Box::new(PhysicalPlan::SeqNodeScan {
+                variable: "s".to_string(),
+                label: "Source".to_string(),
+            }),
+        };
+
+        assert_eq!(plan.kind(), PhysicalPlanKind::NodeCartesianProductExec);
+        assert_eq!(plan.class(), PhysicalPlanClass::Relational);
+
+        let PhysicalPlanChildren::Binary(left, right) = plan.children() else {
+            panic!("cartesian product should expose binary children");
+        };
+        assert_eq!(left.kind(), PhysicalPlanKind::SeqNodeScan);
+        assert_eq!(right.kind(), PhysicalPlanKind::SeqNodeScan);
+        assert_eq!(left.class(), PhysicalPlanClass::Access);
+        assert_eq!(right.class(), PhysicalPlanClass::Access);
+    }
 
     #[test]
     fn optimizer_budget_uses_direct_fallback_with_trace_warning() {

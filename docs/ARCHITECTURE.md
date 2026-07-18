@@ -174,6 +174,14 @@ concerns. The current hand-written parser should keep that boundary while
 avoiding a generated grammar until the Cypher subset is large and stable enough
 to justify it.
 
+The optimizer should follow the same incremental split while graph-specific
+contracts are still in the root crate:
+
+```text
+src/optimizer.rs                optimizer facade, plan enum, memo search, rules
+src/optimizer/physical_plan.rs  physical plan metadata and child traversal
+```
+
 ## Logical Plan
 
 Core logical operators:
@@ -203,6 +211,27 @@ enumerate pattern join orders instead of committing too early to query text
 order.
 
 ## Physical Plan
+
+Skein currently keeps a public `PhysicalPlan` enum as the embedded facade
+between optimizer and executor. That shape is intentionally compatibility-first:
+it keeps execution, explain output, and deterministic fingerprints stable while
+the Nowledge replacement surface is still growing.
+
+The long-term direction is closer to RisingWave's plan-node organization:
+operator-specific structs own their private fields, every node exposes stable
+metadata, and common optimizer code works through plan-node references plus
+properties instead of matching one large enum everywhere. Skein should migrate
+in that direction incrementally:
+
+- keep `PhysicalPlan` as the public compatibility facade until executor
+  contracts are stable
+- use `PhysicalPlanKind`, `PhysicalPlanClass`, and child metadata as the
+  operator identity boundary for diagnostics, tracing, and future memo storage
+- split large physical operators into modules and later into per-node structs
+  behind the facade
+- move graph-specific implementation rules into a `graph-optimizer` crate only
+  after parser, planner, executor, and storage dependencies no longer create
+  cycles
 
 Core physical operators:
 
