@@ -193,9 +193,12 @@ graph epoch before writing the pointer.
 `skein graph-lightning-verify-published <staging-dir> <publish-dir>` verifies
 that the published pointer still references the staged catalog by byte length
 and checksum, and that the referenced staging catalog still passes the
-source-independent verifier. Its validation gate keeps flat errors and grouped
-pointer, catalog, and staging error arrays so resume automation can distinguish
-pointer corruption from staging catalog drift.
+source-independent verifier. The report promotes the staging verifier's
+`storage_recovery_evidence` to a top-level field so post-publish audit can
+inspect recovery readiness without traversing the nested staging report. Its
+validation gate keeps flat errors and grouped pointer, catalog, and staging
+error arrays so resume automation can distinguish pointer corruption from
+staging catalog drift.
 `skein graph-lightning-gc-staging-report <staging-dir> <publish-dir>` fails
 closed when a published pointer cannot be verified and groups the propagated
 published-pointer verification errors for cleanup automation. The GC report also
