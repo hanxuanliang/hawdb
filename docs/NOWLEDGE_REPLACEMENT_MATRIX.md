@@ -228,6 +228,11 @@ validates job ids, job types, progress percentages, progress messages, and
 failure messages before WAL, reports missing, existing, status-mismatched, and
 duplicate jobs without writing, and commits eligible creates/updates through
 one grouped WAL batch.
+Source-reference relationship cleanup is covered by a typed API for Nowledge
+memory/source delete flows. `Database::delete_knowledge_source_reference_relationships`
+scans only `RELATES_TO.source_reference`, rejects empty references before WAL,
+preserves endpoint Entity nodes, and commits eligible relationship deletes
+through one grouped WAL batch.
 
 ## Current Direction
 

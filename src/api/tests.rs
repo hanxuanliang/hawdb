@@ -35,12 +35,12 @@ use super::{
     KnowledgeSkillLifecycleUpdate, KnowledgeSkillUsageStatsBatchRequest,
     KnowledgeSkillUsageStatsUpdate, KnowledgeSourceLifecycleBatchRequest,
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
-    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSubgraphRequest,
-    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -10543,6 +10543,162 @@ fn typed_knowledge_relationship_batch_delete_persists_as_one_wal_batch_and_repla
             limit_per_seed: 4,
         });
         assert_eq!(output.relationship_count, 0);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn deletes_source_reference_relationships_for_nowledge_cleanup() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'entity_1'})-[:RELATES_TO {source_reference: 'source_1'}]->(:Entity {id: 'entity_2'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_3'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_4'})").unwrap();
+    db.create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+        source: KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "entity_1".to_string(),
+        },
+        target: KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "entity_3".to_string(),
+        },
+        relationship_type: "RELATES_TO".to_string(),
+        properties: BTreeMap::from([(
+            "source_reference".to_string(),
+            Value::String("source_1".to_string()),
+        )]),
+    })
+    .unwrap();
+    db.create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+        source: KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "entity_1".to_string(),
+        },
+        target: KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "entity_4".to_string(),
+        },
+        relationship_type: "RELATES_TO".to_string(),
+        properties: BTreeMap::from([(
+            "source_reference".to_string(),
+            Value::String("source_2".to_string()),
+        )]),
+    })
+    .unwrap();
+
+    let output = db
+        .delete_knowledge_source_reference_relationships(
+            &KnowledgeSourceReferenceRelationshipCleanupRequest {
+                source_reference: "source_1".to_string(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 5);
+    assert_eq!(output.graph_commit_epoch_after, 6);
+    assert_eq!(output.candidate_count, 2);
+    assert_eq!(output.deleted_relationship_count, 2);
+    assert_eq!(output.rows.len(), 2);
+    assert!(output.rows.iter().all(|row| row.deleted));
+    assert!(output
+        .rows
+        .iter()
+        .all(|row| row.source_external_id.as_deref() == Some("entity_1")));
+
+    let dropped = db
+        .query("MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.source_reference = 'source_1' RETURN count(r) AS total")
+        .unwrap();
+    assert_eq!(dropped.rows[0].get("total"), Some(&Value::Int(0)));
+    let kept = db
+        .query("MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE r.source_reference = 'source_2' RETURN count(r) AS total")
+        .unwrap();
+    assert_eq!(kept.rows[0].get("total"), Some(&Value::Int(1)));
+    let nodes = db
+        .query("MATCH (e:Entity) RETURN count(e) AS total")
+        .unwrap();
+    assert_eq!(nodes.rows[0].get("total"), Some(&Value::Int(4)));
+}
+
+#[test]
+fn source_reference_relationship_cleanup_rejects_empty_reference_before_wal() {
+    let path = unique_test_dir("source_reference_cleanup_empty_before_wal");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Entity {id: 'entity_1'})-[:RELATES_TO {source_reference: 'source_1'}]->(:Entity {id: 'entity_2'})")
+            .unwrap();
+    }
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    {
+        let mut db = Database::open(&path).unwrap();
+        let epoch_before = db.store.commit_epoch();
+        let error = db
+            .delete_knowledge_source_reference_relationships(
+                &KnowledgeSourceReferenceRelationshipCleanupRequest {
+                    source_reference: " ".to_string(),
+                },
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("non-empty source_reference"));
+        assert_eq!(db.store.commit_epoch(), epoch_before);
+    }
+    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal_after, wal_before);
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn typed_source_reference_relationship_cleanup_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_source_reference_cleanup_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Entity {id: 'entity_1'})-[:RELATES_TO {source_reference: 'source_1'}]->(:Entity {id: 'entity_2'})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'entity_3'})").unwrap();
+        db.create_knowledge_relationship(&KnowledgeRelationshipCreateRequest {
+            source: KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_1".to_string(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_3".to_string(),
+            },
+            relationship_type: "RELATES_TO".to_string(),
+            properties: BTreeMap::from([(
+                "source_reference".to_string(),
+                Value::String("source_1".to_string()),
+            )]),
+        })
+        .unwrap();
+    }
+    let setup_wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    let setup_batch_count = setup_wal.matches("\tbatch\t").count();
+    {
+        let mut db = Database::open(&path).unwrap();
+        let output = db
+            .delete_knowledge_source_reference_relationships(
+                &KnowledgeSourceReferenceRelationshipCleanupRequest {
+                    source_reference: "source_1".to_string(),
+                },
+            )
+            .unwrap();
+        assert_eq!(output.candidate_count, 2);
+        assert_eq!(output.deleted_relationship_count, 2);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("delete_rel"));
+    assert_eq!(wal.matches("\tbatch\t").count(), setup_batch_count + 1);
+    {
+        let mut db = Database::open(&path).unwrap();
+        let relationships = db
+            .query("MATCH (:Entity)-[r:RELATES_TO]->(:Entity) RETURN count(r) AS total")
+            .unwrap();
+        assert_eq!(relationships.rows[0].get("total"), Some(&Value::Int(0)));
+        let nodes = db
+            .query("MATCH (e:Entity) RETURN count(e) AS total")
+            .unwrap();
+        assert_eq!(nodes.rows[0].get("total"), Some(&Value::Int(3)));
     }
     std::fs::remove_dir_all(path).unwrap();
 }

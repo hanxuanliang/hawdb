@@ -382,6 +382,11 @@ available as `Database::update_knowledge_memory_latest_batch`, which updates
 only `is_latest`, supports the exact `space_id` filter used by in-space
 demotion, reports non-writable and duplicate rows, and commits eligible updates
 through one grouped WAL batch.
+Source-reference relationship cleanup for Nowledge memory/source delete flows
+is available as `Database::delete_knowledge_source_reference_relationships`.
+It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty
+references before WAL, preserves endpoint Entity nodes, and commits eligible
+relationship deletes through one grouped WAL batch.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.

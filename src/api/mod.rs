@@ -2519,6 +2519,30 @@ pub struct KnowledgeRelationshipDeleteBatchOutput {
     pub deleted_relationship_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceRelationshipCleanupRequest {
+    pub source_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceRelationshipCleanupRow {
+    pub relationship_id: u64,
+    pub source_node_id: u64,
+    pub target_node_id: u64,
+    pub source_external_id: Option<String>,
+    pub target_external_id: Option<String>,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceRelationshipCleanupOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceReferenceRelationshipCleanupRow>,
+    pub candidate_count: usize,
+    pub deleted_relationship_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {
     pub node_id: u64,
@@ -4150,6 +4174,13 @@ impl Database {
         request: &KnowledgeScopedRelationshipDeleteBatchRequest,
     ) -> Result<KnowledgeRelationshipDeleteBatchOutput> {
         delete_scoped_knowledge_relationship_batch_for(self, request)
+    }
+
+    pub fn delete_knowledge_source_reference_relationships(
+        &mut self,
+        request: &KnowledgeSourceReferenceRelationshipCleanupRequest,
+    ) -> Result<KnowledgeSourceReferenceRelationshipCleanupOutput> {
+        delete_knowledge_source_reference_relationships_for(self, request)
     }
 
     pub fn knowledge_neighbors(
@@ -10689,6 +10720,116 @@ fn delete_scoped_knowledge_relationship_batch_for(
     })
 }
 
+struct KnowledgeSourceReferenceRelationshipDeleteCandidate {
+    relationship_id: u64,
+    source_node_id: u64,
+    target_node_id: u64,
+    source_external_id: Option<String>,
+    target_external_id: Option<String>,
+}
+
+fn delete_knowledge_source_reference_relationships_for(
+    db: &mut Database,
+    request: &KnowledgeSourceReferenceRelationshipCleanupRequest,
+) -> Result<KnowledgeSourceReferenceRelationshipCleanupOutput> {
+    db.ensure_writable()?;
+    if request.source_reference.trim().is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source-reference relationship cleanup requires a non-empty source_reference"
+                .to_string(),
+        ));
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let Some(rel_type_id) = db.catalog.rel_type_id("RELATES_TO") else {
+        return Ok(KnowledgeSourceReferenceRelationshipCleanupOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows: Vec::new(),
+            candidate_count: 0,
+            deleted_relationship_count: 0,
+        });
+    };
+
+    let mut candidates = db
+        .store
+        .scan_relationships(Some(rel_type_id))
+        .filter(|relationship| {
+            relationship
+                .properties
+                .get("source_reference")
+                .is_some_and(|value| value_to_external_id(value) == request.source_reference)
+        })
+        .map(
+            |relationship| KnowledgeSourceReferenceRelationshipDeleteCandidate {
+                relationship_id: relationship.id.0,
+                source_node_id: relationship.source.0,
+                target_node_id: relationship.target.0,
+                source_external_id: db
+                    .store
+                    .node(relationship.source)
+                    .and_then(node_external_id),
+                target_external_id: db
+                    .store
+                    .node(relationship.target)
+                    .and_then(node_external_id),
+            },
+        )
+        .collect::<Vec<_>>();
+    candidates.sort_by_key(|candidate| candidate.relationship_id);
+
+    if candidates.is_empty() {
+        return Ok(KnowledgeSourceReferenceRelationshipCleanupOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows: Vec::new(),
+            candidate_count: 0,
+            deleted_relationship_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for candidate in &candidates {
+        let (cypher, parameters) =
+            knowledge_source_reference_relationship_delete_statement(candidate.relationship_id)?;
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+    let deleted_relationship_count = candidates.len();
+    let rows = candidates
+        .into_iter()
+        .map(|candidate| KnowledgeSourceReferenceRelationshipCleanupRow {
+            relationship_id: candidate.relationship_id,
+            source_node_id: candidate.source_node_id,
+            target_node_id: candidate.target_node_id,
+            source_external_id: candidate.source_external_id,
+            target_external_id: candidate.target_external_id,
+            deleted: true,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeSourceReferenceRelationshipCleanupOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        candidate_count: rows.len(),
+        rows,
+        deleted_relationship_count,
+    })
+}
+
+fn knowledge_source_reference_relationship_delete_statement(
+    relationship_id: u64,
+) -> Result<(String, BTreeMap<String, Value>)> {
+    let relationship_id = i64::try_from(relationship_id).map_err(|_| {
+        SkeinError::Semantic("relationship id does not fit Cypher integer".to_string())
+    })?;
+    Ok((
+        "MATCH (:Entity)-[r:RELATES_TO]->(:Entity) WHERE id(r) = $relationship_id DELETE r"
+            .to_string(),
+        BTreeMap::from([("relationship_id".to_string(), Value::Int(relationship_id))]),
+    ))
+}
+
 fn node_has_external_id_property(node: &NodeRecord, external_id: &str) -> bool {
     node.properties
         .get("id")
@@ -13698,6 +13839,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedRelationshipDeleteBatchRequest,
     ) -> Result<KnowledgeRelationshipDeleteBatchOutput> {
         self.db.delete_scoped_knowledge_relationship_batch(request)
+    }
+
+    pub fn delete_knowledge_source_reference_relationships(
+        &mut self,
+        request: &KnowledgeSourceReferenceRelationshipCleanupRequest,
+    ) -> Result<KnowledgeSourceReferenceRelationshipCleanupOutput> {
+        self.db
+            .delete_knowledge_source_reference_relationships(request)
     }
 
     pub fn knowledge_neighbors(
