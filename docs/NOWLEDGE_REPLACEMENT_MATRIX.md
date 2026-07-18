@@ -96,6 +96,19 @@ specific migration gate needs oracle-backed parity evidence. Required cutover
 evidence now rejects self-shadow protocol smoke runs and requires the shadow
 ready preflight to declare `engine_kind: "previous_wrapper"`.
 
+The stable way to report "how much of Nowledge can be replaced" is to run
+`skein nowledge-replacement-summary <migration-gate-json>` over a generated
+migration-gate bundle. The summary intentionally separates three numbers:
+`business_surface.covered_per_million` for scanned Cypher coverage,
+`shadow_parity.matched_per_million` for previous-wrapper comparison, and
+`production_replacement_per_million` for conservative production replacement
+readiness. Production replacement stays `0` unless the migration gate is ready,
+shadow parity is complete, `cutover_evidence.eligible` is true, and the bundle
+shows full per-query-family replacement readiness. Adapter bring-up should use
+`skein external-shadow-adapter-smoke --require-previous-wrapper ...` first to
+validate `ready`, `execute_session`, and `project_graph` wiring, but smoke output
+does not count as production cutover evidence.
+
 ## LanceDB Replacement Surface
 
 | Capability | Nowledge need | Skein status |
@@ -148,5 +161,9 @@ reasons.
    the current graph-kernel-external derived job boundary.
 5. Use `ExternalShadowCommand` with the previous local graph wrapper only when
    compatibility evidence is needed for a specific migration gate.
-6. Continue the chryso-style crate split beyond the current `core` crate once
+6. Use `nowledge-replacement-summary --require-production-ready` as the final
+   reporting guard for production replacement notes after the migration-gate
+   bundle has been generated with previous-wrapper, storage recovery, and
+   background-maintenance evidence.
+7. Continue the chryso-style crate split beyond the current `core` crate once
    parser, planner, optimizer, store, and search contracts stabilize.

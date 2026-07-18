@@ -521,6 +521,21 @@ automation should use those grouped fields to distinguish scanner coverage gaps,
 fixture wiring drift, missing shadow evidence, and shadow parity failures
 without parsing blocker strings.
 
+For dashboards and release notes that need one conservative replacement number,
+use:
+
+```text
+skein nowledge-replacement-summary [--require-production-ready] <migration-gate-json>
+```
+
+The command reads an existing migration-gate bundle and prints
+`skein-nowledge-replacement-summary` JSON. It keeps scanner coverage,
+shadow-parity readiness, and production cutover readiness separate. If the
+bundle lacks eligible `cutover_evidence`, `production_replacement_per_million`
+is `0` even when scanner coverage and shadow matched ratios are complete. With
+`--require-production-ready`, the command exits with an error unless the summary
+reports `production_cutover_ready: true`.
+
 When the caller requires rollback proof, the migration gate can also carry
 caller-owned rollback evidence through `rollback_required`, `rollback_ready`,
 and `rollback_evidence`. Skein only gates on this supplied evidence; it does not

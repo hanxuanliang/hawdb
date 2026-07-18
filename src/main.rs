@@ -1,3 +1,8 @@
+mod cli_replacement_summary;
+
+use cli_replacement_summary::{
+    nowledge_replacement_summary_json, nowledge_replacement_summary_usage,
+};
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
     external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
@@ -323,6 +328,38 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge migration gate is blocked".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-replacement-summary" {
+            let mut require_production_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-production-ready" => {
+                        require_production_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let bundle_path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(nowledge_replacement_summary_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(nowledge_replacement_summary_usage()));
+            }
+            let bundle = read_json_file(Path::new(&bundle_path))?;
+            let summary = nowledge_replacement_summary_json(&bundle);
+            println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+            if require_production_ready
+                && summary
+                    .get("production_cutover_ready")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge replacement summary is not production cutover ready".to_string(),
                 ));
             }
             return Ok(());
