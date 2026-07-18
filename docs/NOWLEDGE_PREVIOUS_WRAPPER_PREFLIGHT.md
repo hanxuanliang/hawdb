@@ -1,0 +1,220 @@
+# Nowledge Previous-Wrapper Preflight
+
+This runbook turns a Nowledge-owned Kuzu/Ladybug wrapper command into Skein
+production-replacement evidence. It is intentionally evidence-first: a passing
+scanner or a passing protocol smoke is not enough for cutover.
+
+## Safety Boundary
+
+Never open the live Nowledge Kuzu database from a Skein or ad hoc validation
+tool. Kuzu's writer lock is process-exclusive, and the desktop/server runtime
+may already hold the live handle.
+
+Use a point-in-time copy:
+
+```bash
+export NMEM_LIVE_DIR="$HOME/Library/Application Support/NowledgeGraph"
+export NMEM_PREFLIGHT_ROOT="/tmp/skein-nowledge-preflight"
+
+rm -rf "$NMEM_PREFLIGHT_ROOT"
+mkdir -p "$NMEM_PREFLIGHT_ROOT"
+
+cp -R "$NMEM_LIVE_DIR/nowledge_graph_v2.db" "$NMEM_PREFLIGHT_ROOT/nowledge_graph_v2.db"
+cp "$NMEM_LIVE_DIR/content.db" "$NMEM_PREFLIGHT_ROOT/content.db"
+cp -R "$NMEM_LIVE_DIR/search_index" "$NMEM_PREFLIGHT_ROOT/search_index"
+```
+
+The wrapper command should read only from the copied paths during shadow
+validation. Writable validation must use an isolated fixture database, not the
+live application directory.
+
+## Required Wrapper Command
+
+Skein does not link `nmem-graph`, Kuzu, or Ladybug. Nowledge owns the wrapper
+command process and all graph dependencies. The command must read one JSON
+request per line from stdin and write one JSON response per line to stdout.
+
+It must implement:
+
+- `{"op":"query","cypher":"...","parameters":{...}}`
+- `{"op":"execute_session","statements":[...]}`
+- `{"op":"project_graph",...}`
+
+The response shape is documented in
+[`EXTERNAL_SHADOW_PROTOCOL.md`](EXTERNAL_SHADOW_PROTOCOL.md). For real cutover
+evidence, `project_graph` must return a full projected-graph payload, not
+`primary_only`.
+
+The command should be persistent for full-contract validation so it can keep one
+database/session handle open:
+
+```bash
+export NOWLEDGE_WRAPPER_COMMAND="/path/to/nowledge-previous-wrapper-command"
+export NOWLEDGE_WRAPPER_IDENTITY="nowledge-previous-wrapper:local-copy"
+```
+
+## 1. Export The Contract
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-fixture-contract nowledge-memory-core \
+  > "$NMEM_PREFLIGHT_ROOT/contract.json"
+```
+
+The contract is the machine-readable Nowledge business fixture. It includes
+setup, Cypher statements, parameters, expected rows, effect checks, and
+projected-graph requests.
+
+## 2. Run The Full Wrapper Contract
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-fixture-contract-command-check \
+  --require-full-contract \
+  --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
+  "$NMEM_PREFLIGHT_ROOT/contract.json" \
+  --persistent-command "$NOWLEDGE_WRAPPER_COMMAND" \
+  > "$NMEM_PREFLIGHT_ROOT/contract-evidence.json"
+```
+
+The report must satisfy:
+
+```bash
+jq -e '
+  .required_contract_ready == true and
+  .previous_wrapper_contract_evidence.ready == true and
+  .previous_wrapper_contract_evidence.wrapper_identity == env.NOWLEDGE_WRAPPER_IDENTITY
+' "$NMEM_PREFLIGHT_ROOT/contract-evidence.json"
+```
+
+When bringing up a failing wrapper, use `--stop-after-first-failure`,
+`--start-check`, or `--check-name`. Do not feed selected-slice output into the
+production migration gate.
+
+## 3. Smoke The External Shadow Adapter
+
+```bash
+cargo run --quiet --bin skein -- \
+  external-shadow-adapter-smoke \
+  --require-previous-wrapper \
+  --shadow-trace "$NMEM_PREFLIGHT_ROOT/adapter-shadow.jsonl" \
+  previous-wrapper \
+  cargo run --quiet --example nowledge_previous_wrapper_shadow_adapter -- \
+    --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
+    --persistent-command "$NOWLEDGE_WRAPPER_COMMAND" \
+  > "$NMEM_PREFLIGHT_ROOT/adapter-smoke.json"
+```
+
+The smoke report must satisfy:
+
+```bash
+jq -e '
+  .adapter_smoke_ready == true and
+  .engine_kind == "previous_wrapper" and
+  .wrapper_identity == env.NOWLEDGE_WRAPPER_IDENTITY and
+  .primary_only_checks == 0
+' "$NMEM_PREFLIGHT_ROOT/adapter-smoke.json"
+```
+
+This proves protocol shape and adapter identity only. It is still not production
+replacement evidence by itself.
+
+## 4. Attach Storage And Background Evidence
+
+Use an isolated Skein database for storage-recovery and background-maintenance
+evidence:
+
+```bash
+TMPDIR="$NMEM_PREFLIGHT_ROOT" cargo run --quiet --bin skein -- \
+  > "$NMEM_PREFLIGHT_ROOT/skein-demo.out"
+
+export SKEIN_PREFLIGHT_DB="$NMEM_PREFLIGHT_ROOT/skein-demo"
+
+cargo run --quiet --bin skein -- \
+  storage-recovery-report \
+  --max-wal-replay-entries 100 \
+  --require-durable \
+  --require-checkpoint-boundary \
+  --require-bounded-wal-replay \
+  --require-clean-tail \
+  "$SKEIN_PREFLIGHT_DB" \
+  > "$NMEM_PREFLIGHT_ROOT/storage-recovery.json"
+
+cargo run --quiet --bin skein -- \
+  background-maintenance-report \
+  --require-cutover-ready \
+  "$SKEIN_PREFLIGHT_DB" \
+  > "$NMEM_PREFLIGHT_ROOT/background-maintenance.json"
+```
+
+These reports prove Skein-side recovery and background QoS readiness. They do
+not prove Nowledge wrapper parity.
+
+## 5. Run The Migration Gate
+
+Run the migration gate against the Nowledge graph-source checkout and the real
+previous-wrapper adapter. Use the `previous_wrapper_contract_evidence` object
+from the full contract report:
+
+```bash
+jq '.previous_wrapper_contract_evidence' \
+  "$NMEM_PREFLIGHT_ROOT/contract-evidence.json" \
+  > "$NMEM_PREFLIGHT_ROOT/previous-wrapper-contract-evidence.json"
+
+cargo run --quiet --bin skein -- \
+  nowledge-cypher-migration-gate \
+  --require-ready \
+  --require-cutover-evidence \
+  --shadow-ready \
+  --shadow-trace "$NMEM_PREFLIGHT_ROOT/migration-shadow.jsonl" \
+  --require-storage-recovery-evidence \
+  --storage-recovery-report-json "$NMEM_PREFLIGHT_ROOT/storage-recovery.json" \
+  --require-background-maintenance-evidence \
+  --background-maintenance-report-json "$NMEM_PREFLIGHT_ROOT/background-maintenance.json" \
+  --previous-wrapper-contract-evidence-json "$NMEM_PREFLIGHT_ROOT/previous-wrapper-contract-evidence.json" \
+  /Users/hawkingrei/devel/nowledge/mem \
+  previous-wrapper \
+  cargo run --quiet --example nowledge_previous_wrapper_shadow_adapter -- \
+    --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
+    --persistent-command "$NOWLEDGE_WRAPPER_COMMAND" \
+  > "$NMEM_PREFLIGHT_ROOT/migration-gate.json"
+```
+
+The gate must report:
+
+```bash
+jq -e '
+  .migration_gate.decision == "ready" and
+  .cutover.decision == "ready" and
+  .cutover_evidence.eligible == true and
+  .cutover_evidence.ready_engine_kind == "previous_wrapper" and
+  .cutover_evidence.ready_wrapper_identity == env.NOWLEDGE_WRAPPER_IDENTITY and
+  .previous_wrapper_contract_evidence.ready == true and
+  .replacement_readiness_per_million == 1000000
+' "$NMEM_PREFLIGHT_ROOT/migration-gate.json"
+```
+
+## 6. Produce The Replacement Summary
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-replacement-summary \
+  --require-production-ready \
+  "$NMEM_PREFLIGHT_ROOT/migration-gate.json" \
+  > "$NMEM_PREFLIGHT_ROOT/replacement-summary.json"
+```
+
+The replacement summary is the release-facing artifact. It must report:
+
+```bash
+jq -e '
+  .production_cutover_ready == true and
+  .production_replacement_per_million == 1000000 and
+  (.blocking_categories | length) == 0 and
+  (.missing_evidence | length) == 0 and
+  (.next_actions | length) == 0
+' "$NMEM_PREFLIGHT_ROOT/replacement-summary.json"
+```
+
+If this command fails, inspect `next_actions` first. The action codes are
+stable enough for dashboards and release automation.

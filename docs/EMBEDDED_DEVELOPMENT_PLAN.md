@@ -211,7 +211,12 @@ production-source gate. The remaining Phase 1 work is no longer fixture-gap
 closure for the current scan; it is to attach the previous wrapper through the
 external shadow adapter when migration-gate
 evidence is needed, and to rerun the scanner whenever Nowledge adds new graph
-call sites.
+call sites. The real previous-wrapper validation workflow is captured in
+`docs/NOWLEDGE_PREVIOUS_WRAPPER_PREFLIGHT.md`: copy the live Kuzu, content, and
+search state to `/tmp`, run the full exported fixture contract against a
+Nowledge-owned persistent wrapper command, smoke the external shadow adapter,
+attach storage-recovery and background-maintenance evidence, then run the
+migration gate and replacement summary with fail-closed production readiness.
 The embedded front door now includes a bounded exact physical-plan LFU cache for
 literal and parameterized query/explain paths. Cache keys include Cypher text,
 bound parameter values, graph commit epoch, and optimizer group budget; any
