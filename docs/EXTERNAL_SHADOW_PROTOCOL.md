@@ -428,6 +428,13 @@ scanner-assigned query family and reports per-family required, covered, missing,
 and `coverage_per_million` values. This lets migration dashboards show which
 Nowledge business slice is still blocking replacement without parsing fixture
 names.
+The top-level bundle also includes `replacement_readiness_by_query_family`,
+which combines scanner coverage with shadow parity for each query family. Each
+entry reports inventory-missing checks, shadow-matched checks, primary-only
+shadow checks, primary-only check names, and per-million coverage, shadow
+matched, and replacement-readiness ratios. These per-family readiness values are
+progress signals; cutover automation must still honor the gate decisions and
+blocker arrays.
 `shadow_evidence_present` is true only when at least one check matched through
 the shadow engine; primary-only checks do not count as parity evidence. Cutover
 automation should use those grouped fields to distinguish scanner coverage gaps,

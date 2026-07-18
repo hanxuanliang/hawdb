@@ -783,6 +783,88 @@ fn migration_gate_bundle_reports_blocked_json() {
 }
 
 #[test]
+fn migration_gate_bundle_reports_replacement_readiness_by_query_family() {
+    let fixture = CompatibilityFixture {
+        name: "family-shadow".to_string(),
+        setup: Vec::new(),
+        checks: vec![
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "read check",
+                CypherFixtureStatement::new("MATCH (m:Memory) RETURN m.id AS id"),
+                ExpectedRows::RowCount(0),
+            )),
+            CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+                "write check",
+                CypherFixtureStatement::new("MATCH (m:Memory) SET m.seen = true"),
+                ExpectedRows::RowCount(0),
+            )),
+        ],
+    };
+    let inventory = CompatibilityQueryInventory {
+        name: "family-inventory".to_string(),
+        required_checks: vec![
+            CompatibilityQueryInventoryItem::new("read check", "read"),
+            CompatibilityQueryInventoryItem::new("write check", "mutation"),
+        ],
+    };
+    let shadow = CompatibilityShadowReport {
+        fixture: "family-shadow".to_string(),
+        shadow_engine: "shadow".to_string(),
+        primary_checks: vec![
+            CompatibilityCheckReport {
+                name: "read check".to_string(),
+            },
+            CompatibilityCheckReport {
+                name: "write check".to_string(),
+            },
+        ],
+        shadow_checks: vec![
+            CompatibilityShadowCheckReport {
+                name: "read check".to_string(),
+                status: CompatibilityShadowStatus::Matched,
+                primary_only_reason: None,
+            },
+            CompatibilityShadowCheckReport {
+                name: "write check".to_string(),
+                status: CompatibilityShadowStatus::PrimaryOnly,
+                primary_only_reason: Some("shadow write disabled".to_string()),
+            },
+        ],
+    };
+
+    let bundle = assess_compatibility_migration_gate_bundle(
+        &fixture,
+        &inventory,
+        &shadow,
+        CompatibilityInventoryCoveragePolicy {
+            require_all_required_checks: true,
+            allow_extra_fixture_checks: false,
+        },
+        CompatibilityCutoverPolicy::default(),
+    );
+    let json = super::compatibility_migration_gate_bundle_to_json(&bundle);
+    let families = json["replacement_readiness_by_query_family"]
+        .as_array()
+        .unwrap();
+
+    assert_eq!(json["replacement_readiness_per_million"], 500_000);
+    assert_eq!(families.len(), 2);
+    assert_eq!(families[0]["query_family"], "mutation");
+    assert_eq!(families[0]["covered_checks"], 1);
+    assert_eq!(families[0]["shadow_matched_checks"], 0);
+    assert_eq!(families[0]["shadow_primary_only_checks"], 1);
+    assert_eq!(
+        families[0]["shadow_primary_only_check_names"][0],
+        "write check"
+    );
+    assert_eq!(families[0]["replacement_readiness_per_million"], 0);
+    assert_eq!(families[1]["query_family"], "read");
+    assert_eq!(families[1]["covered_checks"], 1);
+    assert_eq!(families[1]["shadow_matched_checks"], 1);
+    assert_eq!(families[1]["replacement_readiness_per_million"], 1_000_000);
+}
+
+#[test]
 fn runs_fixture_against_external_shadow_command() {
     let mut primary = Database::new();
     let script = write_external_shadow_script(

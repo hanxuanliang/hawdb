@@ -43,6 +43,7 @@ pub struct CompatibilityQueryFamilyCoverage {
     pub query_family: String,
     pub required_checks: usize,
     pub covered_checks: usize,
+    pub covered_check_names: Vec<String>,
     pub missing_checks: Vec<String>,
 }
 
@@ -364,6 +365,7 @@ pub fn compatibility_migration_gate_bundle_to_json(
         "inventory_gate": compatibility_inventory_gate_report_to_json(&bundle.inventory_gate),
         "cutover": compatibility_cutover_report_to_json(&bundle.cutover),
         "migration_gate": compatibility_migration_gate_report_to_json(&bundle.migration_gate),
+        "replacement_readiness_by_query_family": replacement_readiness_by_query_family_to_json(bundle),
         "replacement_readiness_per_million": ratio_per_million(
             bundle.coverage.covered_checks.min(bundle.cutover.matched_checks),
             bundle.coverage.required_checks.max(bundle.cutover.total_checks),
@@ -393,6 +395,48 @@ fn query_family_coverage_to_json(report: &CompatibilityQueryFamilyCoverage) -> s
         "coverage_per_million": ratio_per_million(report.covered_checks, report.required_checks),
         "missing_checks": report.missing_checks,
     })
+}
+
+fn replacement_readiness_by_query_family_to_json(
+    bundle: &CompatibilityMigrationGateBundle,
+) -> Vec<serde_json::Value> {
+    let primary_only_checks = bundle
+        .cutover
+        .primary_only_checks
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
+    bundle
+        .coverage
+        .coverage_by_query_family
+        .iter()
+        .map(|family| {
+            let shadow_primary_only_check_names = family
+                .covered_check_names
+                .iter()
+                .filter(|check| primary_only_checks.contains(check.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let shadow_primary_only_checks = shadow_primary_only_check_names.len();
+            let shadow_matched_checks = family.covered_checks - shadow_primary_only_checks;
+            serde_json::json!({
+                "query_family": family.query_family,
+                "required_checks": family.required_checks,
+                "covered_checks": family.covered_checks,
+                "inventory_missing_checks": family.missing_checks,
+                "shadow_matched_checks": shadow_matched_checks,
+                "shadow_primary_only_checks": shadow_primary_only_checks,
+                "shadow_primary_only_check_names": shadow_primary_only_check_names,
+                "coverage_per_million": ratio_per_million(family.covered_checks, family.required_checks),
+                "shadow_matched_per_million": ratio_per_million(shadow_matched_checks, family.required_checks),
+                "replacement_readiness_per_million": ratio_per_million(
+                    family.covered_checks.min(shadow_matched_checks),
+                    family.required_checks,
+                ),
+            })
+        })
+        .collect()
 }
 
 fn build_compatibility_query_inventory_from_items(
@@ -657,6 +701,7 @@ fn coverage_by_query_family<'a>(
     struct FamilyAccumulator {
         required_checks: usize,
         covered_checks: usize,
+        covered_check_names: Vec<String>,
         missing_checks: Vec<String>,
     }
 
@@ -666,6 +711,7 @@ fn coverage_by_query_family<'a>(
         family.required_checks += 1;
         if is_covered(item) {
             family.covered_checks += 1;
+            family.covered_check_names.push(item.name.clone());
         } else {
             family.missing_checks.push(item.name.clone());
         }
@@ -677,6 +723,7 @@ fn coverage_by_query_family<'a>(
             query_family,
             required_checks: family.required_checks,
             covered_checks: family.covered_checks,
+            covered_check_names: family.covered_check_names,
             missing_checks: family.missing_checks,
         })
         .collect()
