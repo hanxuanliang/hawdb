@@ -365,6 +365,7 @@ fn insert_cutover_evidence_json(
         .get("decision")
         .and_then(serde_json::Value::as_str)
         == Some("ready");
+    let ready_engine_kind = shadow_ready.and_then(|ready| ready.engine_kind.as_deref());
     let ready_missing_capabilities = external_shadow_ready_missing_capabilities(shadow_ready);
     let shadow_evidence_present = migration_gate
         .get("shadow_evidence_present")
@@ -383,6 +384,14 @@ fn insert_cutover_evidence_json(
     }
     if !ready_preflight {
         blockers.push("shadow ready preflight was not executed".to_string());
+    }
+    if ready_preflight && ready_engine_kind.is_none() {
+        blockers.push("shadow ready response missing engine_kind".to_string());
+    }
+    if let Some(engine_kind) = ready_engine_kind {
+        if engine_kind != "previous_wrapper" {
+            blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
+        }
     }
     if ready_preflight && !ready_missing_capabilities.is_empty() {
         blockers.push("shadow ready response missing required capabilities".to_string());
@@ -417,9 +426,11 @@ fn insert_cutover_evidence_json(
             },
             "requires_previous_wrapper": true,
             "requires_ready_preflight": true,
+            "requires_ready_engine_kind": "previous_wrapper",
             "requires_ready_capabilities": REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
             "requires_shadow_evidence": true,
             "ready_preflight": ready_preflight,
+            "ready_engine_kind": ready_engine_kind,
             "ready_missing_capabilities": ready_missing_capabilities,
             "shadow_evidence_present": shadow_evidence_present,
             "shadow_trace_present": shadow_trace_health.present,
@@ -1800,6 +1811,14 @@ mod tests {
             bundle["shadow_ready"]["protocol_version"],
             crate::EXTERNAL_SHADOW_PROTOCOL_VERSION
         );
+        assert_eq!(
+            bundle["cutover_evidence"]["requires_ready_engine_kind"],
+            "previous_wrapper"
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["ready_engine_kind"],
+            "previous_wrapper"
+        );
         assert_eq!(bundle["shadow_trace"]["request_count"], 2);
         assert_eq!(bundle["shadow_trace"]["summary_available"], true);
         assert_eq!(bundle["shadow_trace"]["request_op_counts"]["ready"], 1);
@@ -1902,6 +1921,63 @@ mod tests {
                 .as_u64()
                 .unwrap()
                 > 0
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_cypher_migration_gate_requires_previous_wrapper_ready_engine_kind() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-migration-gate-engine-kind-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let mut shadow = TestShadowEngine::default();
+        let bundle = scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+            &root,
+            &mut shadow,
+            NowledgeCypherMigrationGateJsonOptions {
+                shadow_name: Some("shadow-without-engine-kind".to_string()),
+                shadow_ready: Some(ExternalShadowReady {
+                    protocol_version: crate::EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                    capabilities: vec![
+                        "execute".to_string(),
+                        "execute_session".to_string(),
+                        "project_graph".to_string(),
+                    ],
+                    engine_kind: None,
+                }),
+                include_cutover_evidence: true,
+                ..NowledgeCypherMigrationGateJsonOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(bundle["migration_gate"]["decision"], "ready");
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert_eq!(
+            bundle["cutover_evidence"]["requires_ready_engine_kind"],
+            "previous_wrapper"
+        );
+        assert!(bundle["cutover_evidence"]["ready_engine_kind"].is_null());
+        assert_eq!(
+            bundle["cutover_evidence"]["blockers"][0],
+            "shadow ready response missing engine_kind"
         );
 
         fs::remove_dir_all(root).unwrap();
