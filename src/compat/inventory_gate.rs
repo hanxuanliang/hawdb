@@ -265,6 +265,7 @@ pub fn compatibility_inventory_coverage_report_to_json(
         "fixture": report.fixture,
         "required_checks": report.required_checks,
         "covered_checks": report.covered_checks,
+        "coverage_per_million": ratio_per_million(report.covered_checks, report.required_checks),
         "missing_checks": report.missing_checks,
         "extra_fixture_checks": report.extra_fixture_checks,
     })
@@ -279,6 +280,7 @@ pub fn compatibility_inventory_gate_report_to_json(
         "decision": compatibility_cutover_decision_as_str(report.decision),
         "required_checks": report.required_checks,
         "covered_checks": report.covered_checks,
+        "coverage_per_million": ratio_per_million(report.covered_checks, report.required_checks),
         "missing_checks": report.missing_checks,
         "extra_fixture_checks": report.extra_fixture_checks,
         "blockers": report.blockers,
@@ -294,6 +296,7 @@ pub fn compatibility_cutover_report_to_json(
         "decision": compatibility_cutover_decision_as_str(report.decision),
         "total_checks": report.total_checks,
         "matched_checks": report.matched_checks,
+        "matched_per_million": ratio_per_million(report.matched_checks, report.total_checks),
         "primary_only_checks": report.primary_only_checks,
         "primary_only_reasons": report.primary_only_reasons,
         "blockers": report.blockers,
@@ -313,6 +316,10 @@ pub fn compatibility_migration_gate_report_to_json(
         "shadow_total_checks": report.shadow_total_checks,
         "shadow_matched_checks": report.shadow_matched_checks,
         "shadow_primary_only_checks": report.shadow_primary_only_checks,
+        "shadow_matched_per_million": ratio_per_million(
+            report.shadow_matched_checks,
+            report.shadow_total_checks
+        ),
         "shadow_evidence_present": report.shadow_evidence_present,
         "fixture_mismatch_blockers": report.fixture_mismatch_blockers,
         "inventory_blockers": report.inventory_blockers,
@@ -337,6 +344,10 @@ pub fn compatibility_migration_gate_bundle_to_json(
         "inventory_gate": compatibility_inventory_gate_report_to_json(&bundle.inventory_gate),
         "cutover": compatibility_cutover_report_to_json(&bundle.cutover),
         "migration_gate": compatibility_migration_gate_report_to_json(&bundle.migration_gate),
+        "replacement_readiness_per_million": ratio_per_million(
+            bundle.coverage.covered_checks.min(bundle.cutover.matched_checks),
+            bundle.coverage.required_checks.max(bundle.cutover.total_checks),
+        ),
     })
 }
 
@@ -345,6 +356,13 @@ fn compatibility_cutover_decision_as_str(decision: CompatibilityCutoverDecision)
         CompatibilityCutoverDecision::Ready => "ready",
         CompatibilityCutoverDecision::Blocked => "blocked",
     }
+}
+
+fn ratio_per_million(numerator: usize, denominator: usize) -> u64 {
+    if denominator == 0 {
+        return 0;
+    }
+    ((numerator as u128).saturating_mul(1_000_000) / denominator as u128) as u64
 }
 
 fn build_compatibility_query_inventory_from_items(

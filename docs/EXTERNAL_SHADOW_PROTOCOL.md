@@ -415,6 +415,13 @@ human-readable logs and also includes machine-readable
 `rollback_blockers` counts. It also includes matching
 `fixture_mismatch_blocker_messages`, `inventory_blocker_messages`,
 `shadow_blocker_messages`, and `rollback_blocker_messages` arrays.
+The coverage, inventory gate, cutover, and migration gate JSON objects expose
+deterministic integer ratios with `*_per_million` fields. The top-level
+`replacement_readiness_per_million` is the conservative minimum of inventory
+coverage and shadow parity, scaled so `1000000` means all required checks are
+covered and matched. These fields are progress and dashboard signals only;
+cutover automation must still honor the Ready/Blocked decision and blocker
+arrays.
 `shadow_evidence_present` is true only when at least one check matched through
 the shadow engine; primary-only checks do not count as parity evidence. Cutover
 automation should use those grouped fields to distinguish scanner coverage gaps,

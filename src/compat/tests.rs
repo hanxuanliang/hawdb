@@ -81,14 +81,24 @@ fn public_nowledge_core_fixture_and_inventory_are_gate_ready() {
     );
     assert!(bundle.migration_gate.blockers.is_empty());
     assert_eq!(bundle_json["coverage"]["covered_checks"], 642);
+    assert_eq!(bundle_json["coverage"]["coverage_per_million"], 1_000_000);
     assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
+    assert_eq!(
+        bundle_json["inventory_gate"]["coverage_per_million"],
+        1_000_000
+    );
     assert_eq!(bundle_json["cutover"]["decision"], "ready");
     assert_eq!(bundle_json["cutover"]["matched_checks"], 642);
+    assert_eq!(bundle_json["cutover"]["matched_per_million"], 1_000_000);
     assert_eq!(bundle_json["migration_gate"]["decision"], "ready");
     assert_eq!(bundle_json["migration_gate"]["inventory_decision"], "ready");
     assert_eq!(bundle_json["migration_gate"]["shadow_decision"], "ready");
     assert_eq!(bundle_json["migration_gate"]["shadow_total_checks"], 642);
     assert_eq!(bundle_json["migration_gate"]["shadow_matched_checks"], 642);
+    assert_eq!(
+        bundle_json["migration_gate"]["shadow_matched_per_million"],
+        1_000_000
+    );
     assert_eq!(
         bundle_json["migration_gate"]["shadow_primary_only_checks"],
         0
@@ -97,6 +107,7 @@ fn public_nowledge_core_fixture_and_inventory_are_gate_ready() {
         bundle_json["migration_gate"]["shadow_evidence_present"],
         true
     );
+    assert_eq!(bundle_json["replacement_readiness_per_million"], 1_000_000);
 }
 
 #[test]
@@ -709,11 +720,15 @@ fn migration_gate_bundle_reports_blocked_json() {
         CompatibilityCutoverDecision::Blocked
     );
     assert_eq!(json["coverage"]["missing_checks"][0], "required check");
+    assert_eq!(json["coverage"]["coverage_per_million"], 0);
     assert_eq!(json["inventory_gate"]["decision"], "blocked");
+    assert_eq!(json["inventory_gate"]["coverage_per_million"], 0);
     assert_eq!(json["cutover"]["decision"], "blocked");
+    assert_eq!(json["cutover"]["matched_per_million"], 0);
     assert_eq!(json["migration_gate"]["decision"], "blocked");
     assert_eq!(json["migration_gate"]["shadow_total_checks"], 1);
     assert_eq!(json["migration_gate"]["shadow_matched_checks"], 0);
+    assert_eq!(json["migration_gate"]["shadow_matched_per_million"], 0);
     assert_eq!(json["migration_gate"]["shadow_primary_only_checks"], 1);
     assert_eq!(json["migration_gate"]["shadow_evidence_present"], false);
     assert_eq!(json["migration_gate"]["fixture_mismatch_blockers"], 0);
@@ -737,6 +752,7 @@ fn migration_gate_bundle_reports_blocked_json() {
         json["migration_gate"]["blockers"].as_array().unwrap().len(),
         4
     );
+    assert_eq!(json["replacement_readiness_per_million"], 0);
 }
 
 #[test]
