@@ -65,6 +65,13 @@ pub enum PhysicalPlanClass {
     Procedure,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum PlanChildren<'a, P> {
+    None,
+    Unary(&'a P),
+    Binary(&'a P, &'a P),
+}
+
 impl PhysicalPlanKind {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -212,9 +219,23 @@ impl PhysicalPlanClass {
     }
 }
 
+impl<'a, P> PlanChildren<'a, P> {
+    pub fn len(self) -> usize {
+        match self {
+            PlanChildren::None => 0,
+            PlanChildren::Unary(_) => 1,
+            PlanChildren::Binary(_, _) => 2,
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.len() == 0
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PhysicalPlanClass, PhysicalPlanKind};
+    use super::{PhysicalPlanClass, PhysicalPlanKind, PlanChildren};
 
     #[test]
     fn physical_plan_kind_exposes_stable_strings_and_classes() {
@@ -241,5 +262,18 @@ mod tests {
         assert_eq!(PhysicalPlanClass::Traversal.as_str(), "traversal");
         assert_eq!(PhysicalPlanClass::Relational.as_str(), "relational");
         assert_eq!(PhysicalPlanClass::Procedure.as_str(), "procedure");
+    }
+
+    #[test]
+    fn plan_children_reports_arity_without_knowing_plan_type() {
+        assert_eq!(PlanChildren::<&str>::None.len(), 0);
+        assert!(PlanChildren::<&str>::None.is_empty());
+
+        let child = "scan";
+        assert_eq!(PlanChildren::Unary(&child).len(), 1);
+
+        let left = "left";
+        let right = "right";
+        assert_eq!(PlanChildren::Binary(&left, &right).len(), 2);
     }
 }

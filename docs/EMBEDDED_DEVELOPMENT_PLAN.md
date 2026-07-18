@@ -925,9 +925,10 @@ Current implemented slice:
   cost
 - `OptimizerTrace::selected_plan_operator_counts` and
   `OptimizerTrace::selected_plan_class_counts` expose stable selected-plan
-  histograms derived from crate-owned physical plan metadata, so diagnostics do
-  not need to parse English explain text to detect operator mix or
-  schema/mutation/access/traversal/relational/procedure composition
+  histograms derived from crate-owned physical plan kind/class/children
+  metadata, so diagnostics do not need to parse English explain text to detect
+  operator mix or schema/mutation/access/traversal/relational/procedure
+  composition
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,

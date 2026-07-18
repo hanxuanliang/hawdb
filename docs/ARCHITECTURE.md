@@ -56,8 +56,9 @@ crate remains the stable embedded facade, while implementation crates are split
 out as interfaces harden and dependency direction becomes acyclic. The current
 crate split includes `skein-core` for common graph primitives and
 `skein-optimizer` for Cascades-style optimizer primitives, stable physical
-operator metadata, and structured cost summaries. Cypher graph logical and
-physical operators still live in the root crate until parser/planner/executor
+operator metadata, generic plan-child metadata, and structured cost summaries.
+Cypher graph logical and physical operators still live in the root crate until
+parser/planner/executor
 contracts are stable enough to move without creating cycles.
 
 ```text
@@ -227,10 +228,9 @@ in that direction incrementally:
 
 - keep `PhysicalPlan` as the public compatibility facade until executor
   contracts are stable
-- keep `PhysicalPlanKind` and `PhysicalPlanClass` in `skein-optimizer`; root
-  graph plans only map facade variants to those crate-owned identities
-- use child metadata as the root-facade binding for diagnostics, tracing, and
-  future memo storage
+- keep `PhysicalPlanKind`, `PhysicalPlanClass`, and `PlanChildren` in
+  `skein-optimizer`; root graph plans only map facade variants and child
+  references to those crate-owned identities
 - split large physical operators into modules and later into per-node structs
   behind the facade
 - move graph-specific implementation rules into a `graph-optimizer` crate only

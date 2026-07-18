@@ -1,26 +1,7 @@
 use super::PhysicalPlan;
-use skein_optimizer::{PhysicalPlanClass, PhysicalPlanKind};
+use skein_optimizer::{PhysicalPlanClass, PhysicalPlanKind, PlanChildren};
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PhysicalPlanChildren<'a> {
-    None,
-    Unary(&'a PhysicalPlan),
-    Binary(&'a PhysicalPlan, &'a PhysicalPlan),
-}
-
-impl<'a> PhysicalPlanChildren<'a> {
-    pub fn len(self) -> usize {
-        match self {
-            PhysicalPlanChildren::None => 0,
-            PhysicalPlanChildren::Unary(_) => 1,
-            PhysicalPlanChildren::Binary(_, _) => 2,
-        }
-    }
-
-    pub fn is_empty(self) -> bool {
-        self.len() == 0
-    }
-}
+pub type PhysicalPlanChildren<'a> = PlanChildren<'a, PhysicalPlan>;
 
 impl PhysicalPlan {
     pub fn kind(&self) -> PhysicalPlanKind {
@@ -118,7 +99,7 @@ impl PhysicalPlan {
     pub fn children(&self) -> PhysicalPlanChildren<'_> {
         match self {
             PhysicalPlan::NodeCartesianProductExec { left, right } => {
-                PhysicalPlanChildren::Binary(left, right)
+                PlanChildren::Binary(left, right)
             }
             PhysicalPlan::NodeColumnLookupExec { input, .. }
             | PhysicalPlan::AdjacencyExpandExec { input, .. }
@@ -128,8 +109,8 @@ impl PhysicalPlan {
             | PhysicalPlan::AggregateExec { input, .. }
             | PhysicalPlan::DistinctExec { input }
             | PhysicalPlan::SortExec { input, .. }
-            | PhysicalPlan::LimitExec { input, .. } => PhysicalPlanChildren::Unary(input),
-            _ => PhysicalPlanChildren::None,
+            | PhysicalPlan::LimitExec { input, .. } => PlanChildren::Unary(input),
+            _ => PlanChildren::None,
         }
     }
 }
