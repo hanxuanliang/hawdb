@@ -9,6 +9,8 @@ const COMMAND_WAIT_POLL_MS: u64 = 10;
 #[derive(Debug, Clone)]
 pub struct FixtureContractCommandCheckOptions {
     pub max_checks: Option<usize>,
+    pub start_check: usize,
+    pub check_name: Option<String>,
     pub command_timeout: Duration,
     pub allow_primary_only_project_graph: bool,
 }
@@ -17,6 +19,8 @@ impl Default for FixtureContractCommandCheckOptions {
     fn default() -> Self {
         Self {
             max_checks: None,
+            start_check: 0,
+            check_name: None,
             command_timeout: Duration::from_millis(DEFAULT_COMMAND_TIMEOUT_MS),
             allow_primary_only_project_graph: false,
         }
@@ -24,7 +28,7 @@ impl Default for FixtureContractCommandCheckOptions {
 }
 
 pub fn nowledge_fixture_contract_command_check_usage() -> String {
-    "nowledge-fixture-contract-command-check requires [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]".to_string()
+    "nowledge-fixture-contract-command-check requires [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]".to_string()
 }
 
 pub fn run_nowledge_fixture_contract_command_check(
@@ -39,6 +43,17 @@ pub fn run_nowledge_fixture_contract_command_check(
                     SkeinError::Semantic(nowledge_fixture_contract_command_check_usage())
                 })?;
                 options.max_checks = Some(parse_positive_usize("--max-checks", &raw)?);
+            }
+            "--start-check" => {
+                let raw = args.next().ok_or_else(|| {
+                    SkeinError::Semantic(nowledge_fixture_contract_command_check_usage())
+                })?;
+                options.start_check = parse_usize("--start-check", &raw)?;
+            }
+            "--check-name" => {
+                options.check_name = Some(args.next().ok_or_else(|| {
+                    SkeinError::Semantic(nowledge_fixture_contract_command_check_usage())
+                })?);
             }
             "--command-timeout-ms" => {
                 let raw = args.next().ok_or_else(|| {
@@ -113,6 +128,7 @@ fn check_contract_command(
                 contract,
                 options,
                 0,
+                0,
                 matched_checks,
                 &primary_only_project_graph_checks,
                 failures,
@@ -124,8 +140,30 @@ fn check_contract_command(
         .get("checks")
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| SkeinError::Semantic("fixture contract missing checks array".to_string()))?;
-    let check_limit = options.max_checks.unwrap_or(checks.len()).min(checks.len());
-    for check in checks.iter().take(check_limit) {
+    let selected_checks = select_contract_checks(checks, options);
+    let selected_check_count = selected_checks.len();
+    if selected_check_count == 0 {
+        failures.push(serde_json::json!({
+            "phase": "selection",
+            "name": serde_json::Value::Null,
+            "index": serde_json::Value::Null,
+            "message": "no fixture checks selected",
+        }));
+        return Ok(command_check_report_json(
+            contract,
+            options,
+            selected_check_count,
+            0,
+            matched_checks,
+            &primary_only_project_graph_checks,
+            failures,
+        ));
+    }
+    let check_limit = options
+        .max_checks
+        .unwrap_or(selected_check_count)
+        .min(selected_check_count);
+    for check in selected_checks.iter().take(check_limit) {
         match check.get("kind").and_then(serde_json::Value::as_str) {
             Some("cypher") => match check_cypher_contract_check(&command, check) {
                 Ok(()) => matched_checks += 1,
@@ -168,11 +206,37 @@ fn check_contract_command(
     Ok(command_check_report_json(
         contract,
         options,
+        selected_check_count,
         check_limit,
         matched_checks,
         &primary_only_project_graph_checks,
         failures,
     ))
+}
+
+fn select_contract_checks<'a>(
+    checks: &'a [serde_json::Value],
+    options: &FixtureContractCommandCheckOptions,
+) -> Vec<&'a serde_json::Value> {
+    checks
+        .iter()
+        .enumerate()
+        .filter(|(position, check)| {
+            contract_check_index(check).unwrap_or(*position) >= options.start_check
+        })
+        .filter(|(_, check)| match options.check_name.as_deref() {
+            Some(name) => check.get("name").and_then(serde_json::Value::as_str) == Some(name),
+            None => true,
+        })
+        .map(|(_, check)| check)
+        .collect()
+}
+
+fn contract_check_index(check: &serde_json::Value) -> Option<usize> {
+    check
+        .get("index")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|index| usize::try_from(index).ok())
 }
 
 fn check_cypher_contract_check(
@@ -464,6 +528,7 @@ impl FixtureCommand<'_> {
 fn command_check_report_json(
     contract: &serde_json::Value,
     options: &FixtureContractCommandCheckOptions,
+    selected_checks: usize,
     checked_checks: usize,
     matched_checks: usize,
     primary_only_project_graph_checks: &[serde_json::Value],
@@ -473,10 +538,18 @@ fn command_check_report_json(
         .get("check_count")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    let full_contract_checked = selected_checks as u64 == total_checks
+        && checked_checks as u64 == total_checks
+        && options.start_check == 0
+        && options.check_name.is_none()
+        && options.max_checks.is_none();
+    let selected_subset_ready =
+        failures.is_empty() && selected_checks > 0 && matched_checks == checked_checks;
     serde_json::json!({
         "protocol": "skein-nowledge-fixture-contract-command-check",
         "fixture": contract.get("fixture").cloned().unwrap_or(serde_json::Value::Null),
         "total_checks": total_checks,
+        "selected_checks": selected_checks,
         "checked_checks": checked_checks,
         "matched_checks": matched_checks,
         "failed_checks": failures.len(),
@@ -484,10 +557,14 @@ fn command_check_report_json(
         "primary_only_project_graph_checks": primary_only_project_graph_checks,
         "options": {
             "max_checks": options.max_checks,
+            "start_check": options.start_check,
+            "check_name": options.check_name,
             "command_timeout_ms": options.command_timeout.as_millis() as u64,
             "allow_primary_only_project_graph": options.allow_primary_only_project_graph,
         },
-        "contract_command_check_ready": failures.is_empty() && matched_checks == checked_checks,
+        "full_contract_checked": full_contract_checked,
+        "full_contract_ready": full_contract_checked && selected_subset_ready,
+        "contract_command_check_ready": selected_subset_ready,
     })
 }
 
@@ -510,6 +587,12 @@ fn parse_positive_usize(flag: &str, value: &str) -> Result<usize> {
         )));
     }
     Ok(parsed)
+}
+
+fn parse_usize(flag: &str, value: &str) -> Result<usize> {
+    value
+        .parse::<usize>()
+        .map_err(|error| SkeinError::Semantic(format!("invalid {flag} value '{value}': {error}")))
 }
 
 fn parse_positive_u64(flag: &str, value: &str) -> Result<u64> {
@@ -579,6 +662,116 @@ mod tests {
 
         assert_eq!(report["matched_checks"], 0);
         assert_eq!(report["failed_checks"], 1);
+        assert_eq!(report["contract_command_check_ready"], false);
+    }
+
+    #[test]
+    fn contract_command_check_can_start_from_later_check() {
+        let contract = serde_json::json!({
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 2,
+            "setup": [],
+            "checks": [
+                {
+                    "index": 0,
+                    "kind": "cypher",
+                    "name": "first",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 1
+                    }
+                },
+                {
+                    "index": 1,
+                    "kind": "cypher",
+                    "name": "second",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 0
+                    }
+                }
+            ]
+        });
+        let options = FixtureContractCommandCheckOptions {
+            start_check: 1,
+            ..FixtureContractCommandCheckOptions::default()
+        };
+        let report = check_contract_command(
+            &contract,
+            "python3",
+            &[
+                "-c".to_string(),
+                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
+                    .to_string(),
+            ],
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(report["selected_checks"], 1);
+        assert_eq!(report["checked_checks"], 1);
+        assert_eq!(report["matched_checks"], 1);
+        assert_eq!(report["full_contract_checked"], false);
+        assert_eq!(report["contract_command_check_ready"], true);
+    }
+
+    #[test]
+    fn contract_command_check_reports_empty_selection() {
+        let contract = serde_json::json!({
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 1,
+            "setup": [],
+            "checks": [
+                {
+                    "index": 0,
+                    "kind": "cypher",
+                    "name": "present",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 0
+                    }
+                }
+            ]
+        });
+        let options = FixtureContractCommandCheckOptions {
+            check_name: Some("missing".to_string()),
+            ..FixtureContractCommandCheckOptions::default()
+        };
+        let report = check_contract_command(&contract, "python3", &[], &options).unwrap();
+
+        assert_eq!(report["selected_checks"], 0);
+        assert_eq!(report["checked_checks"], 0);
+        assert_eq!(report["failed_checks"], 1);
+        assert_eq!(report["failures"][0]["phase"], "selection");
         assert_eq!(report["contract_command_check_ready"], false);
     }
 }
