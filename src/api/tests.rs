@@ -8682,6 +8682,15 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
         &policy,
         &LocalQosState::default(),
         BackgroundMaintenanceOptions {
+            hint: BackgroundWorkHint {
+                active_topic: true,
+                query_probability_per_million: 250_000,
+                staleness_millis: 750,
+                staleness_ttl_millis: Some(1_000),
+                freshness_slo_millis: Some(500),
+                tenant_budget_remaining_operations: Some(8),
+                ..BackgroundWorkHint::default()
+            },
             search_projection_graph_delta: Some(search_delta_request),
             include_schema_maintenance: false,
             include_property_index_projection: false,
@@ -8715,6 +8724,17 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
     assert_eq!(admitted.name, "search_projection_graph_delta");
     assert_eq!(admitted.work_class_name, "projection");
     assert_eq!(admitted.priority_name, "background");
+    assert!(admitted.hint_active_topic);
+    assert_eq!(admitted.hint_recent_delta_operations, 2);
+    assert_eq!(
+        admitted.hint_source_graph_commit_lag,
+        db.store.commit_epoch()
+    );
+    assert_eq!(admitted.hint_query_probability_per_million, 250_000);
+    assert_eq!(admitted.hint_staleness_millis, 750);
+    assert_eq!(admitted.hint_staleness_ttl_millis, Some(1_000));
+    assert_eq!(admitted.hint_freshness_slo_millis, Some(500));
+    assert_eq!(admitted.hint_tenant_budget_remaining_operations, Some(8));
     assert!(admitted.has_executable_search_projection_graph_delta);
     assert_eq!(
         admitted.search_projection_graph_delta_operation_count,

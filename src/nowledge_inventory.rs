@@ -392,6 +392,14 @@ fn background_maintenance_summary_to_json(
                     "work_class": &item.work_class_name,
                     "priority": &item.priority_name,
                     "estimated_operations": item.estimated_operations,
+                    "hint_active_topic": item.hint_active_topic,
+                    "hint_recent_delta_operations": item.hint_recent_delta_operations,
+                    "hint_source_graph_commit_lag": item.hint_source_graph_commit_lag,
+                    "hint_query_probability_per_million": item.hint_query_probability_per_million,
+                    "hint_staleness_millis": item.hint_staleness_millis,
+                    "hint_staleness_ttl_millis": item.hint_staleness_ttl_millis,
+                    "hint_freshness_slo_millis": item.hint_freshness_slo_millis,
+                    "hint_tenant_budget_remaining_operations": item.hint_tenant_budget_remaining_operations,
                     "admission": &item.admission_name,
                     "admission_code": &item.admission_code_name,
                     "score": item.score,
@@ -1309,6 +1317,32 @@ mod tests {
                 .unwrap()
                 > 0
         );
+        assert!(
+            executable_delta["hint_recent_delta_operations"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            executable_delta["hint_source_graph_commit_lag"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(executable_delta["hint_active_topic"], false);
+        assert_eq!(
+            executable_delta["hint_query_probability_per_million"]
+                .as_u64()
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            executable_delta["hint_staleness_millis"].as_u64().unwrap(),
+            0
+        );
+        assert!(executable_delta["hint_staleness_ttl_millis"].is_null());
+        assert!(executable_delta["hint_freshness_slo_millis"].is_null());
+        assert!(executable_delta["hint_tenant_budget_remaining_operations"].is_null());
         assert!(
             executable_delta["search_projection_graph_delta_upsert_node_count"]
                 .as_u64()

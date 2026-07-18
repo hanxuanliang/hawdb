@@ -132,6 +132,9 @@ content store
 
 This matches the existing Nowledge invariant: graph identity is durable,
 search is rebuildable, and large content is not duplicated into the graph store.
+Resource-constrained embedded deployments should consume background maintenance
+summaries through typed QoS hint fields, not by parsing human-readable ranking
+reasons.
 
 ## Next Implementation Slices
 

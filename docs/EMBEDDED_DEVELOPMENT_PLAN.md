@@ -627,7 +627,10 @@ work on behalf of the embedded application. Executable search-projection graph
 delta candidates expose operation counts, upsert/delete counts, optional
 max-operation limits, and the complete-through graph commit epoch, so the
 application can distinguish bounded incremental FTS maintenance from
-freshness-lag planning signals. Tenant budget hints below a candidate's
+freshness-lag planning signals. Background maintenance summaries also expose
+typed active-topic, recent-delta, source-graph-lag, query-probability,
+staleness, freshness-SLO, and tenant-budget hints, so callers do not need to
+parse human-readable ranking reasons. Tenant budget hints below a candidate's
 estimated operations are ranked as deferred background work, while foreground
 user-triggered rebuilds, deltas, and repairs can still use the direct APIs.
 Database-owned
