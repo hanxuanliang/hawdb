@@ -91,8 +91,10 @@ pub fn nowledge_replacement_summary_json_with_options(
             "ready_engine_kind": json_get_str_path(bundle, &["cutover_evidence", "ready_engine_kind"]),
             "storage_recovery_required": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]),
             "storage_recovery_ready": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]),
+            "storage_recovery_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "storage_recovery_blocker_codes"]),
             "background_maintenance_required": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_required"]),
             "background_maintenance_ready": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_ready"]),
+            "background_maintenance_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "background_maintenance_blocker_codes"]),
             "replacement_readiness_min_per_million": json_get_u64_path(bundle, &["cutover_evidence", "replacement_readiness_min_per_million"]),
         },
         "blocking_categories": blocking_categories,
@@ -322,6 +324,13 @@ fn json_get_bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> 
 
 fn json_get_str_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
     json_get_path(value, path).and_then(serde_json::Value::as_str)
+}
+
+fn json_get_array_path(value: &serde_json::Value, path: &[&str]) -> serde_json::Value {
+    json_get_path(value, path)
+        .filter(|value| value.is_array())
+        .cloned()
+        .unwrap_or(serde_json::Value::Null)
 }
 
 fn json_get_string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {
@@ -566,11 +575,13 @@ mod tests {
                 "eligible": false,
                 "storage_recovery_required": true,
                 "storage_recovery_ready": false,
+                "storage_recovery_blocker_codes": ["wal_replay_unbounded"],
                 "storage_recovery_blockers": [
                     "WAL replay was not opened with a configured entry bound"
                 ],
                 "background_maintenance_required": true,
                 "background_maintenance_ready": false,
+                "background_maintenance_blocker_codes": ["missing_evidence"],
                 "background_maintenance_blockers": [
                     "background maintenance summary is missing"
                 ],
@@ -603,6 +614,14 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "background maintenance summary is missing"));
+        assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_blocker_codes"],
+            serde_json::json!(["wal_replay_unbounded"])
+        );
+        assert_eq!(
+            summary["cutover_evidence"]["background_maintenance_blocker_codes"],
+            serde_json::json!(["missing_evidence"])
+        );
         assert_eq!(summary["production_replacement_per_million"], 0);
     }
 
@@ -636,9 +655,11 @@ mod tests {
                 "ready_engine_kind": "previous_wrapper",
                 "storage_recovery_required": true,
                 "storage_recovery_ready": true,
+                "storage_recovery_blocker_codes": [],
                 "storage_recovery_blockers": [],
                 "background_maintenance_required": true,
                 "background_maintenance_ready": true,
+                "background_maintenance_blocker_codes": [],
                 "background_maintenance_blockers": [],
                 "replacement_readiness_min_per_million": 1_000_000,
                 "replacement_readiness_invalid_family_count": 0,
@@ -680,11 +701,13 @@ mod tests {
                 "eligible": false,
                 "storage_recovery_required": true,
                 "storage_recovery_ready": false,
+                "storage_recovery_blocker_codes": ["wal_replay_unbounded"],
                 "storage_recovery_blockers": [
                     "WAL replay was not opened with a configured entry bound"
                 ],
                 "background_maintenance_required": true,
                 "background_maintenance_ready": false,
+                "background_maintenance_blocker_codes": ["missing_evidence"],
                 "background_maintenance_blockers": [
                     "background maintenance summary is missing"
                 ],

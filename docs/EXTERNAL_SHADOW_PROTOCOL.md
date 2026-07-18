@@ -528,7 +528,8 @@ coverage and shadow parity into a single global ratio.
 `storage_recovery_ready`, `storage_recovery_protocol_matches`,
 `storage_recovery_durable`, `storage_recovery_checkpoint_boundary_present`,
 `storage_recovery_wal_replay_bounded`,
-`storage_recovery_torn_tail_clean`, and `storage_recovery_blockers`.
+`storage_recovery_torn_tail_clean`, `storage_recovery_blocker_codes`, and
+`storage_recovery_blockers`.
 Required storage recovery evidence is ready only when the report protocol
 matches `skein-storage-recovery-report`, durable recovery was observed, a
 checkpoint boundary is present, WAL replay was opened with a configured bound,
@@ -548,7 +549,8 @@ reports `background_maintenance_required`, `background_maintenance_present`,
 `background_maintenance_ready`, `background_maintenance_total_candidates`,
 `background_maintenance_ranked_count`,
 `background_maintenance_foreground_ranked_count`,
-`background_maintenance_unknown_admission_count`, and
+`background_maintenance_unknown_admission_count`,
+`background_maintenance_blocker_codes`, and
 `background_maintenance_blockers`. Required background maintenance evidence is
 ready only when the summary is present, it contains non-empty candidate and
 ranked-work counts, all ranked work is background priority, and admission values

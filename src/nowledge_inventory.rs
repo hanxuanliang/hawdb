@@ -48,6 +48,7 @@ pub struct StorageRecoveryEvidenceHealth {
     pub checkpoint_boundary_present: Option<bool>,
     pub wal_replay_bounded: Option<bool>,
     pub torn_tail_clean: Option<bool>,
+    pub blocker_codes: Vec<String>,
     pub blockers: Vec<String>,
 }
 
@@ -60,6 +61,7 @@ pub struct BackgroundMaintenanceEvidenceHealth {
     pub ranked_count: Option<u64>,
     pub foreground_ranked_count: u64,
     pub unknown_admission_count: u64,
+    pub blocker_codes: Vec<String>,
     pub blockers: Vec<String>,
 }
 
@@ -300,6 +302,17 @@ fn migration_gate_json_object(
     })
 }
 
+fn insert_json<T: serde::Serialize>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: T,
+) {
+    object.insert(
+        key.to_string(),
+        serde_json::to_value(value).expect("cutover evidence values must serialize"),
+    );
+}
+
 fn insert_shadow_run_json(
     bundle: &mut serde_json::Value,
     shadow_name: &str,
@@ -415,54 +428,192 @@ fn insert_cutover_evidence_json(
         blockers.push("migration gate decision is not ready".to_string());
     }
 
+    let mut evidence = serde_json::Map::new();
+    insert_json(&mut evidence, "eligible", blockers.is_empty());
+    insert_json(
+        &mut evidence,
+        "evidence_kind",
+        if self_shadow {
+            "protocol_smoke"
+        } else {
+            "previous_wrapper"
+        },
+    );
+    insert_json(&mut evidence, "requires_previous_wrapper", true);
+    insert_json(&mut evidence, "requires_ready_preflight", true);
+    insert_json(
+        &mut evidence,
+        "requires_ready_engine_kind",
+        "previous_wrapper",
+    );
+    insert_json(
+        &mut evidence,
+        "requires_ready_capabilities",
+        REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    );
+    insert_json(&mut evidence, "requires_shadow_evidence", true);
+    insert_json(&mut evidence, "ready_preflight", ready_preflight);
+    insert_json(&mut evidence, "ready_engine_kind", ready_engine_kind);
+    insert_json(
+        &mut evidence,
+        "ready_missing_capabilities",
+        ready_missing_capabilities,
+    );
+    insert_json(
+        &mut evidence,
+        "shadow_evidence_present",
+        shadow_evidence_present,
+    );
+    insert_json(
+        &mut evidence,
+        "shadow_trace_present",
+        shadow_trace_health.present,
+    );
+    insert_json(
+        &mut evidence,
+        "shadow_trace_complete",
+        shadow_trace_health.complete,
+    );
+    insert_json(
+        &mut evidence,
+        "shadow_trace_summary_available",
+        shadow_trace_health.summary_available,
+    );
+    insert_json(
+        &mut evidence,
+        "shadow_trace_request_count_matches",
+        shadow_trace_health.request_count_matches,
+    );
+    insert_json(
+        &mut evidence,
+        "shadow_trace_pending_request_count",
+        shadow_trace_health.pending_request_count,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_required",
+        storage_recovery_health.required,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_present",
+        storage_recovery_health.present,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_ready",
+        storage_recovery_health.ready,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_protocol_matches",
+        storage_recovery_health.protocol_matches,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_durable",
+        storage_recovery_health.durable_recovery_observed,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_checkpoint_boundary_present",
+        storage_recovery_health.checkpoint_boundary_present,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_wal_replay_bounded",
+        storage_recovery_health.wal_replay_bounded,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_torn_tail_clean",
+        storage_recovery_health.torn_tail_clean,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_blocker_codes",
+        storage_recovery_health.blocker_codes,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_blockers",
+        storage_recovery_health.blockers,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_required",
+        background_maintenance_health.required,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_present",
+        background_maintenance_health.present,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_ready",
+        background_maintenance_health.ready,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_total_candidates",
+        background_maintenance_health.total_candidates,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_ranked_count",
+        background_maintenance_health.ranked_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_foreground_ranked_count",
+        background_maintenance_health.foreground_ranked_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_unknown_admission_count",
+        background_maintenance_health.unknown_admission_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_blocker_codes",
+        background_maintenance_health.blocker_codes,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_blockers",
+        background_maintenance_health.blockers,
+    );
+    insert_json(
+        &mut evidence,
+        "replacement_readiness_family_report_present",
+        replacement_family_health.present,
+    );
+    insert_json(
+        &mut evidence,
+        "replacement_readiness_min_per_million",
+        replacement_family_health.min_replacement_readiness_per_million,
+    );
+    insert_json(
+        &mut evidence,
+        "replacement_readiness_invalid_family_count",
+        replacement_family_health.invalid_family_count,
+    );
+    insert_json(
+        &mut evidence,
+        "replacement_readiness_blocked_query_families",
+        replacement_family_health.blocked_query_families,
+    );
+    insert_json(
+        &mut evidence,
+        "replacement_readiness_blockers",
+        replacement_family_health.blockers,
+    );
+    insert_json(&mut evidence, "migration_gate_ready", migration_gate_ready);
+    insert_json(&mut evidence, "blockers", blockers);
     migration_gate_json_object(bundle)?.insert(
         "cutover_evidence".to_string(),
-        serde_json::json!({
-            "eligible": blockers.is_empty(),
-            "evidence_kind": if self_shadow {
-                "protocol_smoke"
-            } else {
-                "previous_wrapper"
-            },
-            "requires_previous_wrapper": true,
-            "requires_ready_preflight": true,
-            "requires_ready_engine_kind": "previous_wrapper",
-            "requires_ready_capabilities": REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
-            "requires_shadow_evidence": true,
-            "ready_preflight": ready_preflight,
-            "ready_engine_kind": ready_engine_kind,
-            "ready_missing_capabilities": ready_missing_capabilities,
-            "shadow_evidence_present": shadow_evidence_present,
-            "shadow_trace_present": shadow_trace_health.present,
-            "shadow_trace_complete": shadow_trace_health.complete,
-            "shadow_trace_summary_available": shadow_trace_health.summary_available,
-            "shadow_trace_request_count_matches": shadow_trace_health.request_count_matches,
-            "shadow_trace_pending_request_count": shadow_trace_health.pending_request_count,
-            "storage_recovery_required": storage_recovery_health.required,
-            "storage_recovery_present": storage_recovery_health.present,
-            "storage_recovery_ready": storage_recovery_health.ready,
-            "storage_recovery_protocol_matches": storage_recovery_health.protocol_matches,
-            "storage_recovery_durable": storage_recovery_health.durable_recovery_observed,
-            "storage_recovery_checkpoint_boundary_present": storage_recovery_health.checkpoint_boundary_present,
-            "storage_recovery_wal_replay_bounded": storage_recovery_health.wal_replay_bounded,
-            "storage_recovery_torn_tail_clean": storage_recovery_health.torn_tail_clean,
-            "storage_recovery_blockers": storage_recovery_health.blockers,
-            "background_maintenance_required": background_maintenance_health.required,
-            "background_maintenance_present": background_maintenance_health.present,
-            "background_maintenance_ready": background_maintenance_health.ready,
-            "background_maintenance_total_candidates": background_maintenance_health.total_candidates,
-            "background_maintenance_ranked_count": background_maintenance_health.ranked_count,
-            "background_maintenance_foreground_ranked_count": background_maintenance_health.foreground_ranked_count,
-            "background_maintenance_unknown_admission_count": background_maintenance_health.unknown_admission_count,
-            "background_maintenance_blockers": background_maintenance_health.blockers,
-            "replacement_readiness_family_report_present": replacement_family_health.present,
-            "replacement_readiness_min_per_million": replacement_family_health.min_replacement_readiness_per_million,
-            "replacement_readiness_invalid_family_count": replacement_family_health.invalid_family_count,
-            "replacement_readiness_blocked_query_families": replacement_family_health.blocked_query_families,
-            "replacement_readiness_blockers": replacement_family_health.blockers,
-            "migration_gate_ready": migration_gate_ready,
-            "blockers": blockers,
-        }),
+        serde_json::Value::Object(evidence),
     );
     Ok(())
 }
@@ -580,6 +731,11 @@ pub fn background_maintenance_evidence_health(
             ranked_count: None,
             foreground_ranked_count: 0,
             unknown_admission_count: 0,
+            blocker_codes: if required {
+                vec!["missing_evidence".to_string()]
+            } else {
+                Vec::new()
+            },
             blockers,
         };
     };
@@ -609,17 +765,22 @@ pub fn background_maintenance_evidence_health(
             )
         })
         .count() as u64;
+    let mut blocker_codes = Vec::new();
     let mut blockers = Vec::new();
     if required && total_candidates.unwrap_or_default() == 0 {
+        blocker_codes.push("no_candidates".to_string());
         blockers.push("background maintenance evidence has no candidates".to_string());
     }
     if required && ranked_count.unwrap_or_default() == 0 {
+        blocker_codes.push("no_ranked_work".to_string());
         blockers.push("background maintenance evidence has no ranked work".to_string());
     }
     if foreground_ranked_count > 0 {
+        blocker_codes.push("foreground_ranked_work".to_string());
         blockers.push("background maintenance evidence ranked foreground work".to_string());
     }
     if unknown_admission_count > 0 {
+        blocker_codes.push("unknown_admission".to_string());
         blockers.push("background maintenance evidence has unknown admission values".to_string());
     }
     BackgroundMaintenanceEvidenceHealth {
@@ -630,6 +791,7 @@ pub fn background_maintenance_evidence_health(
         ranked_count,
         foreground_ranked_count,
         unknown_admission_count,
+        blocker_codes,
         blockers,
     }
 }
@@ -653,6 +815,11 @@ pub fn storage_recovery_evidence_health(
             checkpoint_boundary_present: None,
             wal_replay_bounded: None,
             torn_tail_clean: None,
+            blocker_codes: if required {
+                vec!["missing_evidence".to_string()]
+            } else {
+                Vec::new()
+            },
             blockers,
         };
     };
@@ -673,20 +840,26 @@ pub fn storage_recovery_evidence_health(
     let torn_tail_clean = readiness
         .and_then(|readiness| readiness.get("torn_tail_clean"))
         .and_then(serde_json::Value::as_bool);
+    let mut blocker_codes = Vec::new();
     let mut blockers = Vec::new();
     if protocol_matches != Some(true) {
+        blocker_codes.push("protocol_mismatch".to_string());
         blockers.push("storage recovery evidence protocol mismatch".to_string());
     }
     if durable_recovery_observed != Some(true) {
+        blocker_codes.push("durable_recovery_not_observed".to_string());
         blockers.push("storage recovery evidence does not prove durable recovery".to_string());
     }
     if checkpoint_boundary_present != Some(true) {
+        blocker_codes.push("checkpoint_boundary_missing".to_string());
         blockers.push("storage recovery evidence lacks checkpoint boundary".to_string());
     }
     if wal_replay_bounded != Some(true) {
+        blocker_codes.push("wal_replay_unbounded".to_string());
         blockers.push("storage recovery evidence lacks bounded WAL replay".to_string());
     }
     if torn_tail_clean != Some(true) {
+        blocker_codes.push("torn_tail_observed".to_string());
         blockers.push("storage recovery evidence observed torn WAL tail".to_string());
     }
     StorageRecoveryEvidenceHealth {
@@ -698,6 +871,7 @@ pub fn storage_recovery_evidence_health(
         checkpoint_boundary_present,
         wal_replay_bounded,
         torn_tail_clean,
+        blocker_codes,
         blockers,
     }
 }
@@ -2051,6 +2225,7 @@ mod tests {
             health.blockers,
             vec!["background maintenance evidence is required before cutover".to_string()]
         );
+        assert_eq!(health.blocker_codes, vec!["missing_evidence".to_string()]);
     }
 
     #[test]
@@ -2077,6 +2252,38 @@ mod tests {
         assert_eq!(
             health.blockers,
             vec!["background maintenance evidence ranked foreground work".to_string()]
+        );
+        assert_eq!(
+            health.blocker_codes,
+            vec!["foreground_ranked_work".to_string()]
+        );
+    }
+
+    #[test]
+    fn storage_recovery_evidence_health_reports_stable_blocker_codes() {
+        let report = serde_json::json!({
+            "protocol": "unexpected-report",
+            "readiness": {
+                "durable_recovery_observed": false,
+                "checkpoint_boundary_present": false,
+                "wal_replay_bounded": false,
+                "torn_tail_clean": false
+            }
+        });
+
+        let health = super::storage_recovery_evidence_health(Some(&report), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(
+            health.blocker_codes,
+            vec![
+                "protocol_mismatch".to_string(),
+                "durable_recovery_not_observed".to_string(),
+                "checkpoint_boundary_missing".to_string(),
+                "wal_replay_unbounded".to_string(),
+                "torn_tail_observed".to_string()
+            ]
         );
     }
 
@@ -2183,6 +2390,10 @@ mod tests {
         assert_eq!(
             bundle["cutover_evidence"]["storage_recovery_blockers"][0],
             "storage recovery evidence is required before cutover"
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_blocker_codes"][0],
+            "missing_evidence"
         );
 
         fs::remove_dir_all(root).unwrap();
