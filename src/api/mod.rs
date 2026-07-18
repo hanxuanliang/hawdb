@@ -14,7 +14,7 @@ use crate::qos::{
 };
 use crate::schema::{
     Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics, IndexDescriptor,
-    IndexKind, PropertyDescriptor, SchemaObjectState, TableDescriptor,
+    IndexKind, LabelId, PropertyDescriptor, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
     projection_row_from_node, MetadataRepairOptions, MetadataRepairSummary,
@@ -2011,6 +2011,28 @@ pub struct KnowledgePageRankClearOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityAssignmentClearRequest {
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityAssignmentClearRow {
+    pub labels: Vec<String>,
+    pub external_id: Option<String>,
+    pub node_id: u64,
+    pub cleared: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityAssignmentClearOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeCommunityAssignmentClearRow>,
+    pub candidate_count: usize,
+    pub cleared_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphMetaStamp {
     pub meta_id: String,
     pub assignments: BTreeMap<String, Value>,
@@ -3917,6 +3939,13 @@ impl Database {
         request: &KnowledgePageRankClearRequest,
     ) -> Result<KnowledgePageRankClearOutput> {
         clear_knowledge_pagerank_scores_for(self, request)
+    }
+
+    pub fn clear_knowledge_community_assignments(
+        &mut self,
+        request: &KnowledgeCommunityAssignmentClearRequest,
+    ) -> Result<KnowledgeCommunityAssignmentClearOutput> {
+        clear_knowledge_community_assignments_for(self, request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(
@@ -8099,6 +8128,117 @@ fn pagerank_label(label: &str) -> &'static str {
         "Entity" | "entity" => "Entity",
         _ => unreachable!("pagerank label should be validated before canonicalization"),
     }
+}
+
+fn clear_knowledge_community_assignments_for(
+    db: &mut Database,
+    request: &KnowledgeCommunityAssignmentClearRequest,
+) -> Result<KnowledgeCommunityAssignmentClearOutput> {
+    db.ensure_writable()?;
+    for label in &request.labels {
+        validate_cypher_identifier(label.as_str(), "node label")?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::new();
+    let mut candidate_count = 0;
+    let mut cleared_count = 0;
+    let mut eligible_updates = Vec::new();
+    let mut seen_node_ids = BTreeSet::new();
+
+    if request.labels.is_empty() {
+        collect_knowledge_community_assignment_clears(
+            db,
+            None,
+            &mut seen_node_ids,
+            &mut rows,
+            &mut eligible_updates,
+            &mut candidate_count,
+            &mut cleared_count,
+        );
+    } else {
+        for label in &request.labels {
+            let Some(label_id) = db.catalog.label_id(label.as_str()) else {
+                continue;
+            };
+            collect_knowledge_community_assignment_clears(
+                db,
+                Some(label_id),
+                &mut seen_node_ids,
+                &mut rows,
+                &mut eligible_updates,
+                &mut candidate_count,
+                &mut cleared_count,
+            );
+        }
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeCommunityAssignmentClearOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            candidate_count,
+            cleared_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for node_id in &eligible_updates {
+        let (cypher, parameters) = community_assignment_clear_statement(*node_id);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeCommunityAssignmentClearOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        candidate_count,
+        cleared_count,
+    })
+}
+
+fn collect_knowledge_community_assignment_clears(
+    db: &Database,
+    label_id: Option<LabelId>,
+    seen_node_ids: &mut BTreeSet<NodeId>,
+    rows: &mut Vec<KnowledgeCommunityAssignmentClearRow>,
+    eligible_updates: &mut Vec<NodeId>,
+    candidate_count: &mut usize,
+    cleared_count: &mut usize,
+) {
+    for node in db.store.scan_nodes(label_id) {
+        if !seen_node_ids.insert(node.id) {
+            continue;
+        }
+        if node
+            .properties
+            .get("community_id")
+            .is_none_or(|value| value == &Value::Null)
+        {
+            continue;
+        }
+        *candidate_count += 1;
+        *cleared_count += 1;
+        eligible_updates.push(node.id);
+        rows.push(KnowledgeCommunityAssignmentClearRow {
+            labels: node_label_names(&db.catalog, node),
+            external_id: node_external_id(node),
+            node_id: node.id.0,
+            cleared: true,
+        });
+    }
+}
+
+fn community_assignment_clear_statement(node_id: NodeId) -> (String, BTreeMap<String, Value>) {
+    (
+        "MATCH (n) WHERE id(n) = $node_id SET n.community_id = $community_id".to_string(),
+        BTreeMap::from([
+            ("node_id".to_string(), Value::Int(node_id.0 as i64)),
+            ("community_id".to_string(), Value::Null),
+        ]),
+    )
 }
 
 fn stamp_knowledge_graph_meta_batch_for(
@@ -13196,6 +13336,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgePageRankClearRequest,
     ) -> Result<KnowledgePageRankClearOutput> {
         self.db.clear_knowledge_pagerank_scores(request)
+    }
+
+    pub fn clear_knowledge_community_assignments(
+        &mut self,
+        request: &KnowledgeCommunityAssignmentClearRequest,
+    ) -> Result<KnowledgeCommunityAssignmentClearOutput> {
+        self.db.clear_knowledge_community_assignments(request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(

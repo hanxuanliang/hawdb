@@ -372,6 +372,11 @@ patterns, are lowered to the same property equality predicate path. One-hop
 unlabeled node matches such as `MATCH (n) WHERE n.id IN $ids RETURN n.id` and
 `MATCH (n) WHERE n.id = $node_id SET n.community_id = $community_id` are
 supported for current Nowledge graph analysis and community-assignment paths.
+Community assignment cleanup is also exposed through
+`Database::clear_knowledge_community_assignments`, which accepts explicit label
+scopes or an all-node scan, validates label names before WAL, deduplicates
+overlapping label scopes, clears only non-null `community_id` values, and
+commits eligible clears through one grouped WAL batch.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.
