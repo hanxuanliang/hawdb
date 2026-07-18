@@ -5,8 +5,8 @@ use skein::{
     scan_nowledge_query_inventory_to_json, CanonicalGraphSnapshotValidation,
     CanonicalSnapshotIdentityAudit, CompatibilityRollbackEvidence, Database, DatabaseConfig,
     ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
-    NowledgeCypherMigrationGateJsonOptions, Result, SkeinError, Value,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NowledgeCypherMigrationGateJsonOptions, RecoveryMode, Result, SkeinError,
+    StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -179,6 +179,45 @@ fn main() -> Result<()> {
                     "nowledge migration gate is blocked".to_string(),
                 ));
             }
+            return Ok(());
+        }
+        if command == "storage-recovery-report" {
+            let mut recovery_mode = RecoveryMode::default();
+            let mut max_wal_replay_entries = None;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--strict" => {
+                        recovery_mode = RecoveryMode::Strict;
+                        args.next();
+                    }
+                    "--max-wal-replay-entries" => {
+                        args.next();
+                        let raw_limit = args
+                            .next()
+                            .ok_or_else(|| SkeinError::Semantic(storage_recovery_report_usage()))?;
+                        max_wal_replay_entries = Some(parse_max_wal_replay_entries(&raw_limit)?);
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(storage_recovery_report_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(storage_recovery_report_usage()));
+            }
+            let db = Database::open_with_config(
+                path,
+                DatabaseConfig {
+                    read_only: true,
+                    recovery_mode,
+                    max_wal_replay_entries,
+                    ..DatabaseConfig::default()
+                },
+            )?;
+            let rendered =
+                storage_recovery_report_json(db.storage_version(), &db.storage_recovery_report());
+            println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
             return Ok(());
         }
         if command == "validate-canonical-snapshot" {
@@ -520,6 +559,11 @@ fn validate_canonical_snapshot_usage() -> String {
         .to_string()
 }
 
+fn storage_recovery_report_usage() -> String {
+    "storage-recovery-report requires [--strict] [--max-wal-replay-entries <n>] <database-path>"
+        .to_string()
+}
+
 fn graph_lightning_bootstrap_manifest_usage() -> String {
     "graph-lightning-bootstrap-manifest requires [--require-ready] <database-path>".to_string()
 }
@@ -618,6 +662,20 @@ fn parse_shadow_timeout_ms(raw_timeout: &str) -> Result<Duration> {
         ));
     }
     Ok(Duration::from_millis(timeout_ms))
+}
+
+fn parse_max_wal_replay_entries(raw_limit: &str) -> Result<usize> {
+    let limit = raw_limit.parse::<usize>().map_err(|error| {
+        SkeinError::Semantic(format!(
+            "invalid --max-wal-replay-entries '{raw_limit}': {error}"
+        ))
+    })?;
+    if limit == 0 {
+        return Err(SkeinError::Semantic(
+            "--max-wal-replay-entries must be greater than zero".to_string(),
+        ));
+    }
+    Ok(limit)
 }
 
 fn add_shadow_ready_report(
@@ -797,6 +855,40 @@ fn canonical_snapshot_validation_json(
             "missing_targets": endpoint_violations_json(&validation.missing_targets),
         }
     })
+}
+
+fn storage_recovery_report_json(
+    storage_version: &str,
+    report: &StorageRecoveryReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "skein-storage-recovery-report",
+        "storage_version": storage_version,
+        "durable": report.durable,
+        "recovery_mode": recovery_mode_name(report.recovery_mode),
+        "checkpoint_epoch": report.checkpoint_epoch,
+        "checkpoint_commit_epoch": report.checkpoint_commit_epoch,
+        "wal_present": report.wal_present,
+        "wal_replay_start_lsn": report.wal_replay_start_lsn,
+        "next_lsn_after_replay": report.next_lsn_after_replay,
+        "replayed_wal_entries": report.replayed_wal_entries,
+        "torn_tail_ignored": report.torn_tail_ignored,
+        "torn_tail_reason": &report.torn_tail_reason,
+        "recovered_commit_epoch": report.recovered_commit_epoch,
+        "readiness": {
+            "durable_recovery_observed": report.durable,
+            "checkpoint_boundary_present": report.checkpoint_epoch.is_some(),
+            "wal_replay_bounded": true,
+            "torn_tail_clean": !report.torn_tail_ignored,
+        },
+    })
+}
+
+fn recovery_mode_name(recovery_mode: RecoveryMode) -> &'static str {
+    match recovery_mode {
+        RecoveryMode::TolerateTornTail => "tolerate_torn_tail",
+        RecoveryMode::Strict => "strict",
+    }
 }
 
 fn graph_lightning_bootstrap_manifest_json(
@@ -2736,17 +2828,19 @@ mod tests {
         graph_lightning_graph_stream_validation_json, graph_lightning_import_status,
         graph_lightning_publish_staging_usage, graph_lightning_stage_bootstrap_usage,
         graph_lightning_verify_export_usage, graph_lightning_verify_published_usage,
-        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog,
+        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_max_wal_replay_entries,
+        parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
-        validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
-        verify_graph_lightning_staging_catalog, PublishGraphLightningOptions,
+        storage_recovery_report_json, validate_canonical_snapshot_usage, value_json,
+        verify_graph_lightning_published_manifest, verify_graph_lightning_staging_catalog,
+        PublishGraphLightningOptions,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
         CanonicalSnapshotIdentityAudit, Database, ExternalShadowReady,
-        GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, Value,
+        GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, RecoveryMode,
+        StorageRecoveryReport, Value,
     };
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -2807,6 +2901,20 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--shadow-timeout-ms must be greater than zero"));
+    }
+
+    #[test]
+    fn parses_max_wal_replay_entries() {
+        assert_eq!(parse_max_wal_replay_entries("3").unwrap(), 3);
+    }
+
+    #[test]
+    fn rejects_zero_max_wal_replay_entries() {
+        let error = parse_max_wal_replay_entries("0").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("--max-wal-replay-entries must be greater than zero"));
     }
 
     #[test]
@@ -3081,6 +3189,41 @@ mod tests {
             json["validation"]["missing_targets"][0]["relationship_id"],
             3
         );
+    }
+
+    #[test]
+    fn renders_storage_recovery_report_json() {
+        let report = StorageRecoveryReport {
+            durable: true,
+            recovery_mode: RecoveryMode::Strict,
+            checkpoint_epoch: Some(2),
+            checkpoint_commit_epoch: Some(8),
+            wal_present: true,
+            wal_replay_start_lsn: Some(9),
+            next_lsn_after_replay: Some(11),
+            replayed_wal_entries: 2,
+            torn_tail_ignored: true,
+            torn_tail_reason: Some("checksum mismatch".to_string()),
+            recovered_commit_epoch: 10,
+        };
+
+        let json = storage_recovery_report_json("skein-storage-v1", &report);
+
+        assert_eq!(json["protocol"], "skein-storage-recovery-report");
+        assert_eq!(json["storage_version"], "skein-storage-v1");
+        assert_eq!(json["recovery_mode"], "strict");
+        assert_eq!(json["checkpoint_epoch"], 2);
+        assert_eq!(json["checkpoint_commit_epoch"], 8);
+        assert_eq!(json["wal_replay_start_lsn"], 9);
+        assert_eq!(json["next_lsn_after_replay"], 11);
+        assert_eq!(json["replayed_wal_entries"], 2);
+        assert_eq!(json["torn_tail_ignored"], true);
+        assert_eq!(json["torn_tail_reason"], "checksum mismatch");
+        assert_eq!(json["recovered_commit_epoch"], 10);
+        assert_eq!(json["readiness"]["durable_recovery_observed"], true);
+        assert_eq!(json["readiness"]["checkpoint_boundary_present"], true);
+        assert_eq!(json["readiness"]["wal_replay_bounded"], true);
+        assert_eq!(json["readiness"]["torn_tail_clean"], false);
     }
 
     #[test]
