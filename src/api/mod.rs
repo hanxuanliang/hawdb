@@ -1422,6 +1422,28 @@ pub struct KnowledgePropertyBatchOutput {
     pub property_names: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePropertyUpdateRequest {
+    pub entity: KnowledgeEntityRequest,
+    pub assignments: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedPropertyUpdateRequest {
+    pub update: KnowledgePropertyUpdateRequest,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePropertyUpdateOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub filtered_out: bool,
+    pub updated_property_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {
     pub node_id: u64,
@@ -2738,6 +2760,20 @@ impl Database {
         request: &KnowledgeScopedPropertyBatchRequest,
     ) -> KnowledgePropertyBatchOutput {
         knowledge_scoped_property_batch_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn update_knowledge_properties(
+        &mut self,
+        request: &KnowledgePropertyUpdateRequest,
+    ) -> Result<KnowledgePropertyUpdateOutput> {
+        update_knowledge_properties_for(self, request)
+    }
+
+    pub fn update_scoped_knowledge_properties(
+        &mut self,
+        request: &KnowledgeScopedPropertyUpdateRequest,
+    ) -> Result<KnowledgePropertyUpdateOutput> {
+        update_scoped_knowledge_properties_for(self, request)
     }
 
     pub fn knowledge_neighbors(
@@ -4221,6 +4257,107 @@ fn project_node_properties(
             (name, value)
         })
         .collect()
+}
+
+fn update_knowledge_properties_for(
+    db: &mut Database,
+    request: &KnowledgePropertyUpdateRequest,
+) -> Result<KnowledgePropertyUpdateOutput> {
+    update_scoped_knowledge_properties_for(
+        db,
+        &KnowledgeScopedPropertyUpdateRequest {
+            update: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn update_scoped_knowledge_properties_for(
+    db: &mut Database,
+    request: &KnowledgeScopedPropertyUpdateRequest,
+) -> Result<KnowledgePropertyUpdateOutput> {
+    db.ensure_writable()?;
+    if request.update.assignments.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge property update requires at least one assignment".to_string(),
+        ));
+    }
+    validate_cypher_identifier(&request.update.entity.label, "label")?;
+    for property in request.update.assignments.keys() {
+        validate_cypher_identifier(property, "property")?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let Some(seed) = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.update.entity.label.as_str(),
+        request.update.entity.external_id.as_str(),
+    ) else {
+        return Ok(KnowledgePropertyUpdateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            node_id: None,
+            matched: false,
+            filtered_out: false,
+            updated_property_count: 0,
+        });
+    };
+    if !request.metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(&db.catalog, seed, &request.metadata_filters)
+    {
+        let node_id = seed.id.0;
+        return Ok(KnowledgePropertyUpdateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            node_id: Some(node_id),
+            matched: false,
+            filtered_out: true,
+            updated_property_count: 0,
+        });
+    }
+    let node_id = seed.id.0;
+
+    let mut cypher = format!(
+        "MATCH (n:{}) WHERE id(n) = $node_id SET ",
+        request.update.entity.label
+    );
+    let mut parameters = BTreeMap::from([("node_id".to_string(), Value::Int(node_id as i64))]);
+    for (index, (property, value)) in request.update.assignments.iter().enumerate() {
+        if index > 0 {
+            cypher.push_str(", ");
+        }
+        let parameter_name = format!("value_{index}");
+        cypher.push_str(&format!("n.{property} = ${parameter_name}"));
+        parameters.insert(parameter_name, value.clone());
+    }
+    db.query_with_params(cypher.as_str(), &parameters)?;
+    Ok(KnowledgePropertyUpdateOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        node_id: Some(node_id),
+        matched: true,
+        filtered_out: false,
+        updated_property_count: request.update.assignments.len(),
+    })
+}
+
+fn validate_cypher_identifier(value: &str, kind: &str) -> Result<()> {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return Err(SkeinError::Semantic(format!("{kind} identifier is empty")));
+    };
+    if !(first == '_' || first.is_ascii_alphabetic()) {
+        return Err(SkeinError::Semantic(format!(
+            "{kind} identifier {value:?} must start with an ASCII letter or underscore"
+        )));
+    }
+    if chars.any(|ch| !(ch == '_' || ch.is_ascii_alphanumeric())) {
+        return Err(SkeinError::Semantic(format!(
+            "{kind} identifier {value:?} must contain only ASCII letters, digits, or underscores"
+        )));
+    }
+    Ok(())
 }
 
 fn knowledge_neighbors_for(
@@ -6878,6 +7015,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedPropertyBatchRequest,
     ) -> KnowledgePropertyBatchOutput {
         self.db.knowledge_scoped_property_batch(request)
+    }
+
+    pub fn update_knowledge_properties(
+        &mut self,
+        request: &KnowledgePropertyUpdateRequest,
+    ) -> Result<KnowledgePropertyUpdateOutput> {
+        self.db.update_knowledge_properties(request)
+    }
+
+    pub fn update_scoped_knowledge_properties(
+        &mut self,
+        request: &KnowledgeScopedPropertyUpdateRequest,
+    ) -> Result<KnowledgePropertyUpdateOutput> {
+        self.db.update_scoped_knowledge_properties(request)
     }
 
     pub fn knowledge_neighbors(

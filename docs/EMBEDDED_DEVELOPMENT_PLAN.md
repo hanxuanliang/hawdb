@@ -270,6 +270,10 @@ subgraph operations, including metadata-scoped entity, ordered bulk entity,
 ordered property projection, ordered relationship, neighborhood, path endpoint,
 and subgraph variants, over their pinned graph snapshot, so knowledge navigation
 can remain snapshot-stable without constructing ad hoc Cypher.
+The mutable typed knowledge facade also exposes exact-identity property updates
+for lightweight metadata, review-status, and access-field writes; it validates
+identifiers, binds assignment values as parameters, and routes through the
+existing WAL-backed `MATCH ... SET` mutation path.
 Page-level MVCC, physical page/segment reclamation, and concurrent writer
 coordination remain.
 
