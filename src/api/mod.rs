@@ -1605,6 +1605,40 @@ pub struct KnowledgeNormalizedSpaceMoveBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryAccessTouch {
+    pub memory_id: String,
+    pub accessed_at: Value,
+    pub click_dwell_time_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryAccessBatchRequest {
+    pub touches: Vec<KnowledgeMemoryAccessTouch>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryAccessBatchRow {
+    pub memory_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub touched: bool,
+    pub clicked: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryAccessBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeMemoryAccessBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub non_writable_count: usize,
+    pub touched_count: usize,
+    pub click_touch_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3310,6 +3344,13 @@ impl Database {
         request: &KnowledgeNormalizedSpaceMoveBatchRequest,
     ) -> Result<KnowledgeNormalizedSpaceMoveBatchOutput> {
         move_knowledge_normalized_space_batch_for(self, request)
+    }
+
+    pub fn touch_knowledge_memory_access_batch(
+        &mut self,
+        request: &KnowledgeMemoryAccessBatchRequest,
+    ) -> Result<KnowledgeMemoryAccessBatchOutput> {
+        touch_knowledge_memory_access_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -5788,6 +5829,177 @@ fn move_knowledge_normalized_space_batch_for(
         duplicate_count,
         moved_count: eligible_updates.len(),
     })
+}
+
+fn touch_knowledge_memory_access_batch_for(
+    db: &mut Database,
+    request: &KnowledgeMemoryAccessBatchRequest,
+) -> Result<KnowledgeMemoryAccessBatchOutput> {
+    db.ensure_writable()?;
+    for touch in &request.touches {
+        if touch.memory_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge memory access touch requires a non-empty memory id".to_string(),
+            ));
+        }
+        if touch
+            .click_dwell_time_ms
+            .is_some_and(|dwell_time_ms| dwell_time_ms < 0)
+        {
+            return Err(SkeinError::Semantic(
+                "knowledge memory access touch requires non-negative dwell time".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.touches.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut non_writable_count = 0;
+    let mut touched_count = 0;
+    let mut click_touch_count = 0;
+    let mut eligible_touches = BTreeMap::new();
+
+    for touch in &request.touches {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &touch.memory_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeMemoryAccessBatchRow {
+                memory_id: touch.memory_id.clone(),
+                node_id: None,
+                matched: false,
+                touched: false,
+                clicked: false,
+                non_writable: false,
+            });
+            continue;
+        };
+        let node_id = seed.id.0;
+        if !node_has_external_id_property(seed, touch.memory_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeMemoryAccessBatchRow {
+                memory_id: touch.memory_id.clone(),
+                node_id: Some(node_id),
+                matched: false,
+                touched: false,
+                clicked: false,
+                non_writable: true,
+            });
+            continue;
+        }
+
+        matched_count += 1;
+        touched_count += 1;
+        let clicked = touch.click_dwell_time_ms.is_some();
+        if clicked {
+            click_touch_count += 1;
+        }
+        eligible_touches
+            .entry(seed.id)
+            .and_modify(|aggregated: &mut AggregatedMemoryAccessTouch| {
+                aggregated.access_count_increment += 1;
+                aggregated.last_accessed_at = touch.accessed_at.clone();
+                if let Some(dwell_time_ms) = touch.click_dwell_time_ms {
+                    aggregated.click_increment += 1;
+                    aggregated.dwell_time_ms_increment += dwell_time_ms;
+                    aggregated.last_clicked_at = Some(touch.accessed_at.clone());
+                }
+            })
+            .or_insert_with(|| AggregatedMemoryAccessTouch {
+                access_count_increment: 1,
+                last_accessed_at: touch.accessed_at.clone(),
+                click_increment: usize::from(clicked),
+                dwell_time_ms_increment: touch.click_dwell_time_ms.unwrap_or(0),
+                last_clicked_at: clicked.then(|| touch.accessed_at.clone()),
+            });
+        rows.push(KnowledgeMemoryAccessBatchRow {
+            memory_id: touch.memory_id.clone(),
+            node_id: Some(node_id),
+            matched: true,
+            touched: true,
+            clicked,
+            non_writable: false,
+        });
+    }
+
+    if eligible_touches.is_empty() {
+        return Ok(KnowledgeMemoryAccessBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            non_writable_count,
+            touched_count: 0,
+            click_touch_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, touch) in &eligible_touches {
+        let (cypher, parameters) = knowledge_memory_access_touch_statement(*node_id, touch);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeMemoryAccessBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        non_writable_count,
+        touched_count,
+        click_touch_count,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AggregatedMemoryAccessTouch {
+    access_count_increment: usize,
+    last_accessed_at: Value,
+    click_increment: usize,
+    dwell_time_ms_increment: i64,
+    last_clicked_at: Option<Value>,
+}
+
+fn knowledge_memory_access_touch_statement(
+    node_id: NodeId,
+    touch: &AggregatedMemoryAccessTouch,
+) -> (String, BTreeMap<String, Value>) {
+    let mut cypher = "MATCH (m:Memory) WHERE id(m) = $node_id SET m.access_count = COALESCE(m.access_count, 0) + $access_count_increment, m.last_accessed_at = $last_accessed_at".to_string();
+    let mut parameters = BTreeMap::from([
+        ("node_id".to_string(), Value::Int(node_id.0 as i64)),
+        (
+            "access_count_increment".to_string(),
+            Value::Int(touch.access_count_increment as i64),
+        ),
+        (
+            "last_accessed_at".to_string(),
+            touch.last_accessed_at.clone(),
+        ),
+    ]);
+    if touch.click_increment > 0 {
+        cypher.push_str(", m.clicks = COALESCE(m.clicks, 0) + $click_increment, m.last_clicked_at = $last_clicked_at, m.total_dwell_time_ms = COALESCE(m.total_dwell_time_ms, 0) + $dwell_time_ms_increment");
+        parameters.insert(
+            "click_increment".to_string(),
+            Value::Int(touch.click_increment as i64),
+        );
+        parameters.insert(
+            "last_clicked_at".to_string(),
+            touch
+                .last_clicked_at
+                .clone()
+                .expect("click aggregate should carry last_clicked_at"),
+        );
+        parameters.insert(
+            "dwell_time_ms_increment".to_string(),
+            Value::Int(touch.dwell_time_ms_increment),
+        );
+    }
+    (cypher, parameters)
 }
 
 fn delete_knowledge_entity_for(
@@ -10141,6 +10353,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeNormalizedSpaceMoveBatchRequest,
     ) -> Result<KnowledgeNormalizedSpaceMoveBatchOutput> {
         self.db.move_knowledge_normalized_space_batch(request)
+    }
+
+    pub fn touch_knowledge_memory_access_batch(
+        &mut self,
+        request: &KnowledgeMemoryAccessBatchRequest,
+    ) -> Result<KnowledgeMemoryAccessBatchOutput> {
+        self.db.touch_knowledge_memory_access_batch(request)
     }
 
     pub fn delete_knowledge_entity(

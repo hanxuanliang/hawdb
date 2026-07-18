@@ -142,6 +142,13 @@ the Nowledge rule that missing, `NULL`, and empty `space_id` map to `default`,
 supports optional source-space filtering and target-space no-op reporting,
 deduplicates pending node writes, returns moved external IDs in caller order,
 can stamp `updated_at`, and commits eligible rows through one grouped WAL batch.
+It also includes a typed Memory access touch batch for Nowledge
+`mark_memories_accessed` and click-dwell writes. The wrapper increments
+`access_count`, `clicks`, and `total_dwell_time_ms` through Cypher
+`COALESCE(..., 0) + ...` assignments inside one transaction, updates
+`last_accessed_at` and `last_clicked_at`, reports missing/idless rows without
+writing, and preserves duplicate same-memory touches as separate increments in
+the same grouped WAL batch.
 
 ## Current Direction
 

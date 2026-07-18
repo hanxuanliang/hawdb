@@ -154,8 +154,8 @@ typed front door for parameterized query, explain, and grouped mutation
 transaction execution without requiring raw string interpolation.
 The typed knowledge facade also covers endpoint-known entity lookup,
 create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
-normalized-space batch moves, ordered batch mutation, and grouped WAL commits
-for eligible lifecycle rows.
+normalized-space batch moves, memory access/click-dwell touches, ordered batch
+mutation, and grouped WAL commits for eligible lifecycle rows.
 `DatabaseConfig` provides read-only operation and bounded read-result
 configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,

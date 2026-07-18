@@ -6,15 +6,15 @@ use super::{
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
-    KnowledgeNeighborsRequest, KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePathRequest,
-    KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,
-    KnowledgePropertyUpdateRequest, KnowledgeRelationshipCreateBatchRequest,
-    KnowledgeRelationshipCreateRequest, KnowledgeRelationshipDeleteBatchRequest,
-    KnowledgeRelationshipDeleteRequest, KnowledgeRelationshipUpdateBatchRequest,
-    KnowledgeRelationshipUpdateRequest, KnowledgeRelationshipUpsertBatchRequest,
-    KnowledgeRelationshipUpsertRequest, KnowledgeRelationshipsRequest,
-    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
+    KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeMemoryAccessBatchRequest,
+    KnowledgeMemoryAccessTouch, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePathRequest, KnowledgePropertyBatchRequest,
+    KnowledgePropertyUpdateBatchRequest, KnowledgePropertyUpdateRequest,
+    KnowledgeRelationshipCreateBatchRequest, KnowledgeRelationshipCreateRequest,
+    KnowledgeRelationshipDeleteBatchRequest, KnowledgeRelationshipDeleteRequest,
+    KnowledgeRelationshipUpdateBatchRequest, KnowledgeRelationshipUpdateRequest,
+    KnowledgeRelationshipUpsertBatchRequest, KnowledgeRelationshipUpsertRequest,
+    KnowledgeRelationshipsRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
     KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityDeleteBatchRequest,
     KnowledgeScopedEntityDeleteRequest, KnowledgeScopedEntityRequest,
     KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
@@ -4882,6 +4882,201 @@ fn typed_knowledge_normalized_space_move_persists_as_one_wal_batch_and_replays()
         assert_eq!(
             rows.rows[1].properties.get("space_id"),
             Some(&Some(Value::String("archive".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn touches_memory_access_batch_with_incremental_counters() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1', access_count: 2, clicks: 1, total_dwell_time_ms: 100, last_accessed_at: 'old', last_clicked_at: 'old'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2'})").unwrap();
+
+    let output = db
+        .touch_knowledge_memory_access_batch(&KnowledgeMemoryAccessBatchRequest {
+            touches: vec![
+                KnowledgeMemoryAccessTouch {
+                    memory_id: "memory_1".to_string(),
+                    accessed_at: Value::String("2026-07-19T10:00:00Z".to_string()),
+                    click_dwell_time_ms: None,
+                },
+                KnowledgeMemoryAccessTouch {
+                    memory_id: "memory_1".to_string(),
+                    accessed_at: Value::String("2026-07-19T10:01:00Z".to_string()),
+                    click_dwell_time_ms: Some(50),
+                },
+                KnowledgeMemoryAccessTouch {
+                    memory_id: "memory_2".to_string(),
+                    accessed_at: Value::String("2026-07-19T10:02:00Z".to_string()),
+                    click_dwell_time_ms: Some(25),
+                },
+                KnowledgeMemoryAccessTouch {
+                    memory_id: "missing".to_string(),
+                    accessed_at: Value::String("2026-07-19T10:03:00Z".to_string()),
+                    click_dwell_time_ms: None,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 3);
+    assert_eq!(output.rows.len(), 4);
+    assert_eq!(output.matched_count, 3);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.touched_count, 3);
+    assert_eq!(output.click_touch_count, 2);
+    assert!(output.rows[0].touched);
+    assert!(!output.rows[0].clicked);
+    assert!(output.rows[1].clicked);
+    assert!(output.rows[2].clicked);
+    assert!(!output.rows[3].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_2".to_string(),
+            },
+        ],
+        property_names: vec![
+            "access_count".to_string(),
+            "clicks".to_string(),
+            "total_dwell_time_ms".to_string(),
+            "last_accessed_at".to_string(),
+            "last_clicked_at".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("access_count"),
+        Some(&Some(Value::Int(4)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("clicks"),
+        Some(&Some(Value::Int(2)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("total_dwell_time_ms"),
+        Some(&Some(Value::Int(150)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("last_accessed_at"),
+        Some(&Some(Value::String("2026-07-19T10:01:00Z".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("last_clicked_at"),
+        Some(&Some(Value::String("2026-07-19T10:01:00Z".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("access_count"),
+        Some(&Some(Value::Int(1)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("clicks"),
+        Some(&Some(Value::Int(1)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("total_dwell_time_ms"),
+        Some(&Some(Value::Int(25)))
+    );
+}
+
+#[test]
+fn knowledge_memory_access_batch_rejects_negative_dwell_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .touch_knowledge_memory_access_batch(&KnowledgeMemoryAccessBatchRequest {
+            touches: vec![KnowledgeMemoryAccessTouch {
+                memory_id: "memory_1".to_string(),
+                accessed_at: Value::String("2026-07-19T10:00:00Z".to_string()),
+                click_dwell_time_ms: Some(-1),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-negative dwell time"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_knowledge_memory_access_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+        db.query("CREATE (:Memory {id: 'memory_2', access_count: 4, clicks: 2, total_dwell_time_ms: 10})")
+            .unwrap();
+        let batch_count_before_touch = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.touch_knowledge_memory_access_batch(&KnowledgeMemoryAccessBatchRequest {
+            touches: vec![
+                KnowledgeMemoryAccessTouch {
+                    memory_id: "memory_1".to_string(),
+                    accessed_at: Value::String("2026-07-19T11:00:00Z".to_string()),
+                    click_dwell_time_ms: None,
+                },
+                KnowledgeMemoryAccessTouch {
+                    memory_id: "memory_2".to_string(),
+                    accessed_at: Value::String("2026-07-19T11:01:00Z".to_string()),
+                    click_dwell_time_ms: Some(90),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_touch = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_touch, batch_count_before_touch + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            property_names: vec![
+                "access_count".to_string(),
+                "clicks".to_string(),
+                "total_dwell_time_ms".to_string(),
+            ],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("access_count"),
+            Some(&Some(Value::Int(1)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("access_count"),
+            Some(&Some(Value::Int(5)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("clicks"),
+            Some(&Some(Value::Int(3)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("total_dwell_time_ms"),
+            Some(&Some(Value::Int(100)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
