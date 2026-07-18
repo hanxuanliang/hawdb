@@ -1596,10 +1596,16 @@ impl Database {
         statement: &cypher::Statement,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<(PhysicalPlan, OptimizerTrace)> {
+        let cache_mode = if statement_uses_plan_cache(statement) {
+            PlanCacheMode::Use
+        } else {
+            PlanCacheMode::Bypass
+        };
         optimized_query_plan_for(
             cypher_text,
             statement,
             parameters,
+            cache_mode,
             PlanCacheContext {
                 catalog: &self.catalog,
                 store: &self.store,
@@ -6236,8 +6242,26 @@ fn mutation_command_for_statement(
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<GraphMutation>> {
-    let (physical, _) = db.optimized_query_plan(cypher_text, statement, parameters)?;
+    let (physical, _) = optimized_query_plan_for(
+        cypher_text,
+        statement,
+        parameters,
+        PlanCacheMode::Bypass,
+        PlanCacheContext {
+            catalog: &db.catalog,
+            store: &db.store,
+            optimizer: &db.optimizer,
+            config: &db.config,
+            cache: &db.plan_cache,
+        },
+    )?;
     executor::mutation_command(&physical)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanCacheMode {
+    Use,
+    Bypass,
 }
 
 struct PlanCacheContext<'a> {
@@ -6252,20 +6276,24 @@ fn optimized_query_plan_for(
     cypher_text: &str,
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
+    cache_mode: PlanCacheMode,
     context: PlanCacheContext<'_>,
 ) -> Result<(PhysicalPlan, OptimizerTrace)> {
-    let key = PlanCacheKey {
+    let key = (cache_mode == PlanCacheMode::Use).then(|| PlanCacheKey {
         cypher: cypher_text.to_string(),
         parameters: parameters.clone(),
         graph_commit_epoch: context.store.commit_epoch(),
         max_optimizer_groups: context.config.max_optimizer_groups,
-    };
-    if let Some(cached) = context.cache.borrow_mut().get(&key) {
-        let mut trace = cached.trace;
-        trace
-            .decisions
-            .push("plan cache hit: exact parameterized physical plan".to_string());
-        return Ok((cached.physical_plan, trace));
+    });
+    if cache_mode == PlanCacheMode::Use {
+        let key = key.as_ref().expect("cache key exists in use mode");
+        if let Some(cached) = context.cache.borrow_mut().get(key) {
+            let mut trace = cached.trace;
+            trace
+                .decisions
+                .push("plan cache hit: exact parameterized physical plan".to_string());
+            return Ok((cached.physical_plan, trace));
+        }
     }
 
     let logical = planner::plan_with_params(statement, parameters)?;
@@ -6273,18 +6301,33 @@ fn optimized_query_plan_for(
         &logical,
         &optimizer_catalog(context.catalog, &context.store.statistics()),
     );
-    context.cache.borrow_mut().insert(
-        key,
-        CachedPlan {
-            physical_plan: physical_plan.clone(),
-            trace: trace.clone(),
-        },
-    );
     let mut trace = trace;
-    trace
-        .decisions
-        .push("plan cache miss: optimized exact parameterized physical plan".to_string());
+    if cache_mode == PlanCacheMode::Use {
+        let key = key.expect("cache key exists in use mode");
+        context.cache.borrow_mut().insert(
+            key,
+            CachedPlan {
+                physical_plan: physical_plan.clone(),
+                trace: trace.clone(),
+            },
+        );
+        trace
+            .decisions
+            .push("plan cache miss: optimized exact parameterized physical plan".to_string());
+    }
     Ok((physical_plan, trace))
+}
+
+fn statement_uses_plan_cache(statement: &cypher::Statement) -> bool {
+    matches!(
+        statement,
+        cypher::Statement::MatchReturn(_)
+            | cypher::Statement::ShortestPathReturn(_)
+            | cypher::Statement::MatchNodesReturn(_)
+            | cypher::Statement::MatchOptionalRelationshipCountSum(_)
+            | cypher::Statement::MatchThreadRepairStats(_)
+            | cypher::Statement::GraphAlgorithm(_)
+    )
 }
 
 impl DatabaseReadTransaction {
@@ -6348,10 +6391,16 @@ impl DatabaseReadTransaction {
         statement: &cypher::Statement,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<(PhysicalPlan, OptimizerTrace)> {
+        let cache_mode = if statement_uses_plan_cache(statement) {
+            PlanCacheMode::Use
+        } else {
+            PlanCacheMode::Bypass
+        };
         optimized_query_plan_for(
             cypher_text,
             statement,
             parameters,
+            cache_mode,
             PlanCacheContext {
                 catalog: &self.catalog,
                 store: &self.store,

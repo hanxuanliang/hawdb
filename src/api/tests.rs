@@ -4730,7 +4730,7 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
     );
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
-    assert!(stats.misses >= 3);
+    assert_eq!(stats.misses, 2);
 }
 
 #[test]
@@ -4765,7 +4765,7 @@ fn plan_cache_misses_after_index_descriptor_changes() {
     assert!(!after_index.trace.selected_plan.contains("SeqNodeScan"));
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
-    assert!(stats.misses >= 3);
+    assert_eq!(stats.misses, 2);
 }
 
 #[test]
@@ -11568,6 +11568,26 @@ fn read_only_database_rejects_cypher_mutations_before_writing() {
         .query("MATCH (m:Memory) RETURN m.title AS title")
         .unwrap();
     assert!(output.rows.is_empty());
+}
+
+#[test]
+fn read_only_rejected_mutations_do_not_populate_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        read_only: true,
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+
+    let error = db
+        .query("CREATE (:Memory {id: 1, title: 'Blocked'})")
+        .unwrap_err();
+    assert!(error.to_string().contains("read-only mode"));
+
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 0);
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.misses, 0);
+    assert_eq!(stats.evictions, 0);
 }
 
 #[test]
