@@ -4,6 +4,9 @@ use crate::schema::{
     Catalog, ConstraintId, GraphStatistics, IndexId, IndexKind, LabelId, PropertyId, PropertyType,
     RelTypeId, SchemaObjectState, TableDescriptor, TableId, TableKind,
 };
+use crate::search::{
+    search_projection_document_id_for_label_and_properties, search_projection_document_id_for_node,
+};
 use crate::value::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
@@ -530,6 +533,13 @@ pub struct PropertyIndexProjectionRebuildAction {
     pub indexed_entries: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchProjectionGraphChange {
+    pub commit_epoch: u64,
+    pub upsert_node_ids: Vec<u64>,
+    pub delete_document_ids: Vec<String>,
+}
+
 #[derive(Debug, Default)]
 pub struct GraphStore {
     next_node_id: u64,
@@ -545,6 +555,8 @@ pub struct GraphStore {
     projected_graphs: BTreeMap<String, ProjectedGraphDefinition>,
     projected_graph_artifacts: BTreeMap<String, ProjectedGraphArtifact>,
     stable_id_mapping: StoreStableIdMapping,
+    search_projection_change_log_start_epoch: u64,
+    search_projection_graph_changes: Vec<SearchProjectionGraphChange>,
     durable: Option<DurableStore>,
 }
 
@@ -664,6 +676,8 @@ impl GraphStore {
             projected_graphs: BTreeMap::new(),
             projected_graph_artifacts: BTreeMap::new(),
             stable_id_mapping: StoreStableIdMapping::default(),
+            search_projection_change_log_start_epoch: 0,
+            search_projection_graph_changes: Vec::new(),
             durable: Some(durable),
         };
         store.load_checkpoint(catalog)?;
@@ -682,17 +696,16 @@ impl GraphStore {
     ) -> Result<NodeId> {
         let label_id = catalog.get_or_create_label(label);
         let id = NodeId(self.next_node_id);
-        self.validate_constraints_for_ops(
-            catalog,
-            &[WalOp::CreateNode {
-                id,
-                label: label.to_string(),
-                properties: properties.clone(),
-            }],
-        )?;
+        let ops = [WalOp::CreateNode {
+            id,
+            label: label.to_string(),
+            properties: properties.clone(),
+        }];
+        self.validate_constraints_for_ops(catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_create_node(id, label, &properties)?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         register_property_index_descriptors(catalog, [label_id], &properties);
         self.apply_create_node(catalog, id, label_id, properties);
         self.commit_epoch += 1;
@@ -1113,6 +1126,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_schema_maintenance_op(catalog, op);
         }
@@ -1578,6 +1592,11 @@ impl GraphStore {
                 if let Some(durable) = &mut self.durable {
                     durable.append_batch(ops.clone())?;
                 }
+                self.record_search_projection_graph_changes_for_ops(
+                    catalog,
+                    self.commit_epoch + 1,
+                    &ops,
+                );
                 for op in ops {
                     self.apply_wal_op(catalog, op);
                 }
@@ -1591,17 +1610,16 @@ impl GraphStore {
         }
         apply_node_assignments_to_properties(&mut properties, post_merge_assignments)?;
         let id = NodeId(self.next_node_id);
-        self.validate_constraints_for_ops(
-            catalog,
-            &[WalOp::CreateNode {
-                id,
-                label: label.to_string(),
-                properties: properties.clone(),
-            }],
-        )?;
+        let ops = [WalOp::CreateNode {
+            id,
+            label: label.to_string(),
+            properties: properties.clone(),
+        }];
+        self.validate_constraints_for_ops(catalog, &ops)?;
         if let Some(durable) = &mut self.durable {
             durable.append_create_node(id, label, &properties)?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         register_property_index_descriptors(catalog, [label_id], &properties);
         self.apply_create_node(catalog, id, label_id, properties);
         self.commit_epoch += 1;
@@ -1691,6 +1709,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -1765,6 +1784,11 @@ impl GraphStore {
             if let Some(durable) = &mut self.durable {
                 durable.append_batch(ops.clone())?;
             }
+            self.record_search_projection_graph_changes_for_ops(
+                catalog,
+                self.commit_epoch + 1,
+                &ops,
+            );
             for op in ops {
                 self.apply_wal_op(catalog, op);
             }
@@ -1881,6 +1905,11 @@ impl GraphStore {
             if let Some(durable) = &mut self.durable {
                 durable.append_batch(ops.clone())?;
             }
+            self.record_search_projection_graph_changes_for_ops(
+                catalog,
+                self.commit_epoch + 1,
+                &ops,
+            );
             for op in ops {
                 self.apply_wal_op(catalog, op);
             }
@@ -1987,6 +2016,11 @@ impl GraphStore {
             if let Some(durable) = &mut self.durable {
                 durable.append_batch(ops.clone())?;
             }
+            self.record_search_projection_graph_changes_for_ops(
+                catalog,
+                self.commit_epoch + 1,
+                &ops,
+            );
             for op in ops {
                 self.apply_wal_op(catalog, op);
             }
@@ -2091,6 +2125,11 @@ impl GraphStore {
             if let Some(durable) = &mut self.durable {
                 durable.append_batch(ops.clone())?;
             }
+            self.record_search_projection_graph_changes_for_ops(
+                catalog,
+                self.commit_epoch + 1,
+                &ops,
+            );
             for op in ops {
                 self.apply_wal_op(catalog, op);
             }
@@ -2131,6 +2170,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -2187,6 +2227,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             if let WalOp::SetNodeProperty {
                 id,
@@ -2225,6 +2266,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -2246,6 +2288,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -2298,6 +2341,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -2372,6 +2416,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -2392,6 +2437,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -2542,6 +2588,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -2635,6 +2682,7 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.append_batch(ops.clone())?;
         }
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -4058,6 +4106,7 @@ impl GraphStore {
             durable.append_batch(ops.clone())?;
         }
         *catalog = working_catalog;
+        self.record_search_projection_graph_changes_for_ops(catalog, self.commit_epoch + 1, &ops);
         for op in ops {
             self.apply_wal_op(catalog, op);
         }
@@ -4148,6 +4197,21 @@ impl GraphStore {
 
     pub fn commit_epoch(&self) -> u64 {
         self.commit_epoch
+    }
+
+    pub fn search_projection_change_log_start_epoch(&self) -> u64 {
+        self.search_projection_change_log_start_epoch
+    }
+
+    pub fn search_projection_graph_changes_after(
+        &self,
+        commit_epoch: u64,
+    ) -> Vec<SearchProjectionGraphChange> {
+        self.search_projection_graph_changes
+            .iter()
+            .filter(|change| change.commit_epoch > commit_epoch)
+            .cloned()
+            .collect()
     }
 
     pub fn stable_id_mapping(&self) -> StoreStableIdMapping {
@@ -4257,7 +4321,105 @@ impl GraphStore {
             projected_graphs: self.projected_graphs.clone(),
             projected_graph_artifacts: self.projected_graph_artifacts.clone(),
             stable_id_mapping: self.stable_id_mapping.clone(),
+            search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
+            search_projection_graph_changes: self.search_projection_graph_changes.clone(),
             durable: None,
+        }
+    }
+
+    fn record_search_projection_graph_changes_for_ops(
+        &mut self,
+        catalog: &Catalog,
+        commit_epoch: u64,
+        ops: &[WalOp],
+    ) {
+        let mut upsert_node_ids = BTreeSet::new();
+        let mut delete_document_ids = BTreeSet::new();
+        self.collect_search_projection_graph_changes_for_ops(
+            catalog,
+            ops,
+            &mut upsert_node_ids,
+            &mut delete_document_ids,
+        );
+        self.search_projection_graph_changes
+            .push(SearchProjectionGraphChange {
+                commit_epoch,
+                upsert_node_ids: upsert_node_ids.into_iter().map(|id| id.0).collect(),
+                delete_document_ids: delete_document_ids.into_iter().collect(),
+            });
+    }
+
+    fn collect_search_projection_graph_changes_for_ops(
+        &self,
+        catalog: &Catalog,
+        ops: &[WalOp],
+        upsert_node_ids: &mut BTreeSet<NodeId>,
+        delete_document_ids: &mut BTreeSet<String>,
+    ) {
+        for op in ops {
+            match op {
+                WalOp::CreateNode {
+                    id,
+                    label,
+                    properties,
+                } => {
+                    if search_projection_document_id_for_label_and_properties(
+                        label, properties, *id,
+                    )
+                    .is_some()
+                    {
+                        upsert_node_ids.insert(*id);
+                    }
+                }
+                WalOp::SetNodeProperty { id, property, .. } => {
+                    if let Some(node) = self.nodes.get(id) {
+                        if let Some(document_id) =
+                            search_projection_document_id_for_node(catalog, node)
+                        {
+                            if property == "id" {
+                                delete_document_ids.insert(document_id);
+                            }
+                            upsert_node_ids.insert(*id);
+                        }
+                    }
+                }
+                WalOp::DeleteNode { id } => {
+                    if let Some(node) = self.nodes.get(id) {
+                        if let Some(document_id) =
+                            search_projection_document_id_for_node(catalog, node)
+                        {
+                            delete_document_ids.insert(document_id);
+                        }
+                    }
+                }
+                WalOp::Batch(batch_ops) => self.collect_search_projection_graph_changes_for_ops(
+                    catalog,
+                    batch_ops,
+                    upsert_node_ids,
+                    delete_document_ids,
+                ),
+                WalOp::CreateNodeLabel { .. }
+                | WalOp::CreateRelationshipType { .. }
+                | WalOp::CreateNodeTable { .. }
+                | WalOp::CreateRelationshipTable { .. }
+                | WalOp::CreateProperty { .. }
+                | WalOp::AlterTableState { .. }
+                | WalOp::AlterPropertyState { .. }
+                | WalOp::GcTableDescriptor { .. }
+                | WalOp::GcPropertyDescriptor { .. }
+                | WalOp::CreateIndex { .. }
+                | WalOp::CreateCompositeIndex { .. }
+                | WalOp::CreateRangeIndex { .. }
+                | WalOp::CreateFullTextIndex { .. }
+                | WalOp::CreateUniqueConstraint { .. }
+                | WalOp::CreateNodePropertyExistsConstraint { .. }
+                | WalOp::CreateRelationshipUniqueConstraint { .. }
+                | WalOp::CreateRelationshipPropertyExistsConstraint { .. }
+                | WalOp::CreateRelationship { .. }
+                | WalOp::SetRelationshipProperty { .. }
+                | WalOp::DeleteRelationship { .. }
+                | WalOp::ProjectGraph { .. } => {}
+            }
         }
     }
 
@@ -5348,6 +5510,7 @@ impl GraphStore {
                 }
             }
         }
+        self.search_projection_change_log_start_epoch = self.commit_epoch;
         Ok(())
     }
 
@@ -5389,12 +5552,24 @@ impl GraphStore {
             next_lsn = next_lsn.max(entry.lsn + 1);
             match entry.op {
                 WalOp::Batch(ops) => {
+                    let commit_epoch = self.commit_epoch + 1;
+                    self.record_search_projection_graph_changes_for_ops(
+                        catalog,
+                        commit_epoch,
+                        &ops,
+                    );
                     for op in ops {
                         self.apply_wal_op(catalog, op);
                     }
                     self.commit_epoch += 1;
                 }
                 op => {
+                    let commit_epoch = self.commit_epoch + 1;
+                    self.record_search_projection_graph_changes_for_ops(
+                        catalog,
+                        commit_epoch,
+                        std::slice::from_ref(&op),
+                    );
                     self.apply_wal_op(catalog, op);
                     self.commit_epoch += 1;
                 }

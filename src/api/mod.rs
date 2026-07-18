@@ -2012,6 +2012,19 @@ impl Database {
             hint.source_graph_commit_lag =
                 search_projection_commit_lag(search_index, self.store.commit_epoch());
         }
+        if request.operation_count() == 0
+            && hint.source_graph_commit_lag > 0
+            && request.complete_through_graph_commit_epoch.is_some()
+        {
+            if hint.recent_delta_operations == 0 {
+                hint.recent_delta_operations = 1;
+            }
+            return Some(BackgroundWorkPlan::background(
+                WorkClass::Projection,
+                1,
+                hint,
+            ));
+        }
         request.background_work_plan(hint)
     }
 
@@ -2037,6 +2050,54 @@ impl Database {
             operation_count,
             hint,
         ))
+    }
+
+    pub fn build_search_projection_graph_delta_request_after(
+        &self,
+        source_graph_commit_epoch: u64,
+        max_operations: Option<usize>,
+    ) -> Result<Option<SearchProjectionGraphDeltaRequest>> {
+        let current_epoch = self.store.commit_epoch();
+        if source_graph_commit_epoch >= current_epoch {
+            return Ok(None);
+        }
+        let change_log_start_epoch = self.store.search_projection_change_log_start_epoch();
+        if source_graph_commit_epoch < change_log_start_epoch {
+            return Err(SkeinError::Storage(format!(
+                "search projection change log starts at commit epoch {change_log_start_epoch}; requested source graph commit epoch {source_graph_commit_epoch}; full search projection rebuild required"
+            )));
+        }
+
+        let mut upsert_node_ids = BTreeSet::new();
+        let mut delete_document_ids = BTreeSet::new();
+        for change in self
+            .store
+            .search_projection_graph_changes_after(source_graph_commit_epoch)
+        {
+            upsert_node_ids.extend(change.upsert_node_ids);
+            delete_document_ids.extend(change.delete_document_ids);
+        }
+
+        Ok(Some(SearchProjectionGraphDeltaRequest {
+            upsert_node_ids: upsert_node_ids.into_iter().collect(),
+            delete_document_ids: delete_document_ids.into_iter().collect(),
+            max_operations,
+            complete_through_graph_commit_epoch: Some(current_epoch),
+        }))
+    }
+
+    pub fn build_search_projection_graph_delta_request_from_freshness(
+        &self,
+        search_index: &SearchIndex,
+        max_operations: Option<usize>,
+    ) -> Result<Option<SearchProjectionGraphDeltaRequest>> {
+        self.build_search_projection_graph_delta_request_after(
+            search_index
+                .projection_freshness()
+                .source_graph_commit_epoch
+                .unwrap_or(0),
+            max_operations,
+        )
     }
 
     pub fn background_maintenance_candidates(
@@ -2090,10 +2151,32 @@ impl Database {
             }
         } else if options.include_search_projection_graph_delta_freshness {
             if let Some(search_index) = search_index {
-                if let Some(plan) = self.search_projection_freshness_lag_background_work_plan(
-                    search_index,
-                    options.hint.clone(),
-                ) {
+                let executable_request = self
+                    .build_search_projection_graph_delta_request_from_freshness(search_index, None)
+                    .ok()
+                    .flatten();
+                if let Some(request) = executable_request {
+                    if let Some(plan) = self
+                        .search_projection_graph_delta_freshness_background_work_plan(
+                            search_index,
+                            &request,
+                            options.hint.clone(),
+                        )
+                    {
+                        candidates.push(
+                            BackgroundMaintenanceCandidate::new(
+                                BackgroundMaintenanceKind::SearchProjectionGraphDelta,
+                                plan,
+                            )
+                            .with_search_projection_graph_delta(request),
+                        );
+                    }
+                } else if let Some(plan) = self
+                    .search_projection_freshness_lag_background_work_plan(
+                        search_index,
+                        options.hint.clone(),
+                    )
+                {
                     candidates.push(BackgroundMaintenanceCandidate::new(
                         BackgroundMaintenanceKind::SearchProjectionGraphDelta,
                         plan,

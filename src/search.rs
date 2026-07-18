@@ -4,7 +4,7 @@ use crate::qos::{
     QosAdmission, WorkClass, WorkRequest,
 };
 use crate::schema::Catalog;
-use crate::store::{GraphStore, NodeRecord};
+use crate::store::{GraphStore, NodeId, NodeRecord};
 use crate::value::Value;
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -106,6 +106,35 @@ impl SearchProjectionRow {
             metadata,
         }
     }
+}
+
+pub fn search_projection_document_id_for_node(
+    catalog: &Catalog,
+    node: &NodeRecord,
+) -> Option<String> {
+    let kind = node.labels.iter().find_map(|label_id| {
+        catalog
+            .label_name(*label_id)
+            .and_then(search_projection_kind_from_label)
+    })?;
+    let external_id = string_property(node, "id")
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| node.id.0.to_string());
+    Some(format!("{}:{external_id}", kind.as_str()))
+}
+
+pub fn search_projection_document_id_for_label_and_properties(
+    label: &str,
+    properties: &BTreeMap<String, Value>,
+    node_id: NodeId,
+) -> Option<String> {
+    let kind = search_projection_kind_from_label(label)?;
+    let external_id = properties
+        .get("id")
+        .map(value_to_projection_string)
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| node_id.0.to_string());
+    Some(format!("{}:{external_id}", kind.as_str()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

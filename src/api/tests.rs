@@ -812,6 +812,113 @@ fn database_facade_builds_search_projection_delta_from_graph_nodes() {
 }
 
 #[test]
+fn database_facade_builds_search_projection_delta_request_from_changefeed() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'm1', title: 'Old title', content: 'Old body'})")
+        .unwrap();
+
+    let request = db
+        .build_search_projection_graph_delta_request_after(0, Some(4))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.upsert_node_ids, vec![0]);
+    assert!(request.delete_document_ids.is_empty());
+    assert_eq!(request.max_operations, Some(4));
+    assert_eq!(
+        request.complete_through_graph_commit_epoch,
+        Some(db.store.commit_epoch())
+    );
+
+    let mut search_index = SearchIndex::in_memory();
+    db.apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+
+    db.query("MATCH (m:Memory {id: 'm1'}) SET m.id = 'm2'")
+        .unwrap();
+    let request = db
+        .build_search_projection_graph_delta_request_from_freshness(&search_index, Some(2))
+        .unwrap()
+        .unwrap();
+    assert_eq!(request.upsert_node_ids, vec![0]);
+    assert_eq!(request.delete_document_ids, vec!["memory:m1".to_string()]);
+
+    db.apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm2'}) DETACH DELETE m")
+        .unwrap();
+    let request = db
+        .build_search_projection_graph_delta_request_from_freshness(&search_index, Some(1))
+        .unwrap()
+        .unwrap();
+    assert!(request.upsert_node_ids.is_empty());
+    assert_eq!(request.delete_document_ids, vec!["memory:m2".to_string()]);
+}
+
+#[test]
+fn search_projection_changefeed_can_emit_watermark_only_delta_request() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'm1', title: 'Memory'})-[:MENTIONS]->(:Entity {id: 'e1', name: 'Entity'})",
+    )
+    .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    let request = db
+        .build_search_projection_graph_delta_request_after(0, Some(4))
+        .unwrap()
+        .unwrap();
+    db.apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+
+    db.query("MATCH (m:Memory {id: 'm1'}), (e:Entity {id: 'e1'}) CREATE (m)-[:RELATES_TO]->(e)")
+        .unwrap();
+    let request = db
+        .build_search_projection_graph_delta_request_from_freshness(&search_index, Some(1))
+        .unwrap()
+        .unwrap();
+
+    assert!(request.upsert_node_ids.is_empty());
+    assert!(request.delete_document_ids.is_empty());
+    assert_eq!(
+        request.complete_through_graph_commit_epoch,
+        Some(db.store.commit_epoch())
+    );
+
+    let plan = db
+        .search_projection_graph_delta_freshness_background_work_plan(
+            &search_index,
+            &request,
+            BackgroundWorkHint::default(),
+        )
+        .unwrap();
+    assert_eq!(plan.request.class, WorkClass::Projection);
+    assert_eq!(plan.request.estimated_operations, 1);
+    assert_eq!(plan.hint.recent_delta_operations, 1);
+    assert_eq!(plan.hint.source_graph_commit_lag, 1);
+}
+
+#[test]
+fn search_projection_delta_request_requires_rebuild_when_changefeed_start_is_too_new() {
+    let path = unique_test_dir("search_projection_changefeed_checkpoint_gap");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'm1', title: 'Checkpointed'})")
+            .unwrap();
+        db.checkpoint().unwrap();
+    }
+
+    let db = Database::open(&path).unwrap();
+    let search_index = SearchIndex::in_memory();
+    let error = db
+        .build_search_projection_graph_delta_request_from_freshness(&search_index, Some(4))
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("full search projection rebuild required"));
+}
+
+#[test]
 fn graph_search_projection_delta_budget_failure_keeps_projection_unchanged() {
     let mut db = Database::new();
     let node_id = db
@@ -8238,19 +8345,21 @@ fn background_maintenance_includes_stale_search_projection_graph_delta() {
     );
     assert_eq!(candidates[0].name, "search_projection_graph_delta");
     assert_eq!(candidates[0].plan.request.class, WorkClass::Projection);
-    assert_eq!(
-        candidates[0].plan.request.estimated_operations,
-        usize::try_from(db.store.commit_epoch()).unwrap()
-    );
+    assert_eq!(candidates[0].plan.request.estimated_operations, 1);
     assert_eq!(
         candidates[0].plan.hint.source_graph_commit_lag,
         db.store.commit_epoch()
     );
+    assert_eq!(candidates[0].plan.hint.recent_delta_operations, 1);
     assert_eq!(
-        candidates[0].plan.hint.recent_delta_operations,
-        usize::try_from(db.store.commit_epoch()).unwrap()
+        candidates[0].search_projection_graph_delta.as_ref(),
+        Some(&SearchProjectionGraphDeltaRequest {
+            upsert_node_ids: vec![0],
+            delete_document_ids: Vec::new(),
+            max_operations: None,
+            complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
+        })
     );
-    assert!(candidates[0].search_projection_graph_delta.is_none());
 
     let ranked = db.rank_background_maintenance(
         Some(&search_index),
@@ -8272,7 +8381,15 @@ fn background_maintenance_includes_stale_search_projection_graph_delta() {
         ranked[0].kind,
         BackgroundMaintenanceKind::SearchProjectionGraphDelta
     );
-    assert!(ranked[0].search_projection_graph_delta.is_none());
+    assert_eq!(
+        ranked[0].search_projection_graph_delta.as_ref(),
+        Some(&SearchProjectionGraphDeltaRequest {
+            upsert_node_ids: vec![0],
+            delete_document_ids: Vec::new(),
+            max_operations: None,
+            complete_through_graph_commit_epoch: Some(db.store.commit_epoch()),
+        })
+    );
     assert!(ranked[0]
         .decision
         .reason_codes
