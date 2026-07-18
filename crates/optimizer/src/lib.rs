@@ -2,6 +2,7 @@ pub mod cost;
 pub mod memo;
 pub mod operator;
 pub mod properties;
+pub mod rule;
 pub mod search;
 pub mod trace;
 
@@ -12,5 +13,9 @@ pub use operator::{
     PlanChildren, PlanNode,
 };
 pub use properties::{Distribution, PhysicalProperties, RequiredProperties};
+pub use rule::{
+    apply_rule_batch, AppliedRule, OptimizerRule, RuleApplication, RuleBatch, RuleId, RuleKind,
+    RulePromise,
+};
 pub use search::{OptimizationSearchReport, RuleEvent, RuleOutcome, SearchMode, SelectedPlanTrace};
 pub use trace::{OptimizerConfig, OptimizerTrace};

@@ -933,10 +933,12 @@ Current implemented slice:
   to parse English explain text to detect operator mix or
   schema/mutation/access/traversal/relational/procedure composition
 - `skein-optimizer` owns `OptimizationSearchReport`, `SearchMode`,
-  `RuleEvent`, `RuleOutcome`, and `SelectedPlanTrace`, so group-budget fallback
-  warnings and selected-plan trace materialization are crate-level optimizer
-  scaffolding while root `src/optimizer.rs` still owns Cypher-specific graph
-  rules and catalog-dependent costing
+  `RuleEvent`, `RuleOutcome`, `SelectedPlanTrace`, and storage-independent
+  rule identity/application/batch-runner abstractions, so group-budget fallback
+  warnings, selected-plan trace materialization, deterministic rule ordering,
+  and rule event recording are crate-level optimizer scaffolding while root
+  `src/optimizer.rs` still owns Cypher-specific graph rules and
+  catalog-dependent costing
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,
