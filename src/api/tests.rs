@@ -4671,6 +4671,142 @@ fn explains_query_with_optimizer_trace() {
 }
 
 #[test]
+fn plan_cache_reuses_exact_parameterized_physical_plan() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    let mut parameters = BTreeMap::new();
+    parameters.insert("id".to_string(), Value::Int(1));
+    let query = "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title";
+
+    let first = db.explain_query_with_params(query, &parameters).unwrap();
+    let second = db.explain_query_with_params(query, &parameters).unwrap();
+
+    assert!(
+        first
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision
+                == "plan cache miss: optimized exact parameterized physical plan")
+    );
+    assert!(second
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "plan cache hit: exact parameterized physical plan"));
+    assert_eq!(
+        first.trace.selected_plan_fingerprint,
+        second.trace.selected_plan_fingerprint
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.hits, 1);
+    assert_eq!(stats.misses, 1);
+}
+
+#[test]
+fn plan_cache_misses_after_graph_commit_epoch_changes() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+
+    db.explain_query(query).unwrap();
+    db.explain_query(query).unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
+        .unwrap();
+    let after_commit = db.explain_query(query).unwrap();
+
+    assert!(
+        after_commit
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision
+                == "plan cache miss: optimized exact parameterized physical plan")
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.hits, 1);
+    assert!(stats.misses >= 3);
+}
+
+#[test]
+fn plan_cache_evicts_least_frequently_used_plan() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(2),
+        ..DatabaseConfig::default()
+    });
+    let q1 = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+    let q2 = "MATCH (m:Memory) WHERE m.id = 2 RETURN m.title AS title";
+    let q3 = "MATCH (m:Memory) WHERE m.id = 3 RETURN m.title AS title";
+
+    db.explain_query(q1).unwrap();
+    db.explain_query(q1).unwrap();
+    db.explain_query(q2).unwrap();
+    db.explain_query(q3).unwrap();
+
+    let hot = db.explain_query(q1).unwrap();
+    let evicted = db.explain_query(q2).unwrap();
+
+    assert!(hot
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "plan cache hit: exact parameterized physical plan"));
+    assert!(
+        evicted
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision
+                == "plan cache miss: optimized exact parameterized physical plan")
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.hits, 2);
+    assert_eq!(stats.misses, 4);
+    assert_eq!(stats.evictions, 2);
+}
+
+#[test]
+fn plan_cache_can_be_disabled_with_zero_capacity() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(0),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+
+    let first = db.explain_query(query).unwrap();
+    let second = db.explain_query(query).unwrap();
+
+    assert!(
+        first
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision
+                == "plan cache miss: optimized exact parameterized physical plan")
+    );
+    assert!(
+        second
+            .trace
+            .decisions
+            .iter()
+            .any(|decision| decision
+                == "plan cache miss: optimized exact parameterized physical plan")
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.max_entries, Some(0));
+    assert_eq!(stats.entries, 0);
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.evictions, 0);
+}
+
+#[test]
 fn explain_uses_scan_without_index_descriptor() {
     let db = Database::new();
     let output = db

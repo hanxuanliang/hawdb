@@ -40,6 +40,7 @@ use std::str::FromStr;
 mod artifact_jobs;
 
 const DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES: usize = 4096;
+const DEFAULT_PLAN_CACHE_MAX_ENTRIES: usize = 128;
 
 pub use artifact_jobs::{
     DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
@@ -52,6 +53,7 @@ pub struct Database {
     catalog: Catalog,
     store: GraphStore,
     optimizer: CascadesOptimizer,
+    plan_cache: RefCell<PlanCache>,
     config: DatabaseConfig,
     reader_pins: Rc<RefCell<ReaderPins>>,
     next_derived_artifact_job_id: u64,
@@ -66,6 +68,7 @@ pub struct DatabaseConfig {
     pub recovery_mode: RecoveryMode,
     pub max_wal_replay_entries: Option<usize>,
     pub max_search_projection_change_log_entries: Option<usize>,
+    pub max_plan_cache_entries: Option<usize>,
 }
 
 impl Default for DatabaseConfig {
@@ -79,6 +82,7 @@ impl Default for DatabaseConfig {
             max_search_projection_change_log_entries: Some(
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
+            max_plan_cache_entries: Some(DEFAULT_PLAN_CACHE_MAX_ENTRIES),
         }
     }
 }
@@ -250,6 +254,95 @@ impl CanonicalGraphSnapshotExport {
             duplicate_relationship_ids,
             missing_sources,
             missing_targets,
+        }
+    }
+}
+
+impl PlanCache {
+    fn new(max_entries: Option<usize>) -> Self {
+        Self {
+            max_entries,
+            entries: BTreeMap::new(),
+            access_tick: 0,
+            hits: 0,
+            misses: 0,
+            evictions: 0,
+        }
+    }
+
+    fn get(&mut self, key: &PlanCacheKey) -> Option<CachedPlan> {
+        if self.max_entries == Some(0) {
+            self.misses += 1;
+            return None;
+        }
+        self.access_tick = self.access_tick.saturating_add(1);
+        let Some(entry) = self.entries.get_mut(key) else {
+            self.misses += 1;
+            return None;
+        };
+        self.hits += 1;
+        entry.frequency = entry.frequency.saturating_add(1);
+        entry.last_access_tick = self.access_tick;
+        Some(entry.plan.clone())
+    }
+
+    fn insert(&mut self, key: PlanCacheKey, plan: CachedPlan) {
+        let Some(max_entries) = self.max_entries else {
+            self.insert_entry(key, plan);
+            return;
+        };
+        if max_entries == 0 {
+            return;
+        }
+        self.insert_entry(key, plan);
+        while self.entries.len() > max_entries {
+            let Some(evicted) = self.lfu_victim_key() else {
+                break;
+            };
+            if self.entries.remove(&evicted).is_some() {
+                self.evictions += 1;
+            }
+        }
+    }
+
+    fn insert_entry(&mut self, key: PlanCacheKey, plan: CachedPlan) {
+        self.access_tick = self.access_tick.saturating_add(1);
+        if let Some(entry) = self.entries.get_mut(&key) {
+            entry.plan = plan;
+            entry.frequency = entry.frequency.saturating_add(1);
+            entry.last_access_tick = self.access_tick;
+            return;
+        }
+        self.entries.insert(
+            key,
+            PlanCacheEntry {
+                plan,
+                frequency: 1,
+                last_access_tick: self.access_tick,
+            },
+        );
+    }
+
+    fn lfu_victim_key(&self) -> Option<PlanCacheKey> {
+        self.entries
+            .iter()
+            .min_by(|(left_key, left), (right_key, right)| {
+                (left.frequency, left.last_access_tick, *left_key).cmp(&(
+                    right.frequency,
+                    right.last_access_tick,
+                    *right_key,
+                ))
+            })
+            .map(|(key, _)| key.clone())
+    }
+
+    fn stats(&self) -> PlanCacheStats {
+        PlanCacheStats {
+            max_entries: self.max_entries,
+            entries: self.entries.len(),
+            hits: self.hits,
+            misses: self.misses,
+            evictions: self.evictions,
         }
     }
 }
@@ -1356,6 +1449,46 @@ pub struct ExplainOutput {
     pub trace: OptimizerTrace,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanCacheStats {
+    pub max_entries: Option<usize>,
+    pub entries: usize,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct PlanCacheKey {
+    cypher: String,
+    parameters: BTreeMap<String, Value>,
+    graph_commit_epoch: u64,
+    max_optimizer_groups: Option<usize>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct CachedPlan {
+    physical_plan: PhysicalPlan,
+    trace: OptimizerTrace,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PlanCacheEntry {
+    plan: CachedPlan,
+    frequency: u64,
+    last_access_tick: u64,
+}
+
+#[derive(Debug, Clone)]
+struct PlanCache {
+    max_entries: Option<usize>,
+    entries: BTreeMap<PlanCacheKey, PlanCacheEntry>,
+    access_tick: u64,
+    hits: u64,
+    misses: u64,
+    evictions: u64,
+}
+
 #[derive(Debug)]
 pub struct DatabaseTransaction<'a> {
     db: &'a mut Database,
@@ -1374,6 +1507,7 @@ pub struct DatabaseReadTransaction {
     catalog: Catalog,
     store: GraphStore,
     optimizer: CascadesOptimizer,
+    plan_cache: RefCell<PlanCache>,
     config: DatabaseConfig,
     _pin: ReaderPin,
 }
@@ -1406,6 +1540,7 @@ impl Default for Database {
             catalog: Catalog::default(),
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
+            plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
             config,
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
@@ -1429,6 +1564,7 @@ impl Database {
             catalog: Catalog::default(),
             store,
             optimizer,
+            plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
             config,
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
@@ -1483,6 +1619,7 @@ impl Database {
             catalog,
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
+            plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
             config,
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
@@ -1513,14 +1650,7 @@ impl Database {
             self.checkpoint()?;
             return Ok(QueryOutput { rows: Vec::new() });
         }
-        let logical = planner::plan_with_params(&statement, parameters)?;
-        let physical = self
-            .optimizer
-            .optimize_with_catalog(
-                &logical,
-                &optimizer_catalog(&self.catalog, &self.store.statistics()),
-            )
-            .0;
+        let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
         let is_mutation = executor::is_mutation_plan(&physical)?;
         if is_mutation {
             self.ensure_writable()?;
@@ -1559,6 +1689,7 @@ impl Database {
             catalog: self.catalog.clone(),
             store: self.store.snapshot(),
             optimizer: self.optimizer.clone(),
+            plan_cache: RefCell::new(PlanCache::new(self.config.max_plan_cache_entries)),
             config: self.config.clone(),
             _pin: pin,
         }
@@ -1574,15 +1705,36 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
-        let logical = planner::plan_with_params(&statement, parameters)?;
-        let (physical_plan, trace) = self.optimizer.optimize_with_catalog(
-            &logical,
-            &optimizer_catalog(&self.catalog, &self.store.statistics()),
-        );
+        let (physical_plan, trace) =
+            self.optimized_query_plan(cypher_text, &statement, parameters)?;
         Ok(ExplainOutput {
             physical_plan,
             trace,
         })
+    }
+
+    pub fn plan_cache_stats(&self) -> PlanCacheStats {
+        self.plan_cache.borrow().stats()
+    }
+
+    fn optimized_query_plan(
+        &self,
+        cypher_text: &str,
+        statement: &cypher::Statement,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<(PhysicalPlan, OptimizerTrace)> {
+        optimized_query_plan_for(
+            cypher_text,
+            statement,
+            parameters,
+            PlanCacheContext {
+                catalog: &self.catalog,
+                store: &self.store,
+                optimizer: &self.optimizer,
+                config: &self.config,
+                cache: &self.plan_cache,
+            },
+        )
     }
 
     pub fn checkpoint(&mut self) -> Result<()> {
@@ -6092,15 +6244,9 @@ impl DatabaseTransaction<'_> {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
-        let logical = planner::plan_with_params(&statement, parameters)?;
-        let physical = self
+        let (physical, _) = self
             .db
-            .optimizer
-            .optimize_with_catalog(
-                &logical,
-                &optimizer_catalog(&self.db.catalog, &self.db.store.statistics()),
-            )
-            .0;
+            .optimized_query_plan(cypher_text, &statement, parameters)?;
         let Some(mutation) = executor::mutation_command(&physical)? else {
             return Err(SkeinError::Execution(
                 "transaction query must be a mutation".to_string(),
@@ -6179,8 +6325,9 @@ impl DatabaseSession<'_> {
                 ))
             }
             statement if self.transaction_mutations.is_some() => {
-                let mutation = mutation_command_for_statement(self.db, &statement, parameters)?
-                    .ok_or_else(|| {
+                let mutation =
+                    mutation_command_for_statement(self.db, cypher_text, &statement, parameters)?
+                        .ok_or_else(|| {
                         SkeinError::Execution(
                             "session transaction query must be a mutation".to_string(),
                         )
@@ -6212,18 +6359,59 @@ fn reject_transaction_control_parameters(
 
 fn mutation_command_for_statement(
     db: &Database,
+    cypher_text: &str,
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<GraphMutation>> {
-    let logical = planner::plan_with_params(statement, parameters)?;
-    let physical = db
-        .optimizer
-        .optimize_with_catalog(
-            &logical,
-            &optimizer_catalog(&db.catalog, &db.store.statistics()),
-        )
-        .0;
+    let (physical, _) = db.optimized_query_plan(cypher_text, statement, parameters)?;
     executor::mutation_command(&physical)
+}
+
+struct PlanCacheContext<'a> {
+    catalog: &'a Catalog,
+    store: &'a GraphStore,
+    optimizer: &'a CascadesOptimizer,
+    config: &'a DatabaseConfig,
+    cache: &'a RefCell<PlanCache>,
+}
+
+fn optimized_query_plan_for(
+    cypher_text: &str,
+    statement: &cypher::Statement,
+    parameters: &BTreeMap<String, Value>,
+    context: PlanCacheContext<'_>,
+) -> Result<(PhysicalPlan, OptimizerTrace)> {
+    let key = PlanCacheKey {
+        cypher: cypher_text.to_string(),
+        parameters: parameters.clone(),
+        graph_commit_epoch: context.store.commit_epoch(),
+        max_optimizer_groups: context.config.max_optimizer_groups,
+    };
+    if let Some(cached) = context.cache.borrow_mut().get(&key) {
+        let mut trace = cached.trace;
+        trace
+            .decisions
+            .push("plan cache hit: exact parameterized physical plan".to_string());
+        return Ok((cached.physical_plan, trace));
+    }
+
+    let logical = planner::plan_with_params(statement, parameters)?;
+    let (physical_plan, trace) = context.optimizer.optimize_with_catalog(
+        &logical,
+        &optimizer_catalog(context.catalog, &context.store.statistics()),
+    );
+    context.cache.borrow_mut().insert(
+        key,
+        CachedPlan {
+            physical_plan: physical_plan.clone(),
+            trace: trace.clone(),
+        },
+    );
+    let mut trace = trace;
+    trace
+        .decisions
+        .push("plan cache miss: optimized exact parameterized physical plan".to_string());
+    Ok((physical_plan, trace))
 }
 
 impl DatabaseReadTransaction {
@@ -6243,14 +6431,7 @@ impl DatabaseReadTransaction {
                 "CHECKPOINT is not allowed inside a read transaction".to_string(),
             ));
         }
-        let logical = planner::plan_with_params(&statement, parameters)?;
-        let physical = self
-            .optimizer
-            .optimize_with_catalog(
-                &logical,
-                &optimizer_catalog(&self.catalog, &self.store.statistics()),
-            )
-            .0;
+        let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
         if executor::is_mutation_plan(&physical)? {
             return Err(SkeinError::Execution(
                 "read transaction query must not be a mutation".to_string(),
@@ -6271,11 +6452,8 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
-        let logical = planner::plan_with_params(&statement, parameters)?;
-        let (physical_plan, trace) = self.optimizer.optimize_with_catalog(
-            &logical,
-            &optimizer_catalog(&self.catalog, &self.store.statistics()),
-        );
+        let (physical_plan, trace) =
+            self.optimized_query_plan(cypher_text, &statement, parameters)?;
         if executor::is_mutation_plan(&physical_plan)? {
             return Err(SkeinError::Execution(
                 "read transaction query must not be a mutation".to_string(),
@@ -6285,6 +6463,30 @@ impl DatabaseReadTransaction {
             physical_plan,
             trace,
         })
+    }
+
+    pub fn plan_cache_stats(&self) -> PlanCacheStats {
+        self.plan_cache.borrow().stats()
+    }
+
+    fn optimized_query_plan(
+        &self,
+        cypher_text: &str,
+        statement: &cypher::Statement,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<(PhysicalPlan, OptimizerTrace)> {
+        optimized_query_plan_for(
+            cypher_text,
+            statement,
+            parameters,
+            PlanCacheContext {
+                catalog: &self.catalog,
+                store: &self.store,
+                optimizer: &self.optimizer,
+                config: &self.config,
+                cache: &self.plan_cache,
+            },
+        )
     }
 
     pub fn project_graph(&self, rel_type: Option<&str>) -> ProjectedGraph {

@@ -55,6 +55,7 @@ Three codebases define the work:
 - storage format/version inspection
 - read-only and recovery configuration
 - parameterized query and explain
+- bounded in-memory plan cache with observable hit/miss/eviction counters
 - explicit read and write transactions
 - commit, rollback, and checkpoint
 - bounded resource configuration
@@ -211,6 +212,15 @@ work is no longer fixture-gap closure for the current scan; it is to attach the
 previous wrapper through the external shadow adapter when migration-gate
 evidence is needed, and to rerun the scanner whenever Nowledge adds new graph
 call sites.
+The embedded front door now includes a bounded exact physical-plan LFU cache for
+literal and parameterized query/explain paths. Cache keys include Cypher text,
+bound parameter values, graph commit epoch, and optimizer group budget; any
+mutation, schema/index change, or statistics epoch change naturally misses
+instead of reusing a stale physical plan. This is intentionally not yet a
+cross-parameter prepared-plan cache because the current logical plan stores
+bound `Value`s. `foyer` remains a candidate backend once the cache surface is
+abstracted, but v1 keeps a small in-process LFU cache to avoid unnecessary
+runtime/dependency and memory-growth risk in embedded deployments.
 
 ### Phase 2: Snapshot Transactions and MVCC
 

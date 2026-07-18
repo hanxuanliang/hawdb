@@ -48,7 +48,7 @@ pub use api::{
     KnowledgeRetrieverCandidate, KnowledgeRetrieverReport, KnowledgeSubgraphOutput,
     KnowledgeSubgraphRequest, KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
-    NowledgeGraphStatement, NowledgeGraphTransactionOutput, QueryOutput,
+    NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheStats, QueryOutput,
     RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
