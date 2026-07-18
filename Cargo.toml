@@ -11,6 +11,7 @@ serde_json = "1"
 skein-core = { path = "crates/core" }
 skein-cypher = { path = "crates/cypher" }
 skein-optimizer = { path = "crates/optimizer" }
+skein-plan-cache = { path = "crates/plan-cache" }
 skein-qos = { path = "crates/qos" }
 zstd = "0.13"
 
@@ -19,6 +20,7 @@ members = [
   "crates/core",
   "crates/cypher",
   "crates/optimizer",
+  "crates/plan-cache",
   "crates/qos",
 ]
 resolver = "2"
