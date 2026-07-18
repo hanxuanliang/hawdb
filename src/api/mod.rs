@@ -739,6 +739,7 @@ pub struct KnowledgeRetrievalOutput {
 pub struct KnowledgeRetrievalDiagnostics {
     pub graph_commit_epoch: u64,
     pub projection_source_graph_commit_epoch: Option<u64>,
+    pub projection_commit_lag: u64,
     pub projection_stale: bool,
     pub projection_full_reindex_needed: bool,
     pub projection_full_reindex_reasons: Vec<String>,
@@ -3518,6 +3519,10 @@ fn knowledge_retrieval_diagnostics(
     KnowledgeRetrievalDiagnostics {
         graph_commit_epoch,
         projection_source_graph_commit_epoch: projection_freshness.source_graph_commit_epoch,
+        projection_commit_lag: search_projection_freshness_commit_lag(
+            projection_freshness,
+            graph_commit_epoch,
+        ),
         projection_stale: search_projection_is_stale(projection_freshness, graph_commit_epoch),
         projection_full_reindex_needed: projection_freshness.full_reindex_needed,
         projection_full_reindex_reasons: projection_freshness.full_reindex_reasons.clone(),
@@ -3675,6 +3680,13 @@ fn search_projection_is_stale(
         .source_graph_commit_epoch
         .map(|projection_epoch| projection_epoch < graph_commit_epoch)
         .unwrap_or(false)
+}
+
+fn search_projection_freshness_commit_lag(
+    projection_freshness: &SearchProjectionFreshness,
+    graph_commit_epoch: u64,
+) -> u64 {
+    graph_commit_epoch.saturating_sub(projection_freshness.source_graph_commit_epoch.unwrap_or(0))
 }
 
 fn graph_seed_candidate_id(seed: &KnowledgeGraphSeed) -> String {
@@ -4867,12 +4879,7 @@ fn search_projection_graph_delta_for(
 }
 
 fn search_projection_commit_lag(search_index: &SearchIndex, graph_commit_epoch: u64) -> u64 {
-    graph_commit_epoch.saturating_sub(
-        search_index
-            .projection_freshness()
-            .source_graph_commit_epoch
-            .unwrap_or(0),
-    )
+    search_projection_freshness_commit_lag(&search_index.projection_freshness(), graph_commit_epoch)
 }
 
 fn knowledge_entity_from_node(catalog: &Catalog, node: &NodeRecord) -> KnowledgeEntity {

@@ -1383,6 +1383,7 @@ fn retrieves_knowledge_through_database_facade() {
         output.diagnostics.projection_source_graph_commit_epoch,
         Some(4)
     );
+    assert_eq!(output.diagnostics.projection_commit_lag, 0);
     assert!(!output.diagnostics.projection_stale);
     assert!(!output.diagnostics.projection_full_reindex_needed);
     assert!(!output.diagnostics.projection_metadata_repair_needed);
@@ -2824,6 +2825,7 @@ fn knowledge_retrieval_diagnostics_expose_stale_projection_flag() {
         output.diagnostics.projection_source_graph_commit_epoch,
         Some(1)
     );
+    assert_eq!(output.diagnostics.projection_commit_lag, 1);
     assert!(output.diagnostics.projection_stale);
     assert!(!output.diagnostics.projection_full_reindex_needed);
     assert!(!output.diagnostics.projection_metadata_repair_needed);
@@ -2874,6 +2876,7 @@ fn knowledge_retrieval_diagnostics_report_stale_projection_epoch() {
         output.diagnostics.projection_source_graph_commit_epoch,
         Some(1)
     );
+    assert_eq!(output.diagnostics.projection_commit_lag, 1);
     assert!(output
         .diagnostics
         .warnings
