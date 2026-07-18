@@ -1,9 +1,11 @@
 pub mod cost;
 pub mod memo;
+pub mod operator;
 pub mod properties;
 pub mod trace;
 
-pub use cost::PlanCost;
+pub use cost::{PlanCost, PlanCostBreakdown};
 pub use memo::{GroupId, Memo, MemoGroup};
+pub use operator::{PhysicalPlanClass, PhysicalPlanKind};
 pub use properties::{Distribution, PhysicalProperties, RequiredProperties};
 pub use trace::{OptimizerConfig, OptimizerTrace};

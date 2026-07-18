@@ -55,14 +55,16 @@ Skein follows a RisingWave/Chryso-style workspace-and-facade layout. The root
 crate remains the stable embedded facade, while implementation crates are split
 out as interfaces harden and dependency direction becomes acyclic. The current
 crate split includes `skein-core` for common graph primitives and
-`skein-optimizer` for Cascades-style optimizer primitives. Cypher graph logical
-and physical operators still live in the root crate until parser/planner/executor
+`skein-optimizer` for Cascades-style optimizer primitives, stable physical
+operator metadata, and structured cost summaries. Cypher graph logical and
+physical operators still live in the root crate until parser/planner/executor
 contracts are stable enough to move without creating cycles.
 
 ```text
 crates/
   core/                errors, values, ids, catalog names, schema descriptors
-  optimizer/           Cascades cost, memo ids/groups, properties, trace config
+  optimizer/           Cascades cost, memo ids/groups, operator metadata,
+                       properties, trace config
   cypher/              token cursor, parser, AST, parameter model
   catalog/             labels, relationship types, property schema, stats
   planner/             semantic analysis, logical plan, physical plan
@@ -225,8 +227,10 @@ in that direction incrementally:
 
 - keep `PhysicalPlan` as the public compatibility facade until executor
   contracts are stable
-- use `PhysicalPlanKind`, `PhysicalPlanClass`, and child metadata as the
-  operator identity boundary for diagnostics, tracing, and future memo storage
+- keep `PhysicalPlanKind` and `PhysicalPlanClass` in `skein-optimizer`; root
+  graph plans only map facade variants to those crate-owned identities
+- use child metadata as the root-facade binding for diagnostics, tracing, and
+  future memo storage
 - split large physical operators into modules and later into per-node structs
   behind the facade
 - move graph-specific implementation rules into a `graph-optimizer` crate only

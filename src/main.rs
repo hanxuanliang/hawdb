@@ -3097,6 +3097,14 @@ fn explain_output_json(
             "estimated_rows": output.trace.selected_plan_cost.estimated_rows,
             "cost": output.trace.selected_plan_cost.cost,
         },
+        "selected_plan_cost_breakdown": {
+            "estimated_rows": output.trace.selected_plan_cost_breakdown.estimated_rows,
+            "cost": output.trace.selected_plan_cost_breakdown.cost,
+            "cpu": output.trace.selected_plan_cost_breakdown.cpu,
+            "random_io": output.trace.selected_plan_cost_breakdown.random_io,
+            "sequential_io": output.trace.selected_plan_cost_breakdown.sequential_io,
+            "output_rows": output.trace.selected_plan_cost_breakdown.output_rows,
+        },
         "selected_plan_operator_counts": output.trace.selected_plan_operator_counts,
         "selected_plan_class_counts": output.trace.selected_plan_class_counts,
         "warnings": output.trace.warnings,
@@ -3205,7 +3213,7 @@ mod tests {
     };
     use skein::{
         api::ExplainOutput,
-        optimizer::{OptimizerTrace, PhysicalPlan, PlanCost},
+        optimizer::{OptimizerTrace, PhysicalPlan, PlanCost, PlanCostBreakdown},
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -3619,6 +3627,14 @@ mod tests {
                     estimated_rows: 42,
                     cost: 42,
                 },
+                selected_plan_cost_breakdown: PlanCostBreakdown {
+                    estimated_rows: 42,
+                    cost: 42,
+                    cpu: 10,
+                    random_io: 20,
+                    sequential_io: 12,
+                    output_rows: 0,
+                },
                 selected_plan_operator_counts: operator_counts,
                 selected_plan_class_counts: class_counts,
                 warnings: vec!["diagnostic warning".to_string()],
@@ -3637,6 +3653,10 @@ mod tests {
             "SeqNodeScan(1:m:6:Memory)"
         );
         assert_eq!(json["selected_plan_cost"]["estimated_rows"], 42);
+        assert_eq!(json["selected_plan_cost_breakdown"]["cost"], 42);
+        assert_eq!(json["selected_plan_cost_breakdown"]["cpu"], 10);
+        assert_eq!(json["selected_plan_cost_breakdown"]["random_io"], 20);
+        assert_eq!(json["selected_plan_cost_breakdown"]["sequential_io"], 12);
         assert_eq!(json["selected_plan_operator_counts"]["SeqNodeScan"], 1);
         assert_eq!(json["selected_plan_class_counts"]["access"], 1);
         assert_eq!(json["warnings"][0], "diagnostic warning");

@@ -918,17 +918,21 @@ Current implemented slice:
 - `OptimizerTrace::selected_plan_cost` exposes recursive output-row and cost
   estimates for the chosen physical plan; expand rows are scaled by the
   selected input cardinality, so selective seek inputs no longer make the trace
-  report full-label expand cost; endpoint cartesian products report estimated
-  left/right rows, output rows, and product cost
+  report full-label expand cost; `selected_plan_cost_breakdown` exposes the
+  same selected-plan scalar cost as structured CPU, random-I/O,
+  sequential-I/O, and output-row components from `skein-optimizer`; endpoint
+  cartesian products report estimated left/right rows, output rows, and product
+  cost
 - `OptimizerTrace::selected_plan_operator_counts` and
   `OptimizerTrace::selected_plan_class_counts` expose stable selected-plan
-  histograms derived from physical plan metadata, so diagnostics do not need to
-  parse English explain text to detect operator mix or schema/mutation/access/
-  traversal/relational/procedure composition
+  histograms derived from crate-owned physical plan metadata, so diagnostics do
+  not need to parse English explain text to detect operator mix or
+  schema/mutation/access/traversal/relational/procedure composition
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
-  recursive cost, typed parameter echo, warnings, decisions, and structured
-  operator/class histograms as stable JSON for migration gates and CI artifacts
+  recursive cost, cost breakdown, typed parameter echo, warnings, decisions,
+  and structured operator/class histograms as stable JSON for migration gates
+  and CI artifacts
 - endpoint cartesian products whose flattened inputs all estimate to one row
   choose a stable left-deep physical input order by child cost and fingerprint,
   covering Nowledge endpoint-existence checks without changing broader
