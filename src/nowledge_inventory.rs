@@ -894,7 +894,7 @@ fn insert_background_maintenance_summary_json(
     Ok(())
 }
 
-fn background_maintenance_summary_to_json(
+pub fn background_maintenance_summary_to_json(
     summary: &BackgroundMaintenanceSummary,
 ) -> serde_json::Value {
     serde_json::json!({

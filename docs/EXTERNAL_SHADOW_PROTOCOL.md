@@ -474,7 +474,7 @@ below still treats primary-only projected graph checks as blockers.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -557,6 +557,20 @@ ranked-work counts, all ranked work is background priority, and admission values
 use the stable `admit`, `defer`, or `reject` strings. Deferred or rejected
 background work does not block cutover evidence because resource-constrained
 deployments are expected to delay internal work under pressure.
+
+For standalone resource-readiness preflight, run:
+
+```text
+skein background-maintenance-report [--require-cutover-ready] <database-path>
+```
+
+The command opens the database read-only and prints
+`skein-background-maintenance-report` JSON with the same candidate, ranking,
+admission, and search-projection-delta fields used by the migration-gate
+`background_maintenance` object. `--require-cutover-ready` applies the same
+background-maintenance evidence health rules used by cutover evidence and exits
+with an error when stable blocker codes such as `no_candidates`,
+`no_ranked_work`, `foreground_ranked_work`, or `unknown_admission` are present.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover

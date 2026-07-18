@@ -8,6 +8,7 @@ use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
+use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
     external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
@@ -21,11 +22,12 @@ use skein::{
     CypherFixtureCheck, CypherFixtureStatement, Database, DatabaseConfig, ExpectedRows,
     ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
     NowledgeCypherMigrationGateJsonOptions, ProjectedGraphFixtureCheck, RecoveryMode, Result,
-    SkeinError, StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    SearchIndex, SkeinError, StorageRecoveryReport, Value,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 use skein::{
-    nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow, CompatibilityFixture,
+    nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
+    BackgroundMaintenanceOptions, CompatibilityFixture,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -423,6 +425,50 @@ fn main() -> Result<()> {
                 return Err(SkeinError::Execution(
                     "nowledge replacement summary is not production cutover ready".to_string(),
                 ));
+            }
+            return Ok(());
+        }
+        if command == "background-maintenance-report" {
+            let mut require_cutover_ready = false;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-cutover-ready" => {
+                        require_cutover_ready = true;
+                        args.next();
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(background_maintenance_report_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(background_maintenance_report_usage()));
+            }
+            let db = Database::open_with_config(
+                path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )?;
+            let report = background_maintenance_report_json(&db);
+            println!("{}", serde_json::to_string_pretty(&report).unwrap());
+            if require_cutover_ready {
+                let health = background_maintenance_evidence_health_from_bundle(
+                    &serde_json::json!({ "background_maintenance": report }),
+                    true,
+                );
+                if !health.ready {
+                    let reason = if health.blocker_codes.is_empty() {
+                        health.blockers.join("; ")
+                    } else {
+                        health.blocker_codes.join(",")
+                    };
+                    return Err(SkeinError::Execution(format!(
+                        "background maintenance report is not cutover ready: {reason}"
+                    )));
+                }
             }
             return Ok(());
         }
@@ -854,6 +900,10 @@ fn validate_canonical_snapshot_usage() -> String {
 fn storage_recovery_report_usage() -> String {
     "storage-recovery-report requires [--strict] [--max-wal-replay-entries <n>] [--require-durable] [--require-checkpoint-boundary] [--require-bounded-wal-replay] [--require-clean-tail] <database-path>"
         .to_string()
+}
+
+fn background_maintenance_report_usage() -> String {
+    "background-maintenance-report requires [--require-cutover-ready] <database-path>".to_string()
 }
 
 fn graph_lightning_bootstrap_manifest_usage() -> String {
@@ -1567,6 +1617,24 @@ fn storage_recovery_report_json(
             "torn_tail_clean": !report.torn_tail_ignored,
         },
     })
+}
+
+fn background_maintenance_report_json(database: &Database) -> serde_json::Value {
+    let search_index = SearchIndex::in_memory();
+    let summary = database.background_maintenance_summary(
+        Some(&search_index),
+        &skein::LocalQosPolicy::default(),
+        &skein::LocalQosState::default(),
+        BackgroundMaintenanceOptions::default(),
+    );
+    let mut report = background_maintenance_summary_to_json(&summary);
+    if let Some(object) = report.as_object_mut() {
+        object.insert(
+            "protocol".to_string(),
+            serde_json::Value::String("skein-background-maintenance-report".to_string()),
+        );
+    }
+    report
 }
 
 fn recovery_mode_name(recovery_mode: RecoveryMode) -> &'static str {
@@ -3815,10 +3883,12 @@ fn value_from_json(value: &serde_json::Value) -> Result<Value> {
 mod tests {
     use super::{
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
-        add_shadow_trace_report, canonical_snapshot_validation_json, cutover_evidence_is_eligible,
-        enforce_external_shadow_adapter_smoke_requirements, enforce_storage_recovery_requirements,
-        explain_json_usage, explain_output_json, external_shadow_adapter_smoke_fixture,
-        external_shadow_adapter_smoke_report_json, graph_lightning_bootstrap_bundle_json,
+        add_shadow_trace_report, background_maintenance_report_json,
+        background_maintenance_report_usage, canonical_snapshot_validation_json,
+        cutover_evidence_is_eligible, enforce_external_shadow_adapter_smoke_requirements,
+        enforce_storage_recovery_requirements, explain_json_usage, explain_output_json,
+        external_shadow_adapter_smoke_fixture, external_shadow_adapter_smoke_report_json,
+        graph_lightning_bootstrap_bundle_json,
         graph_lightning_bootstrap_bundle_json_with_storage_recovery,
         graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
         graph_lightning_bootstrap_manifest_usage, graph_lightning_gc_staging_report,
@@ -4694,6 +4764,44 @@ mod tests {
         assert_eq!(json["readiness"]["checkpoint_boundary_present"], true);
         assert_eq!(json["readiness"]["wal_replay_bounded"], true);
         assert_eq!(json["readiness"]["torn_tail_clean"], false);
+    }
+
+    #[test]
+    fn renders_background_maintenance_report_json() {
+        let db = Database::new();
+
+        let json = background_maintenance_report_json(&db);
+
+        assert_eq!(json["protocol"], "skein-background-maintenance-report");
+        assert_eq!(json["total_candidates"], 0);
+        assert_eq!(json["admitted_count"], 0);
+        assert_eq!(json["deferred_count"], 0);
+        assert_eq!(json["rejected_count"], 0);
+        assert!(json["top_admitted_kind"].is_null());
+        assert!(json["ranked"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn background_maintenance_report_usage_mentions_cutover_ready_gate() {
+        assert!(background_maintenance_report_usage().contains("--require-cutover-ready"));
+        assert!(background_maintenance_report_usage().contains("<database-path>"));
+    }
+
+    #[test]
+    fn empty_background_maintenance_report_fails_cutover_health_with_codes() {
+        let db = Database::new();
+        let report = background_maintenance_report_json(&db);
+        let bundle = serde_json::json!({
+            "background_maintenance": report
+        });
+
+        let health = skein::background_maintenance_evidence_health_from_bundle(&bundle, true);
+
+        assert!(!health.ready);
+        assert_eq!(
+            health.blocker_codes,
+            vec!["no_candidates".to_string(), "no_ranked_work".to_string()]
+        );
     }
 
     #[test]
