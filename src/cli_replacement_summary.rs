@@ -91,9 +91,11 @@ pub fn nowledge_replacement_summary_json_with_options(
             "ready_engine_kind": json_get_str_path(bundle, &["cutover_evidence", "ready_engine_kind"]),
             "storage_recovery_required": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]),
             "storage_recovery_ready": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]),
+            "storage_recovery_protocol_matches": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_protocol_matches"]),
             "storage_recovery_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "storage_recovery_blocker_codes"]),
             "background_maintenance_required": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_required"]),
             "background_maintenance_ready": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_ready"]),
+            "background_maintenance_protocol_matches": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_protocol_matches"]),
             "background_maintenance_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "background_maintenance_blocker_codes"]),
             "replacement_readiness_min_per_million": json_get_u64_path(bundle, &["cutover_evidence", "replacement_readiness_min_per_million"]),
         },
@@ -400,6 +402,14 @@ mod tests {
         assert_eq!(summary["blocking_categories"], serde_json::json!([]));
         assert_eq!(summary["missing_evidence"], serde_json::json!([]));
         assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_protocol_matches"],
+            true
+        );
+        assert_eq!(
+            summary["cutover_evidence"]["background_maintenance_protocol_matches"],
+            true
+        );
+        assert_eq!(
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
@@ -655,10 +665,12 @@ mod tests {
                 "ready_engine_kind": "previous_wrapper",
                 "storage_recovery_required": true,
                 "storage_recovery_ready": true,
+                "storage_recovery_protocol_matches": true,
                 "storage_recovery_blocker_codes": [],
                 "storage_recovery_blockers": [],
                 "background_maintenance_required": true,
                 "background_maintenance_ready": true,
+                "background_maintenance_protocol_matches": true,
                 "background_maintenance_blocker_codes": [],
                 "background_maintenance_blockers": [],
                 "replacement_readiness_min_per_million": 1_000_000,

@@ -546,15 +546,17 @@ incremental projection work from planning-only freshness signals. This object
 is resource readiness evidence for caller-owned scheduling. When
 `--require-background-maintenance-evidence` is passed, `cutover_evidence`
 reports `background_maintenance_required`, `background_maintenance_present`,
-`background_maintenance_ready`, `background_maintenance_total_candidates`,
-`background_maintenance_ranked_count`,
+`background_maintenance_ready`, `background_maintenance_protocol_matches`,
+`background_maintenance_total_candidates`, `background_maintenance_ranked_count`,
 `background_maintenance_foreground_ranked_count`,
 `background_maintenance_unknown_admission_count`,
 `background_maintenance_blocker_codes`, and
 `background_maintenance_blockers`. Required background maintenance evidence is
-ready only when the summary is present, it contains non-empty candidate and
+ready only when the summary is present, any declared protocol matches
+`skein-background-maintenance-report`, it contains non-empty candidate and
 ranked-work counts, all ranked work is background priority, and admission values
-use the stable `admit`, `defer`, or `reject` strings. Deferred or rejected
+use the stable `admit`, `defer`, or `reject` strings. Legacy fixture-local
+summaries without a `protocol` field remain accepted. Deferred or rejected
 background work does not block cutover evidence because resource-constrained
 deployments are expected to delay internal work under pressure.
 

@@ -58,6 +58,7 @@ pub struct BackgroundMaintenanceEvidenceHealth {
     pub required: bool,
     pub present: bool,
     pub ready: bool,
+    pub protocol_matches: Option<bool>,
     pub total_candidates: Option<u64>,
     pub ranked_count: Option<u64>,
     pub foreground_ranked_count: u64,
@@ -564,6 +565,11 @@ fn insert_cutover_evidence_json(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_protocol_matches",
+        background_maintenance_health.protocol_matches,
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_total_candidates",
         background_maintenance_health.total_candidates,
     );
@@ -735,6 +741,7 @@ pub fn background_maintenance_evidence_health(
             required,
             present: false,
             ready: !required,
+            protocol_matches: None,
             total_candidates: None,
             ranked_count: None,
             foreground_ranked_count: 0,
@@ -747,6 +754,10 @@ pub fn background_maintenance_evidence_health(
             blockers,
         };
     };
+    let protocol_matches = background_maintenance
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        .map(|protocol| protocol == "skein-background-maintenance-report");
     let total_candidates = background_maintenance
         .get("total_candidates")
         .and_then(serde_json::Value::as_u64);
@@ -775,6 +786,10 @@ pub fn background_maintenance_evidence_health(
         .count() as u64;
     let mut blocker_codes = Vec::new();
     let mut blockers = Vec::new();
+    if protocol_matches == Some(false) {
+        blocker_codes.push("protocol_mismatch".to_string());
+        blockers.push("background maintenance evidence protocol mismatch".to_string());
+    }
     if required && total_candidates.unwrap_or_default() == 0 {
         blocker_codes.push("no_candidates".to_string());
         blockers.push("background maintenance evidence has no candidates".to_string());
@@ -795,6 +810,7 @@ pub fn background_maintenance_evidence_health(
         required,
         present: true,
         ready: blockers.is_empty(),
+        protocol_matches,
         total_candidates,
         ranked_count,
         foreground_ranked_count,
@@ -2224,11 +2240,42 @@ mod tests {
             true
         );
         assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_protocol_matches"],
+            true
+        );
+        assert_eq!(
             bundle["cutover_evidence"]["background_maintenance_blocker_codes"],
             serde_json::json!(["no_candidates", "no_ranked_work"])
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn background_maintenance_evidence_health_rejects_protocol_mismatch() {
+        let summary = serde_json::json!({
+            "protocol": "unexpected-background-report",
+            "total_candidates": 1,
+            "ranked": [
+                {
+                    "kind": "schema_maintenance",
+                    "work_class": "mutation",
+                    "priority": "background",
+                    "admission": "admit"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.protocol_matches, Some(false));
+        assert_eq!(health.blocker_codes, vec!["protocol_mismatch".to_string()]);
+        assert_eq!(
+            health.blockers,
+            vec!["background maintenance evidence protocol mismatch".to_string()]
+        );
     }
 
     #[test]

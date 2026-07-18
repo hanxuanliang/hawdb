@@ -1335,6 +1335,11 @@ fn add_cutover_evidence_report(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_protocol_matches",
+        background_maintenance_health.protocol_matches,
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_total_candidates",
         background_maintenance_health.total_candidates,
     );
@@ -4814,6 +4819,7 @@ mod tests {
         let health = skein::background_maintenance_evidence_health_from_bundle(&bundle, true);
 
         assert!(!health.ready);
+        assert_eq!(health.protocol_matches, Some(true));
         assert_eq!(
             health.blocker_codes,
             vec!["no_candidates".to_string(), "no_ranked_work".to_string()]
