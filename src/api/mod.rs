@@ -1393,6 +1393,47 @@ pub struct KnowledgeEntityBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityCreateRequest {
+    pub label: String,
+    pub external_id: String,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityCreateOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub already_exists: bool,
+    pub created_node_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityCreateBatchRequest {
+    pub creates: Vec<KnowledgeEntityCreateRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityCreateBatchRow {
+    pub label: String,
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub already_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityCreateBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeEntityCreateBatchRow>,
+    pub created_count: usize,
+    pub already_exists_count: usize,
+    pub created_node_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePropertyBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
     pub property_names: Vec<String>,
@@ -3034,6 +3075,20 @@ impl Database {
         knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
     }
 
+    pub fn create_knowledge_entity(
+        &mut self,
+        request: &KnowledgeEntityCreateRequest,
+    ) -> Result<KnowledgeEntityCreateOutput> {
+        create_knowledge_entity_for(self, request)
+    }
+
+    pub fn create_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeEntityCreateBatchRequest,
+    ) -> Result<KnowledgeEntityCreateBatchOutput> {
+        create_knowledge_entity_batch_for(self, request)
+    }
+
     pub fn knowledge_property_batch(
         &self,
         request: &KnowledgePropertyBatchRequest,
@@ -4566,6 +4621,190 @@ fn knowledge_scoped_entity_match(
         return KnowledgeScopedEntityMatch::FilteredOut;
     }
     KnowledgeScopedEntityMatch::Found(knowledge_entity_from_node(catalog, node))
+}
+
+fn create_knowledge_entity_for(
+    db: &mut Database,
+    request: &KnowledgeEntityCreateRequest,
+) -> Result<KnowledgeEntityCreateOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_entity_create(request)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    if let Some(existing) = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.label.as_str(),
+        request.external_id.as_str(),
+    ) {
+        return Ok(KnowledgeEntityCreateOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            node_id: Some(existing.id.0),
+            created: false,
+            already_exists: true,
+            created_node_count: 0,
+        });
+    }
+
+    let (cypher, parameters) = knowledge_entity_create_statement(request);
+    let output = db.query_with_params(cypher.as_str(), &parameters)?;
+    let created_node_count = output.rows.len();
+    let created = created_node_count > 0;
+    let node_id = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.label.as_str(),
+        request.external_id.as_str(),
+    )
+    .map(|node| node.id.0);
+    Ok(KnowledgeEntityCreateOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        node_id,
+        created,
+        already_exists: false,
+        created_node_count,
+    })
+}
+
+fn create_knowledge_entity_batch_for(
+    db: &mut Database,
+    request: &KnowledgeEntityCreateBatchRequest,
+) -> Result<KnowledgeEntityCreateBatchOutput> {
+    db.ensure_writable()?;
+    for create in &request.creates {
+        validate_knowledge_entity_create(create)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.creates.len());
+    let mut created_count = 0;
+    let mut already_exists_count = 0;
+    let mut eligible_creates = Vec::new();
+    let mut pending_identities = BTreeSet::new();
+
+    for create in &request.creates {
+        if let Some(existing) = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            create.label.as_str(),
+            create.external_id.as_str(),
+        ) {
+            already_exists_count += 1;
+            rows.push(KnowledgeEntityCreateBatchRow {
+                label: create.label.clone(),
+                external_id: create.external_id.clone(),
+                node_id: Some(existing.id.0),
+                created: false,
+                already_exists: true,
+            });
+            continue;
+        }
+        let identity = (create.label.clone(), create.external_id.clone());
+        if !pending_identities.insert(identity) {
+            already_exists_count += 1;
+            rows.push(KnowledgeEntityCreateBatchRow {
+                label: create.label.clone(),
+                external_id: create.external_id.clone(),
+                node_id: None,
+                created: false,
+                already_exists: true,
+            });
+            continue;
+        }
+
+        created_count += 1;
+        eligible_creates.push(create.clone());
+        rows.push(KnowledgeEntityCreateBatchRow {
+            label: create.label.clone(),
+            external_id: create.external_id.clone(),
+            node_id: None,
+            created: true,
+            already_exists: false,
+        });
+    }
+
+    if eligible_creates.is_empty() {
+        return Ok(KnowledgeEntityCreateBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            created_count,
+            already_exists_count,
+            created_node_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for create in &eligible_creates {
+        let (cypher, parameters) = knowledge_entity_create_statement(create);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    let output = tx.commit()?;
+    for row in &mut rows {
+        if row.created {
+            row.node_id = seed_node_by_label_and_external_id(
+                &db.catalog,
+                &db.store,
+                row.label.as_str(),
+                row.external_id.as_str(),
+            )
+            .map(|node| node.id.0);
+        }
+    }
+    Ok(KnowledgeEntityCreateBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        created_count,
+        already_exists_count,
+        created_node_count: output.rows.len(),
+    })
+}
+
+fn validate_knowledge_entity_create(request: &KnowledgeEntityCreateRequest) -> Result<()> {
+    validate_cypher_identifier(&request.label, "label")?;
+    if request.external_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity create requires a non-empty external id".to_string(),
+        ));
+    }
+    for property in request.properties.keys() {
+        validate_cypher_identifier(property, "property")?;
+    }
+    if let Some(id) = request.properties.get("id") {
+        let property_external_id = value_to_external_id(id);
+        if property_external_id != request.external_id {
+            return Err(SkeinError::Semantic(format!(
+                "knowledge entity create id property {property_external_id:?} does not match external id {:?}",
+                request.external_id
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn knowledge_entity_create_statement(
+    request: &KnowledgeEntityCreateRequest,
+) -> (String, BTreeMap<String, Value>) {
+    let mut cypher = format!("CREATE (:{} {{id: $external_id", request.label);
+    let mut parameters = BTreeMap::from([(
+        "external_id".to_string(),
+        Value::String(request.external_id.clone()),
+    )]);
+    for (index, (property, value)) in request
+        .properties
+        .iter()
+        .filter(|(property, _)| property.as_str() != "id")
+        .enumerate()
+    {
+        let parameter_name = format!("property_value_{index}");
+        cypher.push_str(&format!(", {property}: ${parameter_name}"));
+        parameters.insert(parameter_name, value.clone());
+    }
+    cypher.push_str("})");
+    (cypher, parameters)
 }
 
 fn knowledge_property_batch_for(
@@ -8729,6 +8968,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedEntityBatchRequest,
     ) -> KnowledgeEntityBatchOutput {
         self.db.knowledge_scoped_entity_batch(request)
+    }
+
+    pub fn create_knowledge_entity(
+        &mut self,
+        request: &KnowledgeEntityCreateRequest,
+    ) -> Result<KnowledgeEntityCreateOutput> {
+        self.db.create_knowledge_entity(request)
+    }
+
+    pub fn create_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeEntityCreateBatchRequest,
+    ) -> Result<KnowledgeEntityCreateBatchOutput> {
+        self.db.create_knowledge_entity_batch(request)
     }
 
     pub fn knowledge_property_batch(

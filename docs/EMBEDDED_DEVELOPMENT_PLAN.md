@@ -270,6 +270,11 @@ subgraph operations, including metadata-scoped entity, ordered bulk entity,
 ordered property projection, ordered relationship, neighborhood, path endpoint,
 and subgraph variants, over their pinned graph snapshot, so knowledge navigation
 can remain snapshot-stable without constructing ad hoc Cypher.
+The mutable typed knowledge facade exposes endpoint-known entity creation for
+Memory, Source, Entity, Label, Thread, Skill, and similar graph identities. It
+validates labels and property names, enforces `id` property consistency with the
+external identity, reports existing identities without writing, and commits
+eligible ordered batch creates through one transaction-level grouped WAL batch.
 The mutable typed knowledge facade also exposes exact-identity property updates
 for lightweight metadata, review-status, and access-field writes; it validates
 identifiers, binds assignment values as parameters, and routes through the
