@@ -2941,6 +2941,7 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
     assert_eq!(output.diagnostics.candidate_count, 1);
     assert_eq!(output.diagnostics.candidate_total_count, 3);
     assert!(output.diagnostics.candidate_truncated);
+    assert!(output.diagnostics.empty_reason_codes.is_empty());
     assert_eq!(
         output.diagnostics.candidate_truncation_reasons,
         vec!["knowledge_candidate_limit 1 returned from 3 merged candidates".to_string()]
@@ -2988,6 +2989,18 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
         .any(|reason| reason == "knowledge_candidate_limit 0 returned from 3 merged candidates"));
     assert!(empty_by_limit
         .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::CandidateLimitExcludedAllCandidates));
+    assert!(empty_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
+    assert!(!empty_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::GraphSeedNoCandidates));
+    assert!(empty_by_limit
+        .diagnostics
         .empty_reasons
         .iter()
         .any(|reason| reason == "retrieval produced no candidates"));
@@ -3020,6 +3033,18 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
         .empty_reasons
         .iter()
         .any(|reason| reason.starts_with("knowledge_candidate_limit 0")));
+    assert!(search_empty_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::CandidateLimitExcludedAllCandidates));
+    assert!(search_empty_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
+    assert!(!search_empty_by_limit
+        .diagnostics
+        .empty_reason_codes
+        .contains(&KnowledgeRetrievalEmptyReasonCode::GraphSeedLimitZero));
     assert!(!search_empty_by_limit
         .diagnostics
         .empty_reasons
