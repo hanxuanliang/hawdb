@@ -164,7 +164,10 @@ as a typed batch for Nowledge `use_count`, optional `success_rate`,
 write-state updates are exposed as a typed batch for Nowledge stage changes,
 rejections, promotions, compiled metadata, draft bundle writes, content hashes,
 and `updated_at` stamping. Thread metadata updates are exposed as a typed batch
-for Nowledge `metadata` writes with optional `updated_at` stamping.
+for Nowledge `metadata` writes with optional `updated_at` stamping. Thread
+denormalized message-count refreshes are exposed as a typed batch for Nowledge
+`message_count` writes with optional timestamp stamping and preserve-newer
+`updated_at` behavior.
 `DatabaseConfig` provides read-only operation and bounded read-result
 configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,

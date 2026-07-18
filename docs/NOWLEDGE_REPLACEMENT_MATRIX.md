@@ -186,6 +186,12 @@ updates with optional `updated_at` stamping. The wrapper validates Thread ids
 before WAL, reports missing, idless, and duplicate rows without writing, keeps
 metadata-only updates from changing existing timestamps, and commits eligible
 Thread rows through one grouped WAL batch.
+Thread denormalized message-count writes are covered by a typed batch for
+Nowledge `message_count` refreshes with optional `updated_at` stamping and
+`preserve_newer_existing_updated_at` semantics. The wrapper validates Thread
+ids and non-negative counts before WAL, keeps newer existing timestamps when
+requested, reports missing, idless, and duplicate rows without writing, and
+commits eligible Thread rows through one grouped WAL batch.
 
 ## Current Direction
 

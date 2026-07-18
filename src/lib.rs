@@ -89,6 +89,8 @@ pub use api::{
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchOutput, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryCountBatchRow, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
+    KnowledgeThreadMessageCountBatchOutput, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadMessageCountBatchRow, KnowledgeThreadMessageCountUpdate,
     KnowledgeThreadMetadataBatchOutput, KnowledgeThreadMetadataBatchRequest,
     KnowledgeThreadMetadataBatchRow, KnowledgeThreadMetadataUpdate, KnowledgeTraversalDiagnostics,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,

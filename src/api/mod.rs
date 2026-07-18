@@ -1875,6 +1875,45 @@ pub struct KnowledgeThreadMetadataBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageCountUpdate {
+    pub thread_id: String,
+    pub message_count: i64,
+    pub updated_at: Option<Value>,
+    pub preserve_newer_existing_updated_at: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageCountBatchRequest {
+    pub updates: Vec<KnowledgeThreadMessageCountUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageCountBatchRow {
+    pub thread_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_at_changed: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageCountBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeThreadMessageCountBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_at_changed_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3629,6 +3668,13 @@ impl Database {
         request: &KnowledgeThreadMetadataBatchRequest,
     ) -> Result<KnowledgeThreadMetadataBatchOutput> {
         update_knowledge_thread_metadata_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_thread_message_count_batch(
+        &mut self,
+        request: &KnowledgeThreadMessageCountBatchRequest,
+    ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
+        update_knowledge_thread_message_count_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -7226,6 +7272,178 @@ fn update_knowledge_thread_metadata_batch_for(
         updated_count,
         updated_property_count,
     })
+}
+
+fn update_knowledge_thread_message_count_batch_for(
+    db: &mut Database,
+    request: &KnowledgeThreadMessageCountBatchRequest,
+) -> Result<KnowledgeThreadMessageCountBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.thread_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge thread message-count update requires a non-empty thread id".to_string(),
+            ));
+        }
+        if update.message_count < 0 {
+            return Err(SkeinError::Semantic(
+                "knowledge thread message-count update requires non-negative message count"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_at_changed_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Thread", &update.thread_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeThreadMessageCountBatchRow {
+                thread_id: update.thread_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_at_changed: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.thread_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeThreadMessageCountBatchRow {
+                thread_id: update.thread_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_at_changed: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeThreadMessageCountBatchRow {
+                thread_id: update.thread_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_at_changed: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let mut assignments = BTreeMap::from([(
+            "message_count".to_string(),
+            Value::Int(update.message_count),
+        )]);
+        let updated_at_changed = should_update_thread_updated_at(seed, update);
+        if updated_at_changed {
+            if let Some(updated_at) = &update.updated_at {
+                assignments.insert("updated_at".to_string(), updated_at.clone());
+            }
+        }
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        if updated_at_changed {
+            updated_at_changed_count += 1;
+        }
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeThreadMessageCountBatchRow {
+            thread_id: update.thread_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_at_changed,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeThreadMessageCountBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_at_changed_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Thread", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeThreadMessageCountBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_at_changed_count,
+        updated_property_count,
+    })
+}
+
+fn should_update_thread_updated_at(
+    seed: &NodeRecord,
+    update: &KnowledgeThreadMessageCountUpdate,
+) -> bool {
+    let Some(candidate) = &update.updated_at else {
+        return false;
+    };
+    if !update.preserve_newer_existing_updated_at {
+        return true;
+    }
+    match seed.properties.get("updated_at") {
+        Some(current) if current != &Value::Null => !value_is_greater(current, candidate),
+        _ => true,
+    }
+}
+
+fn value_is_greater(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => left > right,
+        (Value::Float(left), Value::Float(right)) => left > right,
+        (Value::Int(left), Value::Float(right)) => (*left as f64) > *right,
+        (Value::Float(left), Value::Int(right)) => *left > (*right as f64),
+        (Value::String(left), Value::String(right)) => left > right,
+        _ => false,
+    }
 }
 
 fn delete_knowledge_entity_for(
@@ -11628,6 +11846,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadMetadataBatchRequest,
     ) -> Result<KnowledgeThreadMetadataBatchOutput> {
         self.db.update_knowledge_thread_metadata_batch(request)
+    }
+
+    pub fn update_knowledge_thread_message_count_batch(
+        &mut self,
+        request: &KnowledgeThreadMessageCountBatchRequest,
+    ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
+        self.db.update_knowledge_thread_message_count_batch(request)
     }
 
     pub fn delete_knowledge_entity(

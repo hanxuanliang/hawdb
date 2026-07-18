@@ -29,6 +29,7 @@ use super::{
     KnowledgeSkillUsageStatsUpdate, KnowledgeSourceLifecycleBatchRequest,
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchRequest, KnowledgeSubgraphRequest,
+    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
     NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
@@ -6344,6 +6345,209 @@ fn typed_thread_metadata_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("updated_at"),
             Some(&Some(Value::Int(1)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_thread_message_count_batch_with_preserve_newer_timestamp() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1', message_count: 1, updated_at: 200})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_2', message_count: 1, updated_at: 100})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_3', message_count: 1, updated_at: 10})")
+        .unwrap();
+
+    let output = db
+        .update_knowledge_thread_message_count_batch(&KnowledgeThreadMessageCountBatchRequest {
+            updates: vec![
+                KnowledgeThreadMessageCountUpdate {
+                    thread_id: "thread_1".to_string(),
+                    message_count: 7,
+                    updated_at: Some(Value::Int(150)),
+                    preserve_newer_existing_updated_at: true,
+                },
+                KnowledgeThreadMessageCountUpdate {
+                    thread_id: "thread_2".to_string(),
+                    message_count: 8,
+                    updated_at: Some(Value::Int(150)),
+                    preserve_newer_existing_updated_at: true,
+                },
+                KnowledgeThreadMessageCountUpdate {
+                    thread_id: "thread_3".to_string(),
+                    message_count: 9,
+                    updated_at: None,
+                    preserve_newer_existing_updated_at: false,
+                },
+                KnowledgeThreadMessageCountUpdate {
+                    thread_id: "thread_2".to_string(),
+                    message_count: 10,
+                    updated_at: Some(Value::Int(300)),
+                    preserve_newer_existing_updated_at: false,
+                },
+                KnowledgeThreadMessageCountUpdate {
+                    thread_id: "missing".to_string(),
+                    message_count: 1,
+                    updated_at: Some(Value::Int(100)),
+                    preserve_newer_existing_updated_at: false,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 3);
+    assert_eq!(output.graph_commit_epoch_after, 4);
+    assert_eq!(output.rows.len(), 5);
+    assert_eq!(output.matched_count, 3);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 3);
+    assert_eq!(output.updated_at_changed_count, 1);
+    assert_eq!(output.updated_property_count, 4);
+    assert_eq!(output.rows[0].updated_property_count, 1);
+    assert!(!output.rows[0].updated_at_changed);
+    assert_eq!(output.rows[1].updated_property_count, 2);
+    assert!(output.rows[1].updated_at_changed);
+    assert_eq!(output.rows[2].updated_property_count, 1);
+    assert!(output.rows[3].duplicate);
+    assert!(!output.rows[4].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Thread".to_string(),
+                external_id: "thread_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Thread".to_string(),
+                external_id: "thread_2".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Thread".to_string(),
+                external_id: "thread_3".to_string(),
+            },
+        ],
+        property_names: vec!["message_count".to_string(), "updated_at".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("message_count"),
+        Some(&Some(Value::Int(7)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("updated_at"),
+        Some(&Some(Value::Int(200)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("message_count"),
+        Some(&Some(Value::Int(8)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("updated_at"),
+        Some(&Some(Value::Int(150)))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("message_count"),
+        Some(&Some(Value::Int(9)))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("updated_at"),
+        Some(&Some(Value::Int(10)))
+    );
+}
+
+#[test]
+fn thread_message_count_batch_rejects_negative_count_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1', message_count: 1})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_thread_message_count_batch(&KnowledgeThreadMessageCountBatchRequest {
+            updates: vec![KnowledgeThreadMessageCountUpdate {
+                thread_id: "thread_1".to_string(),
+                message_count: -1,
+                updated_at: Some(Value::Int(100)),
+                preserve_newer_existing_updated_at: false,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-negative message count"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_thread_message_count_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Thread {id: 'thread_1', message_count: 1, updated_at: 200})")
+            .unwrap();
+        db.query("CREATE (:Thread {id: 'thread_2', message_count: 1, updated_at: 100})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_thread_message_count_batch(&KnowledgeThreadMessageCountBatchRequest {
+            updates: vec![
+                KnowledgeThreadMessageCountUpdate {
+                    thread_id: "thread_1".to_string(),
+                    message_count: 7,
+                    updated_at: Some(Value::Int(150)),
+                    preserve_newer_existing_updated_at: true,
+                },
+                KnowledgeThreadMessageCountUpdate {
+                    thread_id: "thread_2".to_string(),
+                    message_count: 8,
+                    updated_at: Some(Value::Int(150)),
+                    preserve_newer_existing_updated_at: true,
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Thread".to_string(),
+                    external_id: "thread_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Thread".to_string(),
+                    external_id: "thread_2".to_string(),
+                },
+            ],
+            property_names: vec!["message_count".to_string(), "updated_at".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("message_count"),
+            Some(&Some(Value::Int(7)))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("updated_at"),
+            Some(&Some(Value::Int(200)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("message_count"),
+            Some(&Some(Value::Int(8)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("updated_at"),
+            Some(&Some(Value::Int(150)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
