@@ -38,6 +38,81 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Fixture contract checker smoke
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          cat > "$root/contract.json" <<'JSON'
+          {
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 2,
+            "setup": [],
+            "checks": [
+              {
+                "index": 0,
+                "kind": "cypher",
+                "name": "first",
+                "execution_mode": "database",
+                "setup": [],
+                "statement": {
+                  "command_request": {
+                    "op": "query",
+                    "cypher": "MATCH (n) RETURN n",
+                    "parameters": {}
+                  }
+                },
+                "expected_rows": {
+                  "kind": "row_count",
+                  "count": 1
+                }
+              },
+              {
+                "index": 1,
+                "kind": "cypher",
+                "name": "second",
+                "execution_mode": "database",
+                "setup": [],
+                "statement": {
+                  "command_request": {
+                    "op": "query",
+                    "cypher": "MATCH (n) RETURN n",
+                    "parameters": {}
+                  }
+                },
+                "expected_rows": {
+                  "kind": "row_count",
+                  "count": 0
+                }
+              }
+            ]
+          }
+          JSON
+          cargo run --quiet --bin skein -- \
+            nowledge-fixture-contract-command-check \
+            --start-check 1 \
+            "$root/contract.json" \
+            python3 -c 'import json,sys; json.load(sys.stdin); print(json.dumps({"rows": []}))' \
+            > "$root/selected.json"
+          grep -q '"selected_subset_ready": true' "$root/selected.json"
+          grep -q '"full_contract_ready": false' "$root/selected.json"
+          grep -q '"full_contract_not_checked"' "$root/selected.json"
+          if cargo run --quiet --bin skein -- \
+            nowledge-fixture-contract-command-check \
+            --require-full-contract \
+            --start-check 1 \
+            "$root/contract.json" \
+            python3 -c 'import json,sys; json.load(sys.stdin); print(json.dumps({"rows": []}))' \
+            > "$root/full.json" 2> "$root/full.err"; then
+            echo "expected selected fixture slice to fail full-contract readiness"
+            exit 1
+          fi
+          grep -q '"selected_subset_ready": true' "$root/full.json"
+          grep -q '"required_contract_ready": false' "$root/full.json"
+          grep -q '"required_contract_blocker_codes"' "$root/full.json"
+          grep -q '"full_contract_not_checked"' "$root/full.json"
+          grep -q "fixture contract command check failed" "$root/full.err"
+
       - name: Migration gate smoke
         run: |
           set -euo pipefail
