@@ -124,6 +124,12 @@ methods against the existing Kuzu/Ladybug wrapper, return
 stdout. The server owns protocol-version validation, response envelopes,
 capability reporting, JSON-to-`Value` conversion, default ordered
 `execute_session` handling, and default `project_graph` primary-only responses.
+The compile-checked
+`examples/nowledge_previous_wrapper_shadow_adapter.rs` file shows the intended
+shape. In Nowledge, the `PreviousWrapperGraph::query` hook should call the
+existing Kuzu/Ladybug raw read/write wrapper with the decoded parameters, and
+`execute_session` should use the wrapper's single-connection transaction/session
+path so fixture setup, mutation, and effect checks observe one mutable state.
 
 ## `execute`
 
