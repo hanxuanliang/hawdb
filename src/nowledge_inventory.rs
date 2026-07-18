@@ -36,6 +36,7 @@ pub struct NowledgeCypherMigrationGateJsonOptions {
     pub storage_recovery: Option<serde_json::Value>,
     pub background_maintenance_required: bool,
     pub background_maintenance: Option<serde_json::Value>,
+    pub previous_wrapper_contract_evidence: Option<serde_json::Value>,
     pub rollback: CompatibilityRollbackEvidence,
 }
 
@@ -289,6 +290,12 @@ fn add_shadow_metadata_to_migration_gate_json(
     if let Some(storage_recovery) = options.storage_recovery.as_ref() {
         migration_gate_json_object(bundle)?
             .insert("storage_recovery".to_string(), storage_recovery.clone());
+    }
+    if let Some(contract_evidence) = options.previous_wrapper_contract_evidence.as_ref() {
+        migration_gate_json_object(bundle)?.insert(
+            "previous_wrapper_contract_evidence".to_string(),
+            contract_evidence.clone(),
+        );
     }
     if options.include_cutover_evidence {
         insert_cutover_evidence_json(
@@ -2005,6 +2012,15 @@ mod tests {
                     }
                 })),
                 background_maintenance_required: true,
+                previous_wrapper_contract_evidence: Some(serde_json::json!({
+                    "ready": true,
+                    "evidence_kind": "previous_wrapper_contract",
+                    "wrapper_identity": "nowledge-previous-wrapper:test",
+                    "requires_full_contract_ready": true,
+                    "requires_wrapper_identity": true,
+                    "blocker_codes": [],
+                    "blockers": []
+                })),
                 rollback: CompatibilityRollbackEvidence {
                     required: true,
                     ready: true,
@@ -2043,6 +2059,11 @@ mod tests {
         assert_eq!(
             bundle["shadow_trace"]["response_op_counts"]["execute_session"],
             1
+        );
+        assert_eq!(bundle["previous_wrapper_contract_evidence"]["ready"], true);
+        assert_eq!(
+            bundle["previous_wrapper_contract_evidence"]["wrapper_identity"],
+            "nowledge-previous-wrapper:test"
         );
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
         assert_eq!(

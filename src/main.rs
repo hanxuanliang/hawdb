@@ -210,6 +210,7 @@ fn main() -> Result<()> {
             let mut storage_recovery = None;
             let mut background_maintenance_required = false;
             let mut background_maintenance = None;
+            let mut previous_wrapper_contract_evidence = None;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-ready" => {
@@ -272,6 +273,14 @@ fn main() -> Result<()> {
                             SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
                         })?;
                         background_maintenance = Some(read_json_file(Path::new(&path))?);
+                    }
+                    "--previous-wrapper-contract-evidence-json" => {
+                        args.next();
+                        let path = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
+                        })?;
+                        previous_wrapper_contract_evidence =
+                            Some(read_json_file(Path::new(&path))?);
                     }
                     _ => break,
                 }
@@ -340,6 +349,7 @@ fn main() -> Result<()> {
                         storage_recovery,
                         background_maintenance_required,
                         background_maintenance,
+                        previous_wrapper_contract_evidence,
                         ..NowledgeCypherMigrationGateJsonOptions::default()
                     },
                 )?;
@@ -888,7 +898,7 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] [--previous-wrapper-contract-evidence-json <path>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 
@@ -4876,6 +4886,8 @@ mod tests {
         assert!(
             nowledge_cypher_migration_gate_usage().contains("--background-maintenance-report-json")
         );
+        assert!(nowledge_cypher_migration_gate_usage()
+            .contains("--previous-wrapper-contract-evidence-json"));
     }
 
     #[test]

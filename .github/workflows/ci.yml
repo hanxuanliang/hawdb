@@ -215,6 +215,17 @@ jobs:
             background-maintenance-report \
             --require-cutover-ready \
             "$db" > "$root/background.json"
+          cat > "$root/contract-evidence.json" <<'JSON'
+          {
+            "ready": true,
+            "evidence_kind": "previous_wrapper_contract",
+            "wrapper_identity": "nowledge-previous-wrapper:ci-smoke",
+            "requires_full_contract_ready": true,
+            "requires_wrapper_identity": true,
+            "blocker_codes": [],
+            "blockers": []
+          }
+          JSON
           mkdir -p "$root/crates/nmem-graph/src"
           cat > "$root/crates/nmem-graph/src/repo.rs" <<'RS'
           pub fn query() -> &'static str {
@@ -231,6 +242,7 @@ jobs:
             --storage-recovery-report-json "$root/recovery.json" \
             --require-background-maintenance-evidence \
             --background-maintenance-report-json "$root/background.json" \
+            --previous-wrapper-contract-evidence-json "$root/contract-evidence.json" \
             "$root" \
             self \
             cargo run --quiet --bin skein-shadow-self -- \
@@ -247,6 +259,8 @@ jobs:
           grep -q '"background_maintenance_present": true' "$root/gate.json"
           grep -q '"background_maintenance_ready": true' "$root/gate.json"
           grep -q '"background_maintenance_protocol_matches": true' "$root/gate.json"
+          grep -q '"previous_wrapper_contract_evidence"' "$root/gate.json"
+          grep -q '"wrapper_identity": "nowledge-previous-wrapper:ci-smoke"' "$root/gate.json"
           grep -q '"shadow_ready"' "$root/gate.json"
           grep -q '"shadow_trace"' "$root/gate.json"
           grep -q '"request_count"' "$root/gate.json"
@@ -263,6 +277,8 @@ jobs:
           grep -q '"production_cutover_ready": false' "$root/replacement.json"
           grep -q '"production_replacement_per_million": 0' "$root/replacement.json"
           grep -q '"cutover_evidence"' "$root/replacement.json"
+          grep -q '"previous_wrapper_contract_evidence"' "$root/replacement.json"
+          grep -q '"wrapper_identity": "nowledge-previous-wrapper:ci-smoke"' "$root/replacement.json"
           grep -q "nowledge replacement summary is not production cutover ready" "$root/replacement.err"
 
       - name: Migration gate blocked smoke
