@@ -557,6 +557,7 @@ pub struct GraphStore {
     stable_id_mapping: StoreStableIdMapping,
     search_projection_change_log_start_epoch: u64,
     search_projection_graph_changes: Vec<SearchProjectionGraphChange>,
+    max_search_projection_change_log_entries: Option<usize>,
     durable: Option<DurableStore>,
 }
 
@@ -678,6 +679,7 @@ impl GraphStore {
             stable_id_mapping: StoreStableIdMapping::default(),
             search_projection_change_log_start_epoch: 0,
             search_projection_graph_changes: Vec::new(),
+            max_search_projection_change_log_entries: None,
             durable: Some(durable),
         };
         store.load_checkpoint(catalog)?;
@@ -4214,6 +4216,11 @@ impl GraphStore {
             .collect()
     }
 
+    pub fn set_max_search_projection_change_log_entries(&mut self, max_entries: Option<usize>) {
+        self.max_search_projection_change_log_entries = max_entries;
+        self.trim_search_projection_graph_change_log();
+    }
+
     pub fn stable_id_mapping(&self) -> StoreStableIdMapping {
         self.stable_id_mapping.clone()
     }
@@ -4323,6 +4330,7 @@ impl GraphStore {
             stable_id_mapping: self.stable_id_mapping.clone(),
             search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
             search_projection_graph_changes: self.search_projection_graph_changes.clone(),
+            max_search_projection_change_log_entries: self.max_search_projection_change_log_entries,
             durable: None,
         }
     }
@@ -4347,6 +4355,28 @@ impl GraphStore {
                 upsert_node_ids: upsert_node_ids.into_iter().map(|id| id.0).collect(),
                 delete_document_ids: delete_document_ids.into_iter().collect(),
             });
+        self.trim_search_projection_graph_change_log();
+    }
+
+    fn trim_search_projection_graph_change_log(&mut self) {
+        let Some(max_entries) = self.max_search_projection_change_log_entries else {
+            return;
+        };
+        if self.search_projection_graph_changes.len() <= max_entries {
+            return;
+        }
+        let remove_count = self.search_projection_graph_changes.len() - max_entries;
+        if remove_count > 0 {
+            if let Some(last_removed) = self
+                .search_projection_graph_changes
+                .get(remove_count.saturating_sub(1))
+            {
+                self.search_projection_change_log_start_epoch = self
+                    .search_projection_change_log_start_epoch
+                    .max(last_removed.commit_epoch);
+            }
+            self.search_projection_graph_changes.drain(0..remove_count);
+        }
     }
 
     fn collect_search_projection_graph_changes_for_ops(

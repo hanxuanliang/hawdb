@@ -898,6 +898,55 @@ fn search_projection_changefeed_can_emit_watermark_only_delta_request() {
 }
 
 #[test]
+fn search_projection_changefeed_retention_forces_rebuild_for_expired_epoch() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_search_projection_change_log_entries: Some(1),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'm1', title: 'First'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    let request = db
+        .build_search_projection_graph_delta_request_after(0, Some(1))
+        .unwrap()
+        .unwrap();
+    db.apply_search_projection_graph_delta(&mut search_index, request)
+        .unwrap();
+
+    db.query("CREATE (:Memory {id: 'm2', title: 'Second'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'm3', title: 'Third'})")
+        .unwrap();
+
+    let error = db
+        .build_search_projection_graph_delta_request_from_freshness(&search_index, Some(2))
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("full search projection rebuild required"));
+}
+
+#[test]
+fn search_projection_changefeed_retention_zero_disables_incremental_window() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_search_projection_change_log_entries: Some(0),
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'm1', title: 'First'})")
+        .unwrap();
+
+    let error = db
+        .build_search_projection_graph_delta_request_after(0, Some(1))
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("full search projection rebuild required"));
+}
+
+#[test]
 fn search_projection_delta_request_requires_rebuild_when_changefeed_start_is_too_new() {
     let path = unique_test_dir("search_projection_changefeed_checkpoint_gap");
     {

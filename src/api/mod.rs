@@ -38,6 +38,8 @@ use std::str::FromStr;
 
 mod artifact_jobs;
 
+const DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES: usize = 4096;
+
 pub use artifact_jobs::{
     DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
     ExternalContentArtifactJobCompletion, ExternalContentArtifactJobSummary,
@@ -55,13 +57,29 @@ pub struct Database {
     derived_artifact_jobs: Vec<DerivedArtifactJob>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DatabaseConfig {
     pub read_only: bool,
     pub max_read_result_rows: Option<usize>,
     pub max_optimizer_groups: Option<usize>,
     pub recovery_mode: RecoveryMode,
     pub max_wal_replay_entries: Option<usize>,
+    pub max_search_projection_change_log_entries: Option<usize>,
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            read_only: false,
+            max_read_result_rows: None,
+            max_optimizer_groups: None,
+            recovery_mode: RecoveryMode::default(),
+            max_wal_replay_entries: None,
+            max_search_projection_change_log_entries: Some(
+                DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
+            ),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1237,13 +1255,16 @@ struct ReaderPin {
 
 impl Default for Database {
     fn default() -> Self {
+        let config = DatabaseConfig::default();
+        let mut store = GraphStore::default();
+        store.set_max_search_projection_change_log_entries(
+            config.max_search_projection_change_log_entries,
+        );
         Self {
             catalog: Catalog::default(),
-            store: GraphStore::default(),
-            optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(
-                &DatabaseConfig::default(),
-            )),
-            config: DatabaseConfig::default(),
+            store,
+            optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
+            config,
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
             derived_artifact_jobs: Vec::new(),
@@ -1257,10 +1278,19 @@ impl Database {
     }
 
     pub fn new_with_config(config: DatabaseConfig) -> Self {
+        let mut store = GraphStore::default();
+        store.set_max_search_projection_change_log_entries(
+            config.max_search_projection_change_log_entries,
+        );
+        let optimizer = CascadesOptimizer::new(optimizer_config_from_database_config(&config));
         Self {
-            optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
+            catalog: Catalog::default(),
+            store,
+            optimizer,
             config,
-            ..Self::default()
+            reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
+            next_derived_artifact_job_id: 1,
+            derived_artifact_jobs: Vec::new(),
         }
     }
 
@@ -1289,7 +1319,7 @@ impl Database {
             recovery_mode: config.recovery_mode,
             max_entries: config.max_wal_replay_entries,
         };
-        let store = if config.read_only {
+        let mut store = if config.read_only {
             GraphStore::open_read_only_with_durability_and_replay_config(
                 path,
                 &mut catalog,
@@ -1304,6 +1334,9 @@ impl Database {
                 replay_config,
             )?
         };
+        store.set_max_search_projection_change_log_entries(
+            config.max_search_projection_change_log_entries,
+        );
         Ok(Self {
             catalog,
             store,
