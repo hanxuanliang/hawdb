@@ -295,6 +295,9 @@ commits all eligible creates through one transaction-level grouped WAL batch.
 Endpoint-known relationship cleanup uses the same typed facade for label/source
 relation removal, supports optional relationship-property equality filters, and
 routes through the WAL-backed `MATCH ... DELETE r` mutation path.
+Ordered batch relationship cleanup uses the same prefiltered endpoint-known
+contract and commits eligible deletes through one transaction-level grouped WAL
+batch.
 Page-level MVCC, physical page/segment reclamation, and concurrent writer
 coordination remain.
 
