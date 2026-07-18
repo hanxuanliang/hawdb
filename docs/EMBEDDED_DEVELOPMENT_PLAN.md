@@ -411,6 +411,12 @@ available as `Database::interrupt_knowledge_augmentation_jobs`. It scans only
 interruption reason before WAL, marks eligible jobs as `failed` with the
 production interruption message, does not write WAL when no eligible jobs
 exist, and commits eligible updates through one grouped WAL batch.
+AugmentationJob status and list reads are available as
+`Database::knowledge_augmentation_job` and
+`Database::knowledge_augmentation_jobs`. They cover the Nowledge graph and REST
+graph job status/list shapes, including optional status filtering, bounded
+limits, and the two production orderings by `started_at DESC` or
+`created_at DESC`, without requiring application-side Cypher construction.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.

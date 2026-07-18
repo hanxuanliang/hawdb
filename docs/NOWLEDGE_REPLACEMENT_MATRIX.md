@@ -228,6 +228,11 @@ validates job ids, job types, progress percentages, progress messages, and
 failure messages before WAL, reports missing, existing, status-mismatched, and
 duplicate jobs without writing, and commits eligible creates/updates through
 one grouped WAL batch.
+AugmentationJob status and list reads are covered by typed APIs for Nowledge
+graph and REST graph surfaces. `Database::knowledge_augmentation_job` resolves
+one job by `job_id`, while `Database::knowledge_augmentation_jobs` supports the
+production filtered/all list shapes with `started_at DESC` or `created_at DESC`
+ordering and bounded limits without constructing application-side Cypher.
 AugmentationJob stale/orphan interrupt writes are covered by
 `Database::interrupt_knowledge_augmentation_jobs` for the Nowledge
 `interrupt_orphaned_jobs` shape. The wrapper scans only `AugmentationJob`
