@@ -96,9 +96,10 @@ pub use schema::{
 pub use search::{
     MetadataRepairOptions, MetadataRepairSummary, SearchAnalyzerLexicon,
     SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchEmptyReasonCode,
-    SearchHit, SearchIndex, SearchMode, SearchProjectionDelta, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchProjectionKind, SearchProjectionRow, SearchRebuildOptions,
-    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchFallbackReasonCode, SearchHit, SearchIndex, SearchMode, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionKind,
+    SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
+    SearchRetrieverCandidateSetReport,
 };
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,

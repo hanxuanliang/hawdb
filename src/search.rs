@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 mod analyzer_lexicon;
 use analyzer_lexicon::CORE_SEMANTIC_ALIAS_RULES;
@@ -130,6 +131,7 @@ pub struct SearchHit {
     pub source_id: Option<String>,
     pub matched_terms: Vec<String>,
     pub matched_spans: Vec<SearchMatchedSpan>,
+    pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
     pub projection_freshness: SearchProjectionFreshness,
 }
@@ -152,6 +154,7 @@ pub struct SearchResultSet {
     pub truncation_reasons: Vec<String>,
     pub empty_reason_codes: Vec<SearchEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
+    pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
     pub retrievers: Vec<SearchRetrieverReport>,
     pub candidate_set: SearchCandidateSetReport,
@@ -159,6 +162,39 @@ pub struct SearchResultSet {
     pub fusion_weights: SearchFusionWeights,
     pub document_count: usize,
     pub filtered_document_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchFallbackReasonCode {
+    VectorDimensionMismatch,
+    VectorIndexEmpty,
+    QueryEmbeddingMissing,
+    TextQueryEmpty,
+}
+
+impl SearchFallbackReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchFallbackReasonCode::VectorDimensionMismatch => "vector_dimension_mismatch",
+            SearchFallbackReasonCode::VectorIndexEmpty => "vector_index_empty",
+            SearchFallbackReasonCode::QueryEmbeddingMissing => "query_embedding_missing",
+            SearchFallbackReasonCode::TextQueryEmpty => "text_query_empty",
+        }
+    }
+}
+
+impl FromStr for SearchFallbackReasonCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "vector_dimension_mismatch" => Ok(SearchFallbackReasonCode::VectorDimensionMismatch),
+            "vector_index_empty" => Ok(SearchFallbackReasonCode::VectorIndexEmpty),
+            "query_embedding_missing" => Ok(SearchFallbackReasonCode::QueryEmbeddingMissing),
+            "text_query_empty" => Ok(SearchFallbackReasonCode::TextQueryEmpty),
+            _ => Err("unknown search fallback reason code"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +234,7 @@ pub struct SearchRetrieverReport {
     pub available: bool,
     pub candidate_count: usize,
     pub candidate_set: SearchRetrieverCandidateSetReport,
+    pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
     pub top_hit_ids: Vec<String>,
     pub top_candidates: Vec<SearchRetrieverCandidate>,
@@ -984,6 +1021,7 @@ impl SearchIndex {
         options: SearchQueryOptions,
     ) -> SearchResultSet {
         let query_terms = tokenize(query_text, &self.analyzer_lexicon);
+        let mut vector_fallback_reason_codes = Vec::new();
         let mut vector_fallback_reasons = Vec::new();
         let limit = options.limit;
         let document_count = self.documents.len();
@@ -1006,6 +1044,8 @@ impl SearchIndex {
         let vector_available = match (query_embedding, self.embedding_dimension) {
             (Some(vector), Some(dimension)) if vector.len() == dimension => true,
             (Some(vector), Some(dimension)) => {
+                vector_fallback_reason_codes
+                    .push(SearchFallbackReasonCode::VectorDimensionMismatch);
                 vector_fallback_reasons.push(format!(
                     "query embedding dimension {} does not match index dimension {dimension}",
                     vector.len()
@@ -1013,22 +1053,31 @@ impl SearchIndex {
                 false
             }
             (Some(_), None) => {
+                vector_fallback_reason_codes.push(SearchFallbackReasonCode::VectorIndexEmpty);
                 vector_fallback_reasons.push("index has no vector rows".to_string());
                 false
             }
             (None, _) => {
                 if mode != SearchMode::Text {
+                    vector_fallback_reason_codes
+                        .push(SearchFallbackReasonCode::QueryEmbeddingMissing);
                     vector_fallback_reasons.push("query embedding not provided".to_string());
                 }
                 false
             }
         };
         let text_available = !query_terms.is_empty();
-        let text_fallback_reasons = if !text_available && mode != SearchMode::Vector {
-            vec!["query text produced no searchable terms".to_string()]
-        } else {
-            Vec::new()
-        };
+        let (text_fallback_reason_codes, text_fallback_reasons) =
+            if !text_available && mode != SearchMode::Vector {
+                (
+                    vec![SearchFallbackReasonCode::TextQueryEmpty],
+                    vec!["query text produced no searchable terms".to_string()],
+                )
+            } else {
+                (Vec::new(), Vec::new())
+            };
+        let mut fallback_reason_codes = vector_fallback_reason_codes.clone();
+        fallback_reason_codes.extend(text_fallback_reason_codes.iter().copied());
         let mut fallback_reasons = vector_fallback_reasons.clone();
         fallback_reasons.extend(text_fallback_reasons.iter().cloned());
         let text_corpus = if text_available && mode != SearchMode::Vector {
@@ -1084,6 +1133,7 @@ impl SearchIndex {
                     self.source_graph_commit_epoch,
                     options.policy_epoch,
                 ),
+                fallback_reason_codes: vector_fallback_reason_codes,
                 fallback_reasons: vector_fallback_reasons,
                 top_hit_ids: top_ranked_ids(&vector_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&vector_window_ranks, &vector_scores, limit),
@@ -1097,6 +1147,7 @@ impl SearchIndex {
                     self.source_graph_commit_epoch,
                     options.policy_epoch,
                 ),
+                fallback_reason_codes: text_fallback_reason_codes,
                 fallback_reasons: text_fallback_reasons,
                 top_hit_ids: top_ranked_ids(&text_window_ranks, limit),
                 top_candidates: top_ranked_candidates(&text_window_ranks, &text_scores, limit),
@@ -1147,6 +1198,7 @@ impl SearchIndex {
                         document,
                         &self.analyzer_lexicon,
                     ),
+                    fallback_reason_codes: fallback_reason_codes.clone(),
                     fallback_reasons: fallback_reasons.clone(),
                     projection_freshness: projection_freshness.clone(),
                 });
@@ -1191,6 +1243,7 @@ impl SearchIndex {
             truncation_reasons,
             empty_reason_codes,
             empty_reasons,
+            fallback_reason_codes,
             fallback_reasons,
             retrievers,
             candidate_set,
@@ -3030,7 +3083,13 @@ mod tests {
         assert_eq!(hits[0].vector_rank, None);
         assert_eq!(hits[0].text_rank, Some(1));
         assert!(result.fallback_reasons[0].contains("dimension"));
+        assert!(result
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::VectorDimensionMismatch));
         assert!(hits[0].fallback_reasons[0].contains("dimension"));
+        assert!(hits[0]
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::VectorDimensionMismatch));
         let vector = result
             .retrievers
             .iter()
@@ -3038,11 +3097,15 @@ mod tests {
             .expect("expected vector retriever report");
         assert!(!vector.available);
         assert!(vector.fallback_reasons[0].contains("dimension"));
+        assert!(vector
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::VectorDimensionMismatch));
         let text = result
             .retrievers
             .iter()
             .find(|retriever| retriever.name == "text")
             .expect("expected text retriever report");
+        assert!(text.fallback_reason_codes.is_empty());
         assert!(text.fallback_reasons.is_empty());
     }
 
@@ -3061,9 +3124,39 @@ mod tests {
             .iter()
             .any(|reason| reason.contains("query embedding dimension 3")));
         assert!(result
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::VectorDimensionMismatch));
+        assert!(result
             .empty_reasons
             .iter()
             .any(|reason| reason.contains("query embedding dimension 3")));
+    }
+
+    #[test]
+    fn search_fallback_reason_codes_have_stable_string_encodings() {
+        let cases = [
+            (
+                SearchFallbackReasonCode::VectorDimensionMismatch,
+                "vector_dimension_mismatch",
+            ),
+            (
+                SearchFallbackReasonCode::VectorIndexEmpty,
+                "vector_index_empty",
+            ),
+            (
+                SearchFallbackReasonCode::QueryEmbeddingMissing,
+                "query_embedding_missing",
+            ),
+            (SearchFallbackReasonCode::TextQueryEmpty, "text_query_empty"),
+        ];
+
+        for (code, name) in cases {
+            assert_eq!(code.as_str(), name);
+            assert_eq!(name.parse::<SearchFallbackReasonCode>(), Ok(code));
+        }
+        assert!("fallback_unknown"
+            .parse::<SearchFallbackReasonCode>()
+            .is_err());
     }
 
     #[test]
@@ -3081,6 +3174,9 @@ mod tests {
             .iter()
             .any(|reason| reason == "query embedding not provided"));
         assert!(result
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::QueryEmbeddingMissing));
+        assert!(result
             .empty_reasons
             .iter()
             .any(|reason| reason == "query embedding not provided"));
@@ -3090,6 +3186,9 @@ mod tests {
             .find(|retriever| retriever.name == "vector")
             .expect("expected vector retriever report");
         assert!(!vector.available);
+        assert!(vector
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::QueryEmbeddingMissing));
         assert!(vector
             .fallback_reasons
             .iter()
@@ -3860,6 +3959,9 @@ mod tests {
             .iter()
             .any(|reason| reason == "query text produced no searchable terms"));
         assert!(result
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::TextQueryEmpty));
+        assert!(result
             .empty_reasons
             .iter()
             .any(|reason| reason == "query text produced no searchable terms"));
@@ -3869,6 +3971,9 @@ mod tests {
             .find(|retriever| retriever.name == "text")
             .expect("expected text retriever report");
         assert!(!text.available);
+        assert!(text
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::TextQueryEmpty));
         assert!(text
             .fallback_reasons
             .iter()

@@ -17,8 +17,9 @@ use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
 };
 use crate::search::{
-    MetadataRepairOptions, SearchDocument, SearchFusionWeights, SearchIndex, SearchMode,
-    SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow, SearchRebuildOptions,
+    MetadataRepairOptions, SearchDocument, SearchFallbackReasonCode, SearchFusionWeights,
+    SearchIndex, SearchMode, SearchProjectionDelta, SearchProjectionKind, SearchProjectionRow,
+    SearchRebuildOptions,
 };
 use crate::store::{NodeId, DENSE_ADJACENCY_DEGREE_THRESHOLD};
 use crate::Value;
@@ -1301,10 +1302,18 @@ fn knowledge_retrieval_diagnostics_expose_search_fallback_reasons() {
         .iter()
         .any(|reason| reason == "index has no vector rows"));
     assert!(output
+        .search
+        .fallback_reason_codes
+        .contains(&SearchFallbackReasonCode::VectorIndexEmpty));
+    assert!(output
         .diagnostics
         .search_fallback_reasons
         .iter()
         .any(|reason| reason == "index has no vector rows"));
+    assert!(output
+        .diagnostics
+        .search_fallback_reason_codes
+        .contains(&SearchFallbackReasonCode::VectorIndexEmpty));
     let vector_report = output
         .retrievers
         .iter()
@@ -1315,6 +1324,9 @@ fn knowledge_retrieval_diagnostics_expose_search_fallback_reasons() {
         .fallback_reasons
         .iter()
         .any(|reason| reason == "index has no vector rows"));
+    assert!(vector_report
+        .fallback_reason_codes
+        .contains(&SearchFallbackReasonCode::VectorIndexEmpty));
     let text_report = output
         .retrievers
         .iter()
@@ -1325,6 +1337,9 @@ fn knowledge_retrieval_diagnostics_expose_search_fallback_reasons() {
         .fallback_reasons
         .iter()
         .any(|reason| reason == "index has no vector rows"));
+    assert!(output.search.hits[0]
+        .fallback_reason_codes
+        .contains(&SearchFallbackReasonCode::VectorIndexEmpty));
 }
 
 #[test]

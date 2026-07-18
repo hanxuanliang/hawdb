@@ -18,9 +18,10 @@ use crate::schema::{
 use crate::search::{
     projection_row_from_node, MetadataRepairOptions, MetadataRepairSummary,
     SearchCandidateSetReport, SearchDerivedArtifactReport, SearchEmptyReasonCode,
-    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchProjectionDelta,
-    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
-    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchFallbackReasonCode, SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode,
+    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
+    SearchRetrieverCandidateSetReport,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -570,6 +571,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_limit: usize,
     pub search_truncated: bool,
     pub search_truncation_reasons: Vec<String>,
+    pub search_fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub search_fallback_reasons: Vec<String>,
     pub rank_window: Option<usize>,
     pub search_fusion_weights: SearchFusionWeights,
@@ -634,6 +636,7 @@ pub struct KnowledgeRetrieverReport {
     pub limit: Option<usize>,
     pub rank_window: Option<usize>,
     pub fusion_weight: Option<f64>,
+    pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
     pub truncated: bool,
     pub truncation_reasons: Vec<String>,
@@ -2392,6 +2395,7 @@ fn knowledge_retriever_reports(
                 report.name.as_str(),
                 search.fusion_weights,
             ),
+            fallback_reason_codes: report.fallback_reason_codes.clone(),
             fallback_reasons: report.fallback_reasons.clone(),
             truncated: report.candidate_count > report.top_candidates.len(),
             truncation_reasons: knowledge_search_retriever_truncation_reasons(
@@ -2437,6 +2441,7 @@ fn knowledge_retriever_reports(
         limit: Some(graph_seed_input.limit),
         rank_window: None,
         fusion_weight: None,
+        fallback_reason_codes: Vec::new(),
         fallback_reasons: knowledge_graph_seed_fallback_reasons(graph_seed_input.limit),
         truncated: graph_seed_input.candidate_count > graph_seeds.len(),
         truncation_reasons: knowledge_graph_seed_truncation_reasons(
@@ -2641,6 +2646,7 @@ fn knowledge_retrieval_diagnostics(
         search_limit: search.limit,
         search_truncated: search.truncated,
         search_truncation_reasons: search.truncation_reasons.clone(),
+        search_fallback_reason_codes: search.fallback_reason_codes.clone(),
         search_fallback_reasons: search.fallback_reasons.clone(),
         rank_window: search.rank_window,
         search_fusion_weights: search.fusion_weights,
