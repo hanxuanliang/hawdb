@@ -134,7 +134,7 @@ For integration work where linking the wrapper into the example binary is too
 heavy, the example also supports:
 
 ```text
-cargo run --example nowledge_previous_wrapper_shadow_adapter -- --command <program> [args...]
+cargo run --example nowledge_previous_wrapper_shadow_adapter -- [--command-timeout-ms <ms>] --command <program> [args...]
 ```
 
 In this mode the adapter keeps the Skein external-shadow JSON-lines protocol on
@@ -157,7 +157,9 @@ stdout:
 The command bridge is intentionally process-owned by Nowledge. It lets the real
 Kuzu/Ladybug wrapper keep its dependencies and transaction/session handling
 outside Skein while still producing `engine_kind: "previous_wrapper"` shadow
-evidence through the shared protocol server.
+evidence through the shared protocol server. `--command-timeout-ms` bounds each
+delegated command invocation so a hung wrapper fails with a direct adapter error
+instead of only surfacing as an outer shadow request timeout.
 
 ## `execute`
 

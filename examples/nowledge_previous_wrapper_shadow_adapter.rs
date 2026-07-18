@@ -6,7 +6,12 @@ use skein::{
 };
 use std::collections::BTreeMap;
 use std::io::{self, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const DEFAULT_COMMAND_TIMEOUT_MS: u64 = 30_000;
+const COMMAND_WAIT_POLL_MS: u64 = 10;
 
 fn main() -> Result<()> {
     let stdin = io::stdin();
@@ -18,29 +23,49 @@ fn main() -> Result<()> {
 
 fn previous_wrapper_from_args() -> Result<PreviousWrapperAdapter> {
     let mut args = std::env::args().skip(1);
-    match args.next().as_deref() {
-        None => Ok(PreviousWrapperAdapter::Unavailable(
-            UnavailablePreviousWrapper,
-        )),
-        Some("--command") => {
-            let Some(program) = args.next() else {
-                return Err(SkeinError::Semantic(command_usage()));
-            };
-            Ok(PreviousWrapperAdapter::Command(CommandPreviousWrapper {
-                program,
-                args: args.collect(),
-            }))
+    let mut timeout = Duration::from_millis(DEFAULT_COMMAND_TIMEOUT_MS);
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--command-timeout-ms" => {
+                let Some(value) = args.next() else {
+                    return Err(SkeinError::Semantic(command_usage()));
+                };
+                timeout = Duration::from_millis(parse_timeout_ms(&value)?);
+            }
+            "--command" => {
+                let Some(program) = args.next() else {
+                    return Err(SkeinError::Semantic(command_usage()));
+                };
+                return Ok(PreviousWrapperAdapter::Command(CommandPreviousWrapper {
+                    program,
+                    args: args.collect(),
+                    timeout,
+                }));
+            }
+            "--help" | "-h" => return Err(SkeinError::Semantic(command_usage())),
+            other => {
+                return Err(SkeinError::Semantic(format!(
+                    "unknown previous-wrapper adapter option '{other}'; {}",
+                    command_usage()
+                )));
+            }
         }
-        Some("--help") | Some("-h") => Err(SkeinError::Semantic(command_usage())),
-        Some(other) => Err(SkeinError::Semantic(format!(
-            "unknown previous-wrapper adapter option '{other}'; {}",
-            command_usage()
-        ))),
     }
+    Ok(PreviousWrapperAdapter::Unavailable(
+        UnavailablePreviousWrapper,
+    ))
+}
+
+fn parse_timeout_ms(value: &str) -> Result<u64> {
+    value.parse::<u64>().map_err(|error| {
+        SkeinError::Semantic(format!(
+            "invalid --command-timeout-ms value '{value}': {error}"
+        ))
+    })
 }
 
 fn command_usage() -> String {
-    "usage: nowledge_previous_wrapper_shadow_adapter [--command <program> [args...]]".to_string()
+    "usage: nowledge_previous_wrapper_shadow_adapter [--command-timeout-ms <ms>] [--command <program> [args...]]".to_string()
 }
 
 trait PreviousWrapperGraph {
@@ -167,6 +192,7 @@ impl PreviousWrapperGraph for UnavailablePreviousWrapper {
 struct CommandPreviousWrapper {
     program: String,
     args: Vec<String>,
+    timeout: Duration,
 }
 
 impl PreviousWrapperGraph for CommandPreviousWrapper {
@@ -212,7 +238,7 @@ impl CommandPreviousWrapper {
             })?;
 
         {
-            let stdin = child.stdin.as_mut().ok_or_else(|| {
+            let mut stdin = child.stdin.take().ok_or_else(|| {
                 SkeinError::Execution("previous-wrapper command stdin is not available".to_string())
             })?;
             writeln!(stdin, "{request}").map_err(|error| {
@@ -222,11 +248,7 @@ impl CommandPreviousWrapper {
             })?;
         }
 
-        let output = child.wait_with_output().map_err(|error| {
-            SkeinError::Execution(format!(
-                "failed to wait for previous-wrapper command: {error}"
-            ))
-        })?;
+        let output = self.wait_for_output(child)?;
         if !output.status.success() {
             return Err(SkeinError::Execution(format!(
                 "previous-wrapper command exited with {}; stderr: {}",
@@ -240,6 +262,42 @@ impl CommandPreviousWrapper {
                 String::from_utf8_lossy(&output.stdout).trim()
             ))
         })
+    }
+
+    fn wait_for_output(&self, mut child: std::process::Child) -> Result<Output> {
+        let started_at = Instant::now();
+        loop {
+            match child.try_wait() {
+                Ok(Some(_status)) => {
+                    return child.wait_with_output().map_err(|error| {
+                        SkeinError::Execution(format!(
+                            "failed to collect previous-wrapper command output: {error}"
+                        ))
+                    });
+                }
+                Ok(None) if started_at.elapsed() >= self.timeout => {
+                    let _ = child.kill();
+                    let output = child.wait_with_output().map_err(|error| {
+                        SkeinError::Execution(format!(
+                            "previous-wrapper command timed out after {} ms and failed to collect output: {error}",
+                            self.timeout.as_millis()
+                        ))
+                    })?;
+                    return Err(SkeinError::Execution(format!(
+                        "previous-wrapper command timed out after {} ms; stderr: {}",
+                        self.timeout.as_millis(),
+                        String::from_utf8_lossy(&output.stderr).trim()
+                    )));
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(COMMAND_WAIT_POLL_MS)),
+                Err(error) => {
+                    let _ = child.kill();
+                    return Err(SkeinError::Execution(format!(
+                        "failed to poll previous-wrapper command: {error}"
+                    )));
+                }
+            }
+        }
     }
 }
 
@@ -451,6 +509,35 @@ mod tests {
         );
         assert_eq!(request["parameters"]["id"], "m1");
         assert_eq!(request["parameters"]["score"], 1.5);
+    }
+
+    #[test]
+    fn command_adapter_rejects_invalid_timeout() {
+        let error = parse_timeout_ms("not-a-number").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("invalid --command-timeout-ms value"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_adapter_times_out_hung_command() {
+        let wrapper = CommandPreviousWrapper {
+            program: "/bin/sh".to_string(),
+            args: vec!["-c".to_string(), "sleep 1".to_string()],
+            timeout: Duration::from_millis(1),
+        };
+
+        let error = wrapper
+            .invoke(serde_json::json!({
+                "op": "query"
+            }))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("previous-wrapper command timed out"));
     }
 
     #[test]
