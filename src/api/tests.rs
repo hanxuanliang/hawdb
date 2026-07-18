@@ -23,9 +23,11 @@ use super::{
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
-    KnowledgeScopedSubgraphRequest, KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeScopedSubgraphRequest, KnowledgeSourceMemoryCountAdjustment,
+    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSubgraphRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -5077,6 +5079,175 @@ fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("total_dwell_time_ms"),
             Some(&Some(Value::Int(100)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn adjusts_source_memory_count_batch_with_floor_decrements() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_1', memory_count: 1})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_2'})").unwrap();
+    db.query("CREATE (:Source {id: 'bad', memory_count: 'many'})")
+        .unwrap();
+
+    let output = db
+        .adjust_knowledge_source_memory_count_batch(&KnowledgeSourceMemoryCountBatchRequest {
+            adjustments: vec![
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "source_1".to_string(),
+                    delta: 1,
+                },
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "source_1".to_string(),
+                    delta: -1,
+                },
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "source_1".to_string(),
+                    delta: -1,
+                },
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "source_1".to_string(),
+                    delta: -1,
+                },
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "source_2".to_string(),
+                    delta: -1,
+                },
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "missing".to_string(),
+                    delta: 1,
+                },
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "bad".to_string(),
+                    delta: 1,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 3);
+    assert_eq!(output.graph_commit_epoch_after, 4);
+    assert_eq!(output.rows.len(), 7);
+    assert_eq!(output.matched_count, 5);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.invalid_current_count_count, 1);
+    assert_eq!(output.adjusted_count, 5);
+    assert_eq!(output.rows[0].old_count, Some(1));
+    assert_eq!(output.rows[0].new_count, Some(2));
+    assert_eq!(output.rows[1].old_count, Some(2));
+    assert_eq!(output.rows[1].new_count, Some(1));
+    assert_eq!(output.rows[2].old_count, Some(1));
+    assert_eq!(output.rows[2].new_count, Some(0));
+    assert_eq!(output.rows[3].old_count, Some(0));
+    assert_eq!(output.rows[3].new_count, Some(0));
+    assert_eq!(output.rows[4].old_count, Some(0));
+    assert_eq!(output.rows[4].new_count, Some(0));
+    assert!(!output.rows[5].matched);
+    assert!(output.rows[6].invalid_current_count);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "source_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "source_2".to_string(),
+            },
+        ],
+        property_names: vec!["memory_count".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("memory_count"),
+        Some(&Some(Value::Int(0)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("memory_count"),
+        Some(&Some(Value::Int(0)))
+    );
+}
+
+#[test]
+fn source_memory_count_batch_rejects_zero_delta_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_1', memory_count: 1})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .adjust_knowledge_source_memory_count_batch(&KnowledgeSourceMemoryCountBatchRequest {
+            adjustments: vec![KnowledgeSourceMemoryCountAdjustment {
+                source_id: "source_1".to_string(),
+                delta: 0,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-zero delta"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_source_memory_count_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_source_memory_count_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Source {id: 'source_1', memory_count: 0})")
+            .unwrap();
+        db.query("CREATE (:Source {id: 'source_2', memory_count: 2})")
+            .unwrap();
+        let batch_count_before_adjust = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.adjust_knowledge_source_memory_count_batch(&KnowledgeSourceMemoryCountBatchRequest {
+            adjustments: vec![
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "source_1".to_string(),
+                    delta: 1,
+                },
+                KnowledgeSourceMemoryCountAdjustment {
+                    source_id: "source_2".to_string(),
+                    delta: -1,
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_adjust = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_adjust, batch_count_before_adjust + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Source".to_string(),
+                    external_id: "source_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Source".to_string(),
+                    external_id: "source_2".to_string(),
+                },
+            ],
+            property_names: vec!["memory_count".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("memory_count"),
+            Some(&Some(Value::Int(1)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("memory_count"),
+            Some(&Some(Value::Int(1)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();

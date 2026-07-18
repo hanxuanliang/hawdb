@@ -149,6 +149,13 @@ It also includes a typed Memory access touch batch for Nowledge
 `last_accessed_at` and `last_clicked_at`, reports missing/idless rows without
 writing, and preserves duplicate same-memory touches as separate increments in
 the same grouped WAL batch.
+Source provenance count writes are covered by a typed Source memory-count
+adjustment batch for Nowledge `memory_count + 1` and floor-to-zero decrement
+paths. The wrapper validates non-empty Source ids and non-zero deltas before
+WAL, treats missing or `NULL` `memory_count` as zero, rejects non-integer
+current counts without writing that row, preserves duplicate same-source
+adjustments in request order, materializes floor-decrement results as `0`, and
+commits eligible per-source updates through one grouped WAL batch.
 
 ## Current Direction
 

@@ -1639,6 +1639,41 @@ pub struct KnowledgeMemoryAccessBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMemoryCountAdjustment {
+    pub source_id: String,
+    pub delta: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMemoryCountBatchRequest {
+    pub adjustments: Vec<KnowledgeSourceMemoryCountAdjustment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMemoryCountBatchRow {
+    pub source_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub adjusted: bool,
+    pub non_writable: bool,
+    pub invalid_current_count: bool,
+    pub old_count: Option<i64>,
+    pub new_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMemoryCountBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceMemoryCountBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub non_writable_count: usize,
+    pub invalid_current_count_count: usize,
+    pub adjusted_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3351,6 +3386,13 @@ impl Database {
         request: &KnowledgeMemoryAccessBatchRequest,
     ) -> Result<KnowledgeMemoryAccessBatchOutput> {
         touch_knowledge_memory_access_batch_for(self, request)
+    }
+
+    pub fn adjust_knowledge_source_memory_count_batch(
+        &mut self,
+        request: &KnowledgeSourceMemoryCountBatchRequest,
+    ) -> Result<KnowledgeSourceMemoryCountBatchOutput> {
+        adjust_knowledge_source_memory_count_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -6000,6 +6042,171 @@ fn knowledge_memory_access_touch_statement(
         );
     }
     (cypher, parameters)
+}
+
+fn adjust_knowledge_source_memory_count_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSourceMemoryCountBatchRequest,
+) -> Result<KnowledgeSourceMemoryCountBatchOutput> {
+    db.ensure_writable()?;
+    for adjustment in &request.adjustments {
+        if adjustment.source_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge source memory count adjustment requires a non-empty source id"
+                    .to_string(),
+            ));
+        }
+        if adjustment.delta == 0 {
+            return Err(SkeinError::Semantic(
+                "knowledge source memory count adjustment requires a non-zero delta".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.adjustments.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut non_writable_count = 0;
+    let mut invalid_current_count_count = 0;
+    let mut adjusted_count = 0;
+    let mut aggregates: BTreeMap<NodeId, AggregatedSourceMemoryCountAdjustment> = BTreeMap::new();
+
+    for adjustment in &request.adjustments {
+        let Some(seed) = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "Source",
+            &adjustment.source_id,
+        ) else {
+            missing_count += 1;
+            rows.push(KnowledgeSourceMemoryCountBatchRow {
+                source_id: adjustment.source_id.clone(),
+                node_id: None,
+                matched: false,
+                adjusted: false,
+                non_writable: false,
+                invalid_current_count: false,
+                old_count: None,
+                new_count: None,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, adjustment.source_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeSourceMemoryCountBatchRow {
+                source_id: adjustment.source_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                adjusted: false,
+                non_writable: true,
+                invalid_current_count: false,
+                old_count: None,
+                new_count: None,
+            });
+            continue;
+        }
+        let Some(current_count) = source_memory_count(seed) else {
+            invalid_current_count_count += 1;
+            rows.push(KnowledgeSourceMemoryCountBatchRow {
+                source_id: adjustment.source_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                adjusted: false,
+                non_writable: false,
+                invalid_current_count: true,
+                old_count: None,
+                new_count: None,
+            });
+            continue;
+        };
+
+        let aggregate =
+            aggregates
+                .entry(node_id)
+                .or_insert_with(|| AggregatedSourceMemoryCountAdjustment {
+                    old_count: current_count,
+                    new_count: current_count,
+                });
+        let old_count = aggregate.new_count;
+        aggregate.new_count = apply_source_memory_count_delta(old_count, adjustment.delta);
+        matched_count += 1;
+        adjusted_count += 1;
+        rows.push(KnowledgeSourceMemoryCountBatchRow {
+            source_id: adjustment.source_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            adjusted: true,
+            non_writable: false,
+            invalid_current_count: false,
+            old_count: Some(old_count),
+            new_count: Some(aggregate.new_count),
+        });
+    }
+
+    if aggregates.is_empty() {
+        return Ok(KnowledgeSourceMemoryCountBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            non_writable_count,
+            invalid_current_count_count,
+            adjusted_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, adjustment) in &aggregates {
+        let (cypher, parameters) =
+            knowledge_source_memory_count_set_statement(*node_id, adjustment.new_count);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeSourceMemoryCountBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        non_writable_count,
+        invalid_current_count_count,
+        adjusted_count,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AggregatedSourceMemoryCountAdjustment {
+    old_count: i64,
+    new_count: i64,
+}
+
+fn source_memory_count(node: &NodeRecord) -> Option<i64> {
+    match node.properties.get("memory_count") {
+        None | Some(Value::Null) => Some(0),
+        Some(Value::Int(value)) => Some((*value).max(0)),
+        Some(_) => None,
+    }
+}
+
+fn apply_source_memory_count_delta(current_count: i64, delta: i64) -> i64 {
+    current_count.saturating_add(delta).max(0)
+}
+
+fn knowledge_source_memory_count_set_statement(
+    node_id: NodeId,
+    memory_count: i64,
+) -> (String, BTreeMap<String, Value>) {
+    (
+        "MATCH (s:Source) WHERE id(s) = $node_id SET s.memory_count = $memory_count".to_string(),
+        BTreeMap::from([
+            ("node_id".to_string(), Value::Int(node_id.0 as i64)),
+            ("memory_count".to_string(), Value::Int(memory_count)),
+        ]),
+    )
 }
 
 fn delete_knowledge_entity_for(
@@ -10360,6 +10567,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryAccessBatchRequest,
     ) -> Result<KnowledgeMemoryAccessBatchOutput> {
         self.db.touch_knowledge_memory_access_batch(request)
+    }
+
+    pub fn adjust_knowledge_source_memory_count_batch(
+        &mut self,
+        request: &KnowledgeSourceMemoryCountBatchRequest,
+    ) -> Result<KnowledgeSourceMemoryCountBatchOutput> {
+        self.db.adjust_knowledge_source_memory_count_batch(request)
     }
 
     pub fn delete_knowledge_entity(
