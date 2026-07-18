@@ -97,6 +97,8 @@ jobs:
           grep -q '"selected_subset_ready": true' "$root/selected.json"
           grep -q '"full_contract_ready": false' "$root/selected.json"
           grep -q '"full_contract_not_checked"' "$root/selected.json"
+          grep -q '"previous_wrapper_contract_evidence"' "$root/selected.json"
+          grep -q '"missing_wrapper_identity"' "$root/selected.json"
           if cargo run --quiet --bin skein -- \
             nowledge-fixture-contract-command-check \
             --require-full-contract \

@@ -15,6 +15,7 @@ pub struct FixtureContractCommandCheckOptions {
     pub command_timeout: Duration,
     pub allow_primary_only_project_graph: bool,
     pub require_full_contract: bool,
+    pub wrapper_identity: Option<String>,
     pub command_mode: FixtureCommandMode,
     pub stop_after_first_failure: bool,
 }
@@ -28,6 +29,7 @@ impl Default for FixtureContractCommandCheckOptions {
             command_timeout: Duration::from_millis(DEFAULT_COMMAND_TIMEOUT_MS),
             allow_primary_only_project_graph: false,
             require_full_contract: false,
+            wrapper_identity: None,
             command_mode: FixtureCommandMode::SpawnPerRequest,
             stop_after_first_failure: false,
         }
@@ -35,7 +37,7 @@ impl Default for FixtureContractCommandCheckOptions {
 }
 
 pub fn nowledge_fixture_contract_command_check_usage() -> String {
-    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--stop-after-first-failure] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]".to_string()
+    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--wrapper-identity <id>] [--stop-after-first-failure] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]".to_string()
 }
 
 pub fn run_nowledge_fixture_contract_command_check(
@@ -74,6 +76,17 @@ pub fn run_nowledge_fixture_contract_command_check(
             }
             "--require-full-contract" => {
                 options.require_full_contract = true;
+            }
+            "--wrapper-identity" => {
+                let value = args.next().ok_or_else(|| {
+                    SkeinError::Semantic(nowledge_fixture_contract_command_check_usage())
+                })?;
+                if value.trim().is_empty() {
+                    return Err(SkeinError::Semantic(
+                        "--wrapper-identity must not be empty".to_string(),
+                    ));
+                }
+                options.wrapper_identity = Some(value);
             }
             "--stop-after-first-failure" => {
                 options.stop_after_first_failure = true;
@@ -753,6 +766,23 @@ fn command_check_report_json(
             )],
         )
     };
+    let previous_wrapper_contract_ready =
+        full_contract_ready && options.wrapper_identity.as_deref().is_some();
+    let previous_wrapper_contract_readiness = contract_readiness_report(
+        previous_wrapper_contract_ready,
+        &[
+            (
+                full_contract_ready,
+                "full_contract_not_ready",
+                "full contract is not ready",
+            ),
+            (
+                options.wrapper_identity.as_deref().is_some(),
+                "missing_wrapper_identity",
+                "wrapper identity is required for previous-wrapper contract evidence",
+            ),
+        ],
+    );
     let failure_summary = failure_summary_json(&failures, stats.stopped_after_first_failure);
     serde_json::json!({
         "protocol": "skein-nowledge-fixture-contract-command-check",
@@ -772,6 +802,7 @@ fn command_check_report_json(
             "command_timeout_ms": options.command_timeout.as_millis() as u64,
             "allow_primary_only_project_graph": options.allow_primary_only_project_graph,
             "require_full_contract": options.require_full_contract,
+            "wrapper_identity": &options.wrapper_identity,
             "command_mode": fixture_command_mode_json(options.command_mode),
             "stop_after_first_failure": options.stop_after_first_failure,
         },
@@ -783,6 +814,15 @@ fn command_check_report_json(
         "required_contract_ready": required_contract_ready,
         "required_contract_blocker_codes": required_contract_readiness.blocker_codes,
         "required_contract_blockers": required_contract_readiness.blockers,
+        "previous_wrapper_contract_evidence": {
+            "ready": previous_wrapper_contract_ready,
+            "evidence_kind": "previous_wrapper_contract",
+            "wrapper_identity": &options.wrapper_identity,
+            "requires_full_contract_ready": true,
+            "requires_wrapper_identity": true,
+            "blocker_codes": previous_wrapper_contract_readiness.blocker_codes,
+            "blockers": previous_wrapper_contract_readiness.blockers,
+        },
         "contract_command_check_ready": selected_subset_ready,
     })
 }
@@ -1325,6 +1365,77 @@ mod tests {
         assert_eq!(report["matched_checks"], 2);
         assert_eq!(report["full_contract_ready"], true);
         assert_eq!(report["required_contract_ready"], true);
+        assert_eq!(report["previous_wrapper_contract_evidence"]["ready"], false);
+        assert_eq!(
+            report["previous_wrapper_contract_evidence"]["blocker_codes"],
+            serde_json::json!(["missing_wrapper_identity"])
+        );
+    }
+
+    #[test]
+    fn contract_command_check_reports_previous_wrapper_identity_evidence() {
+        let contract = serde_json::json!({
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 1,
+            "setup": [],
+            "checks": [
+                {
+                    "index": 0,
+                    "kind": "cypher",
+                    "name": "first",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 0
+                    }
+                }
+            ]
+        });
+        let options = FixtureContractCommandCheckOptions {
+            require_full_contract: true,
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
+            ..FixtureContractCommandCheckOptions::default()
+        };
+        let report = check_contract_command(
+            &contract,
+            "python3",
+            &[
+                "-c".to_string(),
+                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
+                    .to_string(),
+            ],
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(report["full_contract_ready"], true);
+        assert_eq!(report["required_contract_ready"], true);
+        assert_eq!(
+            report["options"]["wrapper_identity"],
+            "nowledge-previous-wrapper:test"
+        );
+        assert_eq!(report["previous_wrapper_contract_evidence"]["ready"], true);
+        assert_eq!(
+            report["previous_wrapper_contract_evidence"]["evidence_kind"],
+            "previous_wrapper_contract"
+        );
+        assert_eq!(
+            report["previous_wrapper_contract_evidence"]["wrapper_identity"],
+            "nowledge-previous-wrapper:test"
+        );
+        assert_eq!(
+            report["previous_wrapper_contract_evidence"]["blocker_codes"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
