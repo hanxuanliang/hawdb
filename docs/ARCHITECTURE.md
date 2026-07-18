@@ -51,26 +51,32 @@ outside the graph engine.
 
 ## Crate Layout
 
-Skein follows Chryso's workspace-and-facade layout. The root crate remains the
-stable embedded facade, while implementation crates are split out as the
-interfaces harden. The current crate split starts with `skein-core`; parser,
-planner, optimizer, storage, executor, search, and API modules remain in the
-root crate until their contracts are ready to freeze.
+Skein follows a RisingWave/Chryso-style workspace-and-facade layout. The root
+crate remains the stable embedded facade, while implementation crates are split
+out as interfaces harden and dependency direction becomes acyclic. The current
+crate split includes `skein-core` for common graph primitives and
+`skein-optimizer` for Cascades-style optimizer primitives. Cypher graph logical
+and physical operators still live in the root crate until parser/planner/executor
+contracts are stable enough to move without creating cycles.
 
 ```text
 crates/
   core/                errors, values, ids, catalog names, schema descriptors
+  optimizer/           Cascades cost, memo ids/groups, properties, trace config
   cypher/              token cursor, parser, AST, parameter model
   catalog/             labels, relationship types, property schema, stats
   planner/             semantic analysis, logical plan, physical plan
-  optimizer/           Cascades memo, rules, costing, properties, trace
+  graph-optimizer/     graph-specific Cascades rules and physical alternatives
   storage/             embedded persistence, WAL, MVCC, indexes
   executor/            physical operators and query execution
   api/                 stable embedded API facade
 ```
 
 The public facade should stay in the root `skein` crate. Internal crates should
-be allowed to evolve while the embedded API stays small and stable.
+be allowed to evolve while the embedded API stays small and stable. Shared
+optimizer primitives should remain free of Cypher AST, planner, executor, and
+storage dependencies; graph-specific rules can then migrate behind that boundary
+incrementally.
 
 Inside the root crate, larger subsystems should still be split by ownership. The
 current Cypher module uses:

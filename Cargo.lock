@@ -188,11 +188,16 @@ dependencies = [
  "regex",
  "serde_json",
  "skein-core",
+ "skein-optimizer",
  "zstd",
 ]
 
 [[package]]
 name = "skein-core"
+version = "0.1.0"
+
+[[package]]
+name = "skein-optimizer"
 version = "0.1.0"
 
 [[package]]

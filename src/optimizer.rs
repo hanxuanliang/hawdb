@@ -8,6 +8,7 @@ use crate::planner::{
     SortItem, SortKey,
 };
 use crate::value::Value;
+pub use skein_optimizer::{GroupId, OptimizerConfig, OptimizerTrace, PlanCost};
 use std::collections::{BTreeMap, BTreeSet};
 
 type ValueRangeBound = (Value, bool);
@@ -1864,36 +1865,6 @@ impl PhysicalPlan {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OptimizerConfig {
-    pub max_groups: usize,
-}
-
-impl Default for OptimizerConfig {
-    fn default() -> Self {
-        Self { max_groups: 128 }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct OptimizerTrace {
-    pub groups: usize,
-    pub selected_plan: String,
-    pub selected_plan_fingerprint: String,
-    pub selected_plan_cost: PlanCost,
-    pub warnings: Vec<String>,
-    pub decisions: Vec<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct PlanCost {
-    pub estimated_rows: u64,
-    pub cost: u64,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct GroupId(usize);
-
 #[derive(Debug, Default)]
 pub struct Memo {
     groups: Vec<Group>,
@@ -2676,7 +2647,7 @@ struct HopEstimate {
 impl Memo {
     pub fn insert(&mut self, logical: &LogicalPlan) -> GroupId {
         let expr = GroupExpr::from_logical(logical, self);
-        let id = GroupId(self.groups.len());
+        let id = GroupId::new(self.groups.len());
         self.groups.push(Group {
             expressions: vec![expr],
         });
@@ -2689,7 +2660,7 @@ impl Memo {
         catalog: &OptimizerCatalog,
         decisions: &mut Vec<String>,
     ) -> PhysicalPlan {
-        let group = &self.groups[root.0];
+        let group = &self.groups[root.index()];
         group.expressions[0].to_physical(self, catalog, decisions)
     }
 }

@@ -104,6 +104,10 @@ pub use search::{
     SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
     SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
 };
+pub use skein_optimizer::{
+    Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,
+    PhysicalProperties, RequiredProperties,
+};
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,
     OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark, StorageRecoveryReport,
