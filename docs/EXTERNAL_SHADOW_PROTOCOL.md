@@ -186,7 +186,7 @@ full migration gate.
 For a command shim that already implements the contract bridge shape, run:
 
 ```text
-skein nowledge-fixture-contract-command-check [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]
+skein nowledge-fixture-contract-command-check [--require-full-contract] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]
 ```
 
 This command reads a `skein-nowledge-fixture-contract` file, invokes the command
@@ -200,6 +200,9 @@ evidence, and per-family readiness.
 Use `--start-check` and `--check-name` to isolate failures while implementing
 the real wrapper. The report distinguishes selected-subset readiness from
 `full_contract_ready`; partial runs are never full cutover evidence.
+Use `--require-full-contract` in CI or release validation when the command must
+exit successfully only after the complete exported contract has been selected,
+checked, and matched.
 
 ## `execute`
 

@@ -72,7 +72,8 @@ fn main() -> Result<()> {
             let json = run_nowledge_fixture_contract_command_check(args)?;
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
             if json
-                .get("contract_command_check_ready")
+                .get("required_contract_ready")
+                .or_else(|| json.get("contract_command_check_ready"))
                 .and_then(serde_json::Value::as_bool)
                 .unwrap_or(false)
             {

@@ -13,6 +13,7 @@ pub struct FixtureContractCommandCheckOptions {
     pub check_name: Option<String>,
     pub command_timeout: Duration,
     pub allow_primary_only_project_graph: bool,
+    pub require_full_contract: bool,
 }
 
 impl Default for FixtureContractCommandCheckOptions {
@@ -23,12 +24,13 @@ impl Default for FixtureContractCommandCheckOptions {
             check_name: None,
             command_timeout: Duration::from_millis(DEFAULT_COMMAND_TIMEOUT_MS),
             allow_primary_only_project_graph: false,
+            require_full_contract: false,
         }
     }
 }
 
 pub fn nowledge_fixture_contract_command_check_usage() -> String {
-    "nowledge-fixture-contract-command-check requires [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]".to_string()
+    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]".to_string()
 }
 
 pub fn run_nowledge_fixture_contract_command_check(
@@ -64,6 +66,9 @@ pub fn run_nowledge_fixture_contract_command_check(
             }
             "--allow-primary-only-project-graph" => {
                 options.allow_primary_only_project_graph = true;
+            }
+            "--require-full-contract" => {
+                options.require_full_contract = true;
             }
             _ => {
                 positional.push(arg);
@@ -561,9 +566,16 @@ fn command_check_report_json(
             "check_name": options.check_name,
             "command_timeout_ms": options.command_timeout.as_millis() as u64,
             "allow_primary_only_project_graph": options.allow_primary_only_project_graph,
+            "require_full_contract": options.require_full_contract,
         },
+        "selected_subset_ready": selected_subset_ready,
         "full_contract_checked": full_contract_checked,
         "full_contract_ready": full_contract_checked && selected_subset_ready,
+        "required_contract_ready": if options.require_full_contract {
+            full_contract_checked && selected_subset_ready
+        } else {
+            selected_subset_ready
+        },
         "contract_command_check_ready": selected_subset_ready,
     })
 }
@@ -731,6 +743,77 @@ mod tests {
         assert_eq!(report["checked_checks"], 1);
         assert_eq!(report["matched_checks"], 1);
         assert_eq!(report["full_contract_checked"], false);
+        assert_eq!(report["selected_subset_ready"], true);
+        assert_eq!(report["required_contract_ready"], true);
+        assert_eq!(report["contract_command_check_ready"], true);
+    }
+
+    #[test]
+    fn contract_command_check_can_require_full_contract() {
+        let contract = serde_json::json!({
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 2,
+            "setup": [],
+            "checks": [
+                {
+                    "index": 0,
+                    "kind": "cypher",
+                    "name": "first",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 1
+                    }
+                },
+                {
+                    "index": 1,
+                    "kind": "cypher",
+                    "name": "second",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 0
+                    }
+                }
+            ]
+        });
+        let options = FixtureContractCommandCheckOptions {
+            start_check: 1,
+            require_full_contract: true,
+            ..FixtureContractCommandCheckOptions::default()
+        };
+        let report = check_contract_command(
+            &contract,
+            "python3",
+            &[
+                "-c".to_string(),
+                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
+                    .to_string(),
+            ],
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(report["selected_subset_ready"], true);
+        assert_eq!(report["full_contract_ready"], false);
+        assert_eq!(report["required_contract_ready"], false);
         assert_eq!(report["contract_command_check_ready"], true);
     }
 
