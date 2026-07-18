@@ -422,6 +422,12 @@ coverage and shadow parity, scaled so `1000000` means all required checks are
 covered and matched. These fields are progress and dashboard signals only;
 cutover automation must still honor the Ready/Blocked decision and blocker
 arrays.
+The coverage and inventory gate objects also include
+`coverage_by_query_family`, which groups required inventory checks by their
+scanner-assigned query family and reports per-family required, covered, missing,
+and `coverage_per_million` values. This lets migration dashboards show which
+Nowledge business slice is still blocking replacement without parsing fixture
+names.
 `shadow_evidence_present` is true only when at least one check matched through
 the shadow engine; primary-only checks do not count as parity evidence. Cutover
 automation should use those grouped fields to distinguish scanner coverage gaps,

@@ -82,10 +82,19 @@ fn public_nowledge_core_fixture_and_inventory_are_gate_ready() {
     assert!(bundle.migration_gate.blockers.is_empty());
     assert_eq!(bundle_json["coverage"]["covered_checks"], 642);
     assert_eq!(bundle_json["coverage"]["coverage_per_million"], 1_000_000);
+    assert!(bundle_json["coverage"]["coverage_by_query_family"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|family| family["coverage_per_million"] == 1_000_000));
     assert_eq!(bundle_json["inventory_gate"]["decision"], "ready");
     assert_eq!(
         bundle_json["inventory_gate"]["coverage_per_million"],
         1_000_000
+    );
+    assert_eq!(
+        bundle_json["inventory_gate"]["coverage_by_query_family"],
+        bundle_json["coverage"]["coverage_by_query_family"]
     );
     assert_eq!(bundle_json["cutover"]["decision"], "ready");
     assert_eq!(bundle_json["cutover"]["matched_checks"], 642);
@@ -272,6 +281,14 @@ fn query_inventory_reports_missing_and_extra_checks() {
 
     assert_eq!(coverage.required_checks, 1);
     assert_eq!(coverage.covered_checks, 0);
+    assert_eq!(coverage.coverage_by_query_family.len(), 1);
+    assert_eq!(coverage.coverage_by_query_family[0].query_family, "read");
+    assert_eq!(coverage.coverage_by_query_family[0].required_checks, 1);
+    assert_eq!(coverage.coverage_by_query_family[0].covered_checks, 0);
+    assert_eq!(
+        coverage.coverage_by_query_family[0].missing_checks,
+        vec!["required check".to_string()]
+    );
     assert_eq!(coverage.missing_checks, vec!["required check".to_string()]);
     assert_eq!(
         coverage.extra_fixture_checks,
@@ -283,6 +300,14 @@ fn query_inventory_reports_missing_and_extra_checks() {
     assert!(gate.blockers[1].contains("not declared by inventory"));
     let gate_json = super::compatibility_inventory_gate_report_to_json(&gate);
     assert_eq!(gate_json["decision"], "blocked");
+    assert_eq!(
+        gate_json["coverage_by_query_family"][0]["query_family"],
+        "read"
+    );
+    assert_eq!(
+        gate_json["coverage_by_query_family"][0]["coverage_per_million"],
+        0
+    );
     assert_eq!(gate_json["missing_checks"][0], "required check");
     assert_eq!(gate_json["extra_fixture_checks"][0], "extra check");
 }
@@ -579,6 +604,7 @@ fn migration_gate_blocks_when_required_rollback_evidence_is_missing() {
         decision: CompatibilityCutoverDecision::Ready,
         required_checks: 1,
         covered_checks: 1,
+        coverage_by_query_family: Vec::new(),
         missing_checks: Vec::new(),
         extra_fixture_checks: Vec::new(),
         blockers: Vec::new(),
@@ -627,6 +653,7 @@ fn migration_gate_accepts_caller_owned_rollback_evidence() {
         decision: CompatibilityCutoverDecision::Ready,
         required_checks: 1,
         covered_checks: 1,
+        coverage_by_query_family: Vec::new(),
         missing_checks: Vec::new(),
         extra_fixture_checks: Vec::new(),
         blockers: Vec::new(),

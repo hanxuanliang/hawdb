@@ -33,8 +33,17 @@ pub struct CompatibilityInventoryCoverageReport {
     pub fixture: String,
     pub required_checks: usize,
     pub covered_checks: usize,
+    pub coverage_by_query_family: Vec<CompatibilityQueryFamilyCoverage>,
     pub missing_checks: Vec<String>,
     pub extra_fixture_checks: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompatibilityQueryFamilyCoverage {
+    pub query_family: String,
+    pub required_checks: usize,
+    pub covered_checks: usize,
+    pub missing_checks: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +59,7 @@ pub struct CompatibilityInventoryGateReport {
     pub decision: CompatibilityCutoverDecision,
     pub required_checks: usize,
     pub covered_checks: usize,
+    pub coverage_by_query_family: Vec<CompatibilityQueryFamilyCoverage>,
     pub missing_checks: Vec<String>,
     pub extra_fixture_checks: Vec<String>,
     pub blockers: Vec<String>,
@@ -266,6 +276,11 @@ pub fn compatibility_inventory_coverage_report_to_json(
         "required_checks": report.required_checks,
         "covered_checks": report.covered_checks,
         "coverage_per_million": ratio_per_million(report.covered_checks, report.required_checks),
+        "coverage_by_query_family": report
+            .coverage_by_query_family
+            .iter()
+            .map(query_family_coverage_to_json)
+            .collect::<Vec<_>>(),
         "missing_checks": report.missing_checks,
         "extra_fixture_checks": report.extra_fixture_checks,
     })
@@ -281,6 +296,11 @@ pub fn compatibility_inventory_gate_report_to_json(
         "required_checks": report.required_checks,
         "covered_checks": report.covered_checks,
         "coverage_per_million": ratio_per_million(report.covered_checks, report.required_checks),
+        "coverage_by_query_family": report
+            .coverage_by_query_family
+            .iter()
+            .map(query_family_coverage_to_json)
+            .collect::<Vec<_>>(),
         "missing_checks": report.missing_checks,
         "extra_fixture_checks": report.extra_fixture_checks,
         "blockers": report.blockers,
@@ -363,6 +383,16 @@ fn ratio_per_million(numerator: usize, denominator: usize) -> u64 {
         return 0;
     }
     ((numerator as u128).saturating_mul(1_000_000) / denominator as u128) as u64
+}
+
+fn query_family_coverage_to_json(report: &CompatibilityQueryFamilyCoverage) -> serde_json::Value {
+    serde_json::json!({
+        "query_family": report.query_family,
+        "required_checks": report.required_checks,
+        "covered_checks": report.covered_checks,
+        "coverage_per_million": ratio_per_million(report.covered_checks, report.required_checks),
+        "missing_checks": report.missing_checks,
+    })
 }
 
 fn build_compatibility_query_inventory_from_items(
@@ -560,12 +590,17 @@ pub fn assess_query_inventory_coverage(
         .difference(&required_checks)
         .map(|check| (*check).to_string())
         .collect::<Vec<_>>();
+    let coverage_by_query_family =
+        coverage_by_query_family(inventory.required_checks.iter(), |item| {
+            fixture_checks.contains(item.name.as_str())
+        });
 
     CompatibilityInventoryCoverageReport {
         inventory: inventory.name.clone(),
         fixture: fixture.name.clone(),
         required_checks: required_checks.len(),
         covered_checks: required_checks.len() - missing_checks.len(),
+        coverage_by_query_family,
         missing_checks,
         extra_fixture_checks,
     }
@@ -598,15 +633,53 @@ pub fn assess_query_inventory_cypher_coverage(
         .map(compatibility_check_name)
         .map(str::to_string)
         .collect::<Vec<_>>();
+    let coverage_by_query_family =
+        coverage_by_query_family(inventory.required_checks.iter(), |item| {
+            fixture_keys.contains(&inventory_item_coverage_key(item))
+        });
 
     CompatibilityInventoryCoverageReport {
         inventory: inventory.name.clone(),
         fixture: fixture.name.clone(),
         required_checks: inventory.required_checks.len(),
         covered_checks: inventory.required_checks.len() - missing_checks.len(),
+        coverage_by_query_family,
         missing_checks,
         extra_fixture_checks,
     }
+}
+
+fn coverage_by_query_family<'a>(
+    items: impl Iterator<Item = &'a CompatibilityQueryInventoryItem>,
+    is_covered: impl Fn(&CompatibilityQueryInventoryItem) -> bool,
+) -> Vec<CompatibilityQueryFamilyCoverage> {
+    #[derive(Default)]
+    struct FamilyAccumulator {
+        required_checks: usize,
+        covered_checks: usize,
+        missing_checks: Vec<String>,
+    }
+
+    let mut families = BTreeMap::<String, FamilyAccumulator>::new();
+    for item in items {
+        let family = families.entry(item.query_family.clone()).or_default();
+        family.required_checks += 1;
+        if is_covered(item) {
+            family.covered_checks += 1;
+        } else {
+            family.missing_checks.push(item.name.clone());
+        }
+    }
+
+    families
+        .into_iter()
+        .map(|(query_family, family)| CompatibilityQueryFamilyCoverage {
+            query_family,
+            required_checks: family.required_checks,
+            covered_checks: family.covered_checks,
+            missing_checks: family.missing_checks,
+        })
+        .collect()
 }
 
 pub fn assess_query_inventory_gate(
@@ -643,6 +716,7 @@ pub fn assess_query_inventory_gate(
         },
         required_checks: coverage.required_checks,
         covered_checks: coverage.covered_checks,
+        coverage_by_query_family: coverage.coverage_by_query_family.clone(),
         missing_checks: coverage.missing_checks.clone(),
         extra_fixture_checks: coverage.extra_fixture_checks.clone(),
         blockers,
