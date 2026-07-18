@@ -9,9 +9,10 @@ use crate::planner::{
 };
 use crate::value::Value;
 pub use skein_optimizer::{
-    plan_class_counts, plan_operator_counts, GroupId, Memo, OptimizationSearchReport,
-    OptimizerConfig, OptimizerTrace, PhysicalPlanClass, PhysicalPlanKind, PlanCost,
-    PlanCostBreakdown, SelectedPlanTrace,
+    apply_rule_batch, plan_class_counts, plan_operator_counts, GroupId, Memo,
+    OptimizationSearchReport, OptimizerConfig, OptimizerRule, OptimizerTrace, PhysicalPlanClass,
+    PhysicalPlanKind, PlanCost, PlanCostBreakdown, RuleApplication, RuleId, RuleKind, RulePromise,
+    SelectedPlanTrace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1873,6 +1874,19 @@ impl PhysicalPlan {
 }
 
 type GraphMemo = Memo<GroupExpr>;
+
+#[derive(Debug, Clone, PartialEq)]
+enum GraphRuleExpr {
+    Filter {
+        predicate: Box<Predicate>,
+        input: Box<LogicalPlan>,
+    },
+    Physical(Box<PhysicalPlan>),
+}
+
+struct NodeEqualitySeekRule<'a> {
+    catalog: &'a OptimizerCatalog,
+}
 
 #[derive(Debug)]
 struct GroupExpr {
@@ -5507,6 +5521,10 @@ fn index_seek_from_filter(
                 label,
             },
         ) if variable == scan_variable => {
+            if let Some(plan) = equality_index_seek_from_rule(predicate, input, catalog, decisions)
+            {
+                return Some(plan);
+            }
             if !catalog.has_property_index(label, property) {
                 decisions.push(format!(
                     "choose SeqNodeScan for {label}.{property}: no equality index descriptor"
@@ -5666,6 +5684,116 @@ fn index_seek_from_filter(
         }
         _ => None,
     }
+}
+
+impl OptimizerRule<GraphRuleExpr> for NodeEqualitySeekRule<'_> {
+    fn id(&self) -> RuleId {
+        RuleId::new("node_equality_index_seek", RuleKind::Implementation)
+    }
+
+    fn promise(&self, expression: &GraphRuleExpr) -> RulePromise {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return RulePromise::NEVER;
+        };
+        let Predicate::PropertyEq {
+            variable, property, ..
+        } = predicate.as_ref()
+        else {
+            return RulePromise::NEVER;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return RulePromise::NEVER;
+        };
+        if variable != scan_variable || !self.catalog.has_property_index(label, property) {
+            return RulePromise::NEVER;
+        }
+        let label_count = self.catalog.label_count(label);
+        let distinct_count = self.catalog.distinct_count(label, property).max(1);
+        let estimated_rows = label_count.div_ceil(distinct_count).max(1);
+        let scan_cost = label_count.saturating_add(4);
+        let seek_cost = estimated_rows.saturating_mul(2).saturating_add(1);
+        if seek_cost <= scan_cost {
+            RulePromise::new(100)
+        } else {
+            RulePromise::NEVER
+        }
+    }
+
+    fn apply(&self, expression: &GraphRuleExpr) -> Option<RuleApplication<GraphRuleExpr>> {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return None;
+        };
+        let Predicate::PropertyEq {
+            variable,
+            property,
+            value,
+        } = predicate.as_ref()
+        else {
+            return None;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return None;
+        };
+        if variable != scan_variable || !self.catalog.has_property_index(label, property) {
+            return None;
+        }
+        let label_count = self.catalog.label_count(label);
+        let distinct_count = self.catalog.distinct_count(label, property).max(1);
+        let estimated_rows = label_count.div_ceil(distinct_count).max(1);
+        let scan_cost = label_count.saturating_add(4);
+        let seek_cost = estimated_rows.saturating_mul(2).saturating_add(1);
+        if seek_cost > scan_cost {
+            return None;
+        }
+        Some(RuleApplication::new(
+            GraphRuleExpr::Physical(Box::new(PhysicalPlan::IndexNodeSeek {
+                variable: variable.clone(),
+                label: label.clone(),
+                property: property.clone(),
+                value: value.clone(),
+            })),
+            format!(
+                "choose IndexNodeSeek for {label}.{property}: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} distinct_count={distinct_count}"
+            ),
+        ))
+    }
+}
+
+fn equality_index_seek_from_rule(
+    predicate: &Predicate,
+    input: &LogicalPlan,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+) -> Option<PhysicalPlan> {
+    let expression = GraphRuleExpr::Filter {
+        predicate: Box::new(predicate.clone()),
+        input: Box::new(input.clone()),
+    };
+    let rule = NodeEqualitySeekRule { catalog };
+    let batch = apply_rule_batch(&expression, &[&rule]);
+    decisions.extend(
+        batch
+            .events()
+            .iter()
+            .cloned()
+            .map(|event| event.into_decision()),
+    );
+    batch.into_parts().0.into_iter().find_map(|applied| {
+        let application = applied.into_application();
+        decisions.push(application.detail().to_string());
+        match application.into_expression() {
+            GraphRuleExpr::Physical(plan) => Some(*plan),
+            GraphRuleExpr::Filter { .. } => None,
+        }
+    })
 }
 
 fn index_seek_from_conjunction(
@@ -8638,6 +8766,9 @@ mod tests {
             .decisions
             .iter()
             .any(|decision| decision.contains("choose IndexNodeSeek for Memory.id")));
+        assert!(trace.decisions.iter().any(|decision| {
+            decision.starts_with("apply implementation:node_equality_index_seek:")
+        }));
         assert!(trace
             .decisions
             .iter()

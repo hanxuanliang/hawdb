@@ -939,6 +939,10 @@ Current implemented slice:
   and rule event recording are crate-level optimizer scaffolding while root
   `src/optimizer.rs` still owns Cypher-specific graph rules and
   catalog-dependent costing
+- the first graph-specific implementation rule now uses that scaffold for
+  single-property node equality seeks, preserving the existing physical plan and
+  fingerprint while recording a stable
+  `implementation:node_equality_index_seek` rule event in the optimizer trace
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,
