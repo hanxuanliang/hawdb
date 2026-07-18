@@ -154,6 +154,21 @@ impl QosAdmissionCode {
     }
 }
 
+impl FromStr for QosAdmissionCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "background_disabled" => Ok(QosAdmissionCode::BackgroundDisabled),
+            "per_work_limit_exceeded" => Ok(QosAdmissionCode::PerWorkLimitExceeded),
+            "total_background_limit_exceeded" => Ok(QosAdmissionCode::TotalBackgroundLimitExceeded),
+            "class_background_limit_exceeded" => Ok(QosAdmissionCode::ClassBackgroundLimitExceeded),
+            "tenant_budget_exceeded" => Ok(QosAdmissionCode::TenantBudgetExceeded),
+            _ => Err("unknown qos admission code"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalQosPermit {
     request: WorkRequest,
@@ -611,6 +626,27 @@ mod tests {
             QosAdmissionCode::TenantBudgetExceeded.as_str(),
             "tenant_budget_exceeded"
         );
+        assert_eq!(
+            "background_disabled".parse::<QosAdmissionCode>(),
+            Ok(QosAdmissionCode::BackgroundDisabled)
+        );
+        assert_eq!(
+            "per_work_limit_exceeded".parse::<QosAdmissionCode>(),
+            Ok(QosAdmissionCode::PerWorkLimitExceeded)
+        );
+        assert_eq!(
+            "total_background_limit_exceeded".parse::<QosAdmissionCode>(),
+            Ok(QosAdmissionCode::TotalBackgroundLimitExceeded)
+        );
+        assert_eq!(
+            "class_background_limit_exceeded".parse::<QosAdmissionCode>(),
+            Ok(QosAdmissionCode::ClassBackgroundLimitExceeded)
+        );
+        assert_eq!(
+            "tenant_budget_exceeded".parse::<QosAdmissionCode>(),
+            Ok(QosAdmissionCode::TenantBudgetExceeded)
+        );
+        assert!("background_paused".parse::<QosAdmissionCode>().is_err());
     }
 
     #[test]
@@ -638,6 +674,10 @@ mod tests {
         assert_eq!(
             admission.code().map(QosAdmissionCode::as_str),
             Some("background_disabled")
+        );
+        assert_eq!(
+            "background_disabled".parse::<QosAdmissionCode>(),
+            admission.code().ok_or("missing admission code")
         );
         assert!(matches!(
             admission,
