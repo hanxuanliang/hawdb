@@ -2198,6 +2198,10 @@ fn graph_lightning_import_status(
         &mut errors,
         &mut resource_errors,
     );
+    let storage_recovery_evidence = graph_lightning_import_storage_recovery_evidence(
+        staging_verification.as_ref(),
+        published_verification.as_ref(),
+    );
     let decision = if import_state == "QUARANTINED"
         || !resource_errors.is_empty()
         || !state_errors.is_empty()
@@ -2218,6 +2222,7 @@ fn graph_lightning_import_status(
         "resource_retention": resource_retention,
         "staging_catalog_present": staging_catalog_present,
         "published_pointer_present": published_pointer_present,
+        "storage_recovery_evidence": storage_recovery_evidence,
         "staging_verification": staging_verification,
         "published_verification": published_verification,
         "status_gate": {
@@ -2237,6 +2242,28 @@ fn graph_lightning_import_status(
             "errors": errors,
         },
     }))
+}
+
+fn graph_lightning_import_storage_recovery_evidence(
+    staging_verification: Option<&serde_json::Value>,
+    published_verification: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    published_verification
+        .and_then(|verification| verification.get("storage_recovery_evidence"))
+        .or_else(|| {
+            staging_verification
+                .and_then(|verification| verification.get("storage_recovery_evidence"))
+        })
+        .cloned()
+        .unwrap_or_else(|| {
+            serde_json::json!({
+                "present": false,
+                "valid": true,
+                "protocol_matches": false,
+                "storage_version_present": false,
+                "recovered_commit_epoch_matches_manifest": false,
+            })
+        })
 }
 
 fn graph_lightning_import_checkpoint_log(
@@ -4838,6 +4865,36 @@ mod tests {
     }
 
     #[test]
+    fn import_status_exposes_ready_storage_recovery_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
+            .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
+        let staging_dir = unique_main_test_dir("graph_lightning_status_ready_recovery");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_ready_recovery_target");
+        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+            &export,
+            &staging_dir,
+            "skein-storage-v1",
+            &recovery,
+        )
+        .unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "READY");
+        assert_eq!(report["storage_recovery_evidence"]["present"], true);
+        assert_eq!(report["storage_recovery_evidence"]["valid"], true);
+        assert_eq!(
+            report["storage_recovery_evidence"],
+            report["staging_verification"]["storage_recovery_evidence"]
+        );
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
     fn import_status_reports_published_after_pointer_verifies() {
         let mut db = Database::new();
         db.query(
@@ -4875,6 +4932,38 @@ mod tests {
         assert_eq!(report["status_gate"]["staging_errors"], 0);
         assert_eq!(report["status_gate"]["published_errors"], 0);
         assert_eq!(report["status_gate"]["resource_errors"], 0);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+        std::fs::remove_dir_all(publish_dir).unwrap();
+    }
+
+    #[test]
+    fn import_status_exposes_published_storage_recovery_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
+            .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
+        let staging_dir = unique_main_test_dir("graph_lightning_status_published_recovery");
+        let publish_dir = unique_main_test_dir("graph_lightning_status_published_recovery_target");
+        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+            &export,
+            &staging_dir,
+            "skein-storage-v1",
+            &recovery,
+        )
+        .unwrap();
+        publish_graph_lightning_staging_catalog(&staging_dir, &publish_dir).unwrap();
+
+        let report = graph_lightning_import_status(&staging_dir, &publish_dir).unwrap();
+
+        assert_eq!(report["import_state"], "PUBLISHED");
+        assert_eq!(report["storage_recovery_evidence"]["present"], true);
+        assert_eq!(report["storage_recovery_evidence"]["valid"], true);
+        assert_eq!(
+            report["storage_recovery_evidence"],
+            report["published_verification"]["storage_recovery_evidence"]
+        );
 
         std::fs::remove_dir_all(staging_dir).unwrap();
         std::fs::remove_dir_all(publish_dir).unwrap();

@@ -222,11 +222,14 @@ manifest-digest coordinates blocks the status report instead of allowing resume
 automation to amplify a stale retry marker. Checkpoint status also exposes
 machine-readable stage, status, failure-rule, and failure-partition counts so
 resume monitors can classify progress and failure hot spots without reparsing
-the append log. The report also
-includes machine-readable `resume_action`, `state_marker`, `checkpoint_log`, and
-`resource_retention` fields that distinguish staging, publishing, active work,
-completed, canceled, failed, and quarantined/manual-repair states without
-requiring callers to parse human-readable error strings.
+the append log. The report promotes `storage_recovery_evidence` from published
+verification when present, otherwise from staging verification, so migration
+monitors can inspect recovery readiness without traversing nested verifier
+reports. The report also includes machine-readable `resume_action`,
+`state_marker`, `checkpoint_log`, and `resource_retention` fields that
+distinguish staging, publishing, active work, completed, canceled, failed, and
+quarantined/manual-repair states without requiring callers to parse
+human-readable error strings.
 The storage-equivalence regression coverage compares canonical exports from the
 same graph after live mutation, WAL replay, checkpoint publication, and
 checkpoint recovery, and requires byte-for-byte equal export structures plus a
