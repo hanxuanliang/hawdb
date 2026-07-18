@@ -15,9 +15,12 @@ use external_shadow::{
     decode_external_ready_response, decode_external_session_response,
 };
 pub use external_shadow::{
-    external_shadow_ready_missing_capabilities, external_shadow_trace_health_from_bundle,
-    external_shadow_trace_report_json, ExternalShadowCommand, ExternalShadowReady,
-    ExternalShadowTraceHealth, ExternalShadowTraceSummary, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    external_shadow_json_from_value, external_shadow_ready_missing_capabilities,
+    external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
+    external_shadow_value_from_json, ExternalShadowCommand, ExternalShadowProjectGraphReply,
+    ExternalShadowProjectGraphRequest, ExternalShadowProtocolBackend, ExternalShadowProtocolServer,
+    ExternalShadowReady, ExternalShadowStatementRequest, ExternalShadowTraceHealth,
+    ExternalShadowTraceSummary, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 pub use inventory_gate::{
     assess_compatibility_cypher_migration_gate_bundle,

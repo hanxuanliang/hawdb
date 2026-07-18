@@ -22,6 +22,59 @@ const EXTERNAL_SHADOW_STDOUT_TAIL_BYTES: usize = 2048;
 pub const REQUIRED_EXTERNAL_SHADOW_CAPABILITIES: [&str; 3] =
     ["execute", "execute_session", "project_graph"];
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExternalShadowStatementRequest {
+    pub cypher: String,
+    pub parameters: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExternalShadowProjectGraphRequest {
+    pub rel_type: Option<String>,
+    pub expected_incoming_nodes: Vec<u64>,
+    pub include_communities: bool,
+    pub include_hierarchical_communities: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExternalShadowProjectGraphReply {
+    Ok(serde_json::Value),
+    PrimaryOnly { reason: Option<String> },
+}
+
+pub trait ExternalShadowProtocolBackend {
+    fn engine_kind(&self) -> &'static str;
+
+    fn capabilities(&self) -> Vec<&'static str> {
+        REQUIRED_EXTERNAL_SHADOW_CAPABILITIES.to_vec()
+    }
+
+    fn execute(&mut self, statement: ExternalShadowStatementRequest) -> Result<QueryOutput>;
+
+    fn execute_session(
+        &mut self,
+        statements: Vec<ExternalShadowStatementRequest>,
+    ) -> Result<Vec<QueryOutput>> {
+        statements
+            .into_iter()
+            .map(|statement| self.execute(statement))
+            .collect()
+    }
+
+    fn project_graph(
+        &mut self,
+        _request: ExternalShadowProjectGraphRequest,
+    ) -> Result<ExternalShadowProjectGraphReply> {
+        Ok(ExternalShadowProjectGraphReply::PrimaryOnly {
+            reason: Some("projected graph metadata is not exposed".to_string()),
+        })
+    }
+}
+
+pub struct ExternalShadowProtocolServer<B> {
+    backend: B,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShadowStatementRole {
     Read,
@@ -94,6 +147,270 @@ enum ExternalShadowErrorClass {
     Semantic,
     Storage,
     Execution,
+}
+
+impl<B> ExternalShadowProtocolServer<B>
+where
+    B: ExternalShadowProtocolBackend,
+{
+    pub fn new(backend: B) -> Self {
+        Self { backend }
+    }
+
+    pub fn run_json_lines<R, W>(&mut self, reader: R, mut writer: W) -> Result<()>
+    where
+        R: BufRead,
+        W: Write,
+    {
+        for line in reader.lines() {
+            let line = line.map_err(|error| {
+                SkeinError::Execution(format!("failed to read shadow request: {error}"))
+            })?;
+            let response = match serde_json::from_str::<serde_json::Value>(&line) {
+                Ok(request) => self.handle_request(&request),
+                Err(error) => json_error("parse", format!("invalid JSON: {error}")),
+            };
+            writeln!(writer, "{response}").map_err(|error| {
+                SkeinError::Execution(format!("failed to write shadow response: {error}"))
+            })?;
+            writer.flush().map_err(|error| {
+                SkeinError::Execution(format!("failed to flush shadow response: {error}"))
+            })?;
+        }
+        Ok(())
+    }
+
+    pub fn handle_request(&mut self, request: &serde_json::Value) -> serde_json::Value {
+        if let Err(error) = validate_protocol_version(request) {
+            return error;
+        }
+        match request.get("op").and_then(serde_json::Value::as_str) {
+            Some("ready") => self.handle_ready(),
+            Some("execute") => self.handle_execute(request),
+            Some("execute_session") => self.handle_execute_session(request),
+            Some("project_graph") => self.handle_project_graph(request),
+            Some(other) => json_error("semantic", format!("unknown shadow op '{other}'")),
+            None => json_error("semantic", "shadow request missing op"),
+        }
+    }
+
+    fn handle_ready(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ok": {
+                "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                "engine_kind": self.backend.engine_kind(),
+                "capabilities": self.backend.capabilities(),
+            }
+        })
+    }
+
+    fn handle_execute(&mut self, request: &serde_json::Value) -> serde_json::Value {
+        let Some(statement) = statement_from_request(request) else {
+            return json_error("semantic", "execute request missing cypher");
+        };
+        match self.backend.execute(statement) {
+            Ok(output) => json_output(output),
+            Err(error) => json_error_from_skein(error),
+        }
+    }
+
+    fn handle_execute_session(&mut self, request: &serde_json::Value) -> serde_json::Value {
+        let Some(statements) = request
+            .get("statements")
+            .and_then(serde_json::Value::as_array)
+        else {
+            return json_error("semantic", "execute_session request missing statements");
+        };
+        let mut decoded = Vec::with_capacity(statements.len());
+        for statement in statements {
+            let Some(statement) = statement_from_request(statement) else {
+                return json_error("semantic", "session statement missing cypher");
+            };
+            decoded.push(statement);
+        }
+
+        match self.backend.execute_session(decoded) {
+            Ok(outputs) => serde_json::json!({
+                "ok": {
+                    "outputs": outputs.into_iter().map(rows_json).collect::<Vec<_>>()
+                }
+            }),
+            Err(error) => json_error_from_skein(error),
+        }
+    }
+
+    fn handle_project_graph(&mut self, request: &serde_json::Value) -> serde_json::Value {
+        let request = project_graph_request_from_json(request);
+        match self.backend.project_graph(request) {
+            Ok(ExternalShadowProjectGraphReply::Ok(output)) => serde_json::json!({ "ok": output }),
+            Ok(ExternalShadowProjectGraphReply::PrimaryOnly { reason }) => {
+                let mut response = serde_json::Map::from_iter([(
+                    "primary_only".to_string(),
+                    serde_json::Value::Bool(true),
+                )]);
+                if let Some(reason) = reason {
+                    response.insert("reason".to_string(), serde_json::Value::String(reason));
+                }
+                serde_json::Value::Object(response)
+            }
+            Err(error) => json_error_from_skein(error),
+        }
+    }
+}
+
+pub fn external_shadow_value_from_json(value: &serde_json::Value) -> Result<Value> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::Float(value))
+            } else {
+                Err(SkeinError::Execution(format!(
+                    "unsupported JSON number: {value}"
+                )))
+            }
+        }
+        serde_json::Value::String(value) => Ok(Value::String(value.clone())),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(external_shadow_value_from_json)
+            .collect::<Result<Vec<_>>>()
+            .map(Value::List),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), external_shadow_value_from_json(value)?)))
+            .collect::<Result<BTreeMap<_, _>>>()
+            .map(Value::Map),
+    }
+}
+
+pub fn external_shadow_json_from_value(value: Value) -> serde_json::Value {
+    match value {
+        Value::Null => serde_json::Value::Null,
+        Value::Bool(value) => serde_json::Value::Bool(value),
+        Value::Int(value) => serde_json::Value::Number(value.into()),
+        Value::Float(value) => serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        Value::String(value) => serde_json::Value::String(value),
+        Value::List(values) => serde_json::Value::Array(
+            values
+                .into_iter()
+                .map(external_shadow_json_from_value)
+                .collect(),
+        ),
+        Value::Map(values) => serde_json::Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, external_shadow_json_from_value(value)))
+                .collect(),
+        ),
+    }
+}
+
+fn validate_protocol_version(
+    request: &serde_json::Value,
+) -> std::result::Result<(), serde_json::Value> {
+    match request
+        .get("protocol_version")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(EXTERNAL_SHADOW_PROTOCOL_VERSION) => Ok(()),
+        Some(version) => Err(json_error(
+            "execution",
+            format!(
+                "unsupported shadow protocol version {version}; expected {EXTERNAL_SHADOW_PROTOCOL_VERSION}"
+            ),
+        )),
+        None => Err(json_error("execution", "shadow request missing protocol_version")),
+    }
+}
+
+fn statement_from_request(request: &serde_json::Value) -> Option<ExternalShadowStatementRequest> {
+    let cypher = request.get("cypher")?.as_str()?.to_string();
+    let parameters = request
+        .get("parameters")
+        .and_then(serde_json::Value::as_object)
+        .map(|parameters| {
+            parameters
+                .iter()
+                .map(|(key, value)| Ok((key.clone(), external_shadow_value_from_json(value)?)))
+                .collect::<Result<BTreeMap<_, _>>>()
+        })
+        .transpose()
+        .ok()?
+        .unwrap_or_default();
+    Some(ExternalShadowStatementRequest { cypher, parameters })
+}
+
+fn project_graph_request_from_json(
+    request: &serde_json::Value,
+) -> ExternalShadowProjectGraphRequest {
+    ExternalShadowProjectGraphRequest {
+        rel_type: request
+            .get("rel_type")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string),
+        expected_incoming_nodes: request
+            .get("expected_incoming_nodes")
+            .and_then(serde_json::Value::as_array)
+            .map(|nodes| {
+                nodes
+                    .iter()
+                    .filter_map(serde_json::Value::as_u64)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default(),
+        include_communities: request
+            .get("include_communities")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        include_hierarchical_communities: request
+            .get("include_hierarchical_communities")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    }
+}
+
+fn json_output(output: QueryOutput) -> serde_json::Value {
+    serde_json::json!({ "ok": rows_json(output) })
+}
+
+fn rows_json(output: QueryOutput) -> serde_json::Value {
+    serde_json::json!({
+        "rows": output
+            .rows
+            .into_iter()
+            .map(|row| {
+                serde_json::Value::Object(
+                    row.into_iter()
+                        .map(|(key, value)| (key, external_shadow_json_from_value(value)))
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>()
+    })
+}
+
+fn json_error(class: &str, message: impl ToString) -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "class": class,
+            "message": message.to_string(),
+        }
+    })
+}
+
+fn json_error_from_skein(error: SkeinError) -> serde_json::Value {
+    match error {
+        SkeinError::Parse(message) => json_error("parse", message),
+        SkeinError::Semantic(message) => json_error("semantic", message),
+        SkeinError::Storage(message) => json_error("storage", message),
+        SkeinError::Execution(message) => json_error("execution", message),
+    }
 }
 
 impl ExternalShadowCommand {
@@ -1354,4 +1671,76 @@ fn tuple_error(engine_name: &str, field: &str) -> SkeinError {
     SkeinError::Execution(format!(
         "shadow engine '{engine_name}' field '{field}' has invalid tuple shape"
     ))
+}
+
+#[cfg(test)]
+mod protocol_server_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct StubPreviousWrapperBackend {
+        executed: Vec<String>,
+    }
+
+    impl ExternalShadowProtocolBackend for StubPreviousWrapperBackend {
+        fn engine_kind(&self) -> &'static str {
+            "previous_wrapper"
+        }
+
+        fn execute(&mut self, statement: ExternalShadowStatementRequest) -> Result<QueryOutput> {
+            self.executed.push(statement.cypher);
+            let mut row = Row::new();
+            row.insert("value".to_string(), Value::Int(self.executed.len() as i64));
+            Ok(QueryOutput { rows: vec![row] })
+        }
+    }
+
+    #[test]
+    fn protocol_server_reports_previous_wrapper_ready_shape() {
+        let mut server = ExternalShadowProtocolServer::new(StubPreviousWrapperBackend::default());
+
+        let response = server.handle_request(&serde_json::json!({
+            "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+            "op": "ready"
+        }));
+
+        assert_eq!(response["ok"]["engine_kind"], "previous_wrapper");
+        assert_eq!(
+            response["ok"]["capabilities"],
+            serde_json::json!(["execute", "execute_session", "project_graph"])
+        );
+    }
+
+    #[test]
+    fn protocol_server_runs_default_session_in_order() {
+        let mut server = ExternalShadowProtocolServer::new(StubPreviousWrapperBackend::default());
+
+        let response = server.handle_request(&serde_json::json!({
+            "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+            "op": "execute_session",
+            "statements": [
+                { "cypher": "RETURN 1 AS value", "parameters": {} },
+                { "cypher": "RETURN 2 AS value", "parameters": {} }
+            ]
+        }));
+
+        assert_eq!(response["ok"]["outputs"][0]["rows"][0]["value"], 1);
+        assert_eq!(response["ok"]["outputs"][1]["rows"][0]["value"], 2);
+    }
+
+    #[test]
+    fn protocol_server_defaults_project_graph_to_primary_only() {
+        let mut server = ExternalShadowProtocolServer::new(StubPreviousWrapperBackend::default());
+
+        let response = server.handle_request(&serde_json::json!({
+            "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+            "op": "project_graph"
+        }));
+
+        assert_eq!(response["primary_only"], true);
+        assert_eq!(
+            response["reason"],
+            "projected graph metadata is not exposed"
+        );
+    }
 }

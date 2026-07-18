@@ -116,6 +116,15 @@ evidence requires `previous_wrapper`. The bundled `skein-shadow-self` adapter
 reports `protocol_smoke`, so it can validate the protocol without being accepted
 as previous-wrapper cutover evidence.
 
+Previous-wrapper adapters should not hand-roll the JSON-lines protocol loop.
+Skein exposes `ExternalShadowProtocolBackend` and
+`ExternalShadowProtocolServer` for wrapper processes: implement the backend
+methods against the existing Kuzu/Ladybug wrapper, return
+`engine_kind() == "previous_wrapper"`, then call `run_json_lines` on stdin and
+stdout. The server owns protocol-version validation, response envelopes,
+capability reporting, JSON-to-`Value` conversion, default ordered
+`execute_session` handling, and default `project_graph` primary-only responses.
+
 ## `execute`
 
 `execute` runs one Cypher statement against the shadow engine.
