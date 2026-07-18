@@ -1324,6 +1324,12 @@ pub struct KnowledgeEntityRequest {
     pub external_id: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedEntityRequest {
+    pub entity: KnowledgeEntityRequest,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntityOutput {
     pub graph_commit_epoch: u64,
@@ -2613,6 +2619,13 @@ impl Database {
         knowledge_entity_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_scoped_entity(
+        &self,
+        request: &KnowledgeScopedEntityRequest,
+    ) -> KnowledgeEntityOutput {
+        knowledge_scoped_entity_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
@@ -3867,12 +3880,31 @@ fn knowledge_entity_for(
     store: &GraphStore,
     request: &KnowledgeEntityRequest,
 ) -> KnowledgeEntityOutput {
+    knowledge_scoped_entity_for(
+        catalog,
+        store,
+        &KnowledgeScopedEntityRequest {
+            entity: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn knowledge_scoped_entity_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeScopedEntityRequest,
+) -> KnowledgeEntityOutput {
     let entity = seed_node_by_label_and_external_id(
         catalog,
         store,
-        request.label.as_str(),
-        request.external_id.as_str(),
+        request.entity.label.as_str(),
+        request.entity.external_id.as_str(),
     )
+    .filter(|node| {
+        request.metadata_filters.is_empty()
+            || knowledge_graph_seed_matches_filters(catalog, node, &request.metadata_filters)
+    })
     .map(|node| knowledge_entity_from_node(catalog, node));
     KnowledgeEntityOutput {
         graph_commit_epoch: store.commit_epoch(),
@@ -6369,6 +6401,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_entity(request)
     }
 
+    pub fn knowledge_scoped_entity(
+        &self,
+        request: &KnowledgeScopedEntityRequest,
+    ) -> KnowledgeEntityOutput {
+        self.db.knowledge_scoped_entity(request)
+    }
+
     pub fn knowledge_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
@@ -6773,6 +6812,13 @@ impl DatabaseReadTransaction {
 
     pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
         knowledge_entity_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_entity(
+        &self,
+        request: &KnowledgeScopedEntityRequest,
+    ) -> KnowledgeEntityOutput {
+        knowledge_scoped_entity_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_neighbors(

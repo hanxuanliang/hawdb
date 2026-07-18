@@ -5,11 +5,11 @@ use super::{
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeScopedNeighborsRequest,
-    KnowledgeScopedPathRequest, KnowledgeScopedSubgraphRequest, KnowledgeSubgraphRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeScopedEntityRequest,
+    KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest, KnowledgeScopedSubgraphRequest,
+    KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode,
+    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -3636,6 +3636,41 @@ fn retrieves_knowledge_entity_without_search_projection() {
         Some(&Value::String("Skein".to_string()))
     );
     assert_eq!(entity.properties.get("score"), Some(&Value::Int(7)));
+}
+
+#[test]
+fn scoped_knowledge_entity_filters_by_metadata() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'memory_1', title: 'Scoped', source_id: 'thread_1', space_id: ''})",
+    )
+    .unwrap();
+
+    let scoped = db.knowledge_scoped_entity(&KnowledgeScopedEntityRequest {
+        entity: KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+        },
+        metadata_filters: BTreeMap::from([
+            ("source_id".to_string(), "thread_1".to_string()),
+            ("space_id".to_string(), "default".to_string()),
+        ]),
+    });
+
+    let entity = scoped.entity.expect("expected scoped entity");
+    assert_eq!(scoped.graph_commit_epoch, 1);
+    assert_eq!(entity.external_id.as_deref(), Some("memory_1"));
+
+    let filtered = db.knowledge_scoped_entity(&KnowledgeScopedEntityRequest {
+        entity: KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+        },
+        metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_2".to_string())]),
+    });
+
+    assert_eq!(filtered.graph_commit_epoch, 1);
+    assert!(filtered.entity.is_none());
 }
 
 #[test]
@@ -11270,6 +11305,15 @@ fn read_transaction_keeps_typed_knowledge_snapshot() {
         entity.entity.as_ref().unwrap().properties.get("title"),
         Some(&Value::String("Before snapshot".to_string()))
     );
+    let scoped_entity = read_tx.knowledge_scoped_entity(&KnowledgeScopedEntityRequest {
+        entity: KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+        },
+        metadata_filters: BTreeMap::from([("title".to_string(), "Before snapshot".to_string())]),
+    });
+    assert_eq!(scoped_entity.graph_commit_epoch, 1);
+    assert!(scoped_entity.entity.is_some());
 
     let snapshot_neighbors = read_tx.knowledge_neighbors(&KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
