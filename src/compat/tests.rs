@@ -1,5 +1,6 @@
 use super::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
+    assess_compatibility_cypher_migration_gate_bundle_with_rollback,
     assess_compatibility_migration_gate, assess_compatibility_migration_gate_bundle,
     assess_query_inventory_coverage, assess_query_inventory_cypher_coverage,
     assess_query_inventory_gate, build_compatibility_query_inventory, nowledge_memory_core_fixture,
@@ -333,6 +334,82 @@ fn query_inventory_can_audit_scanner_names_by_cypher() {
         CompatibilityCutoverDecision::Ready
     );
     assert!(bundle.migration_gate.blockers.is_empty());
+}
+
+#[test]
+fn cypher_migration_gate_can_require_rollback_evidence() {
+    let cypher = "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title";
+    let fixture = CompatibilityFixture {
+        name: "partial".to_string(),
+        setup: Vec::new(),
+        checks: vec![CompatibilityCheck::Cypher(CypherFixtureCheck::expect_rows(
+            "semantic memory lookup",
+            CypherFixtureStatement::new(cypher),
+            ExpectedRows::RowCount(0),
+        ))],
+    };
+    let inventory = CompatibilityQueryInventory {
+        name: "scanned".to_string(),
+        required_checks: vec![CompatibilityQueryInventoryItem::new(
+            "crates/nmem-graph/src/store.rs:42:abcd",
+            "read",
+        )
+        .with_source("crates/nmem-graph/src/store.rs:42")
+        .with_cypher(cypher)],
+    };
+    let shadow = CompatibilityShadowReport {
+        fixture: "partial".to_string(),
+        shadow_engine: "previous-wrapper".to_string(),
+        primary_checks: vec![CompatibilityCheckReport {
+            name: "semantic memory lookup".to_string(),
+        }],
+        shadow_checks: vec![CompatibilityShadowCheckReport {
+            name: "semantic memory lookup".to_string(),
+            status: CompatibilityShadowStatus::Matched,
+            primary_only_reason: None,
+        }],
+    };
+
+    let blocked = assess_compatibility_cypher_migration_gate_bundle_with_rollback(
+        &fixture,
+        &inventory,
+        &shadow,
+        CompatibilityInventoryCoveragePolicy::default(),
+        CompatibilityCutoverPolicy::default(),
+        CompatibilityRollbackEvidence {
+            required: true,
+            ready: false,
+            evidence: None,
+            blockers: Vec::new(),
+        },
+    );
+    assert_eq!(
+        blocked.migration_gate.decision,
+        CompatibilityCutoverDecision::Blocked
+    );
+    assert_eq!(blocked.migration_gate.rollback_blockers, 1);
+
+    let ready = assess_compatibility_cypher_migration_gate_bundle_with_rollback(
+        &fixture,
+        &inventory,
+        &shadow,
+        CompatibilityInventoryCoveragePolicy::default(),
+        CompatibilityCutoverPolicy::default(),
+        CompatibilityRollbackEvidence {
+            required: true,
+            ready: true,
+            evidence: Some("previous wrapper reopen smoke passed".to_string()),
+            blockers: Vec::new(),
+        },
+    );
+    assert_eq!(
+        ready.migration_gate.decision,
+        CompatibilityCutoverDecision::Ready
+    );
+    assert_eq!(
+        ready.migration_gate.rollback_evidence.as_deref(),
+        Some("previous wrapper reopen smoke passed")
+    );
 }
 
 #[test]

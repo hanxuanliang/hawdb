@@ -356,7 +356,7 @@ Skein-side error with the shadow engine name.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -421,7 +421,9 @@ without parsing blocker strings.
 When the caller requires rollback proof, the migration gate can also carry
 caller-owned rollback evidence through `rollback_required`, `rollback_ready`,
 and `rollback_evidence`. Skein only gates on this supplied evidence; it does not
-open or link the previous graph database.
+open or link the previous graph database. The CLI sets `rollback_required` with
+`--require-rollback-evidence` and marks rollback ready only when
+`--rollback-evidence <text>` is supplied.
 
 `--shadow-trace <path>` writes a JSON-lines transcript of the external shadow
 conversation. Each line contains `sequence`, `event`, and `payload`; `event` is

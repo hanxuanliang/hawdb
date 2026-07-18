@@ -54,6 +54,7 @@ pub use api::{
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
+    assess_compatibility_cypher_migration_gate_bundle_with_rollback,
     assess_compatibility_migration_gate, assess_compatibility_migration_gate_bundle,
     assess_compatibility_migration_gate_with_rollback, assess_query_inventory_coverage,
     assess_query_inventory_cypher_coverage, assess_query_inventory_gate,

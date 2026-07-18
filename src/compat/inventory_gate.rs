@@ -742,10 +742,29 @@ pub fn assess_compatibility_cypher_migration_gate_bundle(
     inventory_policy: CompatibilityInventoryCoveragePolicy,
     cutover_policy: CompatibilityCutoverPolicy,
 ) -> CompatibilityMigrationGateBundle {
+    assess_compatibility_cypher_migration_gate_bundle_with_rollback(
+        fixture,
+        inventory,
+        shadow,
+        inventory_policy,
+        cutover_policy,
+        CompatibilityRollbackEvidence::default(),
+    )
+}
+
+pub fn assess_compatibility_cypher_migration_gate_bundle_with_rollback(
+    fixture: &CompatibilityFixture,
+    inventory: &CompatibilityQueryInventory,
+    shadow: &CompatibilityShadowReport,
+    inventory_policy: CompatibilityInventoryCoveragePolicy,
+    cutover_policy: CompatibilityCutoverPolicy,
+    rollback: CompatibilityRollbackEvidence,
+) -> CompatibilityMigrationGateBundle {
     let coverage = assess_query_inventory_cypher_coverage(fixture, inventory);
     let inventory_gate = assess_query_inventory_gate(&coverage, inventory_policy);
     let cutover = assess_compatibility_cutover(shadow, cutover_policy);
-    let migration_gate = assess_compatibility_migration_gate(&inventory_gate, &cutover);
+    let migration_gate =
+        assess_compatibility_migration_gate_with_rollback(&inventory_gate, &cutover, rollback);
     CompatibilityMigrationGateBundle {
         coverage,
         inventory_gate,

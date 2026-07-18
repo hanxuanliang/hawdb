@@ -1,10 +1,11 @@
 use skein::{
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
-    scan_nowledge_query_inventory_cypher_migration_gate_to_json,
+    scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
     scan_nowledge_query_inventory_to_json, CanonicalGraphSnapshotValidation,
-    CanonicalSnapshotIdentityAudit, Database, DatabaseConfig, ExternalShadowCommand,
-    ExternalShadowReady, GraphLightningBootstrapManifest, Result, SkeinError, Value,
+    CanonicalSnapshotIdentityAudit, CompatibilityRollbackEvidence, Database, DatabaseConfig,
+    ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
+    NowledgeCypherMigrationGateJsonOptions, Result, SkeinError, Value,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -43,6 +44,8 @@ fn main() -> Result<()> {
             let mut shadow_ready = false;
             let mut shadow_trace = None;
             let mut shadow_timeout = None;
+            let mut rollback_required = false;
+            let mut rollback_evidence = None;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-ready" => {
@@ -73,6 +76,16 @@ fn main() -> Result<()> {
                             SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
                         })?;
                         shadow_timeout = Some(parse_shadow_timeout_ms(&raw_timeout)?);
+                    }
+                    "--require-rollback-evidence" => {
+                        rollback_required = true;
+                        args.next();
+                    }
+                    "--rollback-evidence" => {
+                        args.next();
+                        rollback_evidence = Some(args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
+                        })?);
                     }
                     _ => break,
                 }
@@ -127,7 +140,19 @@ fn main() -> Result<()> {
                     None
                 };
             let mut json =
-                scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
+                scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+                    root,
+                    &mut shadow,
+                    NowledgeCypherMigrationGateJsonOptions {
+                        rollback: CompatibilityRollbackEvidence {
+                            required: rollback_required,
+                            ready: rollback_evidence.is_some(),
+                            evidence: rollback_evidence,
+                            blockers: Vec::new(),
+                        },
+                        ..NowledgeCypherMigrationGateJsonOptions::default()
+                    },
+                )?;
             add_shadow_run_report(&mut json, &shadow_name_report, is_self_shadow)?;
             if let Some(ready) = shadow_ready_report.as_ref() {
                 add_shadow_ready_report(&mut json, ready)?;
@@ -486,7 +511,7 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 

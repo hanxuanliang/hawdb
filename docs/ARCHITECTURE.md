@@ -351,7 +351,8 @@ packages the four reports into one result, and
 `compatibility_migration_gate_bundle_to_json` preserves the same structure for
 artifact upload. The `nowledge-cypher-migration-gate [--require-ready]
 [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready]
-[--shadow-trace <path>] [--shadow-timeout-ms <ms>] <root> <shadow-name>
+[--shadow-trace <path>] [--shadow-timeout-ms <ms>]
+[--require-rollback-evidence] [--rollback-evidence <text>] <root> <shadow-name>
 <program> [args...]` CLI command
 scans a Nowledge source tree,
 runs the public Nowledge core fixture through `ExternalShadowCommand`, uses
@@ -361,6 +362,9 @@ JSON. With `--require-ready`, the command exits with an error when the migration
 gate decision is blocked. With `--require-cutover-evidence`, the command also
 runs the ready preflight and requires previous-wrapper shadow evidence, making it
 suitable as a production cutover gate.
+With `--require-rollback-evidence`, the same gate also requires caller-supplied
+previous-database reopen proof through `--rollback-evidence <text>` before the
+migration decision can be ready.
 The bundle also carries `background_maintenance` resource-readiness diagnostics
 from the post-fixture local database, including stable QoS admission strings and
 operation totals for caller-owned maintenance loops. These diagnostics are

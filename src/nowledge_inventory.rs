@@ -1,11 +1,12 @@
 use crate::api::{BackgroundMaintenanceSummary, Database};
 use crate::compat::{
-    assess_compatibility_cypher_migration_gate_bundle, assess_query_inventory_cypher_coverage,
-    build_compatibility_query_inventory, compatibility_inventory_coverage_report_to_json,
-    compatibility_migration_gate_bundle_to_json, nowledge_memory_core_fixture,
-    run_compatibility_fixture_with_shadow, CompatibilityCutoverPolicy,
-    CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite, CompatibilityQueryInventory,
-    CompatibilityShadowEngine, ExternalShadowReady,
+    assess_compatibility_cypher_migration_gate_bundle_with_rollback,
+    assess_query_inventory_cypher_coverage, build_compatibility_query_inventory,
+    compatibility_inventory_coverage_report_to_json, compatibility_migration_gate_bundle_to_json,
+    nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
+    CompatibilityCutoverPolicy, CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite,
+    CompatibilityQueryInventory, CompatibilityRollbackEvidence, CompatibilityShadowEngine,
+    ExternalShadowReady,
 };
 use crate::error::{Result, SkeinError};
 use crate::qos::{LocalQosPolicy, LocalQosState};
@@ -29,6 +30,7 @@ pub struct NowledgeCypherMigrationGateJsonOptions {
     pub shadow_trace_path: Option<String>,
     pub shadow_request_count: Option<u64>,
     pub include_cutover_evidence: bool,
+    pub rollback: CompatibilityRollbackEvidence,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -192,12 +194,13 @@ pub fn scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
     let shadow_engine_name = shadow.name().to_string();
     let mut primary = Database::new();
     let shadow_report = run_compatibility_fixture_with_shadow(&mut primary, &fixture, shadow)?;
-    let bundle = assess_compatibility_cypher_migration_gate_bundle(
+    let bundle = assess_compatibility_cypher_migration_gate_bundle_with_rollback(
         &fixture,
         &inventory,
         &shadow_report,
         CompatibilityInventoryCoveragePolicy::default(),
         CompatibilityCutoverPolicy::default(),
+        options.rollback.clone(),
     );
     let mut json = compatibility_migration_gate_bundle_to_json(&bundle);
     insert_background_maintenance_summary_json(&mut json, &primary)?;
@@ -1003,8 +1006,8 @@ mod tests {
         strip_cfg_test_modules, NowledgeCypherMigrationGateJsonOptions,
     };
     use crate::compat::{
-        CompatibilityShadowEngine, ExternalShadowReady, ProjectedGraphFixtureCheck,
-        ProjectedGraphShadowOutput,
+        CompatibilityRollbackEvidence, CompatibilityShadowEngine, ExternalShadowReady,
+        ProjectedGraphFixtureCheck, ProjectedGraphShadowOutput,
     };
     use crate::{Database, QueryOutput, Result};
     use std::fs;
@@ -1337,6 +1340,12 @@ mod tests {
                 shadow_trace_path: Some("/tmp/skein-shadow.jsonl".to_string()),
                 shadow_request_count: Some(42),
                 include_cutover_evidence: true,
+                rollback: CompatibilityRollbackEvidence {
+                    required: true,
+                    ready: true,
+                    evidence: Some("previous wrapper reopen smoke passed".to_string()),
+                    blockers: Vec::new(),
+                },
                 ..NowledgeCypherMigrationGateJsonOptions::default()
             },
         )
@@ -1354,11 +1363,66 @@ mod tests {
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
         assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);
+        assert_eq!(bundle["migration_gate"]["rollback_required"], true);
+        assert_eq!(bundle["migration_gate"]["rollback_ready"], true);
+        assert_eq!(
+            bundle["migration_gate"]["rollback_evidence"],
+            "previous wrapper reopen smoke passed"
+        );
         assert!(
             bundle["background_maintenance"]["admitted_count"]
                 .as_u64()
                 .unwrap()
                 > 0
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_cypher_migration_gate_blocks_when_required_rollback_evidence_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-migration-gate-rollback-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let mut shadow = TestShadowEngine::default();
+        let bundle = scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+            &root,
+            &mut shadow,
+            NowledgeCypherMigrationGateJsonOptions {
+                rollback: CompatibilityRollbackEvidence {
+                    required: true,
+                    ready: false,
+                    evidence: None,
+                    blockers: Vec::new(),
+                },
+                ..NowledgeCypherMigrationGateJsonOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(bundle["migration_gate"]["decision"], "blocked");
+        assert_eq!(bundle["migration_gate"]["rollback_required"], true);
+        assert_eq!(bundle["migration_gate"]["rollback_ready"], false);
+        assert_eq!(bundle["migration_gate"]["rollback_blockers"], 1);
+        assert_eq!(
+            bundle["migration_gate"]["rollback_blocker_messages"][0],
+            "previous database reopen evidence is required before cutover"
         );
 
         fs::remove_dir_all(root).unwrap();

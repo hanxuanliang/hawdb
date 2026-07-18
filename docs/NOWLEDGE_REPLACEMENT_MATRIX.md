@@ -59,6 +59,9 @@ caller-owned rollback evidence fields, `shadow_run.evidence_kind`, plus grouped
 blocker messages so cutover automation can separate scanner coverage gaps,
 previous-wrapper parity failures, rollback readiness gaps, and self-shadow
 protocol smoke without making Skein open the previous graph database.
+The Nowledge migration-gate library options and CLI can require caller-owned
+rollback evidence and carry the supplied previous-database reopen proof into the
+gate decision.
 Graph Lightning bootstrap bundle export gates likewise split manifest and
 GraphStream blockers into counts and grouped messages for import preflight
 automation.
