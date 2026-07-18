@@ -1791,6 +1791,42 @@ pub struct KnowledgeSkillUsageStatsBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMetadataUpdate {
+    pub thread_id: String,
+    pub metadata: Value,
+    pub updated_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMetadataBatchRequest {
+    pub updates: Vec<KnowledgeThreadMetadataUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMetadataBatchRow {
+    pub thread_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMetadataBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeThreadMetadataBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3531,6 +3567,13 @@ impl Database {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         update_knowledge_skill_usage_stats_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_thread_metadata_batch(
+        &mut self,
+        request: &KnowledgeThreadMetadataBatchRequest,
+    ) -> Result<KnowledgeThreadMetadataBatchOutput> {
+        update_knowledge_thread_metadata_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -6817,6 +6860,129 @@ fn validate_skill_success_rate(value: &Value) -> Result<()> {
             "knowledge skill usage stats update requires success rate between 0 and 1".to_string(),
         ))
     }
+}
+
+fn update_knowledge_thread_metadata_batch_for(
+    db: &mut Database,
+    request: &KnowledgeThreadMetadataBatchRequest,
+) -> Result<KnowledgeThreadMetadataBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.thread_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge thread metadata update requires a non-empty thread id".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Thread", &update.thread_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeThreadMetadataBatchRow {
+                thread_id: update.thread_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.thread_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeThreadMetadataBatchRow {
+                thread_id: update.thread_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeThreadMetadataBatchRow {
+                thread_id: update.thread_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let mut assignments = BTreeMap::from([("metadata".to_string(), update.metadata.clone())]);
+        if let Some(updated_at) = &update.updated_at {
+            assignments.insert("updated_at".to_string(), updated_at.clone());
+        }
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeThreadMetadataBatchRow {
+            thread_id: update.thread_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeThreadMetadataBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Thread", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeThreadMetadataBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
 }
 
 fn delete_knowledge_entity_for(
@@ -11205,6 +11371,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         self.db.update_knowledge_skill_usage_stats_batch(request)
+    }
+
+    pub fn update_knowledge_thread_metadata_batch(
+        &mut self,
+        request: &KnowledgeThreadMetadataBatchRequest,
+    ) -> Result<KnowledgeThreadMetadataBatchOutput> {
+        self.db.update_knowledge_thread_metadata_batch(request)
     }
 
     pub fn delete_knowledge_entity(

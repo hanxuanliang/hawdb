@@ -174,6 +174,11 @@ Skill usage-stat writes are covered by a typed batch for Nowledge
 counts, and bounded numeric success rates before WAL, reports missing,
 idless, and duplicate rows without writing, and commits eligible Skill rows
 through one grouped WAL batch.
+Thread metadata writes are covered by a typed batch for Nowledge `metadata`
+updates with optional `updated_at` stamping. The wrapper validates Thread ids
+before WAL, reports missing, idless, and duplicate rows without writing, keeps
+metadata-only updates from changing existing timestamps, and commits eligible
+Thread rows through one grouped WAL batch.
 
 ## Current Direction
 

@@ -87,10 +87,11 @@ pub use api::{
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchOutput, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryCountBatchRow, KnowledgeSubgraphOutput, KnowledgeSubgraphRequest,
-    KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
-    NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheStats, QueryOutput,
-    RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
+    KnowledgeThreadMetadataBatchOutput, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataBatchRow, KnowledgeThreadMetadataUpdate, KnowledgeTraversalDiagnostics,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphExplainOutput, NowledgeGraphStatement, NowledgeGraphTransactionOutput,
+    PlanCacheStats, QueryOutput, RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{

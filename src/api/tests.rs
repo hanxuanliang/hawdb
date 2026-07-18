@@ -28,6 +28,7 @@ use super::{
     KnowledgeSkillUsageStatsUpdate, KnowledgeSourceLifecycleBatchRequest,
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchRequest, KnowledgeSubgraphRequest,
+    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
     NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
@@ -5868,6 +5869,182 @@ fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("metadata"),
             Some(&Some(Value::String("{\"runs\":5}".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_thread_metadata_batch_for_nowledge_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1', metadata: '{}', updated_at: 1})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_2', metadata: '{}', updated_at: 1})")
+        .unwrap();
+
+    let output = db
+        .update_knowledge_thread_metadata_batch(&KnowledgeThreadMetadataBatchRequest {
+            updates: vec![
+                KnowledgeThreadMetadataUpdate {
+                    thread_id: "thread_1".to_string(),
+                    metadata: Value::String("{\"summary\":\"ready\"}".to_string()),
+                    updated_at: Some(Value::Int(100)),
+                },
+                KnowledgeThreadMetadataUpdate {
+                    thread_id: "thread_2".to_string(),
+                    metadata: Value::String("{\"summary\":\"metadata-only\"}".to_string()),
+                    updated_at: None,
+                },
+                KnowledgeThreadMetadataUpdate {
+                    thread_id: "thread_2".to_string(),
+                    metadata: Value::String("{\"duplicate\":true}".to_string()),
+                    updated_at: Some(Value::Int(200)),
+                },
+                KnowledgeThreadMetadataUpdate {
+                    thread_id: "missing".to_string(),
+                    metadata: Value::String("{}".to_string()),
+                    updated_at: Some(Value::Int(300)),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 3);
+    assert_eq!(output.rows.len(), 4);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 2);
+    assert_eq!(output.updated_property_count, 3);
+    assert_eq!(output.rows[0].updated_property_count, 2);
+    assert_eq!(output.rows[1].updated_property_count, 1);
+    assert!(output.rows[2].duplicate);
+    assert!(!output.rows[3].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Thread".to_string(),
+                external_id: "thread_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Thread".to_string(),
+                external_id: "thread_2".to_string(),
+            },
+        ],
+        property_names: vec!["metadata".to_string(), "updated_at".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("metadata"),
+        Some(&Some(Value::String("{\"summary\":\"ready\"}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("updated_at"),
+        Some(&Some(Value::Int(100)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("metadata"),
+        Some(&Some(Value::String(
+            "{\"summary\":\"metadata-only\"}".to_string()
+        )))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("updated_at"),
+        Some(&Some(Value::Int(1)))
+    );
+}
+
+#[test]
+fn thread_metadata_batch_rejects_empty_thread_id_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1', metadata: '{}', updated_at: 1})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_thread_metadata_batch(&KnowledgeThreadMetadataBatchRequest {
+            updates: vec![KnowledgeThreadMetadataUpdate {
+                thread_id: String::new(),
+                metadata: Value::String("{}".to_string()),
+                updated_at: Some(Value::Int(100)),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty thread id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_thread_metadata_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_thread_metadata_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Thread {id: 'thread_1', metadata: '{}', updated_at: 1})")
+            .unwrap();
+        db.query("CREATE (:Thread {id: 'thread_2', metadata: '{}', updated_at: 1})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_thread_metadata_batch(&KnowledgeThreadMetadataBatchRequest {
+            updates: vec![
+                KnowledgeThreadMetadataUpdate {
+                    thread_id: "thread_1".to_string(),
+                    metadata: Value::String("{\"summary\":\"ready\"}".to_string()),
+                    updated_at: Some(Value::Int(100)),
+                },
+                KnowledgeThreadMetadataUpdate {
+                    thread_id: "thread_2".to_string(),
+                    metadata: Value::String("{\"summary\":\"metadata-only\"}".to_string()),
+                    updated_at: None,
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Thread".to_string(),
+                    external_id: "thread_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Thread".to_string(),
+                    external_id: "thread_2".to_string(),
+                },
+            ],
+            property_names: vec!["metadata".to_string(), "updated_at".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("metadata"),
+            Some(&Some(Value::String("{\"summary\":\"ready\"}".to_string())))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("updated_at"),
+            Some(&Some(Value::Int(100)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("metadata"),
+            Some(&Some(Value::String(
+                "{\"summary\":\"metadata-only\"}".to_string()
+            )))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("updated_at"),
+            Some(&Some(Value::Int(1)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
