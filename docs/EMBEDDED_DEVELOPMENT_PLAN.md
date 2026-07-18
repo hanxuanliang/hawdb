@@ -955,6 +955,11 @@ Current implemented slice:
   path for `IndexNodeTextSeek`, preserving the residual filter and legacy
   decision string while adding a stable `implementation:node_text_index_seek`
   rule event for FTS/retrieval diagnostics
+- conjunctions that cover a full composite equality index now use the
+  implementation-rule path for `IndexNodeCompositeSeek`, preserving the residual
+  filter and legacy decision string while adding a stable
+  `implementation:node_composite_index_seek` rule event for multi-property
+  lookup diagnostics
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,

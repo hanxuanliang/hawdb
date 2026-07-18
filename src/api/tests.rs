@@ -6066,6 +6066,9 @@ fn composite_index_ddl_enables_composite_index_seek_plans() {
         .decisions
         .iter()
         .any(|decision| decision.contains("choose IndexNodeCompositeSeek")));
+    assert!(explain.trace.decisions.iter().any(|decision| {
+        decision.starts_with("apply implementation:node_composite_index_seek:")
+    }));
 
     let output = db
         .query(

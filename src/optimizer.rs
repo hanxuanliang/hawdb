@@ -1900,6 +1900,10 @@ struct NodeTextSeekRule<'a> {
     catalog: &'a OptimizerCatalog,
 }
 
+struct NodeCompositeSeekRule<'a> {
+    catalog: &'a OptimizerCatalog,
+}
+
 #[derive(Debug)]
 struct GroupExpr {
     logical: LogicalPlan,
@@ -5791,6 +5795,55 @@ impl OptimizerRule<GraphRuleExpr> for NodeTextSeekRule<'_> {
     }
 }
 
+impl OptimizerRule<GraphRuleExpr> for NodeCompositeSeekRule<'_> {
+    fn id(&self) -> RuleId {
+        RuleId::new("node_composite_index_seek", RuleKind::Implementation)
+    }
+
+    fn promise(&self, expression: &GraphRuleExpr) -> RulePromise {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return RulePromise::NEVER;
+        };
+        let Predicate::And(predicates) = predicate.as_ref() else {
+            return RulePromise::NEVER;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return RulePromise::NEVER;
+        };
+        if composite_index_seek_candidate(predicates, predicate, scan_variable, label, self.catalog)
+            .is_some()
+        {
+            RulePromise::new(105)
+        } else {
+            RulePromise::NEVER
+        }
+    }
+
+    fn apply(&self, expression: &GraphRuleExpr) -> Option<RuleApplication<GraphRuleExpr>> {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return None;
+        };
+        let Predicate::And(predicates) = predicate.as_ref() else {
+            return None;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return None;
+        };
+        composite_index_seek_candidate(predicates, predicate, scan_variable, label, self.catalog)
+            .map(|(plan, decision)| {
+                RuleApplication::new(GraphRuleExpr::Physical(Box::new(plan)), decision)
+            })
+    }
+}
+
 impl OptimizerRule<GraphRuleExpr> for NodeRangeSeekRule<'_> {
     fn id(&self) -> RuleId {
         RuleId::new("node_range_index_seek", RuleKind::Implementation)
@@ -6071,6 +6124,20 @@ fn text_index_seek_from_rule(
     physical_plan_from_rule_batch(&expression, &[&rule], decisions)
 }
 
+fn composite_index_seek_from_rule(
+    predicate: &Predicate,
+    input: &LogicalPlan,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+) -> Option<PhysicalPlan> {
+    let expression = GraphRuleExpr::Filter {
+        predicate: Box::new(predicate.clone()),
+        input: Box::new(input.clone()),
+    };
+    let rule = NodeCompositeSeekRule { catalog };
+    physical_plan_from_rule_batch(&expression, &[&rule], decisions)
+}
+
 fn range_index_seek_from_rule(
     predicate: &Predicate,
     input: &LogicalPlan,
@@ -6279,6 +6346,31 @@ fn composite_index_seek_from_conjunction(
     catalog: &OptimizerCatalog,
     decisions: &mut Vec<String>,
 ) -> Option<PhysicalPlan> {
+    let logical_scan = LogicalPlan::NodeScan {
+        variable: scan_variable.to_string(),
+        label: label.to_string(),
+    };
+    if let Some(plan) =
+        composite_index_seek_from_rule(full_predicate, &logical_scan, catalog, decisions)
+    {
+        return Some(plan);
+    }
+    if let Some((plan, decision)) =
+        composite_index_seek_candidate(predicates, full_predicate, scan_variable, label, catalog)
+    {
+        decisions.push(decision);
+        return Some(plan);
+    }
+    None
+}
+
+fn composite_index_seek_candidate(
+    predicates: &[Predicate],
+    full_predicate: &Predicate,
+    scan_variable: &str,
+    label: &str,
+    catalog: &OptimizerCatalog,
+) -> Option<(PhysicalPlan, String)> {
     let mut equality_values = BTreeMap::<String, Value>::new();
     for predicate in predicates {
         let Predicate::PropertyEq {
@@ -6320,18 +6412,19 @@ fn composite_index_seek_from_conjunction(
             .saturating_mul(2)
             .saturating_add(properties.len() as u64);
         if seek_cost <= scan_cost {
-            decisions.push(format!(
+            let decision = format!(
                 "choose IndexNodeCompositeSeek for {label}.{:?}: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} distinct_product={distinct_product}",
                 properties
-            ));
-            return Some(PhysicalPlan::FilterExec {
+            );
+            let plan = PhysicalPlan::FilterExec {
                 predicate: full_predicate.clone(),
                 input: Box::new(PhysicalPlan::IndexNodeCompositeSeek {
                     variable: scan_variable.to_string(),
                     label: label.to_string(),
                     predicates: seek_predicates,
                 }),
-            });
+            };
+            return Some((plan, decision));
         }
     }
     None
