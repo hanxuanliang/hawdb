@@ -361,6 +361,10 @@ JSON. With `--require-ready`, the command exits with an error when the migration
 gate decision is blocked. With `--require-cutover-evidence`, the command also
 runs the ready preflight and requires previous-wrapper shadow evidence, making it
 suitable as a production cutover gate.
+The bundle also carries `background_maintenance` resource-readiness diagnostics
+from the post-fixture local database, including stable QoS admission strings and
+operation totals for caller-owned maintenance loops. These diagnostics are
+reported for scheduling visibility and do not affect compatibility readiness.
 `skein-shadow-self` is a JSON-lines self-shadow process for protocol and CLI
 smoke testing; it exercises the process boundary but does not replace the
 required previous-wrapper parity run. The CLI bundle includes `shadow_run`

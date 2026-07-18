@@ -383,6 +383,14 @@ decision is `ready`. Its `blockers` array is intended for CI and release gates
 that need to reject protocol smoke or incomplete shadow runs without rejoining
 the rest of the bundle fields.
 
+The bundle includes a top-level `background_maintenance` object with the local
+Skein maintenance summary after the compatibility fixture run. It reports
+candidate counts, admitted/deferred/rejected operation totals, stable work
+class/priority/admission strings, reason codes, and whether a search projection
+delta candidate carries an executable request. This object is resource
+readiness evidence for caller-owned scheduling; it does not change the
+compatibility or cutover decision.
+
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
 automation that must reject self-shadow smoke runs, missing shadow parity

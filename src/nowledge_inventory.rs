@@ -1,4 +1,4 @@
-use crate::api::Database;
+use crate::api::{BackgroundMaintenanceSummary, Database};
 use crate::compat::{
     assess_compatibility_cypher_migration_gate_bundle, assess_query_inventory_cypher_coverage,
     build_compatibility_query_inventory, compatibility_inventory_coverage_report_to_json,
@@ -8,6 +8,8 @@ use crate::compat::{
     CompatibilityShadowEngine, ExternalShadowReady,
 };
 use crate::error::{Result, SkeinError};
+use crate::qos::{LocalQosPolicy, LocalQosState};
+use crate::search::SearchIndex;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -198,6 +200,7 @@ pub fn scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
         CompatibilityCutoverPolicy::default(),
     );
     let mut json = compatibility_migration_gate_bundle_to_json(&bundle);
+    insert_background_maintenance_summary_json(&mut json, &primary)?;
     add_shadow_metadata_to_migration_gate_json(&mut json, &shadow_engine_name, options)?;
     Ok(json)
 }
@@ -342,6 +345,60 @@ fn insert_cutover_evidence_json(
         }),
     );
     Ok(())
+}
+
+fn insert_background_maintenance_summary_json(
+    bundle: &mut serde_json::Value,
+    database: &Database,
+) -> Result<()> {
+    let search_index = SearchIndex::in_memory();
+    let summary = database.background_maintenance_summary(
+        Some(&search_index),
+        &LocalQosPolicy::default(),
+        &LocalQosState::default(),
+        Default::default(),
+    );
+    migration_gate_json_object(bundle)?.insert(
+        "background_maintenance".to_string(),
+        background_maintenance_summary_to_json(&summary),
+    );
+    Ok(())
+}
+
+fn background_maintenance_summary_to_json(
+    summary: &BackgroundMaintenanceSummary,
+) -> serde_json::Value {
+    serde_json::json!({
+        "total_candidates": summary.total_candidates,
+        "admitted_count": summary.admitted_count,
+        "deferred_count": summary.deferred_count,
+        "rejected_count": summary.rejected_count,
+        "total_estimated_operations": summary.total_estimated_operations,
+        "admitted_estimated_operations": summary.admitted_estimated_operations,
+        "deferred_estimated_operations": summary.deferred_estimated_operations,
+        "rejected_estimated_operations": summary.rejected_estimated_operations,
+        "top_admitted_kind": summary.top_admitted_kind.map(|kind| kind.as_str()),
+        "top_admitted_name": summary.top_admitted_name.as_deref(),
+        "ranked": summary
+            .ranked
+            .iter()
+            .map(|item| {
+                serde_json::json!({
+                    "kind": item.kind.as_str(),
+                    "name": &item.name,
+                    "work_class": &item.work_class_name,
+                    "priority": &item.priority_name,
+                    "estimated_operations": item.estimated_operations,
+                    "admission": &item.admission_name,
+                    "admission_code": &item.admission_code_name,
+                    "score": item.score,
+                    "reason_codes": &item.reason_code_names,
+                    "reasons": &item.reasons,
+                    "has_executable_search_projection_graph_delta": item.has_executable_search_projection_graph_delta,
+                })
+            })
+            .collect::<Vec<_>>(),
+    })
 }
 
 fn fixture_check_cypher(check: &crate::compat::CompatibilityCheck) -> Option<&str> {
@@ -1211,6 +1268,28 @@ mod tests {
         assert_eq!(bundle["migration_gate"]["decision"], "ready");
         assert_eq!(bundle["migration_gate"]["shadow_decision"], "ready");
         assert_eq!(
+            bundle["background_maintenance"]["total_candidates"]
+                .as_u64()
+                .unwrap(),
+            bundle["background_maintenance"]["ranked"]
+                .as_array()
+                .unwrap()
+                .len() as u64
+        );
+        assert!(
+            bundle["background_maintenance"]["total_candidates"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(bundle["background_maintenance"]["ranked"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item["work_class"] == "projection"
+                && item["priority"] == "background"
+                && item["admission"] == "admit"));
+        assert_eq!(
             bundle["migration_gate"]["blockers"]
                 .as_array()
                 .unwrap()
@@ -1275,6 +1354,12 @@ mod tests {
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
         assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);
+        assert!(
+            bundle["background_maintenance"]["admitted_count"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
