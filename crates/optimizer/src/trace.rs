@@ -1,4 +1,5 @@
 use crate::cost::{PlanCost, PlanCostBreakdown};
+use crate::search::RuleEvent;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -23,4 +24,5 @@ pub struct OptimizerTrace {
     pub selected_plan_class_counts: BTreeMap<String, usize>,
     pub warnings: Vec<String>,
     pub decisions: Vec<String>,
+    pub rule_events: Vec<RuleEvent>,
 }

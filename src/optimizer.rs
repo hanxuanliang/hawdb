@@ -11,8 +11,8 @@ use crate::value::Value;
 pub use skein_optimizer::{
     apply_rule_batch, plan_class_counts, plan_operator_counts, GroupId, Memo,
     OptimizationSearchReport, OptimizerConfig, OptimizerRule, OptimizerTrace, PhysicalPlanClass,
-    PhysicalPlanKind, PlanCost, PlanCostBreakdown, RuleApplication, RuleId, RuleKind, RulePromise,
-    SelectedPlanTrace,
+    PhysicalPlanKind, PlanCost, PlanCostBreakdown, RuleApplication, RuleEvent, RuleId, RuleKind,
+    RuleOutcome, RulePromise, SelectedPlanTrace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -7549,7 +7549,7 @@ mod tests {
     use super::{
         CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
         OptimizerConfig, PhysicalPlan, PhysicalPlanChildren, PhysicalPlanClass, PhysicalPlanKind,
-        PlanCost,
+        PlanCost, RuleOutcome,
     };
     use crate::cypher::RelationshipDirection;
     use crate::planner::{
@@ -9289,6 +9289,10 @@ mod tests {
             .any(|decision| decision.contains("choose IndexNodeSeek for Memory.id")));
         assert!(trace.decisions.iter().any(|decision| {
             decision.starts_with("apply implementation:node_equality_index_seek:")
+        }));
+        assert!(trace.rule_events.iter().any(|event| {
+            event.rule() == "implementation:node_equality_index_seek"
+                && event.outcome() == RuleOutcome::Applied
         }));
         assert!(trace
             .decisions

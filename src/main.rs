@@ -3109,6 +3109,20 @@ fn explain_output_json(
         "selected_plan_class_counts": output.trace.selected_plan_class_counts,
         "warnings": output.trace.warnings,
         "decisions": output.trace.decisions,
+        "rule_events": output
+            .trace
+            .rule_events
+            .iter()
+            .map(rule_event_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn rule_event_json(event: &skein::optimizer::RuleEvent) -> serde_json::Value {
+    serde_json::json!({
+        "rule": event.rule(),
+        "outcome": event.outcome().as_str(),
+        "detail": event.detail(),
     })
 }
 
@@ -3639,6 +3653,10 @@ mod tests {
                 selected_plan_class_counts: class_counts,
                 warnings: vec!["diagnostic warning".to_string()],
                 decisions: vec!["diagnostic decision".to_string()],
+                rule_events: vec![skein::optimizer::RuleEvent::applied(
+                    "implementation:node_equality_index_seek",
+                    "priority=100 property=id",
+                )],
             },
         };
 
@@ -3661,6 +3679,12 @@ mod tests {
         assert_eq!(json["selected_plan_class_counts"]["access"], 1);
         assert_eq!(json["warnings"][0], "diagnostic warning");
         assert_eq!(json["decisions"][0], "diagnostic decision");
+        assert_eq!(
+            json["rule_events"][0]["rule"],
+            "implementation:node_equality_index_seek"
+        );
+        assert_eq!(json["rule_events"][0]["outcome"], "apply");
+        assert_eq!(json["rule_events"][0]["detail"], "priority=100 property=id");
     }
 
     #[test]

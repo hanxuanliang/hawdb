@@ -14,6 +14,7 @@ pub struct OptimizationSearchReport {
     mode: SearchMode,
     warnings: Vec<String>,
     decisions: Vec<String>,
+    rule_events: Vec<RuleEvent>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,6 +49,7 @@ impl OptimizationSearchReport {
             mode: SearchMode::Memo,
             warnings: Vec::new(),
             decisions: Vec::new(),
+            rule_events: Vec::new(),
         }
     }
 
@@ -57,6 +59,7 @@ impl OptimizationSearchReport {
             mode: SearchMode::DirectFallback,
             warnings: Vec::new(),
             decisions: Vec::new(),
+            rule_events: Vec::new(),
         };
         report.warnings.push(format!(
             "optimizer memo budget exceeded: required_groups={required_groups} max_groups={max_groups}; used deterministic direct physical fallback"
@@ -80,16 +83,27 @@ impl OptimizationSearchReport {
         &self.decisions
     }
 
+    pub fn rule_events(&self) -> &[RuleEvent] {
+        &self.rule_events
+    }
+
     pub fn push_decision(&mut self, decision: impl Into<String>) {
-        self.decisions.push(decision.into());
+        let decision = decision.into();
+        if let Some(event) = RuleEvent::from_decision(&decision) {
+            self.rule_events.push(event);
+        }
+        self.decisions.push(decision);
     }
 
     pub fn extend_decisions(&mut self, decisions: impl IntoIterator<Item = String>) {
-        self.decisions.extend(decisions);
+        for decision in decisions {
+            self.push_decision(decision);
+        }
     }
 
     pub fn push_rule_event(&mut self, event: RuleEvent) {
-        self.decisions.push(event.into_decision());
+        self.decisions.push(event.clone().into_decision());
+        self.rule_events.push(event);
     }
 
     pub fn record_selected_plan_cost(&mut self, cost: PlanCost) {
@@ -110,6 +124,7 @@ impl OptimizationSearchReport {
             selected_plan_class_counts: selected.class_counts,
             warnings: self.warnings,
             decisions: self.decisions,
+            rule_events: self.rule_events,
         }
     }
 }
@@ -154,6 +169,12 @@ impl RuleEvent {
     pub fn into_decision(self) -> String {
         format!("{} {}: {}", self.outcome.as_str(), self.rule, self.detail)
     }
+
+    fn from_decision(decision: &str) -> Option<Self> {
+        let (outcome, rest) = decision.split_once(' ')?;
+        let (rule, detail) = rest.split_once(": ")?;
+        Some(Self::new(rule, RuleOutcome::from_str(outcome)?, detail))
+    }
 }
 
 impl RuleOutcome {
@@ -163,6 +184,16 @@ impl RuleOutcome {
             RuleOutcome::Skipped => "skip",
             RuleOutcome::Estimated => "estimate",
             RuleOutcome::Selected => "selected",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "apply" => Some(Self::Applied),
+            "skip" => Some(Self::Skipped),
+            "estimate" => Some(Self::Estimated),
+            "selected" => Some(Self::Selected),
+            _ => None,
         }
     }
 }
@@ -182,6 +213,7 @@ mod tests {
         assert_eq!(report.warnings().len(), 1);
         assert!(report.warnings()[0].contains("required_groups=9 max_groups=4"));
         assert!(report.decisions().is_empty());
+        assert!(report.rule_events().is_empty());
     }
 
     #[test]
@@ -224,5 +256,23 @@ mod tests {
         );
         assert_eq!(trace.selected_plan_operator_counts["IndexNodeSeek"], 1);
         assert_eq!(trace.selected_plan_class_counts["access"], 1);
+    }
+
+    #[test]
+    fn search_report_preserves_structured_rule_events_from_legacy_decisions() {
+        let mut report = OptimizationSearchReport::memo(1);
+        report.push_decision(
+            "apply implementation:node_equality_index_seek: priority=100 property=id",
+        );
+        report.push_decision("choose IndexNodeSeek");
+
+        assert_eq!(report.decisions().len(), 2);
+        assert_eq!(report.rule_events().len(), 1);
+        assert_eq!(
+            report.rule_events()[0].rule(),
+            "implementation:node_equality_index_seek"
+        );
+        assert_eq!(report.rule_events()[0].outcome(), RuleOutcome::Applied);
+        assert_eq!(report.rule_events()[0].detail(), "priority=100 property=id");
     }
 }
