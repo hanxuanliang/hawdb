@@ -8011,6 +8011,102 @@ fn background_maintenance_skips_over_limit_search_projection_graph_delta() {
 }
 
 #[test]
+fn background_maintenance_includes_stale_search_projection_graph_delta() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
+        .unwrap();
+    let search_index = SearchIndex::in_memory();
+
+    let candidates = db.background_maintenance_candidates(
+        Some(&search_index),
+        BackgroundMaintenanceOptions {
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_graph_lightning_bootstrap_export: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+
+    assert_eq!(candidates.len(), 1);
+    assert_eq!(
+        candidates[0].kind,
+        BackgroundMaintenanceKind::SearchProjectionGraphDelta
+    );
+    assert_eq!(candidates[0].name, "search_projection_graph_delta");
+    assert_eq!(candidates[0].plan.request.class, WorkClass::Projection);
+    assert_eq!(
+        candidates[0].plan.request.estimated_operations,
+        usize::try_from(db.store.commit_epoch()).unwrap()
+    );
+    assert_eq!(
+        candidates[0].plan.hint.source_graph_commit_lag,
+        db.store.commit_epoch()
+    );
+    assert_eq!(
+        candidates[0].plan.hint.recent_delta_operations,
+        usize::try_from(db.store.commit_epoch()).unwrap()
+    );
+
+    let ranked = db.rank_background_maintenance(
+        Some(&search_index),
+        &LocalQosPolicy::default(),
+        &LocalQosState::default(),
+        BackgroundMaintenanceOptions {
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_graph_lightning_bootstrap_export: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+
+    assert_eq!(ranked.len(), 1);
+    assert_eq!(
+        ranked[0].kind,
+        BackgroundMaintenanceKind::SearchProjectionGraphDelta
+    );
+    assert!(ranked[0]
+        .decision
+        .reason_codes
+        .contains(&BackgroundWorkReasonCode::SourceGraphCommitLag));
+    assert!(ranked[0]
+        .decision
+        .reason_codes
+        .contains(&BackgroundWorkReasonCode::RecentDeltaOperations));
+}
+
+#[test]
+fn background_maintenance_can_disable_stale_search_projection_graph_delta() {
+    let mut db = Database::new();
+    db.query("CREATE NODE TABLE Memory").unwrap();
+    db.query("CREATE (:Memory {id: 1, title: 'Graph foundations'})")
+        .unwrap();
+    let search_index = SearchIndex::in_memory();
+
+    let candidates = db.background_maintenance_candidates(
+        Some(&search_index),
+        BackgroundMaintenanceOptions {
+            include_schema_maintenance: false,
+            include_property_index_projection: false,
+            include_search_projection_graph_delta_freshness: false,
+            include_search_projection_rebuild: false,
+            include_search_projection_metadata_repair: false,
+            include_graph_lightning_bootstrap_export: false,
+            include_external_content_artifact_jobs: false,
+            ..BackgroundMaintenanceOptions::default()
+        },
+    );
+
+    assert!(candidates.is_empty());
+}
+
+#[test]
 fn background_maintenance_ranks_mixed_nowledge_background_work() {
     let mut db = Database::new();
     db.query("CREATE NODE TABLE Memory").unwrap();

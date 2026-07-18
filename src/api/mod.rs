@@ -433,6 +433,7 @@ pub struct BackgroundMaintenanceOptions {
     pub hint: BackgroundWorkHint,
     pub include_schema_maintenance: bool,
     pub include_property_index_projection: bool,
+    pub include_search_projection_graph_delta_freshness: bool,
     pub include_search_projection_rebuild: bool,
     pub include_search_projection_metadata_repair: bool,
     pub include_graph_lightning_bootstrap_export: bool,
@@ -447,6 +448,7 @@ impl Default for BackgroundMaintenanceOptions {
             hint: BackgroundWorkHint::default(),
             include_schema_maintenance: true,
             include_property_index_projection: true,
+            include_search_projection_graph_delta_freshness: true,
             include_search_projection_rebuild: true,
             include_search_projection_metadata_repair: true,
             include_graph_lightning_bootstrap_export: true,
@@ -1996,6 +1998,30 @@ impl Database {
         request.background_work_plan(hint)
     }
 
+    pub fn search_projection_freshness_lag_background_work_plan(
+        &self,
+        search_index: &SearchIndex,
+        mut hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let source_graph_commit_lag =
+            search_projection_commit_lag(search_index, self.store.commit_epoch());
+        if source_graph_commit_lag == 0 {
+            return None;
+        }
+        let operation_count = usize::try_from(source_graph_commit_lag).unwrap_or(usize::MAX);
+        if hint.recent_delta_operations == 0 {
+            hint.recent_delta_operations = operation_count;
+        }
+        if hint.source_graph_commit_lag == 0 {
+            hint.source_graph_commit_lag = source_graph_commit_lag;
+        }
+        Some(BackgroundWorkPlan::background(
+            WorkClass::Projection,
+            operation_count,
+            hint,
+        ))
+    }
+
     pub fn background_maintenance_candidates(
         &self,
         search_index: Option<&SearchIndex>,
@@ -2041,6 +2067,18 @@ impl Database {
                     BackgroundMaintenanceKind::SearchProjectionGraphDelta,
                     plan,
                 ));
+            }
+        } else if options.include_search_projection_graph_delta_freshness {
+            if let Some(search_index) = search_index {
+                if let Some(plan) = self.search_projection_freshness_lag_background_work_plan(
+                    search_index,
+                    options.hint.clone(),
+                ) {
+                    candidates.push(BackgroundMaintenanceCandidate::new(
+                        BackgroundMaintenanceKind::SearchProjectionGraphDelta,
+                        plan,
+                    ));
+                }
             }
         }
 
