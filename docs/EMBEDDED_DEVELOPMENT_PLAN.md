@@ -951,6 +951,10 @@ Current implemented slice:
   for `IndexNodeRangeSeek`, preserving legacy decision strings while adding a
   stable `implementation:node_range_index_seek` rule event for range-index
   diagnostics
+- single-property node full-text predicates now use the implementation-rule
+  path for `IndexNodeTextSeek`, preserving the residual filter and legacy
+  decision string while adding a stable `implementation:node_text_index_seek`
+  rule event for FTS/retrieval diagnostics
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,

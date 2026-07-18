@@ -1896,6 +1896,10 @@ struct NodeRangeSeekRule<'a> {
     catalog: &'a OptimizerCatalog,
 }
 
+struct NodeTextSeekRule<'a> {
+    catalog: &'a OptimizerCatalog,
+}
+
 #[derive(Debug)]
 struct GroupExpr {
     logical: LogicalPlan,
@@ -5666,6 +5670,9 @@ fn index_seek_from_filter(
                 label,
             },
         ) if variable == scan_variable => {
+            if let Some(plan) = text_index_seek_from_rule(predicate, input, catalog, decisions) {
+                return Some(plan);
+            }
             if !catalog.has_full_text_property_index(label, property) {
                 decisions.push(format!(
                     "choose SeqNodeScan for {label}.{property}: no fulltext index descriptor"
@@ -5697,6 +5704,90 @@ fn index_seek_from_filter(
             }
         }
         _ => None,
+    }
+}
+
+impl OptimizerRule<GraphRuleExpr> for NodeTextSeekRule<'_> {
+    fn id(&self) -> RuleId {
+        RuleId::new("node_text_index_seek", RuleKind::Implementation)
+    }
+
+    fn promise(&self, expression: &GraphRuleExpr) -> RulePromise {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return RulePromise::NEVER;
+        };
+        let Predicate::PropertyContains {
+            variable, property, ..
+        } = predicate.as_ref()
+        else {
+            return RulePromise::NEVER;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return RulePromise::NEVER;
+        };
+        if variable != scan_variable || !self.catalog.has_full_text_property_index(label, property)
+        {
+            return RulePromise::NEVER;
+        }
+        let label_count = self.catalog.label_count(label);
+        let estimated_rows = label_count.div_ceil(4).max(1);
+        let scan_cost = label_count.saturating_add(4);
+        let seek_cost = estimated_rows.saturating_mul(2).saturating_add(3);
+        if seek_cost <= scan_cost {
+            RulePromise::new(85)
+        } else {
+            RulePromise::NEVER
+        }
+    }
+
+    fn apply(&self, expression: &GraphRuleExpr) -> Option<RuleApplication<GraphRuleExpr>> {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return None;
+        };
+        let Predicate::PropertyContains {
+            variable,
+            property,
+            value,
+        } = predicate.as_ref()
+        else {
+            return None;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return None;
+        };
+        if variable != scan_variable || !self.catalog.has_full_text_property_index(label, property)
+        {
+            return None;
+        }
+        let label_count = self.catalog.label_count(label);
+        let estimated_rows = label_count.div_ceil(4).max(1);
+        let scan_cost = label_count.saturating_add(4);
+        let seek_cost = estimated_rows.saturating_mul(2).saturating_add(3);
+        if seek_cost > scan_cost {
+            return None;
+        }
+        Some(RuleApplication::new(
+            GraphRuleExpr::Physical(Box::new(PhysicalPlan::FilterExec {
+                predicate: predicate.as_ref().clone(),
+                input: Box::new(PhysicalPlan::IndexNodeTextSeek {
+                    variable: variable.clone(),
+                    label: label.clone(),
+                    property: property.clone(),
+                    query: value.clone(),
+                }),
+            })),
+            format!(
+                "choose IndexNodeTextSeek for {label}.{property}: seek_cost={seek_cost} scan_cost={scan_cost} label_count={label_count} estimated_rows={estimated_rows}"
+            ),
+        ))
     }
 }
 
@@ -5964,6 +6055,20 @@ impl OptimizerRule<GraphRuleExpr> for NodeEqualitySeekRule<'_> {
             ),
         ))
     }
+}
+
+fn text_index_seek_from_rule(
+    predicate: &Predicate,
+    input: &LogicalPlan,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+) -> Option<PhysicalPlan> {
+    let expression = GraphRuleExpr::Filter {
+        predicate: Box::new(predicate.clone()),
+        input: Box::new(input.clone()),
+    };
+    let rule = NodeTextSeekRule { catalog };
+    physical_plan_from_rule_batch(&expression, &[&rule], decisions)
 }
 
 fn range_index_seek_from_rule(

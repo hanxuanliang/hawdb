@@ -6125,6 +6125,11 @@ fn full_text_index_ddl_enables_text_seek_plans() {
         .decisions
         .iter()
         .any(|decision| decision.contains("choose IndexNodeTextSeek")));
+    assert!(explain
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| { decision.starts_with("apply implementation:node_text_index_seek:") }));
 
     let output = db
         .query("MATCH (m:Memory) WHERE m.title CONTAINS 'Graph' RETURN m.id AS id ORDER BY id ASC")
