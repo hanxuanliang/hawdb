@@ -382,6 +382,14 @@ available as `Database::update_knowledge_memory_latest_batch`, which updates
 only `is_latest`, supports the exact `space_id` filter used by in-space
 demotion, reports non-writable and duplicate rows, and commits eligible updates
 through one grouped WAL batch.
+Label canonical and usage reads used by label merge, canonical backfill, and
+label list surfaces are available as typed APIs:
+`Database::lookup_knowledge_labels_by_canonical_name`,
+`Database::scan_knowledge_labels_missing_canonical_name`,
+`Database::knowledge_label_usage`, and
+`Database::knowledge_label_canonical_usage`. They scan only `Label` nodes,
+validate non-empty lookup filters, and compute `HAS_LABEL` usage counts over
+any source node type.
 Source-reference relationship cleanup for Nowledge memory/source delete flows
 is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty

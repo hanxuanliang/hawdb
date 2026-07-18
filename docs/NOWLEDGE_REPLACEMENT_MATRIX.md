@@ -204,6 +204,12 @@ updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names
 before WAL, reports missing, idless, and duplicate rows without writing, and
 commits eligible Label rows through one grouped WAL batch.
+Label canonical and usage reads are covered by typed APIs for Nowledge label
+merge and list surfaces. `Database::lookup_knowledge_labels_by_canonical_name`
+handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_canonical_name`
+handles canonical backfill scans, and `Database::knowledge_label_usage` plus
+`Database::knowledge_label_canonical_usage` expose single-row and canonical
+usage rows with `HAS_LABEL` counts over any source node type.
 PageRank score writes are covered by typed batches for Nowledge Memory and
 Entity `pagerank_score` persistence and clear operations. The wrapper accepts
 only finite non-negative scores for Memory/Entity identities, reports missing,

@@ -1987,6 +1987,58 @@ pub struct KnowledgeLabelLifecycleBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelCanonicalLookupRequest {
+    pub canonical_name: String,
+    pub exclude_label_id: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelBackfillScanRequest {
+    pub exclude_label_id: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelUsageRequest {
+    pub label_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelUsageListRequest {
+    pub canonical_only: bool,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelUsageRow {
+    pub label_id: Option<String>,
+    pub node_id: u64,
+    pub name: Option<String>,
+    pub canonical_name: Option<String>,
+    pub color: Option<Value>,
+    pub description: Option<Value>,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub usage_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelUsageOutput {
+    pub graph_commit_epoch: u64,
+    pub found: bool,
+    pub row: Option<KnowledgeLabelUsageRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelUsageListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeLabelUsageRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePageRankScoreUpdate {
     pub label: String,
@@ -4215,6 +4267,34 @@ impl Database {
         request: &KnowledgeLabelLifecycleBatchRequest,
     ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
         update_knowledge_label_lifecycle_batch_for(self, request)
+    }
+
+    pub fn lookup_knowledge_labels_by_canonical_name(
+        &self,
+        request: &KnowledgeLabelCanonicalLookupRequest,
+    ) -> Result<KnowledgeLabelUsageListOutput> {
+        lookup_knowledge_labels_by_canonical_name_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn scan_knowledge_labels_missing_canonical_name(
+        &self,
+        request: &KnowledgeLabelBackfillScanRequest,
+    ) -> Result<KnowledgeLabelUsageListOutput> {
+        scan_knowledge_labels_missing_canonical_name_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_label_usage(
+        &self,
+        request: &KnowledgeLabelUsageRequest,
+    ) -> Result<KnowledgeLabelUsageOutput> {
+        knowledge_label_usage_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_label_canonical_usage(
+        &self,
+        request: &KnowledgeLabelUsageListRequest,
+    ) -> KnowledgeLabelUsageListOutput {
+        knowledge_label_canonical_usage_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_pagerank_scores_batch(
@@ -8389,6 +8469,174 @@ fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeM
     insert_optional_assignment(&mut assignments, "metadata", &update.metadata);
     insert_optional_assignment(&mut assignments, "updated_at", &update.updated_at);
     assignments
+}
+
+fn lookup_knowledge_labels_by_canonical_name_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeLabelCanonicalLookupRequest,
+) -> Result<KnowledgeLabelUsageListOutput> {
+    if request.canonical_name.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge label canonical lookup requires a non-empty canonical name".to_string(),
+        ));
+    }
+    validate_optional_label_id(request.exclude_label_id.as_deref())?;
+    let graph_commit_epoch = store.commit_epoch();
+    let rows = label_nodes(catalog, store)
+        .into_iter()
+        .filter(|node| {
+            node_string_property(node, "canonical_name").as_deref()
+                == Some(request.canonical_name.as_str())
+                && request
+                    .exclude_label_id
+                    .as_ref()
+                    .is_none_or(|label_id| node_external_id(node).as_ref() != Some(label_id))
+        })
+        .collect::<Vec<_>>();
+    Ok(label_usage_list_output(
+        catalog,
+        store,
+        graph_commit_epoch,
+        rows,
+        request.limit,
+    ))
+}
+
+fn scan_knowledge_labels_missing_canonical_name_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeLabelBackfillScanRequest,
+) -> Result<KnowledgeLabelUsageListOutput> {
+    validate_optional_label_id(request.exclude_label_id.as_deref())?;
+    let graph_commit_epoch = store.commit_epoch();
+    let rows = label_nodes(catalog, store)
+        .into_iter()
+        .filter(|node| {
+            matches!(
+                node.properties.get("canonical_name"),
+                None | Some(Value::Null)
+            ) && request
+                .exclude_label_id
+                .as_ref()
+                .is_none_or(|label_id| node_external_id(node).as_ref() != Some(label_id))
+        })
+        .collect::<Vec<_>>();
+    Ok(label_usage_list_output(
+        catalog,
+        store,
+        graph_commit_epoch,
+        rows,
+        request.limit,
+    ))
+}
+
+fn knowledge_label_usage_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeLabelUsageRequest,
+) -> Result<KnowledgeLabelUsageOutput> {
+    if request.label_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge label usage requires a non-empty label id".to_string(),
+        ));
+    }
+    let graph_commit_epoch = store.commit_epoch();
+    let row = seed_node_by_label_and_external_id(catalog, store, "Label", &request.label_id)
+        .map(|node| label_usage_row(catalog, store, node));
+    Ok(KnowledgeLabelUsageOutput {
+        graph_commit_epoch,
+        found: row.is_some(),
+        row,
+    })
+}
+
+fn knowledge_label_canonical_usage_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeLabelUsageListRequest,
+) -> KnowledgeLabelUsageListOutput {
+    let graph_commit_epoch = store.commit_epoch();
+    let rows = label_nodes(catalog, store)
+        .into_iter()
+        .filter(|node| {
+            !request.canonical_only
+                || node
+                    .properties
+                    .get("canonical_name")
+                    .is_some_and(|value| !matches!(value, Value::Null))
+        })
+        .collect::<Vec<_>>();
+    label_usage_list_output(catalog, store, graph_commit_epoch, rows, request.limit)
+}
+
+fn validate_optional_label_id(label_id: Option<&str>) -> Result<()> {
+    if label_id.is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge label read requires a non-empty excluded label id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn label_nodes<'a>(catalog: &Catalog, store: &'a GraphStore) -> Vec<&'a NodeRecord> {
+    let Some(label_id) = catalog.label_id("Label") else {
+        return Vec::new();
+    };
+    let mut nodes = store.scan_nodes(Some(label_id)).collect::<Vec<_>>();
+    nodes.sort_by_key(|node| node.id.0);
+    nodes
+}
+
+fn label_usage_list_output(
+    catalog: &Catalog,
+    store: &GraphStore,
+    graph_commit_epoch: u64,
+    nodes: Vec<&NodeRecord>,
+    limit: usize,
+) -> KnowledgeLabelUsageListOutput {
+    let matched_count = nodes.len();
+    let mut rows = nodes
+        .into_iter()
+        .take(limit)
+        .map(|node| label_usage_row(catalog, store, node))
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.node_id);
+    let returned_count = rows.len();
+    KnowledgeLabelUsageListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    }
+}
+
+fn label_usage_row(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node: &NodeRecord,
+) -> KnowledgeLabelUsageRow {
+    KnowledgeLabelUsageRow {
+        label_id: node_external_id(node),
+        node_id: node.id.0,
+        name: node_string_property(node, "name"),
+        canonical_name: node_string_property(node, "canonical_name"),
+        color: node.properties.get("color").cloned(),
+        description: node.properties.get("description").cloned(),
+        created_at: node.properties.get("created_at").cloned(),
+        updated_at: node.properties.get("updated_at").cloned(),
+        usage_count: label_usage_count(catalog, store, node.id),
+    }
+}
+
+fn label_usage_count(catalog: &Catalog, store: &GraphStore, label_node_id: NodeId) -> usize {
+    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return 0;
+    };
+    store
+        .scan_relationships(Some(rel_type_id))
+        .filter(|relationship| relationship.target == label_node_id)
+        .count()
 }
 
 fn update_knowledge_pagerank_scores_batch_for(
@@ -14697,6 +14945,35 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeLabelLifecycleBatchRequest,
     ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
         self.db.update_knowledge_label_lifecycle_batch(request)
+    }
+
+    pub fn lookup_knowledge_labels_by_canonical_name(
+        &self,
+        request: &KnowledgeLabelCanonicalLookupRequest,
+    ) -> Result<KnowledgeLabelUsageListOutput> {
+        self.db.lookup_knowledge_labels_by_canonical_name(request)
+    }
+
+    pub fn scan_knowledge_labels_missing_canonical_name(
+        &self,
+        request: &KnowledgeLabelBackfillScanRequest,
+    ) -> Result<KnowledgeLabelUsageListOutput> {
+        self.db
+            .scan_knowledge_labels_missing_canonical_name(request)
+    }
+
+    pub fn knowledge_label_usage(
+        &self,
+        request: &KnowledgeLabelUsageRequest,
+    ) -> Result<KnowledgeLabelUsageOutput> {
+        self.db.knowledge_label_usage(request)
+    }
+
+    pub fn knowledge_label_canonical_usage(
+        &self,
+        request: &KnowledgeLabelUsageListRequest,
+    ) -> KnowledgeLabelUsageListOutput {
+        self.db.knowledge_label_canonical_usage(request)
     }
 
     pub fn update_knowledge_pagerank_scores_batch(

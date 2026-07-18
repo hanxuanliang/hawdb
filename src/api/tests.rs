@@ -15,9 +15,10 @@ use super::{
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
     KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
     KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeLabelBackfillScanRequest, KnowledgeLabelCanonicalLookupRequest,
     KnowledgeLabelLifecycleBatchRequest, KnowledgeLabelLifecycleUpdate,
-    KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
-    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
+    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
+    KnowledgeMemoryAccessTouch, KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankClearRequest,
@@ -6971,6 +6972,142 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         );
     }
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_labels_by_canonical_name_for_nowledge_collision_checks() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'source', name: 'Source', canonical_name: 'canonical_source'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'target', name: 'Target', canonical_name: 'canonical_target'})")
+        .unwrap();
+    db.query(
+        "CREATE (:Label {id: 'target_2', name: 'Target 2', canonical_name: 'canonical_target'})",
+    )
+    .unwrap();
+
+    let output = db
+        .lookup_knowledge_labels_by_canonical_name(&KnowledgeLabelCanonicalLookupRequest {
+            canonical_name: "canonical_target".to_string(),
+            exclude_label_id: Some("source".to_string()),
+            limit: 1,
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, 3);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.returned_count, 1);
+    assert_eq!(output.rows[0].label_id.as_deref(), Some("target"));
+    assert_eq!(
+        output.rows[0].canonical_name.as_deref(),
+        Some("canonical_target")
+    );
+}
+
+#[test]
+fn scans_labels_missing_canonical_name_for_nowledge_backfill() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'missing_1', name: 'Missing 1', canonical_name: NULL})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'missing_2', name: 'Missing 2'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'present', name: 'Present', canonical_name: 'present'})")
+        .unwrap();
+
+    let output = db
+        .scan_knowledge_labels_missing_canonical_name(&KnowledgeLabelBackfillScanRequest {
+            exclude_label_id: Some("missing_1".to_string()),
+            limit: 10,
+        })
+        .unwrap();
+
+    assert_eq!(output.matched_count, 1);
+    assert_eq!(output.returned_count, 1);
+    assert_eq!(output.rows[0].label_id.as_deref(), Some("missing_2"));
+    assert_eq!(output.rows[0].name.as_deref(), Some("Missing 2"));
+    assert_eq!(output.rows[0].canonical_name, None);
+}
+
+#[test]
+fn reads_label_usage_rows_for_nowledge_label_apis() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'alpha', name: 'Alpha', canonical_name: 'alpha', color: '#fff', description: 'Alpha label', created_at: 10, updated_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'beta', name: 'Beta', canonical_name: 'beta'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (e:Entity {id: 'entity_1'}), (l:Label {id: 'alpha'}) CREATE (e)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+
+    let row = db
+        .knowledge_label_usage(&KnowledgeLabelUsageRequest {
+            label_id: "alpha".to_string(),
+        })
+        .unwrap();
+    assert_eq!(row.graph_commit_epoch, 6);
+    assert!(row.found);
+    let alpha = row.row.unwrap();
+    assert_eq!(alpha.label_id.as_deref(), Some("alpha"));
+    assert_eq!(alpha.name.as_deref(), Some("Alpha"));
+    assert_eq!(alpha.canonical_name.as_deref(), Some("alpha"));
+    assert_eq!(alpha.color, Some(Value::String("#fff".to_string())));
+    assert_eq!(
+        alpha.description,
+        Some(Value::String("Alpha label".to_string()))
+    );
+    assert_eq!(alpha.created_at, Some(Value::Int(10)));
+    assert_eq!(alpha.updated_at, Some(Value::Int(20)));
+    assert_eq!(alpha.usage_count, 2);
+
+    let list = db.knowledge_label_canonical_usage(&KnowledgeLabelUsageListRequest {
+        canonical_only: true,
+        limit: 10,
+    });
+    assert_eq!(list.matched_count, 2);
+    assert_eq!(list.returned_count, 2);
+    assert_eq!(list.rows[0].label_id.as_deref(), Some("alpha"));
+    assert_eq!(list.rows[0].usage_count, 2);
+    assert_eq!(list.rows[1].label_id.as_deref(), Some("beta"));
+    assert_eq!(list.rows[1].usage_count, 0);
+}
+
+#[test]
+fn label_read_requests_validate_non_empty_filters() {
+    let db = Database::new();
+    let canonical_error = db
+        .lookup_knowledge_labels_by_canonical_name(&KnowledgeLabelCanonicalLookupRequest {
+            canonical_name: String::new(),
+            exclude_label_id: None,
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(canonical_error
+        .to_string()
+        .contains("non-empty canonical name"));
+
+    let exclude_error = db
+        .scan_knowledge_labels_missing_canonical_name(&KnowledgeLabelBackfillScanRequest {
+            exclude_label_id: Some(String::new()),
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(exclude_error
+        .to_string()
+        .contains("non-empty excluded label id"));
+
+    let usage_error = db
+        .knowledge_label_usage(&KnowledgeLabelUsageRequest {
+            label_id: String::new(),
+        })
+        .unwrap_err();
+    assert!(usage_error.to_string().contains("non-empty label id"));
 }
 
 #[test]
