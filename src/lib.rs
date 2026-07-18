@@ -86,7 +86,9 @@ pub use nowledge_inventory::{
     scan_nowledge_query_inventory_cypher_migration_gate_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
     scan_nowledge_query_inventory_to_json, scan_nowledge_query_inventory_with_options,
+    storage_recovery_evidence_health, storage_recovery_evidence_health_from_bundle,
     NowledgeCypherMigrationGateJsonOptions, NowledgeInventoryScanOptions,
+    StorageRecoveryEvidenceHealth,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,

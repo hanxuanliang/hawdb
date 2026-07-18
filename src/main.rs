@@ -4,12 +4,12 @@ use skein::{
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
-    scan_nowledge_query_inventory_to_json, CanonicalGraphSnapshotValidation,
-    CanonicalSnapshotIdentityAudit, CompatibilityRollbackEvidence, Database, DatabaseConfig,
-    ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
-    NowledgeCypherMigrationGateJsonOptions, RecoveryMode, Result, SkeinError,
-    StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    scan_nowledge_query_inventory_to_json, storage_recovery_evidence_health_from_bundle,
+    CanonicalGraphSnapshotValidation, CanonicalSnapshotIdentityAudit,
+    CompatibilityRollbackEvidence, Database, DatabaseConfig, ExternalShadowCommand,
+    ExternalShadowReady, GraphLightningBootstrapManifest, NowledgeCypherMigrationGateJsonOptions,
+    RecoveryMode, Result, SkeinError, StorageRecoveryReport, Value,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -85,6 +85,8 @@ fn main() -> Result<()> {
             let mut shadow_timeout = None;
             let mut rollback_required = false;
             let mut rollback_evidence = None;
+            let mut storage_recovery_required = false;
+            let mut storage_recovery = None;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-ready" => {
@@ -125,6 +127,17 @@ fn main() -> Result<()> {
                         rollback_evidence = Some(args.next().ok_or_else(|| {
                             SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
                         })?);
+                    }
+                    "--require-storage-recovery-evidence" => {
+                        storage_recovery_required = true;
+                        args.next();
+                    }
+                    "--storage-recovery-report-json" => {
+                        args.next();
+                        let path = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
+                        })?;
+                        storage_recovery = Some(read_json_file(Path::new(&path))?);
                     }
                     _ => break,
                 }
@@ -189,6 +202,8 @@ fn main() -> Result<()> {
                             evidence: rollback_evidence,
                             blockers: Vec::new(),
                         },
+                        storage_recovery_required,
+                        storage_recovery,
                         ..NowledgeCypherMigrationGateJsonOptions::default()
                     },
                 )?;
@@ -199,7 +214,12 @@ fn main() -> Result<()> {
             if let Some(trace_path) = shadow_trace_report {
                 add_shadow_trace_report(&mut json, &trace_path, shadow.request_count())?;
             }
-            add_cutover_evidence_report(&mut json, is_self_shadow, shadow_ready_report.as_ref())?;
+            add_cutover_evidence_report(
+                &mut json,
+                is_self_shadow,
+                shadow_ready_report.as_ref(),
+                storage_recovery_required,
+            )?;
             let rendered = serde_json::to_string_pretty(&json).unwrap();
             println!("{rendered}");
             if require_cutover_evidence && !cutover_evidence_is_eligible(&json) {
@@ -627,7 +647,7 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 
@@ -838,6 +858,7 @@ fn add_cutover_evidence_report(
     bundle: &mut serde_json::Value,
     self_shadow: bool,
     shadow_ready: Option<&ExternalShadowReady>,
+    storage_recovery_required: bool,
 ) -> Result<()> {
     let evidence_kind = if self_shadow {
         "protocol_smoke"
@@ -862,32 +883,37 @@ fn add_cutover_evidence_report(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let shadow_trace_health = external_shadow_trace_health_from_bundle(bundle);
+    let storage_recovery_health =
+        storage_recovery_evidence_health_from_bundle(bundle, storage_recovery_required);
     let mut blockers = Vec::new();
     if self_shadow {
-        blockers.push("shadow run is protocol smoke, not previous-wrapper evidence");
+        blockers.push("shadow run is protocol smoke, not previous-wrapper evidence".to_string());
     }
     if !ready_preflight {
-        blockers.push("shadow ready preflight was not executed");
+        blockers.push("shadow ready preflight was not executed".to_string());
     }
     if ready_preflight && ready_engine_kind.is_none() {
-        blockers.push("shadow ready response missing engine_kind");
+        blockers.push("shadow ready response missing engine_kind".to_string());
     }
     if let Some(engine_kind) = ready_engine_kind {
         if engine_kind != "previous_wrapper" {
-            blockers.push("shadow ready engine_kind is not previous_wrapper");
+            blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
         }
     }
     if ready_preflight && !ready_missing_capabilities.is_empty() {
-        blockers.push("shadow ready response missing required capabilities");
+        blockers.push("shadow ready response missing required capabilities".to_string());
     }
     if !shadow_evidence_present {
-        blockers.push("no matched shadow checks are present");
+        blockers.push("no matched shadow checks are present".to_string());
     }
     if shadow_trace_health.present && !shadow_trace_health.complete {
-        blockers.push("shadow trace is incomplete or unavailable");
+        blockers.push("shadow trace is incomplete or unavailable".to_string());
+    }
+    if !storage_recovery_health.ready {
+        blockers.extend(storage_recovery_health.blockers.iter().cloned());
     }
     if !migration_gate_ready {
-        blockers.push("migration gate decision is not ready");
+        blockers.push("migration gate decision is not ready".to_string());
     }
 
     let object = bundle.as_object_mut().ok_or_else(|| {
@@ -912,6 +938,15 @@ fn add_cutover_evidence_report(
             "shadow_trace_summary_available": shadow_trace_health.summary_available,
             "shadow_trace_request_count_matches": shadow_trace_health.request_count_matches,
             "shadow_trace_pending_request_count": shadow_trace_health.pending_request_count,
+            "storage_recovery_required": storage_recovery_health.required,
+            "storage_recovery_present": storage_recovery_health.present,
+            "storage_recovery_ready": storage_recovery_health.ready,
+            "storage_recovery_protocol_matches": storage_recovery_health.protocol_matches,
+            "storage_recovery_durable": storage_recovery_health.durable_recovery_observed,
+            "storage_recovery_checkpoint_boundary_present": storage_recovery_health.checkpoint_boundary_present,
+            "storage_recovery_wal_replay_bounded": storage_recovery_health.wal_replay_bounded,
+            "storage_recovery_torn_tail_clean": storage_recovery_health.torn_tail_clean,
+            "storage_recovery_blockers": storage_recovery_health.blockers,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
         }),
@@ -3459,7 +3494,7 @@ mod tests {
             engine_kind: Some("previous_wrapper".to_string()),
         };
 
-        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready), false).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
         assert!(cutover_evidence_is_eligible(&bundle));
@@ -3483,6 +3518,11 @@ mod tests {
         );
         assert_eq!(bundle["cutover_evidence"]["shadow_trace_present"], false);
         assert_eq!(bundle["cutover_evidence"]["shadow_trace_complete"], true);
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_present"],
+            false
+        );
+        assert_eq!(bundle["cutover_evidence"]["storage_recovery_ready"], true);
     }
 
     #[test]
@@ -3500,7 +3540,7 @@ mod tests {
             engine_kind: Some("previous_wrapper".to_string()),
         };
 
-        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready), false).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
         assert!(!cutover_evidence_is_eligible(&bundle));
@@ -3511,6 +3551,47 @@ mod tests {
         assert_eq!(
             bundle["cutover_evidence"]["blockers"][0],
             "shadow ready response missing required capabilities"
+        );
+    }
+
+    #[test]
+    fn blocks_cutover_when_required_storage_recovery_evidence_is_missing() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready",
+                "shadow_evidence_present": true
+            }
+        });
+
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("previous_wrapper".to_string()),
+        };
+
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready), true).unwrap();
+
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_required"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_present"],
+            false
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_blockers"][0],
+            "storage recovery evidence is required before cutover"
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["blockers"][0],
+            "storage recovery evidence is required before cutover"
         );
     }
 
@@ -3539,7 +3620,7 @@ mod tests {
             engine_kind: Some("previous_wrapper".to_string()),
         };
 
-        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready), false).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
         assert!(!cutover_evidence_is_eligible(&bundle));
@@ -3574,7 +3655,7 @@ mod tests {
             engine_kind: Some("protocol_smoke".to_string()),
         };
 
-        add_cutover_evidence_report(&mut bundle, true, Some(&ready)).unwrap();
+        add_cutover_evidence_report(&mut bundle, true, Some(&ready), false).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
         assert!(!cutover_evidence_is_eligible(&bundle));
@@ -3597,7 +3678,7 @@ mod tests {
             }
         });
 
-        add_cutover_evidence_report(&mut bundle, false, None).unwrap();
+        add_cutover_evidence_report(&mut bundle, false, None, false).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
         assert!(!cutover_evidence_is_eligible(&bundle));
@@ -3625,7 +3706,7 @@ mod tests {
             engine_kind: None,
         };
 
-        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready), false).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
         assert!(!cutover_evidence_is_eligible(&bundle));

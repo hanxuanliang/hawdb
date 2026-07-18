@@ -356,7 +356,7 @@ Skein-side error with the shadow engine name.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -393,6 +393,18 @@ is readable, the reported request count matches request events in the trace,
 and no traced request remains pending. An incomplete present trace blocks
 cutover evidence; omitting trace logging does not by itself block cutover
 eligibility.
+`--storage-recovery-report-json <path>` attaches a JSON report produced by
+`skein storage-recovery-report`. When present, or when
+`--require-storage-recovery-evidence` is passed, `cutover_evidence` reports
+`storage_recovery_required`, `storage_recovery_present`,
+`storage_recovery_ready`, `storage_recovery_protocol_matches`,
+`storage_recovery_durable`, `storage_recovery_checkpoint_boundary_present`,
+`storage_recovery_wal_replay_bounded`,
+`storage_recovery_torn_tail_clean`, and `storage_recovery_blockers`.
+Required storage recovery evidence is ready only when the report protocol
+matches `skein-storage-recovery-report`, durable recovery was observed, a
+checkpoint boundary is present, WAL replay was opened with a configured bound,
+and no torn tail was ignored.
 
 The bundle includes a top-level `background_maintenance` object with the local
 Skein maintenance summary after the compatibility fixture run. It reports

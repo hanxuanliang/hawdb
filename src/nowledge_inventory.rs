@@ -32,7 +32,22 @@ pub struct NowledgeCypherMigrationGateJsonOptions {
     pub shadow_trace_path: Option<String>,
     pub shadow_request_count: Option<u64>,
     pub include_cutover_evidence: bool,
+    pub storage_recovery_required: bool,
+    pub storage_recovery: Option<serde_json::Value>,
     pub rollback: CompatibilityRollbackEvidence,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageRecoveryEvidenceHealth {
+    pub required: bool,
+    pub present: bool,
+    pub ready: bool,
+    pub protocol_matches: Option<bool>,
+    pub durable_recovery_observed: Option<bool>,
+    pub checkpoint_boundary_present: Option<bool>,
+    pub wal_replay_bounded: Option<bool>,
+    pub torn_tail_clean: Option<bool>,
+    pub blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,12 +252,17 @@ fn add_shadow_metadata_to_migration_gate_json(
             options.shadow_request_count.unwrap_or_default(),
         )?;
     }
+    if let Some(storage_recovery) = options.storage_recovery.as_ref() {
+        migration_gate_json_object(bundle)?
+            .insert("storage_recovery".to_string(), storage_recovery.clone());
+    }
     if options.include_cutover_evidence {
         insert_cutover_evidence_json(
             bundle,
             options.self_shadow,
             ready_preflight,
             options.shadow_ready.as_ref(),
+            options.storage_recovery_required,
         )?;
     }
     Ok(())
@@ -308,6 +328,7 @@ fn insert_cutover_evidence_json(
     self_shadow: bool,
     ready_preflight: bool,
     shadow_ready: Option<&ExternalShadowReady>,
+    storage_recovery_required: bool,
 ) -> Result<()> {
     let migration_gate = bundle
         .get("migration_gate")
@@ -325,24 +346,29 @@ fn insert_cutover_evidence_json(
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(false);
     let shadow_trace_health = external_shadow_trace_health_from_bundle(bundle);
+    let storage_recovery_health =
+        storage_recovery_evidence_health_from_bundle(bundle, storage_recovery_required);
     let mut blockers = Vec::new();
     if self_shadow {
-        blockers.push("shadow run is protocol smoke, not previous-wrapper evidence");
+        blockers.push("shadow run is protocol smoke, not previous-wrapper evidence".to_string());
     }
     if !ready_preflight {
-        blockers.push("shadow ready preflight was not executed");
+        blockers.push("shadow ready preflight was not executed".to_string());
     }
     if ready_preflight && !ready_missing_capabilities.is_empty() {
-        blockers.push("shadow ready response missing required capabilities");
+        blockers.push("shadow ready response missing required capabilities".to_string());
     }
     if !shadow_evidence_present {
-        blockers.push("no matched shadow checks are present");
+        blockers.push("no matched shadow checks are present".to_string());
     }
     if shadow_trace_health.present && !shadow_trace_health.complete {
-        blockers.push("shadow trace is incomplete or unavailable");
+        blockers.push("shadow trace is incomplete or unavailable".to_string());
+    }
+    if !storage_recovery_health.ready {
+        blockers.extend(storage_recovery_health.blockers.iter().cloned());
     }
     if !migration_gate_ready {
-        blockers.push("migration gate decision is not ready");
+        blockers.push("migration gate decision is not ready".to_string());
     }
 
     migration_gate_json_object(bundle)?.insert(
@@ -366,11 +392,95 @@ fn insert_cutover_evidence_json(
             "shadow_trace_summary_available": shadow_trace_health.summary_available,
             "shadow_trace_request_count_matches": shadow_trace_health.request_count_matches,
             "shadow_trace_pending_request_count": shadow_trace_health.pending_request_count,
+            "storage_recovery_required": storage_recovery_health.required,
+            "storage_recovery_present": storage_recovery_health.present,
+            "storage_recovery_ready": storage_recovery_health.ready,
+            "storage_recovery_protocol_matches": storage_recovery_health.protocol_matches,
+            "storage_recovery_durable": storage_recovery_health.durable_recovery_observed,
+            "storage_recovery_checkpoint_boundary_present": storage_recovery_health.checkpoint_boundary_present,
+            "storage_recovery_wal_replay_bounded": storage_recovery_health.wal_replay_bounded,
+            "storage_recovery_torn_tail_clean": storage_recovery_health.torn_tail_clean,
+            "storage_recovery_blockers": storage_recovery_health.blockers,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
         }),
     );
     Ok(())
+}
+
+pub fn storage_recovery_evidence_health_from_bundle(
+    bundle: &serde_json::Value,
+    required: bool,
+) -> StorageRecoveryEvidenceHealth {
+    storage_recovery_evidence_health(bundle.get("storage_recovery"), required)
+}
+
+pub fn storage_recovery_evidence_health(
+    storage_recovery: Option<&serde_json::Value>,
+    required: bool,
+) -> StorageRecoveryEvidenceHealth {
+    let Some(storage_recovery) = storage_recovery else {
+        let blockers = if required {
+            vec!["storage recovery evidence is required before cutover".to_string()]
+        } else {
+            Vec::new()
+        };
+        return StorageRecoveryEvidenceHealth {
+            required,
+            present: false,
+            ready: !required,
+            protocol_matches: None,
+            durable_recovery_observed: None,
+            checkpoint_boundary_present: None,
+            wal_replay_bounded: None,
+            torn_tail_clean: None,
+            blockers,
+        };
+    };
+    let protocol_matches = storage_recovery
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        .map(|protocol| protocol == "skein-storage-recovery-report");
+    let readiness = storage_recovery.get("readiness");
+    let durable_recovery_observed = readiness
+        .and_then(|readiness| readiness.get("durable_recovery_observed"))
+        .and_then(serde_json::Value::as_bool);
+    let checkpoint_boundary_present = readiness
+        .and_then(|readiness| readiness.get("checkpoint_boundary_present"))
+        .and_then(serde_json::Value::as_bool);
+    let wal_replay_bounded = readiness
+        .and_then(|readiness| readiness.get("wal_replay_bounded"))
+        .and_then(serde_json::Value::as_bool);
+    let torn_tail_clean = readiness
+        .and_then(|readiness| readiness.get("torn_tail_clean"))
+        .and_then(serde_json::Value::as_bool);
+    let mut blockers = Vec::new();
+    if protocol_matches != Some(true) {
+        blockers.push("storage recovery evidence protocol mismatch".to_string());
+    }
+    if durable_recovery_observed != Some(true) {
+        blockers.push("storage recovery evidence does not prove durable recovery".to_string());
+    }
+    if checkpoint_boundary_present != Some(true) {
+        blockers.push("storage recovery evidence lacks checkpoint boundary".to_string());
+    }
+    if wal_replay_bounded != Some(true) {
+        blockers.push("storage recovery evidence lacks bounded WAL replay".to_string());
+    }
+    if torn_tail_clean != Some(true) {
+        blockers.push("storage recovery evidence observed torn WAL tail".to_string());
+    }
+    StorageRecoveryEvidenceHealth {
+        required,
+        present: true,
+        ready: blockers.is_empty(),
+        protocol_matches,
+        durable_recovery_observed,
+        checkpoint_boundary_present,
+        wal_replay_bounded,
+        torn_tail_clean,
+        blockers,
+    }
 }
 
 fn insert_background_maintenance_summary_json(
@@ -1451,6 +1561,17 @@ mod tests {
                 shadow_trace_path: Some(trace_path.to_string_lossy().into_owned()),
                 shadow_request_count: Some(2),
                 include_cutover_evidence: true,
+                storage_recovery_required: true,
+                storage_recovery: Some(serde_json::json!({
+                    "protocol": "skein-storage-recovery-report",
+                    "storage_version": "skein-storage-v1",
+                    "readiness": {
+                        "durable_recovery_observed": true,
+                        "checkpoint_boundary_present": true,
+                        "wal_replay_bounded": true,
+                        "torn_tail_clean": true
+                    }
+                })),
                 rollback: CompatibilityRollbackEvidence {
                     required: true,
                     ready: true,
@@ -1503,6 +1624,16 @@ mod tests {
         assert_eq!(
             bundle["cutover_evidence"]["shadow_trace_pending_request_count"],
             0
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_required"],
+            true
+        );
+        assert_eq!(bundle["cutover_evidence"]["storage_recovery_present"], true);
+        assert_eq!(bundle["cutover_evidence"]["storage_recovery_ready"], true);
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_wal_replay_bounded"],
+            true
         );
         assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);
@@ -1566,6 +1697,65 @@ mod tests {
         assert_eq!(
             bundle["migration_gate"]["rollback_blocker_messages"][0],
             "previous database reopen evidence is required before cutover"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_cypher_migration_gate_blocks_when_required_storage_recovery_is_missing() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-migration-gate-storage-recovery-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let mut shadow = TestShadowEngine::default();
+        let bundle = scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+            &root,
+            &mut shadow,
+            NowledgeCypherMigrationGateJsonOptions {
+                shadow_ready: Some(ExternalShadowReady {
+                    protocol_version: crate::EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                    capabilities: vec![
+                        "execute".to_string(),
+                        "execute_session".to_string(),
+                        "project_graph".to_string(),
+                    ],
+                    engine_kind: Some("previous_wrapper".to_string()),
+                }),
+                include_cutover_evidence: true,
+                storage_recovery_required: true,
+                ..NowledgeCypherMigrationGateJsonOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_required"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_present"],
+            false
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["storage_recovery_blockers"][0],
+            "storage recovery evidence is required before cutover"
         );
 
         fs::remove_dir_all(root).unwrap();
