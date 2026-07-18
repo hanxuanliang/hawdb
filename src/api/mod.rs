@@ -2072,6 +2072,68 @@ pub struct KnowledgeSchemaMigrationApplyBatchOutput {
     pub duplicate_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum KnowledgeAugmentationJobLifecycleTransition {
+    Create {
+        job_type: String,
+        parameters: Value,
+        created_at: Value,
+    },
+    MarkRunning {
+        started_at: Value,
+    },
+    UpdateProgress {
+        progress: f64,
+        message: String,
+    },
+    MarkCompleted {
+        result: Value,
+        completed_at: Value,
+    },
+    MarkFailed {
+        error_message: String,
+        completed_at: Value,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeAugmentationJobLifecycleUpdate {
+    pub job_id: String,
+    pub transition: KnowledgeAugmentationJobLifecycleTransition,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeAugmentationJobLifecycleBatchRequest {
+    pub updates: Vec<KnowledgeAugmentationJobLifecycleUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeAugmentationJobLifecycleBatchRow {
+    pub job_id: String,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub updated: bool,
+    pub missing: bool,
+    pub already_exists: bool,
+    pub status_mismatch: bool,
+    pub duplicate: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeAugmentationJobLifecycleBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeAugmentationJobLifecycleBatchRow>,
+    pub created_count: usize,
+    pub updated_count: usize,
+    pub missing_count: usize,
+    pub already_exists_count: usize,
+    pub status_mismatch_count: usize,
+    pub duplicate_count: usize,
+    pub updated_property_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
@@ -3869,6 +3931,13 @@ impl Database {
         request: &KnowledgeSchemaMigrationApplyBatchRequest,
     ) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
         apply_knowledge_schema_migrations_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_augmentation_jobs_batch(
+        &mut self,
+        request: &KnowledgeAugmentationJobLifecycleBatchRequest,
+    ) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
+        update_knowledge_augmentation_jobs_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -8316,6 +8385,389 @@ fn apply_knowledge_schema_migrations_batch_for(
     })
 }
 
+fn update_knowledge_augmentation_jobs_batch_for(
+    db: &mut Database,
+    request: &KnowledgeAugmentationJobLifecycleBatchRequest,
+) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        validate_augmentation_job_lifecycle_update(update)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut created_count = 0;
+    let mut updated_count = 0;
+    let mut missing_count = 0;
+    let mut already_exists_count = 0;
+    let mut status_mismatch_count = 0;
+    let mut duplicate_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_job_ids = BTreeSet::new();
+    let mut eligible_operations = Vec::new();
+
+    for update in &request.updates {
+        if !pending_job_ids.insert(update.job_id.clone()) {
+            duplicate_count += 1;
+            rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
+                job_id: update.job_id.clone(),
+                node_id: None,
+                created: false,
+                updated: false,
+                missing: false,
+                already_exists: false,
+                status_mismatch: false,
+                duplicate: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        match &update.transition {
+            KnowledgeAugmentationJobLifecycleTransition::Create { .. } => {
+                if let Some(existing) = node_by_label_property_external_id(
+                    &db.catalog,
+                    &db.store,
+                    "AugmentationJob",
+                    "job_id",
+                    update.job_id.as_str(),
+                ) {
+                    already_exists_count += 1;
+                    rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
+                        job_id: update.job_id.clone(),
+                        node_id: Some(existing.id.0),
+                        created: false,
+                        updated: false,
+                        missing: false,
+                        already_exists: true,
+                        status_mismatch: false,
+                        duplicate: false,
+                        updated_property_count: 0,
+                    });
+                    continue;
+                }
+                let assignments = augmentation_job_create_assignments(update);
+                let row_updated_property_count = assignments.len();
+                updated_property_count += row_updated_property_count;
+                created_count += 1;
+                eligible_operations.push(AugmentationJobLifecycleOperation::Create {
+                    job_id: update.job_id.clone(),
+                    assignments,
+                });
+                rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
+                    job_id: update.job_id.clone(),
+                    node_id: None,
+                    created: true,
+                    updated: false,
+                    missing: false,
+                    already_exists: false,
+                    status_mismatch: false,
+                    duplicate: false,
+                    updated_property_count: row_updated_property_count,
+                });
+            }
+            _ => {
+                let Some(existing) = node_by_label_property_external_id(
+                    &db.catalog,
+                    &db.store,
+                    "AugmentationJob",
+                    "job_id",
+                    update.job_id.as_str(),
+                ) else {
+                    missing_count += 1;
+                    rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
+                        job_id: update.job_id.clone(),
+                        node_id: None,
+                        created: false,
+                        updated: false,
+                        missing: true,
+                        already_exists: false,
+                        status_mismatch: false,
+                        duplicate: false,
+                        updated_property_count: 0,
+                    });
+                    continue;
+                };
+                if !augmentation_job_transition_allows_status(
+                    &update.transition,
+                    augmentation_job_status(existing).as_deref(),
+                ) {
+                    status_mismatch_count += 1;
+                    rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
+                        job_id: update.job_id.clone(),
+                        node_id: Some(existing.id.0),
+                        created: false,
+                        updated: false,
+                        missing: false,
+                        already_exists: false,
+                        status_mismatch: true,
+                        duplicate: false,
+                        updated_property_count: 0,
+                    });
+                    continue;
+                }
+                let assignments = augmentation_job_transition_assignments(&update.transition);
+                let row_updated_property_count = assignments.len();
+                updated_property_count += row_updated_property_count;
+                updated_count += 1;
+                eligible_operations.push(AugmentationJobLifecycleOperation::Update {
+                    node_id: existing.id,
+                    assignments,
+                });
+                rows.push(KnowledgeAugmentationJobLifecycleBatchRow {
+                    job_id: update.job_id.clone(),
+                    node_id: Some(existing.id.0),
+                    created: false,
+                    updated: true,
+                    missing: false,
+                    already_exists: false,
+                    status_mismatch: false,
+                    duplicate: false,
+                    updated_property_count: row_updated_property_count,
+                });
+            }
+        }
+    }
+
+    if eligible_operations.is_empty() {
+        return Ok(KnowledgeAugmentationJobLifecycleBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            created_count: 0,
+            updated_count: 0,
+            missing_count,
+            already_exists_count,
+            status_mismatch_count,
+            duplicate_count,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for operation in &eligible_operations {
+        let (cypher, parameters) = augmentation_job_lifecycle_statement(operation);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    for row in &mut rows {
+        if row.created {
+            row.node_id = node_by_label_property_external_id(
+                &db.catalog,
+                &db.store,
+                "AugmentationJob",
+                "job_id",
+                row.job_id.as_str(),
+            )
+            .map(|node| node.id.0);
+        }
+    }
+
+    Ok(KnowledgeAugmentationJobLifecycleBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        created_count,
+        updated_count,
+        missing_count,
+        already_exists_count,
+        status_mismatch_count,
+        duplicate_count,
+        updated_property_count,
+    })
+}
+
+enum AugmentationJobLifecycleOperation {
+    Create {
+        job_id: String,
+        assignments: BTreeMap<String, Value>,
+    },
+    Update {
+        node_id: NodeId,
+        assignments: BTreeMap<String, Value>,
+    },
+}
+
+fn validate_augmentation_job_lifecycle_update(
+    update: &KnowledgeAugmentationJobLifecycleUpdate,
+) -> Result<()> {
+    if update.job_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge augmentation job update requires a non-empty job id".to_string(),
+        ));
+    }
+    match &update.transition {
+        KnowledgeAugmentationJobLifecycleTransition::Create { job_type, .. } => {
+            if job_type.is_empty() {
+                return Err(SkeinError::Semantic(
+                    "knowledge augmentation job create requires a non-empty job type".to_string(),
+                ));
+            }
+        }
+        KnowledgeAugmentationJobLifecycleTransition::UpdateProgress { progress, message } => {
+            if !progress.is_finite() || *progress < 0.0 || *progress > 100.0 {
+                return Err(SkeinError::Semantic(
+                    "knowledge augmentation job progress requires a finite percentage".to_string(),
+                ));
+            }
+            if message.is_empty() {
+                return Err(SkeinError::Semantic(
+                    "knowledge augmentation job progress requires a non-empty message".to_string(),
+                ));
+            }
+        }
+        KnowledgeAugmentationJobLifecycleTransition::MarkFailed { error_message, .. }
+            if error_message.is_empty() =>
+        {
+            return Err(SkeinError::Semantic(
+                "knowledge augmentation job failure requires a non-empty error message".to_string(),
+            ));
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn augmentation_job_create_assignments(
+    update: &KnowledgeAugmentationJobLifecycleUpdate,
+) -> BTreeMap<String, Value> {
+    let KnowledgeAugmentationJobLifecycleTransition::Create {
+        job_type,
+        parameters,
+        created_at,
+    } = &update.transition
+    else {
+        unreachable!("augmentation job create assignments require create transition");
+    };
+    BTreeMap::from([
+        ("job_type".to_string(), Value::String(job_type.clone())),
+        ("status".to_string(), Value::String("pending".to_string())),
+        ("progress".to_string(), Value::Float(0.0)),
+        (
+            "message".to_string(),
+            Value::String("Job created".to_string()),
+        ),
+        ("parameters".to_string(), parameters.clone()),
+        ("result".to_string(), Value::String("{}".to_string())),
+        ("error_message".to_string(), Value::String(String::new())),
+        ("started_at".to_string(), Value::Null),
+        ("completed_at".to_string(), Value::Null),
+        ("created_at".to_string(), created_at.clone()),
+    ])
+}
+
+fn augmentation_job_transition_assignments(
+    transition: &KnowledgeAugmentationJobLifecycleTransition,
+) -> BTreeMap<String, Value> {
+    match transition {
+        KnowledgeAugmentationJobLifecycleTransition::MarkRunning { started_at } => {
+            BTreeMap::from([
+                ("status".to_string(), Value::String("running".to_string())),
+                ("started_at".to_string(), started_at.clone()),
+                (
+                    "message".to_string(),
+                    Value::String("Job started".to_string()),
+                ),
+            ])
+        }
+        KnowledgeAugmentationJobLifecycleTransition::UpdateProgress { progress, message } => {
+            BTreeMap::from([
+                ("progress".to_string(), Value::Float(*progress)),
+                ("message".to_string(), Value::String(message.clone())),
+            ])
+        }
+        KnowledgeAugmentationJobLifecycleTransition::MarkCompleted {
+            result,
+            completed_at,
+        } => BTreeMap::from([
+            ("status".to_string(), Value::String("completed".to_string())),
+            ("progress".to_string(), Value::Float(100.0)),
+            (
+                "message".to_string(),
+                Value::String("Job completed successfully".to_string()),
+            ),
+            ("result".to_string(), result.clone()),
+            ("completed_at".to_string(), completed_at.clone()),
+        ]),
+        KnowledgeAugmentationJobLifecycleTransition::MarkFailed {
+            error_message,
+            completed_at,
+        } => BTreeMap::from([
+            ("status".to_string(), Value::String("failed".to_string())),
+            (
+                "message".to_string(),
+                Value::String("Job failed".to_string()),
+            ),
+            (
+                "error_message".to_string(),
+                Value::String(error_message.clone()),
+            ),
+            ("completed_at".to_string(), completed_at.clone()),
+        ]),
+        KnowledgeAugmentationJobLifecycleTransition::Create { .. } => {
+            unreachable!("augmentation job create is handled separately")
+        }
+    }
+}
+
+fn augmentation_job_transition_allows_status(
+    transition: &KnowledgeAugmentationJobLifecycleTransition,
+    status: Option<&str>,
+) -> bool {
+    match transition {
+        KnowledgeAugmentationJobLifecycleTransition::MarkRunning { .. } => {
+            status == Some("pending")
+        }
+        KnowledgeAugmentationJobLifecycleTransition::UpdateProgress { .. }
+        | KnowledgeAugmentationJobLifecycleTransition::MarkCompleted { .. } => {
+            status == Some("running")
+        }
+        KnowledgeAugmentationJobLifecycleTransition::MarkFailed { .. } => {
+            matches!(status, Some("pending" | "running"))
+        }
+        KnowledgeAugmentationJobLifecycleTransition::Create { .. } => false,
+    }
+}
+
+fn augmentation_job_status(node: &NodeRecord) -> Option<String> {
+    match node.properties.get("status") {
+        Some(Value::String(status)) => Some(status.clone()),
+        _ => None,
+    }
+}
+
+fn augmentation_job_lifecycle_statement(
+    operation: &AugmentationJobLifecycleOperation,
+) -> (String, BTreeMap<String, Value>) {
+    match operation {
+        AugmentationJobLifecycleOperation::Create {
+            job_id,
+            assignments,
+        } => augmentation_job_create_statement(job_id, assignments),
+        AugmentationJobLifecycleOperation::Update {
+            node_id,
+            assignments,
+        } => knowledge_property_update_statement("AugmentationJob", node_id.0, assignments),
+    }
+}
+
+fn augmentation_job_create_statement(
+    job_id: &str,
+    assignments: &BTreeMap<String, Value>,
+) -> (String, BTreeMap<String, Value>) {
+    let mut cypher = "CREATE (:AugmentationJob {job_id: $job_id".to_string();
+    let mut parameters =
+        BTreeMap::from([("job_id".to_string(), Value::String(job_id.to_string()))]);
+    for (index, (property, value)) in assignments.iter().enumerate() {
+        let parameter_name = format!("property_value_{index}");
+        cypher.push_str(&format!(", {property}: ${parameter_name}"));
+        parameters.insert(parameter_name, value.clone());
+    }
+    cypher.push_str("})");
+    (cypher, parameters)
+}
+
 fn delete_knowledge_entity_for(
     db: &mut Database,
     request: &KnowledgeEntityDeleteRequest,
@@ -12758,6 +13210,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSchemaMigrationApplyBatchRequest,
     ) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
         self.db.apply_knowledge_schema_migrations_batch(request)
+    }
+
+    pub fn update_knowledge_augmentation_jobs_batch(
+        &mut self,
+        request: &KnowledgeAugmentationJobLifecycleBatchRequest,
+    ) -> Result<KnowledgeAugmentationJobLifecycleBatchOutput> {
+        self.db.update_knowledge_augmentation_jobs_batch(request)
     }
 
     pub fn delete_knowledge_entity(

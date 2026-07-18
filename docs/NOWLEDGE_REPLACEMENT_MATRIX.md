@@ -214,6 +214,13 @@ applied_at`. The wrapper validates non-empty migration ids before WAL, reports
 already-applied and duplicate rows without writing, preserves existing
 `applied_at` values, and commits eligible new migration rows through one grouped
 WAL batch.
+AugmentationJob lifecycle writes are covered by a typed batch for Nowledge job
+creation, pending-to-running starts, running progress updates,
+running-to-completed results, and pending/running-to-failed errors. The wrapper
+validates job ids, job types, progress percentages, progress messages, and
+failure messages before WAL, reports missing, existing, status-mismatched, and
+duplicate jobs without writing, and commits eligible creates/updates through
+one grouped WAL batch.
 
 ## Current Direction
 

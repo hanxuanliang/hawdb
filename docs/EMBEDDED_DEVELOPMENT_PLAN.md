@@ -176,6 +176,8 @@ GraphMeta PageRank and community-detection stamps are exposed as a typed batch
 over `meta_id` plus validated state assignments.
 Schema migration log writes are exposed as a typed create-once batch over
 `SchemaMigrationLog` ids and `applied_at` values.
+AugmentationJob create/running/progress/completed/failed lifecycle writes are
+exposed as a typed batch with explicit status-transition checks.
 `DatabaseConfig` provides read-only operation and bounded read-result
 configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,
