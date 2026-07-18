@@ -2011,6 +2011,38 @@ pub struct KnowledgePageRankClearOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaStamp {
+    pub meta_id: String,
+    pub assignments: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaStampBatchRequest {
+    pub stamps: Vec<KnowledgeGraphMetaStamp>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaStampBatchRow {
+    pub meta_id: String,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaStampBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeGraphMetaStampBatchRow>,
+    pub created_count: usize,
+    pub updated_count: usize,
+    pub duplicate_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3793,6 +3825,13 @@ impl Database {
         request: &KnowledgePageRankClearRequest,
     ) -> Result<KnowledgePageRankClearOutput> {
         clear_knowledge_pagerank_scores_for(self, request)
+    }
+
+    pub fn stamp_knowledge_graph_meta_batch(
+        &mut self,
+        request: &KnowledgeGraphMetaStampBatchRequest,
+    ) -> Result<KnowledgeGraphMetaStampBatchOutput> {
+        stamp_knowledge_graph_meta_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -7954,6 +7993,183 @@ fn pagerank_label(label: &str) -> &'static str {
         "Entity" | "entity" => "Entity",
         _ => unreachable!("pagerank label should be validated before canonicalization"),
     }
+}
+
+fn stamp_knowledge_graph_meta_batch_for(
+    db: &mut Database,
+    request: &KnowledgeGraphMetaStampBatchRequest,
+) -> Result<KnowledgeGraphMetaStampBatchOutput> {
+    db.ensure_writable()?;
+    for stamp in &request.stamps {
+        if stamp.meta_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge graph meta stamp requires a non-empty meta id".to_string(),
+            ));
+        }
+        if stamp.assignments.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge graph meta stamp requires at least one assignment".to_string(),
+            ));
+        }
+        for property in stamp.assignments.keys() {
+            validate_cypher_identifier(property, "property")?;
+            if property == "meta_id" {
+                return Err(SkeinError::Semantic(
+                    "knowledge graph meta stamp cannot update meta_id".to_string(),
+                ));
+            }
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.stamps.len());
+    let mut created_count = 0;
+    let mut updated_count = 0;
+    let mut duplicate_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_meta_ids = BTreeSet::new();
+    let mut eligible_stamps = Vec::new();
+
+    for stamp in &request.stamps {
+        if !pending_meta_ids.insert(stamp.meta_id.clone()) {
+            duplicate_count += 1;
+            rows.push(KnowledgeGraphMetaStampBatchRow {
+                meta_id: stamp.meta_id.clone(),
+                node_id: None,
+                created: false,
+                updated: false,
+                duplicate: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let existing = node_by_label_property_external_id(
+            &db.catalog,
+            &db.store,
+            "GraphMeta",
+            "meta_id",
+            stamp.meta_id.as_str(),
+        );
+        let updated_properties = stamp.assignments.len();
+        updated_property_count += updated_properties;
+        match existing {
+            Some(node) => {
+                updated_count += 1;
+                eligible_stamps.push(GraphMetaStampOperation::Update {
+                    node_id: node.id,
+                    assignments: stamp.assignments.clone(),
+                });
+                rows.push(KnowledgeGraphMetaStampBatchRow {
+                    meta_id: stamp.meta_id.clone(),
+                    node_id: Some(node.id.0),
+                    created: false,
+                    updated: true,
+                    duplicate: false,
+                    updated_property_count: updated_properties,
+                });
+            }
+            None => {
+                created_count += 1;
+                eligible_stamps.push(GraphMetaStampOperation::Create {
+                    meta_id: stamp.meta_id.clone(),
+                    assignments: stamp.assignments.clone(),
+                });
+                rows.push(KnowledgeGraphMetaStampBatchRow {
+                    meta_id: stamp.meta_id.clone(),
+                    node_id: None,
+                    created: true,
+                    updated: false,
+                    duplicate: false,
+                    updated_property_count: updated_properties,
+                });
+            }
+        }
+    }
+
+    if eligible_stamps.is_empty() {
+        return Ok(KnowledgeGraphMetaStampBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            created_count: 0,
+            updated_count: 0,
+            duplicate_count,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for operation in &eligible_stamps {
+        let (cypher, parameters) = graph_meta_stamp_statement(operation);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    for row in &mut rows {
+        if row.created {
+            row.node_id = node_by_label_property_external_id(
+                &db.catalog,
+                &db.store,
+                "GraphMeta",
+                "meta_id",
+                row.meta_id.as_str(),
+            )
+            .map(|node| node.id.0);
+        }
+    }
+
+    Ok(KnowledgeGraphMetaStampBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        created_count,
+        updated_count,
+        duplicate_count,
+        updated_property_count,
+    })
+}
+
+enum GraphMetaStampOperation {
+    Create {
+        meta_id: String,
+        assignments: BTreeMap<String, Value>,
+    },
+    Update {
+        node_id: NodeId,
+        assignments: BTreeMap<String, Value>,
+    },
+}
+
+fn graph_meta_stamp_statement(
+    operation: &GraphMetaStampOperation,
+) -> (String, BTreeMap<String, Value>) {
+    match operation {
+        GraphMetaStampOperation::Create {
+            meta_id,
+            assignments,
+        } => graph_meta_create_statement(meta_id, assignments),
+        GraphMetaStampOperation::Update {
+            node_id,
+            assignments,
+        } => knowledge_property_update_statement("GraphMeta", node_id.0, assignments),
+    }
+}
+
+fn graph_meta_create_statement(
+    meta_id: &str,
+    assignments: &BTreeMap<String, Value>,
+) -> (String, BTreeMap<String, Value>) {
+    let mut cypher = "CREATE (:GraphMeta {meta_id: $meta_id".to_string();
+    let mut parameters =
+        BTreeMap::from([("meta_id".to_string(), Value::String(meta_id.to_string()))]);
+    for (index, (property, value)) in assignments.iter().enumerate() {
+        let parameter_name = format!("property_value_{index}");
+        cypher.push_str(&format!(", {property}: ${parameter_name}"));
+        parameters.insert(parameter_name, value.clone());
+    }
+    cypher.push_str("})");
+    (cypher, parameters)
 }
 
 fn delete_knowledge_entity_for(
@@ -12384,6 +12600,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgePageRankClearRequest,
     ) -> Result<KnowledgePageRankClearOutput> {
         self.db.clear_knowledge_pagerank_scores(request)
+    }
+
+    pub fn stamp_knowledge_graph_meta_batch(
+        &mut self,
+        request: &KnowledgeGraphMetaStampBatchRequest,
+    ) -> Result<KnowledgeGraphMetaStampBatchOutput> {
+        self.db.stamp_knowledge_graph_meta_batch(request)
     }
 
     pub fn delete_knowledge_entity(

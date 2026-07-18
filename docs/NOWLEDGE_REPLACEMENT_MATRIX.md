@@ -202,6 +202,12 @@ Entity `pagerank_score` persistence and clear operations. The wrapper accepts
 only finite non-negative scores for Memory/Entity identities, reports missing,
 idless, duplicate, and clear-only non-writable rows without writing, and commits
 eligible score writes or clears through one grouped WAL batch.
+GraphMeta algorithm stamps are covered by a typed batch for Nowledge PageRank
+and community-detection state updates shaped as `MERGE (m:GraphMeta {meta_id})
+SET ...`. The wrapper validates non-empty `meta_id` values and property names,
+rejects attempts to mutate `meta_id`, creates missing GraphMeta rows, updates
+existing rows, reports duplicate stamps without writing, and commits eligible
+stamps through one grouped WAL batch.
 
 ## Current Direction
 

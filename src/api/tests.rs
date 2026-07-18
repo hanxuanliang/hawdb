@@ -6,7 +6,8 @@ use super::{
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeLabelLifecycleBatchRequest,
+    KnowledgeFanoutReasonCode, KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest,
+    KnowledgeGraphPathDirection, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
@@ -6968,6 +6969,192 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
             rows.rows[1].properties.get("pagerank_score"),
             Some(&Some(Value::Float(0.84)))
         );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn stamps_graph_meta_batch_for_nowledge_algorithm_state() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: false, pagerank_iterations: 5})",
+    )
+    .unwrap();
+
+    let output = db
+        .stamp_knowledge_graph_meta_batch(&KnowledgeGraphMetaStampBatchRequest {
+            stamps: vec![
+                KnowledgeGraphMetaStamp {
+                    meta_id: "main".to_string(),
+                    assignments: BTreeMap::from([
+                        ("pagerank_applied".to_string(), Value::Bool(true)),
+                        (
+                            "pagerank_algorithm".to_string(),
+                            Value::String("pagerank".to_string()),
+                        ),
+                        ("pagerank_damping".to_string(), Value::Float(0.85)),
+                        ("pagerank_iterations".to_string(), Value::Int(20)),
+                        ("pagerank_computed_at".to_string(), Value::Int(100)),
+                        ("updated_at".to_string(), Value::Int(101)),
+                    ]),
+                },
+                KnowledgeGraphMetaStamp {
+                    meta_id: "community".to_string(),
+                    assignments: BTreeMap::from([
+                        ("community_detection_applied".to_string(), Value::Bool(true)),
+                        (
+                            "community_algorithm".to_string(),
+                            Value::String("louvain".to_string()),
+                        ),
+                        ("community_resolution".to_string(), Value::Float(0.8)),
+                        ("community_count".to_string(), Value::Int(3)),
+                        (
+                            "community_detection_computed_at".to_string(),
+                            Value::Int(200),
+                        ),
+                        ("last_augmentation_at".to_string(), Value::Int(201)),
+                        ("updated_at".to_string(), Value::Int(202)),
+                    ]),
+                },
+                KnowledgeGraphMetaStamp {
+                    meta_id: "main".to_string(),
+                    assignments: BTreeMap::from([(
+                        "pagerank_applied".to_string(),
+                        Value::Bool(false),
+                    )]),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 1);
+    assert_eq!(output.graph_commit_epoch_after, 2);
+    assert_eq!(output.rows.len(), 3);
+    assert_eq!(output.created_count, 1);
+    assert_eq!(output.updated_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.updated_property_count, 13);
+    assert!(output.rows[0].updated);
+    assert!(output.rows[1].created);
+    assert!(output.rows[2].duplicate);
+    assert!(output.rows[1].node_id.is_some());
+
+    let rows = db
+        .query("MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.pagerank_applied AS applied, m.pagerank_algorithm AS algorithm, m.pagerank_damping AS damping, m.pagerank_iterations AS iterations, m.pagerank_computed_at AS computed_at, m.updated_at AS updated_at")
+        .unwrap();
+    assert_eq!(rows.rows[0].get("applied"), Some(&Value::Bool(true)));
+    assert_eq!(
+        rows.rows[0].get("algorithm"),
+        Some(&Value::String("pagerank".to_string()))
+    );
+    assert_eq!(rows.rows[0].get("damping"), Some(&Value::Float(0.85)));
+    assert_eq!(rows.rows[0].get("iterations"), Some(&Value::Int(20)));
+    assert_eq!(rows.rows[0].get("computed_at"), Some(&Value::Int(100)));
+    assert_eq!(rows.rows[0].get("updated_at"), Some(&Value::Int(101)));
+
+    let rows = db
+        .query("MATCH (m:GraphMeta {meta_id: 'community'}) RETURN m.community_detection_applied AS applied, m.community_algorithm AS algorithm, m.community_resolution AS resolution, m.community_count AS count, m.community_detection_computed_at AS computed_at, m.last_augmentation_at AS augmented")
+        .unwrap();
+    assert_eq!(rows.rows[0].get("applied"), Some(&Value::Bool(true)));
+    assert_eq!(
+        rows.rows[0].get("algorithm"),
+        Some(&Value::String("louvain".to_string()))
+    );
+    assert_eq!(rows.rows[0].get("resolution"), Some(&Value::Float(0.8)));
+    assert_eq!(rows.rows[0].get("count"), Some(&Value::Int(3)));
+    assert_eq!(rows.rows[0].get("computed_at"), Some(&Value::Int(200)));
+    assert_eq!(rows.rows[0].get("augmented"), Some(&Value::Int(201)));
+}
+
+#[test]
+fn graph_meta_stamp_rejects_meta_id_assignment_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: false})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .stamp_knowledge_graph_meta_batch(&KnowledgeGraphMetaStampBatchRequest {
+            stamps: vec![KnowledgeGraphMetaStamp {
+                meta_id: "main".to_string(),
+                assignments: BTreeMap::from([(
+                    "meta_id".to_string(),
+                    Value::String("other".to_string()),
+                )]),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("cannot update meta_id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_graph_meta_stamp_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_graph_meta_stamp_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: false})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.stamp_knowledge_graph_meta_batch(&KnowledgeGraphMetaStampBatchRequest {
+            stamps: vec![
+                KnowledgeGraphMetaStamp {
+                    meta_id: "main".to_string(),
+                    assignments: BTreeMap::from([
+                        ("pagerank_applied".to_string(), Value::Bool(true)),
+                        ("pagerank_computed_at".to_string(), Value::Int(404)),
+                    ]),
+                },
+                KnowledgeGraphMetaStamp {
+                    meta_id: "community".to_string(),
+                    assignments: BTreeMap::from([
+                        (
+                            "community_detection_applied".to_string(),
+                            Value::Bool(false),
+                        ),
+                        (
+                            "community_algorithm".to_string(),
+                            Value::String(String::new()),
+                        ),
+                        ("community_resolution".to_string(), Value::Float(1.0)),
+                        ("community_count".to_string(), Value::Int(0)),
+                        ("community_detection_computed_at".to_string(), Value::Null),
+                    ]),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    assert!(wal.contains("create_node"));
+    {
+        let mut db = Database::open(&path).unwrap();
+        let rows = db
+            .query("MATCH (m:GraphMeta {meta_id: 'main'}) RETURN m.pagerank_applied AS applied, m.pagerank_computed_at AS computed")
+            .unwrap();
+        assert_eq!(rows.rows[0].get("applied"), Some(&Value::Bool(true)));
+        assert_eq!(rows.rows[0].get("computed"), Some(&Value::Int(404)));
+        let rows = db
+            .query("MATCH (m:GraphMeta {meta_id: 'community'}) RETURN m.community_detection_applied AS applied, m.community_algorithm AS algorithm, m.community_resolution AS resolution, m.community_count AS count, m.community_detection_computed_at AS computed")
+            .unwrap();
+        assert_eq!(rows.rows[0].get("applied"), Some(&Value::Bool(false)));
+        assert_eq!(
+            rows.rows[0].get("algorithm"),
+            Some(&Value::String(String::new()))
+        );
+        assert_eq!(rows.rows[0].get("resolution"), Some(&Value::Float(1.0)));
+        assert_eq!(rows.rows[0].get("count"), Some(&Value::Int(0)));
+        assert_eq!(rows.rows[0].get("computed"), Some(&Value::Null));
     }
     std::fs::remove_dir_all(path).unwrap();
 }
