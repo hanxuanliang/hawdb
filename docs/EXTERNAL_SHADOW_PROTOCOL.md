@@ -101,6 +101,7 @@ Success response:
 {
   "ok": {
     "protocol_version": 1,
+    "engine_kind": "previous_wrapper",
     "capabilities": ["execute", "execute_session", "project_graph"]
   }
 }
@@ -110,6 +111,10 @@ Success response:
 include `execute`, `execute_session`, and `project_graph`; an adapter that cannot
 materialize projected graph metadata should still advertise `project_graph` when
 it can return a valid `primary_only` response for that operation.
+`engine_kind` is optional for protocol smoke tests, but migration cutover
+evidence requires `previous_wrapper`. The bundled `skein-shadow-self` adapter
+reports `protocol_smoke`, so it can validate the protocol without being accepted
+as previous-wrapper cutover evidence.
 
 ## `execute`
 

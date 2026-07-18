@@ -62,6 +62,7 @@ fn handle_ready() -> serde_json::Value {
     serde_json::json!({
         "ok": {
             "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
+            "engine_kind": "protocol_smoke",
             "capabilities": [
                 "execute",
                 "execute_session",
@@ -381,5 +382,6 @@ mod tests {
             response["ok"]["capabilities"],
             serde_json::json!(["execute", "execute_session", "project_graph"])
         );
+        assert_eq!(response["ok"]["engine_kind"], "protocol_smoke");
     }
 }

@@ -269,6 +269,7 @@ fn insert_shadow_ready_json(
         serde_json::json!({
             "protocol_version": ready.protocol_version,
             "capabilities": &ready.capabilities,
+            "engine_kind": &ready.engine_kind,
         }),
     );
     Ok(())
@@ -1252,6 +1253,7 @@ mod tests {
                 shadow_ready: Some(ExternalShadowReady {
                     protocol_version: crate::EXTERNAL_SHADOW_PROTOCOL_VERSION,
                     capabilities: vec!["execute".to_string(), "project_graph".to_string()],
+                    engine_kind: Some("previous_wrapper".to_string()),
                 }),
                 shadow_trace_path: Some("/tmp/skein-shadow.jsonl".to_string()),
                 shadow_request_count: Some(42),

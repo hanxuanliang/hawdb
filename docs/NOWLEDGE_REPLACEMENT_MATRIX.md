@@ -89,7 +89,9 @@ requires 694 checks, `nowledge-memory-core` covers all 694, and
 
 This does not by itself complete migration cutover. The remaining evidence gap
 is external shadow comparison against the previous local graph wrapper when a
-specific migration gate needs oracle-backed parity evidence.
+specific migration gate needs oracle-backed parity evidence. Required cutover
+evidence now rejects self-shadow protocol smoke runs and requires the shadow
+ready preflight to declare `engine_kind: "previous_wrapper"`.
 
 ## LanceDB Replacement Surface
 

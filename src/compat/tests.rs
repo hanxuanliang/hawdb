@@ -730,6 +730,28 @@ done
             "project_graph".to_string()
         ]
     );
+    assert_eq!(ready.engine_kind, None);
+}
+
+#[test]
+fn decodes_external_shadow_ready_engine_kind() {
+    let script = write_external_shadow_script(
+        "external-shadow-ready-engine-kind",
+        r#"#!/bin/sh
+while IFS= read -r line; do
+  case "$line" in
+    *'"op":"ready"'*) echo '{"ok":{"protocol_version":1,"engine_kind":"previous_wrapper","capabilities":["execute","execute_session","project_graph"]}}' ;;
+    *) echo '{"error":{"class":"execution","message":"expected ready"}}' ;;
+  esac
+done
+"#,
+    );
+    let mut shadow =
+        ExternalShadowCommand::spawn("external-shadow-ready-engine-kind", "sh", [script]).unwrap();
+
+    let ready = shadow.require_ready().unwrap();
+
+    assert_eq!(ready.engine_kind.as_deref(), Some("previous_wrapper"));
 }
 
 #[test]

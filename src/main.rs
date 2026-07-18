@@ -126,7 +126,6 @@ fn main() -> Result<()> {
                 } else {
                     None
                 };
-            let shadow_ready_preflight = shadow_ready_report.is_some();
             let mut json =
                 scan_nowledge_query_inventory_cypher_migration_gate_to_json(root, &mut shadow)?;
             add_shadow_run_report(&mut json, &shadow_name_report, is_self_shadow)?;
@@ -136,7 +135,7 @@ fn main() -> Result<()> {
             if let Some(trace_path) = shadow_trace_report {
                 add_shadow_trace_report(&mut json, &trace_path, shadow.request_count())?;
             }
-            add_cutover_evidence_report(&mut json, is_self_shadow, shadow_ready_preflight)?;
+            add_cutover_evidence_report(&mut json, is_self_shadow, shadow_ready_report.as_ref())?;
             let rendered = serde_json::to_string_pretty(&json).unwrap();
             println!("{rendered}");
             if require_cutover_evidence && !cutover_evidence_is_eligible(&json) {
@@ -608,6 +607,7 @@ fn add_shadow_ready_report(
         serde_json::json!({
             "protocol_version": ready.protocol_version,
             "capabilities": &ready.capabilities,
+            "engine_kind": &ready.engine_kind,
         }),
     );
     Ok(())
@@ -639,13 +639,15 @@ fn add_shadow_run_report(
 fn add_cutover_evidence_report(
     bundle: &mut serde_json::Value,
     self_shadow: bool,
-    ready_preflight: bool,
+    shadow_ready: Option<&ExternalShadowReady>,
 ) -> Result<()> {
     let evidence_kind = if self_shadow {
         "protocol_smoke"
     } else {
         "previous_wrapper"
     };
+    let ready_preflight = shadow_ready.is_some();
+    let ready_engine_kind = shadow_ready.and_then(|ready| ready.engine_kind.as_deref());
     let migration_gate = bundle
         .get("migration_gate")
         .and_then(serde_json::Value::as_object)
@@ -667,6 +669,14 @@ fn add_cutover_evidence_report(
     if !ready_preflight {
         blockers.push("shadow ready preflight was not executed");
     }
+    if ready_preflight && ready_engine_kind.is_none() {
+        blockers.push("shadow ready response missing engine_kind");
+    }
+    if let Some(engine_kind) = ready_engine_kind {
+        if engine_kind != "previous_wrapper" {
+            blockers.push("shadow ready engine_kind is not previous_wrapper");
+        }
+    }
     if !shadow_evidence_present {
         blockers.push("no matched shadow checks are present");
     }
@@ -684,8 +694,10 @@ fn add_cutover_evidence_report(
             "evidence_kind": evidence_kind,
             "requires_previous_wrapper": true,
             "requires_ready_preflight": true,
+            "requires_ready_engine_kind": "previous_wrapper",
             "requires_shadow_evidence": true,
             "ready_preflight": ready_preflight,
+            "ready_engine_kind": ready_engine_kind,
             "shadow_evidence_present": shadow_evidence_present,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
@@ -2806,6 +2818,7 @@ mod tests {
                 "execute_session".to_string(),
                 "project_graph".to_string(),
             ],
+            engine_kind: Some("previous_wrapper".to_string()),
         };
 
         add_shadow_ready_report(&mut bundle, &ready).unwrap();
@@ -2815,6 +2828,7 @@ mod tests {
             bundle["shadow_ready"]["capabilities"],
             serde_json::json!(["execute", "execute_session", "project_graph"])
         );
+        assert_eq!(bundle["shadow_ready"]["engine_kind"], "previous_wrapper");
     }
 
     #[test]
@@ -2856,7 +2870,17 @@ mod tests {
             }
         });
 
-        add_cutover_evidence_report(&mut bundle, false, true).unwrap();
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("previous_wrapper".to_string()),
+        };
+
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], true);
         assert!(cutover_evidence_is_eligible(&bundle));
@@ -2882,7 +2906,17 @@ mod tests {
             }
         });
 
-        add_cutover_evidence_report(&mut bundle, true, true).unwrap();
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("protocol_smoke".to_string()),
+        };
+
+        add_cutover_evidence_report(&mut bundle, true, Some(&ready)).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
         assert!(!cutover_evidence_is_eligible(&bundle));
@@ -2905,13 +2939,41 @@ mod tests {
             }
         });
 
-        add_cutover_evidence_report(&mut bundle, false, false).unwrap();
+        add_cutover_evidence_report(&mut bundle, false, None).unwrap();
 
         assert_eq!(bundle["cutover_evidence"]["eligible"], false);
         assert!(!cutover_evidence_is_eligible(&bundle));
         assert_eq!(
             bundle["cutover_evidence"]["blockers"][0],
             "shadow ready preflight was not executed"
+        );
+    }
+
+    #[test]
+    fn requires_previous_wrapper_ready_engine_kind_for_cutover_evidence() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready",
+                "shadow_evidence_present": true
+            }
+        });
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: None,
+        };
+
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready)).unwrap();
+
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
+        assert_eq!(
+            bundle["cutover_evidence"]["blockers"][0],
+            "shadow ready response missing engine_kind"
         );
     }
 

@@ -31,6 +31,7 @@ enum ShadowStatementRole {
 pub struct ExternalShadowReady {
     pub protocol_version: u64,
     pub capabilities: Vec<String>,
+    pub engine_kind: Option<String>,
 }
 
 pub struct ExternalShadowCommand {
@@ -762,9 +763,11 @@ pub(super) fn decode_external_ready_response(
             )));
         }
     }
+    let engine_kind = optional_external_string(engine_name, ok, "engine_kind")?;
     Ok(ExternalShadowReady {
         protocol_version,
         capabilities,
+        engine_kind,
     })
 }
 
