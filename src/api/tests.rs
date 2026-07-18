@@ -11084,30 +11084,47 @@ fn normalized_space_case_predicates_cover_thread_move_selection() {
         .unwrap();
     db.query("CREATE (:Thread {id: 'storage-3', thread_id: 'logical-3', space_id: 'team'})")
         .unwrap();
+    for id in 0..32 {
+        db.query(&format!(
+            "CREATE (:Thread {{id: 'extra-storage-{id}', thread_id: 'extra-logical-{id}', space_id: 'team'}})"
+        ))
+        .unwrap();
+    }
+    db.query("CREATE INDEX ON :Thread(thread_id)").unwrap();
 
-    let source_rows = db
-            .query_with_params(
-                "MATCH (t:Thread)
+    let source_parameters = BTreeMap::from([
+        (
+            "thread_ids".to_string(),
+            Value::List(vec![
+                Value::String("logical-1".into()),
+                Value::String("logical-2".into()),
+                Value::String("logical-3".into()),
+            ]),
+        ),
+        (
+            "source_space_id".to_string(),
+            Value::String("default".into()),
+        ),
+    ]);
+    let source_query = "MATCH (t:Thread)
                  WHERE t.thread_id IN $thread_ids
                    AND CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END = $source_space_id
                  RETURN t.id, t.thread_id, t.space_id
-                 ORDER BY t.id",
-                &BTreeMap::from([
-                    (
-                        "thread_ids".to_string(),
-                        Value::List(vec![
-                            Value::String("logical-1".into()),
-                            Value::String("logical-2".into()),
-                            Value::String("logical-3".into()),
-                        ]),
-                    ),
-                    (
-                        "source_space_id".to_string(),
-                        Value::String("default".into()),
-                    ),
-                ]),
-            )
-            .unwrap();
+                 ORDER BY t.id";
+    let explain = db
+        .explain_query_with_params(source_query, &source_parameters)
+        .unwrap();
+    let physical_plan = explain.physical_plan.explain(0);
+    assert!(physical_plan.contains("IndexNodeMultiSeek"));
+    assert!(physical_plan.contains("FilterExec"));
+    assert!(explain
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision.contains("choose IndexNodeMultiSeek")));
+    let source_rows = db
+        .query_with_params(source_query, &source_parameters)
+        .unwrap();
     assert_eq!(source_rows.rows.len(), 2);
     assert_eq!(
         source_rows.rows[0].get("t.id"),

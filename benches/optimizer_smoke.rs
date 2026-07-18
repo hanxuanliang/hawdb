@@ -502,6 +502,20 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
                 "selected physical plan cost: estimated_rows=900 cost=2004",
             ],
         },
+        OptimizerSmokeCase {
+            name: "thread_candidate_normalized_space_multi_seek",
+            logical: thread_candidate_normalized_space_multi_seek_plan(),
+            catalog: thread_candidate_normalized_space_multi_seek_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 12,
+            },
+            fingerprint_contains: "IndexNodeMultiSeek",
+            decision_contains: &[
+                "choose IndexNodeMultiSeek for Thread.thread_id",
+                "selected physical plan cost: estimated_rows=1 cost=12",
+            ],
+        },
     ]
 }
 
@@ -2324,6 +2338,55 @@ fn normalized_space_exclusion_filter_catalog() -> OptimizerCatalog {
             [],
             [],
             [(("Memory".to_string(), "space_id".to_string()), 10)],
+            [],
+        ),
+    )
+}
+
+fn thread_candidate_normalized_space_multi_seek_plan() -> LogicalPlan {
+    LogicalPlan::Filter {
+        predicate: Predicate::And(vec![
+            Predicate::PropertyIn {
+                variable: "t".to_string(),
+                property: "thread_id".to_string(),
+                values: vec![
+                    Value::String("thread-1".to_string()),
+                    Value::String("thread-2".to_string()),
+                    Value::String("thread-3".to_string()),
+                ],
+            },
+            Predicate::ExpressionEq {
+                expression: ProjectionExpression::DefaultIfNullOrEq {
+                    variable: "t".to_string(),
+                    property: "space_id".to_string(),
+                    empty: Value::String(String::new()),
+                    default: Value::String("default".to_string()),
+                },
+                value: ProjectionExpression::Literal(Value::String("default".to_string())),
+            },
+        ]),
+        input: Box::new(LogicalPlan::NodeScan {
+            variable: "t".to_string(),
+            label: "Thread".to_string(),
+        }),
+    }
+}
+
+fn thread_candidate_normalized_space_multi_seek_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new(
+            [("Thread".to_string(), "thread_id".to_string())],
+            [],
+            [],
+            [],
+        ),
+        OptimizerCatalogStatistics::new(
+            [("Thread".to_string(), 50_000)],
+            [],
+            [],
+            [],
+            [],
+            [(("Thread".to_string(), "thread_id".to_string()), 50_000)],
             [],
         ),
     )
