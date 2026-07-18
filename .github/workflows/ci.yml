@@ -133,10 +133,41 @@ jobs:
           grep -q '"wal_replay_bounded": true' "$root/recovery.json"
           grep -q '"torn_tail_clean": true' "$root/recovery.json"
 
+      - name: Background maintenance report smoke
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          TMPDIR="$root" cargo run --quiet --bin skein -- > "$root/demo.out"
+          db="$root/skein-demo"
+          cargo run --quiet --bin skein -- \
+            background-maintenance-report \
+            --require-cutover-ready \
+            "$db" > "$root/background.json"
+          grep -q '"protocol": "skein-background-maintenance-report"' "$root/background.json"
+          grep -q '"total_candidates": 4' "$root/background.json"
+          grep -q '"kind": "search_projection_graph_delta"' "$root/background.json"
+          grep -q '"kind": "graph_lightning_bootstrap_export"' "$root/background.json"
+          grep -q '"priority": "background"' "$root/background.json"
+          grep -q '"admission": "admit"' "$root/background.json"
+
       - name: Migration gate smoke
         run: |
           set -euo pipefail
           root="$(mktemp -d)"
+          TMPDIR="$root" cargo run --quiet --bin skein -- > "$root/demo.out"
+          db="$root/skein-demo"
+          cargo run --quiet --bin skein -- \
+            storage-recovery-report \
+            --max-wal-replay-entries 100 \
+            --require-durable \
+            --require-checkpoint-boundary \
+            --require-bounded-wal-replay \
+            --require-clean-tail \
+            "$db" > "$root/recovery.json"
+          cargo run --quiet --bin skein -- \
+            background-maintenance-report \
+            --require-cutover-ready \
+            "$db" > "$root/background.json"
           mkdir -p "$root/crates/nmem-graph/src"
           cat > "$root/crates/nmem-graph/src/repo.rs" <<'RS'
           pub fn query() -> &'static str {
@@ -149,6 +180,10 @@ jobs:
             --allow-self-shadow \
             --shadow-ready \
             --shadow-trace "$root/shadow.jsonl" \
+            --require-storage-recovery-evidence \
+            --storage-recovery-report-json "$root/recovery.json" \
+            --require-background-maintenance-evidence \
+            --background-maintenance-report-json "$root/background.json" \
             "$root" \
             self \
             cargo run --quiet --bin skein-shadow-self -- \
@@ -159,6 +194,12 @@ jobs:
           grep -q '"self_shadow": true' "$root/gate.json"
           grep -q '"cutover_evidence"' "$root/gate.json"
           grep -q '"eligible": false' "$root/gate.json"
+          grep -q '"storage_recovery_present": true' "$root/gate.json"
+          grep -q '"storage_recovery_ready": true' "$root/gate.json"
+          grep -q '"storage_recovery_protocol_matches": true' "$root/gate.json"
+          grep -q '"background_maintenance_present": true' "$root/gate.json"
+          grep -q '"background_maintenance_ready": true' "$root/gate.json"
+          grep -q '"background_maintenance_protocol_matches": true' "$root/gate.json"
           grep -q '"shadow_ready"' "$root/gate.json"
           grep -q '"shadow_trace"' "$root/gate.json"
           grep -q '"request_count"' "$root/gate.json"
