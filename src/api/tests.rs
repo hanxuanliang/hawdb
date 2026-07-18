@@ -24,7 +24,8 @@ use super::{
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
-    KnowledgeScopedSubgraphRequest, KnowledgeSourceLifecycleBatchRequest,
+    KnowledgeScopedSubgraphRequest, KnowledgeSkillUsageStatsBatchRequest,
+    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceLifecycleBatchRequest,
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchRequest, KnowledgeSubgraphRequest,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -5652,6 +5653,221 @@ fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("metadata"),
             Some(&Some(Value::String("{\"state\":\"active\"}".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_skill_usage_stats_batch_for_nowledge_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'skill_1', use_count: 1, success_rate: 0.5, metadata: '{}', updated_at: 100})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'skill_2', use_count: 2, metadata: '{}', updated_at: 100})")
+        .unwrap();
+
+    let output = db
+        .update_knowledge_skill_usage_stats_batch(&KnowledgeSkillUsageStatsBatchRequest {
+            updates: vec![
+                KnowledgeSkillUsageStatsUpdate {
+                    skill_id: "skill_1".to_string(),
+                    use_count: 8,
+                    success_rate: Some(Value::Float(0.75)),
+                    last_activity_at: Value::Int(810),
+                    updated_at: Value::Int(820),
+                    metadata: Value::String("{\"runs\":8}".to_string()),
+                },
+                KnowledgeSkillUsageStatsUpdate {
+                    skill_id: "skill_2".to_string(),
+                    use_count: 5,
+                    success_rate: None,
+                    last_activity_at: Value::Int(910),
+                    updated_at: Value::Int(910),
+                    metadata: Value::String("{\"runs\":5}".to_string()),
+                },
+                KnowledgeSkillUsageStatsUpdate {
+                    skill_id: "skill_2".to_string(),
+                    use_count: 6,
+                    success_rate: None,
+                    last_activity_at: Value::Int(920),
+                    updated_at: Value::Int(920),
+                    metadata: Value::String("{\"duplicate\":true}".to_string()),
+                },
+                KnowledgeSkillUsageStatsUpdate {
+                    skill_id: "missing".to_string(),
+                    use_count: 1,
+                    success_rate: Some(Value::Float(1.0)),
+                    last_activity_at: Value::Int(930),
+                    updated_at: Value::Int(930),
+                    metadata: Value::String("{}".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 3);
+    assert_eq!(output.rows.len(), 4);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 2);
+    assert_eq!(output.updated_property_count, 9);
+    assert_eq!(output.rows[0].updated_property_count, 5);
+    assert_eq!(output.rows[1].updated_property_count, 4);
+    assert!(output.rows[2].duplicate);
+    assert!(!output.rows[3].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Skill".to_string(),
+                external_id: "skill_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Skill".to_string(),
+                external_id: "skill_2".to_string(),
+            },
+        ],
+        property_names: vec![
+            "use_count".to_string(),
+            "success_rate".to_string(),
+            "last_activity_at".to_string(),
+            "updated_at".to_string(),
+            "metadata".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("use_count"),
+        Some(&Some(Value::Int(8)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("success_rate"),
+        Some(&Some(Value::Float(0.75)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("metadata"),
+        Some(&Some(Value::String("{\"runs\":8}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("use_count"),
+        Some(&Some(Value::Int(5)))
+    );
+    assert_eq!(rows.rows[1].properties.get("success_rate"), Some(&None));
+    assert_eq!(
+        rows.rows[1].properties.get("last_activity_at"),
+        Some(&Some(Value::Int(910)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("metadata"),
+        Some(&Some(Value::String("{\"runs\":5}".to_string())))
+    );
+}
+
+#[test]
+fn skill_usage_stats_batch_rejects_negative_use_count_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'skill_1', use_count: 1})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_skill_usage_stats_batch(&KnowledgeSkillUsageStatsBatchRequest {
+            updates: vec![KnowledgeSkillUsageStatsUpdate {
+                skill_id: "skill_1".to_string(),
+                use_count: -1,
+                success_rate: None,
+                last_activity_at: Value::Int(1),
+                updated_at: Value::Int(1),
+                metadata: Value::String("{}".to_string()),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-negative use count"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_skill_usage_stats_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_skill_usage_stats_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query(
+            "CREATE (:Skill {id: 'skill_1', use_count: 1, success_rate: 0.5, metadata: '{}'})",
+        )
+        .unwrap();
+        db.query("CREATE (:Skill {id: 'skill_2', use_count: 1, metadata: '{}'})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_skill_usage_stats_batch(&KnowledgeSkillUsageStatsBatchRequest {
+            updates: vec![
+                KnowledgeSkillUsageStatsUpdate {
+                    skill_id: "skill_1".to_string(),
+                    use_count: 8,
+                    success_rate: Some(Value::Float(0.75)),
+                    last_activity_at: Value::Int(810),
+                    updated_at: Value::Int(820),
+                    metadata: Value::String("{\"runs\":8}".to_string()),
+                },
+                KnowledgeSkillUsageStatsUpdate {
+                    skill_id: "skill_2".to_string(),
+                    use_count: 5,
+                    success_rate: None,
+                    last_activity_at: Value::Int(910),
+                    updated_at: Value::Int(910),
+                    metadata: Value::String("{\"runs\":5}".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Skill".to_string(),
+                    external_id: "skill_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Skill".to_string(),
+                    external_id: "skill_2".to_string(),
+                },
+            ],
+            property_names: vec![
+                "use_count".to_string(),
+                "success_rate".to_string(),
+                "metadata".to_string(),
+            ],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("use_count"),
+            Some(&Some(Value::Int(8)))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("success_rate"),
+            Some(&Some(Value::Float(0.75)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("use_count"),
+            Some(&Some(Value::Int(5)))
+        );
+        assert_eq!(rows.rows[1].properties.get("success_rate"), Some(&None));
+        assert_eq!(
+            rows.rows[1].properties.get("metadata"),
+            Some(&Some(Value::String("{\"runs\":5}".to_string())))
         );
     }
     std::fs::remove_dir_all(path).unwrap();

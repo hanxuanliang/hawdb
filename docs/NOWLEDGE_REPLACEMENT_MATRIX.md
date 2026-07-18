@@ -168,6 +168,12 @@ Memory lifecycle metadata writes are covered by a typed batch for the Nowledge
 wrapper validates Memory ids and non-empty lifecycle states before WAL, reports
 missing/idless/duplicate rows without writing, and commits eligible Memory rows
 through one grouped WAL batch.
+Skill usage-stat writes are covered by a typed batch for Nowledge
+`use_count`, optional `success_rate`, `last_activity_at`, `updated_at`, and
+`metadata` update shapes. The wrapper validates Skill ids, non-negative use
+counts, and bounded numeric success rates before WAL, reports missing,
+idless, and duplicate rows without writing, and commits eligible Skill rows
+through one grouped WAL batch.
 
 ## Current Direction
 

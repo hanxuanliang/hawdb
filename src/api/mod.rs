@@ -1752,6 +1752,45 @@ pub struct KnowledgeMemoryLifecycleBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillUsageStatsUpdate {
+    pub skill_id: String,
+    pub use_count: i64,
+    pub success_rate: Option<Value>,
+    pub last_activity_at: Value,
+    pub updated_at: Value,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillUsageStatsBatchRequest {
+    pub updates: Vec<KnowledgeSkillUsageStatsUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillUsageStatsBatchRow {
+    pub skill_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillUsageStatsBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSkillUsageStatsBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3485,6 +3524,13 @@ impl Database {
         request: &KnowledgeMemoryLifecycleBatchRequest,
     ) -> Result<KnowledgeMemoryLifecycleBatchOutput> {
         update_knowledge_memory_lifecycle_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_skill_usage_stats_batch(
+        &mut self,
+        request: &KnowledgeSkillUsageStatsBatchRequest,
+    ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
+        update_knowledge_skill_usage_stats_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -6617,6 +6663,160 @@ fn update_knowledge_memory_lifecycle_batch_for(
         updated_count,
         updated_property_count,
     })
+}
+
+fn update_knowledge_skill_usage_stats_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSkillUsageStatsBatchRequest,
+) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.skill_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge skill usage stats update requires a non-empty skill id".to_string(),
+            ));
+        }
+        if update.use_count < 0 {
+            return Err(SkeinError::Semantic(
+                "knowledge skill usage stats update requires non-negative use count".to_string(),
+            ));
+        }
+        if let Some(success_rate) = &update.success_rate {
+            validate_skill_success_rate(success_rate)?;
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Skill", &update.skill_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeSkillUsageStatsBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.skill_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeSkillUsageStatsBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeSkillUsageStatsBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let mut assignments = BTreeMap::from([
+            ("use_count".to_string(), Value::Int(update.use_count)),
+            (
+                "last_activity_at".to_string(),
+                update.last_activity_at.clone(),
+            ),
+            ("updated_at".to_string(), update.updated_at.clone()),
+            ("metadata".to_string(), update.metadata.clone()),
+        ]);
+        if let Some(success_rate) = &update.success_rate {
+            assignments.insert("success_rate".to_string(), success_rate.clone());
+        }
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeSkillUsageStatsBatchRow {
+            skill_id: update.skill_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeSkillUsageStatsBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Skill", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeSkillUsageStatsBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
+}
+
+fn validate_skill_success_rate(value: &Value) -> Result<()> {
+    let valid = match value {
+        Value::Float(rate) => rate.is_finite() && (0.0..=1.0).contains(rate),
+        Value::Int(rate) => (0..=1).contains(rate),
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SkeinError::Semantic(
+            "knowledge skill usage stats update requires success rate between 0 and 1".to_string(),
+        ))
+    }
 }
 
 fn delete_knowledge_entity_for(
@@ -10998,6 +11198,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryLifecycleBatchRequest,
     ) -> Result<KnowledgeMemoryLifecycleBatchOutput> {
         self.db.update_knowledge_memory_lifecycle_batch(request)
+    }
+
+    pub fn update_knowledge_skill_usage_stats_batch(
+        &mut self,
+        request: &KnowledgeSkillUsageStatsBatchRequest,
+    ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
+        self.db.update_knowledge_skill_usage_stats_batch(request)
     }
 
     pub fn delete_knowledge_entity(
