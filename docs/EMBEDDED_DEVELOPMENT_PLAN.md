@@ -947,6 +947,10 @@ Current implemented slice:
   path for `IndexNodeMultiSeek`, preserving legacy decision strings while
   adding a stable `implementation:node_in_index_multi_seek` rule event for
   feed/source lookup diagnostics
+- single-property node range predicates now use the implementation-rule path
+  for `IndexNodeRangeSeek`, preserving legacy decision strings while adding a
+  stable `implementation:node_range_index_seek` rule event for range-index
+  diagnostics
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,

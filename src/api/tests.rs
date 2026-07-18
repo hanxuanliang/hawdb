@@ -6405,6 +6405,11 @@ fn range_predicates_filter_and_use_range_index() {
         .decisions
         .iter()
         .any(|decision| decision.contains("choose IndexNodeRangeSeek")));
+    assert!(indexed
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| { decision.starts_with("apply implementation:node_range_index_seek:") }));
 
     let output = db
         .query("MATCH (m:Memory) WHERE m.created_at >= 20 RETURN m.id AS id ORDER BY id ASC")
