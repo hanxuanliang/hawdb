@@ -1420,9 +1420,23 @@ fn retrieves_knowledge_through_database_facade() {
         output.fanout_reason_codes,
         vec![KnowledgeFanoutReasonCode::GraphContextLimitReached]
     );
+    assert_eq!(output.fanout_reason_details.len(), 1);
+    assert_eq!(
+        output.fanout_reason_details[0].code,
+        KnowledgeFanoutReasonCode::GraphContextLimitReached
+    );
+    assert_eq!(output.fanout_reason_details[0].limit, Some(1));
+    assert_eq!(
+        output.fanout_reason_details[0].seed_hit_id.as_deref(),
+        Some("memory:mem_1")
+    );
     assert_eq!(
         output.diagnostics.fanout_reason_codes,
         output.fanout_reason_codes
+    );
+    assert_eq!(
+        output.diagnostics.fanout_reason_details,
+        output.fanout_reason_details
     );
     assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
 }
@@ -3048,6 +3062,8 @@ fn knowledge_retrieval_returns_graph_seeds_without_search_hits() {
         output.fanout_reason_codes,
         vec![KnowledgeFanoutReasonCode::GraphSeedLimitReached]
     );
+    assert_eq!(output.fanout_reason_details[0].limit, Some(1));
+    assert_eq!(output.fanout_reason_details[0].total, Some(3));
     assert_eq!(
         output.diagnostics.fanout_reason_codes,
         output.fanout_reason_codes
@@ -3173,6 +3189,8 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
         output.fanout_reason_codes,
         vec![KnowledgeFanoutReasonCode::CandidateLimitReached]
     );
+    assert_eq!(output.fanout_reason_details[0].limit, Some(1));
+    assert_eq!(output.fanout_reason_details[0].total, Some(3));
     assert_eq!(
         output.diagnostics.fanout_reason_codes,
         output.fanout_reason_codes
@@ -3701,8 +3719,31 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
         vec![KnowledgeFanoutReasonCode::DenseAdjacency]
     );
     assert_eq!(
+        neighbors.fanout_reason_details[0].operation.as_deref(),
+        Some("knowledge_neighbors")
+    );
+    assert_eq!(
+        neighbors.fanout_reason_details[0]
+            .relationship_type
+            .as_deref(),
+        Some("LINKS")
+    );
+    assert_eq!(
+        neighbors.fanout_reason_details[0].direction.as_deref(),
+        Some("outgoing")
+    );
+    assert_eq!(neighbors.fanout_reason_details[0].node_id, Some(0));
+    assert_eq!(
+        neighbors.fanout_reason_details[0].degree,
+        Some(DENSE_ADJACENCY_DEGREE_THRESHOLD)
+    );
+    assert_eq!(
         neighbors.diagnostics.fanout_reason_codes,
         neighbors.fanout_reason_codes
+    );
+    assert_eq!(
+        neighbors.diagnostics.fanout_reason_details,
+        neighbors.fanout_reason_details
     );
     assert_eq!(
         neighbors.diagnostics.fanout_reasons,

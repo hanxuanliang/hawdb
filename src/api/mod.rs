@@ -552,6 +552,7 @@ pub struct KnowledgeRetrievalOutput {
     pub graph_seeds: Vec<KnowledgeGraphSeed>,
     pub graph_context_paths: Vec<KnowledgeGraphContextPath>,
     pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     pub fanout_reasons: Vec<String>,
 }
 
@@ -595,6 +596,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_context_fallback_reasons: Vec<String>,
     pub fanout_reason_count: usize,
     pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     pub fanout_reasons: Vec<String>,
     pub candidate_count: usize,
     pub candidate_total_count: usize,
@@ -605,6 +607,20 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub warnings: Vec<String>,
     pub empty_reason_codes: Vec<KnowledgeRetrievalEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeFanoutReasonDetail {
+    pub code: KnowledgeFanoutReasonCode,
+    pub message: String,
+    pub operation: Option<String>,
+    pub limit: Option<usize>,
+    pub total: Option<usize>,
+    pub seed_hit_id: Option<String>,
+    pub node_id: Option<u64>,
+    pub relationship_type: Option<String>,
+    pub direction: Option<String>,
+    pub degree: Option<usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -857,6 +873,7 @@ pub struct KnowledgeNeighborsOutput {
     pub seed_node_id: Option<u64>,
     pub paths: Vec<KnowledgeGraphContextPath>,
     pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     pub fanout_reasons: Vec<String>,
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
@@ -880,6 +897,7 @@ pub struct KnowledgePathOutput {
     pub target_node_id: Option<u64>,
     pub paths: Vec<KnowledgeGraphPath>,
     pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     pub fanout_reasons: Vec<String>,
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
@@ -907,6 +925,7 @@ pub struct KnowledgeSubgraphOutput {
     pub nodes: Vec<KnowledgeEntity>,
     pub relationships: Vec<KnowledgeGraphContextPath>,
     pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     pub fanout_reasons: Vec<String>,
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
@@ -920,6 +939,7 @@ pub struct KnowledgeTraversalDiagnostics {
     pub relationship_count: usize,
     pub fanout_reason_count: usize,
     pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
     pub fanout_reasons: Vec<String>,
     pub fallback_reason_codes: Vec<KnowledgeTraversalFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
@@ -2191,6 +2211,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
         let fanout_reason_codes = knowledge_fanout_reason_codes(&fanout_reasons);
+        let fanout_reason_details = knowledge_fanout_reason_details(&fanout_reasons);
         let diagnostics = knowledge_retrieval_diagnostics(
             &search,
             request,
@@ -2220,6 +2241,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
             graph_seeds,
             graph_context_paths,
             fanout_reason_codes,
+            fanout_reason_details,
             fanout_reasons,
         }
     }
@@ -2920,6 +2942,7 @@ fn knowledge_retrieval_diagnostics(
         graph_context_fallback_reasons: knowledge_graph_context_fallback_reasons(request),
         fanout_reason_count: input.fanout_reason_count,
         fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reasons),
+        fanout_reason_details: knowledge_fanout_reason_details(&input.fanout_reasons),
         fanout_reasons: input.fanout_reasons,
         candidate_count: input.candidate_count,
         candidate_total_count: input.candidate_total_count,
@@ -2937,6 +2960,13 @@ fn knowledge_fanout_reason_codes(reasons: &[String]) -> Vec<KnowledgeFanoutReaso
     reasons
         .iter()
         .filter_map(|reason| knowledge_fanout_reason_code(reason))
+        .collect()
+}
+
+fn knowledge_fanout_reason_details(reasons: &[String]) -> Vec<KnowledgeFanoutReasonDetail> {
+    reasons
+        .iter()
+        .filter_map(|reason| knowledge_fanout_reason_detail(reason))
         .collect()
 }
 
@@ -2960,6 +2990,64 @@ fn knowledge_fanout_reason_code(reason: &str) -> Option<KnowledgeFanoutReasonCod
     } else {
         None
     }
+}
+
+fn knowledge_fanout_reason_detail(reason: &str) -> Option<KnowledgeFanoutReasonDetail> {
+    let code = knowledge_fanout_reason_code(reason)?;
+    let parts = reason.split_whitespace().collect::<Vec<_>>();
+    let mut detail = KnowledgeFanoutReasonDetail {
+        code,
+        message: reason.to_string(),
+        operation: None,
+        limit: None,
+        total: None,
+        seed_hit_id: None,
+        node_id: None,
+        relationship_type: None,
+        direction: None,
+        degree: None,
+    };
+
+    match code {
+        KnowledgeFanoutReasonCode::DenseAdjacency => {
+            if parts.len() >= 8 {
+                detail.operation = Some(parts[0].to_string());
+                detail.relationship_type = Some(parts[2].to_string());
+                detail.direction = Some(parts[3].to_string());
+                detail.node_id = parts[5].parse::<u64>().ok();
+                detail.degree = parts[7].parse::<usize>().ok();
+            }
+        }
+        KnowledgeFanoutReasonCode::GraphContextLimitReached => {
+            detail.operation = Some("graph_context".to_string());
+            detail.limit = parts.get(1).and_then(|value| value.parse::<usize>().ok());
+            detail.seed_hit_id = parts.last().map(|value| (*value).to_string());
+        }
+        KnowledgeFanoutReasonCode::GraphSeedLimitReached => {
+            detail.operation = Some("graph_seed".to_string());
+            detail.limit = parts.get(1).and_then(|value| value.parse::<usize>().ok());
+            detail.total = parts.get(4).and_then(|value| value.parse::<usize>().ok());
+        }
+        KnowledgeFanoutReasonCode::CandidateLimitReached => {
+            detail.operation = Some("candidate".to_string());
+            detail.limit = parts.get(1).and_then(|value| value.parse::<usize>().ok());
+            detail.total = parts.get(4).and_then(|value| value.parse::<usize>().ok());
+        }
+        KnowledgeFanoutReasonCode::PathLimitReached => {
+            detail.operation = parts.first().map(|value| (*value).to_string());
+            detail.limit = parts.get(2).and_then(|value| value.parse::<usize>().ok());
+        }
+        KnowledgeFanoutReasonCode::NodeLimitReached => {
+            detail.operation = Some("knowledge_subgraph".to_string());
+            detail.limit = parts.get(2).and_then(|value| value.parse::<usize>().ok());
+        }
+        KnowledgeFanoutReasonCode::RelationshipLimitReached => {
+            detail.operation = Some("knowledge_subgraph".to_string());
+            detail.limit = parts.get(2).and_then(|value| value.parse::<usize>().ok());
+        }
+    }
+
+    Some(detail)
 }
 
 fn knowledge_empty_reason_code_from_search(
@@ -3221,6 +3309,7 @@ fn knowledge_neighbors_for(
             seed_node_id: None,
             paths: Vec::new(),
             fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: false,
@@ -3253,6 +3342,7 @@ fn knowledge_neighbors_for(
                     seed_node_id: Some(seed.id.0),
                     paths: Vec::new(),
                     fanout_reason_codes: Vec::new(),
+                    fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
@@ -3310,6 +3400,7 @@ fn knowledge_neighbors_for(
         }),
         paths,
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
+        fanout_reason_details: knowledge_fanout_reason_details(&fanout_reasons),
         fanout_reasons,
     }
 }
@@ -3341,6 +3432,7 @@ fn knowledge_paths_for(
             target_node_id,
             paths: Vec::new(),
             fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: false,
@@ -3375,6 +3467,7 @@ fn knowledge_paths_for(
             target_node_id,
             paths: Vec::new(),
             fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: true,
@@ -3407,6 +3500,7 @@ fn knowledge_paths_for(
                     target_node_id,
                     paths: Vec::new(),
                     fanout_reason_codes: Vec::new(),
+                    fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
@@ -3466,6 +3560,7 @@ fn knowledge_paths_for(
         }),
         paths,
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
+        fanout_reason_details: knowledge_fanout_reason_details(&fanout_reasons),
         fanout_reasons,
     }
 }
@@ -3487,6 +3582,7 @@ fn knowledge_subgraph_for(
             nodes: Vec::new(),
             relationships: Vec::new(),
             fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: false,
@@ -3519,6 +3615,7 @@ fn knowledge_subgraph_for(
                     nodes: Vec::new(),
                     relationships: Vec::new(),
                     fanout_reason_codes: Vec::new(),
+                    fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
@@ -3577,6 +3674,7 @@ fn knowledge_subgraph_for(
         nodes,
         relationships,
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
+        fanout_reason_details: knowledge_fanout_reason_details(&fanout_reasons),
         fanout_reasons,
     }
 }
@@ -3611,6 +3709,7 @@ fn knowledge_traversal_diagnostics(
         relationship_count: input.relationship_count,
         fanout_reason_count: input.fanout_reason_count,
         fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reasons),
+        fanout_reason_details: knowledge_fanout_reason_details(&input.fanout_reasons),
         fanout_reasons: input.fanout_reasons,
         fallback_reason_codes,
         fallback_reasons,
