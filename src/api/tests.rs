@@ -5,8 +5,9 @@ use super::{
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
     KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgePathRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
-    KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeSubgraphRequest, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -43,6 +44,42 @@ fn runs_create_match_return_demo() {
         output.rows[0].get("title"),
         Some(&Value::String("Graph foundations".to_string()))
     );
+}
+
+#[test]
+fn knowledge_truncation_reason_codes_have_stable_string_encodings() {
+    let cases = [
+        (
+            KnowledgeTruncationReasonCode::RankWindowExceeded,
+            "rank_window_exceeded",
+        ),
+        (
+            KnowledgeTruncationReasonCode::SearchLimitExceeded,
+            "search_limit_exceeded",
+        ),
+        (
+            KnowledgeTruncationReasonCode::PartialCandidateReturn,
+            "partial_candidate_return",
+        ),
+        (
+            KnowledgeTruncationReasonCode::GraphSeedLimitExceeded,
+            "graph_seed_limit_exceeded",
+        ),
+        (
+            KnowledgeTruncationReasonCode::GraphContextLimitExceeded,
+            "graph_context_limit_exceeded",
+        ),
+        (
+            KnowledgeTruncationReasonCode::CandidateLimitExceeded,
+            "candidate_limit_exceeded",
+        ),
+    ];
+
+    for (code, name) in cases {
+        assert_eq!(code.as_str(), name);
+        assert_eq!(name.parse::<KnowledgeTruncationReasonCode>(), Ok(code));
+    }
+    assert!("limit".parse::<KnowledgeTruncationReasonCode>().is_err());
 }
 
 #[test]
@@ -1061,6 +1098,10 @@ fn retrieves_knowledge_through_database_facade() {
     assert_eq!(output.diagnostics.graph_context_limit, 1);
     assert_eq!(output.diagnostics.graph_context_max_hops, 1);
     assert!(output.diagnostics.graph_context_truncated);
+    assert_eq!(
+        output.diagnostics.graph_context_truncation_reason_codes,
+        vec![KnowledgeTruncationReasonCode::GraphContextLimitExceeded]
+    );
     assert_eq!(
         output.diagnostics.graph_context_truncation_reasons,
         vec!["graph_context_limit 1 reached while expanding hit memory:mem_1".to_string()]
@@ -2649,6 +2690,10 @@ fn knowledge_retrieval_applies_rank_window_to_hybrid_search() {
     assert_eq!(text_retriever.fusion_weight, Some(1.0));
     assert_eq!(text_retriever.top_candidates[0].canonical_node_id, Some(1));
     assert!(text_retriever.truncated);
+    assert_eq!(
+        text_retriever.truncation_reason_codes,
+        vec![KnowledgeTruncationReasonCode::RankWindowExceeded]
+    );
     assert!(text_retriever
         .truncation_reasons
         .iter()
@@ -2824,7 +2869,15 @@ fn knowledge_retrieval_returns_graph_seeds_without_search_hits() {
     assert_eq!(graph_seed_report.rank_window, None);
     assert_eq!(graph_seed_report.fusion_weight, None);
     assert!(graph_seed_report.truncated);
+    assert_eq!(
+        graph_seed_report.truncation_reason_codes,
+        vec![KnowledgeTruncationReasonCode::GraphSeedLimitExceeded]
+    );
     assert!(output.diagnostics.graph_seed_truncated);
+    assert_eq!(
+        output.diagnostics.graph_seed_truncation_reason_codes,
+        vec![KnowledgeTruncationReasonCode::GraphSeedLimitExceeded]
+    );
     assert_eq!(
         output.diagnostics.graph_seed_truncation_reasons,
         vec!["graph_seed limit 1 returned from 3 candidates".to_string()]
@@ -2960,6 +3013,10 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
     assert_eq!(output.diagnostics.candidate_count, 1);
     assert_eq!(output.diagnostics.candidate_total_count, 3);
     assert!(output.diagnostics.candidate_truncated);
+    assert_eq!(
+        output.diagnostics.candidate_truncation_reason_codes,
+        vec![KnowledgeTruncationReasonCode::CandidateLimitExceeded]
+    );
     assert!(output.diagnostics.empty_reason_codes.is_empty());
     assert_eq!(
         output.diagnostics.candidate_truncation_reasons,
@@ -3001,6 +3058,10 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
     assert_eq!(empty_by_limit.diagnostics.candidate_count, 0);
     assert_eq!(empty_by_limit.diagnostics.candidate_total_count, 3);
     assert!(empty_by_limit.diagnostics.candidate_truncated);
+    assert_eq!(
+        empty_by_limit.diagnostics.candidate_truncation_reason_codes,
+        vec![KnowledgeTruncationReasonCode::CandidateLimitExceeded]
+    );
     assert!(empty_by_limit
         .diagnostics
         .empty_reasons

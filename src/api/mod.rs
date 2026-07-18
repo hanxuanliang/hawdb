@@ -580,6 +580,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_seed_returned_count: usize,
     pub graph_seed_limit: usize,
     pub graph_seed_truncated: bool,
+    pub graph_seed_truncation_reason_codes: Vec<KnowledgeTruncationReasonCode>,
     pub graph_seed_truncation_reasons: Vec<String>,
     pub graph_context_path_count: usize,
     pub graph_context_node_count: usize,
@@ -587,6 +588,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_context_limit: usize,
     pub graph_context_max_hops: usize,
     pub graph_context_truncated: bool,
+    pub graph_context_truncation_reason_codes: Vec<KnowledgeTruncationReasonCode>,
     pub graph_context_truncation_reasons: Vec<String>,
     pub graph_context_fallback_reasons: Vec<String>,
     pub fanout_reason_count: usize,
@@ -595,10 +597,50 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub candidate_total_count: usize,
     pub candidate_limit: Option<usize>,
     pub candidate_truncated: bool,
+    pub candidate_truncation_reason_codes: Vec<KnowledgeTruncationReasonCode>,
     pub candidate_truncation_reasons: Vec<String>,
     pub warnings: Vec<String>,
     pub empty_reason_codes: Vec<KnowledgeRetrievalEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeTruncationReasonCode {
+    RankWindowExceeded,
+    SearchLimitExceeded,
+    PartialCandidateReturn,
+    GraphSeedLimitExceeded,
+    GraphContextLimitExceeded,
+    CandidateLimitExceeded,
+}
+
+impl KnowledgeTruncationReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::RankWindowExceeded => "rank_window_exceeded",
+            Self::SearchLimitExceeded => "search_limit_exceeded",
+            Self::PartialCandidateReturn => "partial_candidate_return",
+            Self::GraphSeedLimitExceeded => "graph_seed_limit_exceeded",
+            Self::GraphContextLimitExceeded => "graph_context_limit_exceeded",
+            Self::CandidateLimitExceeded => "candidate_limit_exceeded",
+        }
+    }
+}
+
+impl FromStr for KnowledgeTruncationReasonCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "rank_window_exceeded" => Ok(Self::RankWindowExceeded),
+            "search_limit_exceeded" => Ok(Self::SearchLimitExceeded),
+            "partial_candidate_return" => Ok(Self::PartialCandidateReturn),
+            "graph_seed_limit_exceeded" => Ok(Self::GraphSeedLimitExceeded),
+            "graph_context_limit_exceeded" => Ok(Self::GraphContextLimitExceeded),
+            "candidate_limit_exceeded" => Ok(Self::CandidateLimitExceeded),
+            _ => Err("unknown knowledge truncation reason code"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -640,6 +682,7 @@ pub struct KnowledgeRetrieverReport {
     pub fallback_reason_codes: Vec<SearchFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
     pub truncated: bool,
+    pub truncation_reason_codes: Vec<KnowledgeTruncationReasonCode>,
     pub truncation_reasons: Vec<String>,
     pub top_candidates: Vec<KnowledgeRetrieverCandidate>,
 }
@@ -2399,6 +2442,12 @@ fn knowledge_retriever_reports(
             fallback_reason_codes: report.fallback_reason_codes.clone(),
             fallback_reasons: report.fallback_reasons.clone(),
             truncated: report.candidate_count > report.top_candidates.len(),
+            truncation_reason_codes: knowledge_search_retriever_truncation_reason_codes(
+                report.candidate_count,
+                report.top_candidates.len(),
+                search.limit,
+                search.rank_window,
+            ),
             truncation_reasons: knowledge_search_retriever_truncation_reasons(
                 report.name.as_str(),
                 report.candidate_count,
@@ -2445,6 +2494,10 @@ fn knowledge_retriever_reports(
         fallback_reason_codes: Vec::new(),
         fallback_reasons: knowledge_graph_seed_fallback_reasons(graph_seed_input.limit),
         truncated: graph_seed_input.candidate_count > graph_seeds.len(),
+        truncation_reason_codes: knowledge_graph_seed_truncation_reason_codes(
+            graph_seed_input.candidate_count,
+            graph_seeds.len(),
+        ),
         truncation_reasons: knowledge_graph_seed_truncation_reasons(
             graph_seed_input.candidate_count,
             graph_seeds.len(),
@@ -2515,6 +2568,30 @@ fn knowledge_search_retriever_truncation_reasons(
     reasons
 }
 
+fn knowledge_search_retriever_truncation_reason_codes(
+    candidate_count: usize,
+    returned_count: usize,
+    search_limit: usize,
+    rank_window: Option<usize>,
+) -> Vec<KnowledgeTruncationReasonCode> {
+    if candidate_count <= returned_count {
+        return Vec::new();
+    }
+    let mut codes = Vec::new();
+    if let Some(rank_window) = rank_window {
+        if candidate_count > rank_window && returned_count <= rank_window {
+            codes.push(KnowledgeTruncationReasonCode::RankWindowExceeded);
+        }
+    }
+    if returned_count >= search_limit && candidate_count > search_limit {
+        codes.push(KnowledgeTruncationReasonCode::SearchLimitExceeded);
+    }
+    if codes.is_empty() {
+        codes.push(KnowledgeTruncationReasonCode::PartialCandidateReturn);
+    }
+    codes
+}
+
 fn knowledge_search_retriever_fusion_weight(
     name: &str,
     weights: SearchFusionWeights,
@@ -2535,6 +2612,17 @@ fn knowledge_graph_seed_truncation_reasons(
         vec![format!(
             "graph_seed limit {graph_seed_limit} returned from {candidate_count} candidates"
         )]
+    } else {
+        Vec::new()
+    }
+}
+
+fn knowledge_graph_seed_truncation_reason_codes(
+    candidate_count: usize,
+    returned_count: usize,
+) -> Vec<KnowledgeTruncationReasonCode> {
+    if candidate_count > returned_count {
+        vec![KnowledgeTruncationReasonCode::GraphSeedLimitExceeded]
     } else {
         Vec::new()
     }
@@ -2601,6 +2689,10 @@ fn knowledge_retrieval_diagnostics(
         input.candidate_count,
         request.candidate_limit,
     );
+    let candidate_truncation_reason_codes = knowledge_candidate_truncation_reason_codes(
+        input.candidate_total_count,
+        input.candidate_count,
+    );
     if input.candidate_count == 0 {
         empty_reason_codes.extend(
             search
@@ -2631,6 +2723,12 @@ fn knowledge_retrieval_diagnostics(
         input.graph_seed_returned_count,
         request.graph_seed_limit,
     );
+    let graph_seed_truncation_reason_codes = knowledge_graph_seed_truncation_reason_codes(
+        input.graph_seed_candidate_count,
+        input.graph_seed_returned_count,
+    );
+    let graph_context_truncation_reason_codes =
+        knowledge_graph_context_truncation_reason_codes(&input.graph_context_truncation_reasons);
     KnowledgeRetrievalDiagnostics {
         graph_commit_epoch,
         projection_source_graph_commit_epoch: projection_freshness.source_graph_commit_epoch,
@@ -2656,6 +2754,7 @@ fn knowledge_retrieval_diagnostics(
         graph_seed_returned_count: input.graph_seed_returned_count,
         graph_seed_limit: request.graph_seed_limit,
         graph_seed_truncated: !graph_seed_truncation_reasons.is_empty(),
+        graph_seed_truncation_reason_codes,
         graph_seed_truncation_reasons,
         graph_context_path_count: input.graph_context_path_count,
         graph_context_node_count: input.graph_context_node_count,
@@ -2663,6 +2762,7 @@ fn knowledge_retrieval_diagnostics(
         graph_context_limit: request.graph_context_limit,
         graph_context_max_hops: request.graph_context_max_hops,
         graph_context_truncated: !input.graph_context_truncation_reasons.is_empty(),
+        graph_context_truncation_reason_codes,
         graph_context_truncation_reasons: input.graph_context_truncation_reasons,
         graph_context_fallback_reasons: knowledge_graph_context_fallback_reasons(request),
         fanout_reason_count: input.fanout_reason_count,
@@ -2671,6 +2771,7 @@ fn knowledge_retrieval_diagnostics(
         candidate_total_count: input.candidate_total_count,
         candidate_limit: request.candidate_limit,
         candidate_truncated: !candidate_truncation_reasons.is_empty(),
+        candidate_truncation_reason_codes,
         candidate_truncation_reasons,
         warnings: knowledge_retrieval_warnings(projection_freshness, graph_commit_epoch),
         empty_reason_codes,
@@ -2707,6 +2808,27 @@ fn knowledge_candidate_truncation_reasons(
             "knowledge_candidate_limit {limit} returned from {candidate_total_count} merged candidates"
         )],
         _ => Vec::new(),
+    }
+}
+
+fn knowledge_candidate_truncation_reason_codes(
+    candidate_total_count: usize,
+    candidate_count: usize,
+) -> Vec<KnowledgeTruncationReasonCode> {
+    if candidate_total_count > candidate_count {
+        vec![KnowledgeTruncationReasonCode::CandidateLimitExceeded]
+    } else {
+        Vec::new()
+    }
+}
+
+fn knowledge_graph_context_truncation_reason_codes(
+    truncation_reasons: &[String],
+) -> Vec<KnowledgeTruncationReasonCode> {
+    if truncation_reasons.is_empty() {
+        Vec::new()
+    } else {
+        vec![KnowledgeTruncationReasonCode::GraphContextLimitExceeded]
     }
 }
 
