@@ -279,6 +279,9 @@ Nowledge writes such as mentions, source provenance, labels, evolution, and
 compaction links; endpoint filters are applied before writing, relationship
 properties are parameter-bound, and the write routes through the existing
 WAL-backed `MATCH ... CREATE` mutation path.
+Endpoint-known relationship cleanup uses the same typed facade for label/source
+relation removal, supports optional relationship-property equality filters, and
+routes through the WAL-backed `MATCH ... DELETE r` mutation path.
 Page-level MVCC, physical page/segment reclamation, and concurrent writer
 coordination remain.
 

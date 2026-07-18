@@ -1471,6 +1471,33 @@ pub struct KnowledgeRelationshipCreateOutput {
     pub created_relationship_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipDeleteRequest {
+    pub source: KnowledgeEntityRequest,
+    pub target: KnowledgeEntityRequest,
+    pub relationship_type: String,
+    pub relationship_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedRelationshipDeleteRequest {
+    pub delete: KnowledgeRelationshipDeleteRequest,
+    pub source_metadata_filters: BTreeMap<String, String>,
+    pub target_metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipDeleteOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub source_node_id: Option<u64>,
+    pub target_node_id: Option<u64>,
+    pub matched: bool,
+    pub source_filtered_out: bool,
+    pub target_filtered_out: bool,
+    pub deleted_relationship_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {
     pub node_id: u64,
@@ -2815,6 +2842,20 @@ impl Database {
         request: &KnowledgeScopedRelationshipCreateRequest,
     ) -> Result<KnowledgeRelationshipCreateOutput> {
         create_scoped_knowledge_relationship_for(self, request)
+    }
+
+    pub fn delete_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipDeleteRequest,
+    ) -> Result<KnowledgeRelationshipDeleteOutput> {
+        delete_knowledge_relationship_for(self, request)
+    }
+
+    pub fn delete_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipDeleteRequest,
+    ) -> Result<KnowledgeRelationshipDeleteOutput> {
+        delete_scoped_knowledge_relationship_for(self, request)
     }
 
     pub fn knowledge_neighbors(
@@ -4514,6 +4555,145 @@ fn create_scoped_knowledge_relationship_for(
         source_filtered_out: false,
         target_filtered_out: false,
         created_relationship_count: 1,
+    })
+}
+
+fn delete_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeRelationshipDeleteRequest,
+) -> Result<KnowledgeRelationshipDeleteOutput> {
+    delete_scoped_knowledge_relationship_for(
+        db,
+        &KnowledgeScopedRelationshipDeleteRequest {
+            delete: request.clone(),
+            source_metadata_filters: BTreeMap::new(),
+            target_metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn delete_scoped_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeScopedRelationshipDeleteRequest,
+) -> Result<KnowledgeRelationshipDeleteOutput> {
+    db.ensure_writable()?;
+    validate_cypher_identifier(&request.delete.source.label, "source label")?;
+    validate_cypher_identifier(&request.delete.target.label, "target label")?;
+    validate_cypher_identifier(&request.delete.relationship_type, "relationship type")?;
+    for property in request.delete.relationship_properties.keys() {
+        validate_cypher_identifier(property, "relationship property")?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let source = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.delete.source.label.as_str(),
+        request.delete.source.external_id.as_str(),
+    );
+    let target = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.delete.target.label.as_str(),
+        request.delete.target.external_id.as_str(),
+    );
+    let source_node_id = source.map(|node| node.id.0);
+    let target_node_id = target.map(|node| node.id.0);
+    let (Some(source), Some(target)) = (source, target) else {
+        return Ok(KnowledgeRelationshipDeleteOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            deleted_relationship_count: 0,
+        });
+    };
+    if !node_has_external_id_property(source, request.delete.source.external_id.as_str())
+        || !node_has_external_id_property(target, request.delete.target.external_id.as_str())
+    {
+        return Ok(KnowledgeRelationshipDeleteOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            deleted_relationship_count: 0,
+        });
+    }
+
+    let source_filtered_out = !request.source_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            source,
+            &request.source_metadata_filters,
+        );
+    let target_filtered_out = !request.target_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            target,
+            &request.target_metadata_filters,
+        );
+    if source_filtered_out || target_filtered_out {
+        return Ok(KnowledgeRelationshipDeleteOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            matched: false,
+            source_filtered_out,
+            target_filtered_out,
+            deleted_relationship_count: 0,
+        });
+    }
+
+    let mut cypher = format!(
+        "MATCH (source:{} {{id: $source_external_id}})-[r:{}",
+        request.delete.source.label, request.delete.relationship_type
+    );
+    let mut parameters = BTreeMap::from([
+        (
+            "source_external_id".to_string(),
+            Value::String(request.delete.source.external_id.clone()),
+        ),
+        (
+            "target_external_id".to_string(),
+            Value::String(request.delete.target.external_id.clone()),
+        ),
+    ]);
+    if !request.delete.relationship_properties.is_empty() {
+        cypher.push_str(" {");
+        for (index, (property, value)) in request.delete.relationship_properties.iter().enumerate()
+        {
+            if index > 0 {
+                cypher.push_str(", ");
+            }
+            let parameter_name = format!("relationship_value_{index}");
+            cypher.push_str(&format!("{property}: ${parameter_name}"));
+            parameters.insert(parameter_name, value.clone());
+        }
+        cypher.push('}');
+    }
+    cypher.push_str(&format!(
+        "]->(target:{} {{id: $target_external_id}}) DELETE r",
+        request.delete.target.label
+    ));
+
+    let output = db.query_with_params(cypher.as_str(), &parameters)?;
+    let deleted_relationship_count = output.rows.len();
+    Ok(KnowledgeRelationshipDeleteOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        source_node_id,
+        target_node_id,
+        matched: deleted_relationship_count > 0,
+        source_filtered_out: false,
+        target_filtered_out: false,
+        deleted_relationship_count,
     })
 }
 
@@ -7224,6 +7404,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedRelationshipCreateRequest,
     ) -> Result<KnowledgeRelationshipCreateOutput> {
         self.db.create_scoped_knowledge_relationship(request)
+    }
+
+    pub fn delete_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipDeleteRequest,
+    ) -> Result<KnowledgeRelationshipDeleteOutput> {
+        self.db.delete_knowledge_relationship(request)
+    }
+
+    pub fn delete_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipDeleteRequest,
+    ) -> Result<KnowledgeRelationshipDeleteOutput> {
+        self.db.delete_scoped_knowledge_relationship(request)
     }
 
     pub fn knowledge_neighbors(
