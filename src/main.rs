@@ -1390,6 +1390,15 @@ fn verify_graph_lightning_staging_catalog(
             false
         }
     };
+    let storage_recovery_evidence = match (&bundle, &manifest) {
+        (Some(bundle), Some(manifest)) => verify_bundle_storage_recovery_evidence(
+            bundle,
+            manifest,
+            &mut errors,
+            &mut bundle_errors,
+        ),
+        _ => StorageRecoveryEvidenceVerification::default(),
+    };
     let artifact_integrity = artifact_reports.iter().all(|report| {
         report
             .get("byte_len_matches")
@@ -1434,6 +1443,7 @@ fn verify_graph_lightning_staging_catalog(
         && manifest_protocol_version_matches
         && manifest_matches_graph_stream
         && bundle_matches_artifacts
+        && storage_recovery_evidence.valid
         && catalog_state_ready
         && graph_stream_valid
     {
@@ -1451,6 +1461,13 @@ fn verify_graph_lightning_staging_catalog(
         "manifest_protocol_version_matches": manifest_protocol_version_matches,
         "manifest_matches_graph_stream": manifest_matches_graph_stream,
         "bundle_matches_artifacts": bundle_matches_artifacts,
+        "storage_recovery_evidence": {
+            "present": storage_recovery_evidence.present,
+            "valid": storage_recovery_evidence.valid,
+            "protocol_matches": storage_recovery_evidence.protocol_matches,
+            "storage_version_present": storage_recovery_evidence.storage_version_present,
+            "recovered_commit_epoch_matches_manifest": storage_recovery_evidence.recovered_commit_epoch_matches_manifest,
+        },
         "catalog_state_ready": catalog_state_ready,
         "graph_stream_validation": graph_stream_validation_json,
         "artifact_summary": artifact_summary,
@@ -1480,6 +1497,77 @@ fn push_grouped_error(
     let message = message.into();
     errors.push(message.clone());
     group.push(message);
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StorageRecoveryEvidenceVerification {
+    present: bool,
+    valid: bool,
+    protocol_matches: bool,
+    storage_version_present: bool,
+    recovered_commit_epoch_matches_manifest: bool,
+}
+
+fn verify_bundle_storage_recovery_evidence(
+    bundle: &serde_json::Value,
+    manifest: &serde_json::Value,
+    errors: &mut Vec<String>,
+    bundle_errors: &mut Vec<String>,
+) -> StorageRecoveryEvidenceVerification {
+    let Some(storage_recovery) = bundle.get("storage_recovery") else {
+        return StorageRecoveryEvidenceVerification {
+            present: false,
+            valid: true,
+            protocol_matches: false,
+            storage_version_present: false,
+            recovered_commit_epoch_matches_manifest: false,
+        };
+    };
+    let protocol_matches = storage_recovery
+        .get("protocol")
+        .and_then(serde_json::Value::as_str)
+        == Some("skein-storage-recovery-report");
+    if !protocol_matches {
+        push_grouped_error(
+            errors,
+            bundle_errors,
+            "bundle storage_recovery protocol mismatch",
+        );
+    }
+    let storage_version_present = storage_recovery
+        .get("storage_version")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|version| !version.is_empty());
+    if !storage_version_present {
+        push_grouped_error(
+            errors,
+            bundle_errors,
+            "bundle storage_recovery missing storage_version",
+        );
+    }
+    let recovered_commit_epoch_matches_manifest = storage_recovery
+        .get("recovered_commit_epoch")
+        .and_then(serde_json::Value::as_u64)
+        == manifest
+            .get("graph_commit_epoch")
+            .and_then(serde_json::Value::as_u64);
+    if !recovered_commit_epoch_matches_manifest {
+        push_grouped_error(
+            errors,
+            bundle_errors,
+            "bundle storage_recovery recovered commit epoch does not match manifest graph epoch",
+        );
+    }
+
+    StorageRecoveryEvidenceVerification {
+        present: true,
+        valid: protocol_matches
+            && storage_version_present
+            && recovered_commit_epoch_matches_manifest,
+        protocol_matches,
+        storage_version_present,
+        recovered_commit_epoch_matches_manifest,
+    }
 }
 
 fn publish_graph_lightning_staging_catalog(
@@ -2960,9 +3048,10 @@ mod tests {
         publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
-        storage_recovery_report_json, validate_canonical_snapshot_usage, value_json,
-        verify_graph_lightning_published_manifest, verify_graph_lightning_staging_catalog,
-        PublishGraphLightningOptions, StorageRecoveryRequirements,
+        stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
+        validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
+        verify_graph_lightning_staging_catalog, PublishGraphLightningOptions,
+        StorageRecoveryRequirements,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -3519,20 +3608,7 @@ mod tests {
         db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
             .unwrap();
         let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
-        let recovery = StorageRecoveryReport {
-            durable: true,
-            recovery_mode: RecoveryMode::TolerateTornTail,
-            max_wal_replay_entries: Some(32),
-            checkpoint_epoch: Some(1),
-            checkpoint_commit_epoch: Some(export.manifest.graph_commit_epoch),
-            wal_present: true,
-            wal_replay_start_lsn: Some(1),
-            next_lsn_after_replay: Some(1),
-            replayed_wal_entries: 0,
-            torn_tail_ignored: false,
-            torn_tail_reason: None,
-            recovered_commit_epoch: export.manifest.graph_commit_epoch,
-        };
+        let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
 
         let json = graph_lightning_bootstrap_bundle_json_with_storage_recovery(
             &export,
@@ -3676,6 +3752,87 @@ mod tests {
         assert_eq!(report["validation_gate"]["graph_stream_errors"], 0);
         assert_eq!(report["validation_gate"]["bundle_errors"], 0);
         assert_eq!(report["validation_gate"]["catalog_errors"], 0);
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn staging_verification_validates_storage_recovery_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
+            .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
+        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_recovery");
+        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+            &export,
+            &staging_dir,
+            "skein-storage-v1",
+            &recovery,
+        )
+        .unwrap();
+
+        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+
+        assert_eq!(report["validation_gate"]["decision"], "ready");
+        assert_eq!(report["storage_recovery_evidence"]["present"], true);
+        assert_eq!(report["storage_recovery_evidence"]["valid"], true);
+        assert_eq!(
+            report["storage_recovery_evidence"]["protocol_matches"],
+            true
+        );
+        assert_eq!(
+            report["storage_recovery_evidence"]["storage_version_present"],
+            true
+        );
+        assert_eq!(
+            report["storage_recovery_evidence"]["recovered_commit_epoch_matches_manifest"],
+            true
+        );
+
+        std::fs::remove_dir_all(staging_dir).unwrap();
+    }
+
+    #[test]
+    fn staging_verification_blocks_tampered_storage_recovery_epoch() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'root', title: 'Root'})")
+            .unwrap();
+        let export = db.prepare_graph_lightning_bootstrap_export().unwrap();
+        let recovery = test_storage_recovery_report(export.manifest.graph_commit_epoch);
+        let staging_dir = unique_main_test_dir("graph_lightning_verify_staging_recovery_tampered");
+        stage_graph_lightning_bootstrap_export_with_storage_recovery(
+            &export,
+            &staging_dir,
+            "skein-storage-v1",
+            &recovery,
+        )
+        .unwrap();
+        let bundle_path = staging_dir.join("graph_lightning_bootstrap_bundle.json");
+        let bundle = std::fs::read_to_string(&bundle_path).unwrap().replace(
+            "\"recovered_commit_epoch\": 1",
+            "\"recovered_commit_epoch\": 99",
+        );
+        std::fs::write(&bundle_path, bundle).unwrap();
+
+        let report = verify_graph_lightning_staging_catalog(&staging_dir).unwrap();
+
+        assert_eq!(report["validation_gate"]["decision"], "blocked");
+        assert_eq!(report["artifact_integrity"], false);
+        assert_eq!(report["storage_recovery_evidence"]["present"], true);
+        assert_eq!(report["storage_recovery_evidence"]["valid"], false);
+        assert_eq!(
+            report["storage_recovery_evidence"]["recovered_commit_epoch_matches_manifest"],
+            false
+        );
+        assert!(report["validation_gate"]["bundle_error_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|error| error
+                .as_str()
+                .unwrap()
+                .contains("recovered commit epoch does not match manifest graph epoch")));
 
         std::fs::remove_dir_all(staging_dir).unwrap();
     }
@@ -5023,6 +5180,23 @@ mod tests {
     fn validates_graph_lightning_verify_export_usage_text() {
         assert!(graph_lightning_verify_export_usage().contains("<database-path>"));
         assert!(graph_lightning_verify_export_usage().contains("--require-valid"));
+    }
+
+    fn test_storage_recovery_report(graph_commit_epoch: u64) -> StorageRecoveryReport {
+        StorageRecoveryReport {
+            durable: true,
+            recovery_mode: RecoveryMode::TolerateTornTail,
+            max_wal_replay_entries: Some(32),
+            checkpoint_epoch: Some(1),
+            checkpoint_commit_epoch: Some(graph_commit_epoch),
+            wal_present: true,
+            wal_replay_start_lsn: Some(1),
+            next_lsn_after_replay: Some(1),
+            replayed_wal_entries: 0,
+            torn_tail_ignored: false,
+            torn_tail_reason: None,
+            recovered_commit_epoch: graph_commit_epoch,
+        }
     }
 
     fn unique_main_test_dir(name: &str) -> std::path::PathBuf {

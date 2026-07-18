@@ -173,10 +173,14 @@ that staging catalog without the source database, verifies artifact byte
 lengths and checksums, recomputes GraphStream validation, and checks agreement
 between the catalog, manifest, bundle, and GraphStream artifact. Its validation
 gate keeps flat errors for logs and grouped artifact, manifest, GraphStream,
-bundle, and catalog error arrays for local upload/resume automation. Its
-artifact summary reports the same count and byte metrics from the actually
-measured artifacts. Unknown staging-catalog or bootstrap-manifest protocol
-versions block validation instead of being read on a best-effort basis.
+bundle, and catalog error arrays for local upload/resume automation. If the
+bundle carries `storage_recovery`, staging verification also checks its protocol,
+storage-version presence, and recovered commit epoch against the staged
+manifest graph epoch, then reports the result in a structured
+`storage_recovery_evidence` object. Its artifact summary reports the same count
+and byte metrics from the actually measured artifacts. Unknown staging-catalog
+or bootstrap-manifest protocol versions block validation instead of being read
+on a best-effort basis.
 `skein graph-lightning-publish-staging [--require-state-marker]
 [--fencing-token <token>] [--expected-graph-epoch <epoch>] <staging-dir>
 <publish-dir>` verifies a READY staging catalog and atomically writes
