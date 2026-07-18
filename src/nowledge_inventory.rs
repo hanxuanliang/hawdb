@@ -3,10 +3,10 @@ use crate::compat::{
     assess_compatibility_cypher_migration_gate_bundle_with_rollback,
     assess_query_inventory_cypher_coverage, build_compatibility_query_inventory,
     compatibility_inventory_coverage_report_to_json, compatibility_migration_gate_bundle_to_json,
-    nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
-    CompatibilityCutoverPolicy, CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite,
-    CompatibilityQueryInventory, CompatibilityRollbackEvidence, CompatibilityShadowEngine,
-    ExternalShadowReady,
+    external_shadow_trace_report_json, nowledge_memory_core_fixture,
+    run_compatibility_fixture_with_shadow, CompatibilityCutoverPolicy,
+    CompatibilityInventoryCoveragePolicy, CompatibilityQueryCallSite, CompatibilityQueryInventory,
+    CompatibilityRollbackEvidence, CompatibilityShadowEngine, ExternalShadowReady,
 };
 use crate::error::{Result, SkeinError};
 use crate::qos::{LocalQosPolicy, LocalQosState};
@@ -291,10 +291,7 @@ fn insert_shadow_trace_json(
 ) -> Result<()> {
     migration_gate_json_object(bundle)?.insert(
         "shadow_trace".to_string(),
-        serde_json::json!({
-            "path": trace_path,
-            "request_count": request_count,
-        }),
+        external_shadow_trace_report_json(trace_path, request_count),
     );
     Ok(())
 }

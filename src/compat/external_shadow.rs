@@ -34,6 +34,17 @@ pub struct ExternalShadowReady {
     pub engine_kind: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ExternalShadowTraceSummary {
+    pub trace_record_count: u64,
+    pub request_events: u64,
+    pub response_events: u64,
+    pub error_events: u64,
+    pub invalid_lines: u64,
+    pub completed_request_count: u64,
+    pub pending_request_count: u64,
+}
+
 pub struct ExternalShadowCommand {
     name: String,
     child: Child,
@@ -331,6 +342,81 @@ impl Drop for ExternalShadowCommand {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+pub fn external_shadow_trace_report_json(
+    trace_path: &str,
+    request_count: u64,
+) -> serde_json::Value {
+    match summarize_external_shadow_trace(trace_path) {
+        Ok(summary) => serde_json::json!({
+            "path": trace_path,
+            "request_count": request_count,
+            "summary_available": true,
+            "trace_record_count": summary.trace_record_count,
+            "request_events": summary.request_events,
+            "response_events": summary.response_events,
+            "error_events": summary.error_events,
+            "invalid_lines": summary.invalid_lines,
+            "completed_request_count": summary.completed_request_count,
+            "pending_request_count": summary.pending_request_count,
+        }),
+        Err(error) => serde_json::json!({
+            "path": trace_path,
+            "request_count": request_count,
+            "summary_available": false,
+            "summary_error": error.to_string(),
+        }),
+    }
+}
+
+fn summarize_external_shadow_trace(trace_path: &str) -> Result<ExternalShadowTraceSummary> {
+    let file = File::open(trace_path).map_err(|error| {
+        SkeinError::Execution(format!(
+            "failed to open external shadow trace '{trace_path}': {error}"
+        ))
+    })?;
+    let mut summary = ExternalShadowTraceSummary::default();
+    let mut request_sequences = std::collections::BTreeSet::new();
+    let mut terminal_sequences = std::collections::BTreeSet::new();
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else {
+            summary.invalid_lines += 1;
+            continue;
+        };
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(&line) else {
+            summary.invalid_lines += 1;
+            continue;
+        };
+        summary.trace_record_count += 1;
+        let sequence = record.get("sequence").and_then(serde_json::Value::as_u64);
+        match record.get("event").and_then(serde_json::Value::as_str) {
+            Some("request") => {
+                summary.request_events += 1;
+                if let Some(sequence) = sequence {
+                    request_sequences.insert(sequence);
+                }
+            }
+            Some("response") => {
+                summary.response_events += 1;
+                if let Some(sequence) = sequence {
+                    terminal_sequences.insert(sequence);
+                }
+            }
+            Some("error") => {
+                summary.error_events += 1;
+                if let Some(sequence) = sequence {
+                    terminal_sequences.insert(sequence);
+                }
+            }
+            _ => summary.invalid_lines += 1,
+        }
+    }
+    summary.completed_request_count =
+        request_sequences.intersection(&terminal_sequences).count() as u64;
+    summary.pending_request_count =
+        request_sequences.len() as u64 - summary.completed_request_count;
+    Ok(summary)
 }
 
 impl ExternalShadowStdout {

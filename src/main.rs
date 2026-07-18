@@ -1,4 +1,5 @@
 use skein::{
+    external_shadow_trace_report_json,
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
@@ -911,10 +912,7 @@ fn add_shadow_trace_report(
     })?;
     object.insert(
         "shadow_trace".to_string(),
-        serde_json::json!({
-            "path": trace_path,
-            "request_count": request_count,
-        }),
+        external_shadow_trace_report_json(trace_path, request_count),
     );
     Ok(())
 }
@@ -3560,14 +3558,38 @@ mod tests {
                 "decision": "ready"
             }
         });
+        let trace_path = std::env::temp_dir().join(format!(
+            "skein-shadow-trace-report-{}.jsonl",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &trace_path,
+            r#"{"sequence":1,"event":"request","payload":{"op":"ready"}}"#.to_string()
+                + "\n"
+                + r#"{"sequence":1,"event":"response","payload":{"ready":true}}"#
+                + "\n"
+                + r#"{"sequence":2,"event":"request","payload":{"op":"execute"}}"#
+                + "\n"
+                + r#"{"sequence":2,"event":"error","payload":{"message":"failed"}}"#
+                + "\n",
+        )
+        .unwrap();
 
-        add_shadow_trace_report(&mut bundle, "/tmp/skein-shadow.jsonl", 42).unwrap();
+        add_shadow_trace_report(&mut bundle, trace_path.to_str().unwrap(), 2).unwrap();
 
-        assert_eq!(
-            bundle["shadow_trace"]["path"],
-            serde_json::json!("/tmp/skein-shadow.jsonl")
-        );
-        assert_eq!(bundle["shadow_trace"]["request_count"], 42);
+        assert_eq!(bundle["shadow_trace"]["path"], trace_path.to_str().unwrap());
+        assert_eq!(bundle["shadow_trace"]["request_count"], 2);
+        assert_eq!(bundle["shadow_trace"]["summary_available"], true);
+        assert_eq!(bundle["shadow_trace"]["trace_record_count"], 4);
+        assert_eq!(bundle["shadow_trace"]["request_events"], 2);
+        assert_eq!(bundle["shadow_trace"]["response_events"], 1);
+        assert_eq!(bundle["shadow_trace"]["error_events"], 1);
+        assert_eq!(bundle["shadow_trace"]["completed_request_count"], 2);
+        assert_eq!(bundle["shadow_trace"]["pending_request_count"], 0);
+        std::fs::remove_file(trace_path).unwrap();
     }
 
     #[test]

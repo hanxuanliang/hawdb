@@ -14,7 +14,10 @@ use external_shadow::{
     decode_external_projected_graph_response, decode_external_query_response,
     decode_external_ready_response, decode_external_session_response,
 };
-pub use external_shadow::{ExternalShadowCommand, ExternalShadowReady};
+pub use external_shadow::{
+    external_shadow_trace_report_json, ExternalShadowCommand, ExternalShadowReady,
+    ExternalShadowTraceSummary,
+};
 pub use inventory_gate::{
     assess_compatibility_cypher_migration_gate_bundle,
     assess_compatibility_cypher_migration_gate_bundle_with_rollback,
