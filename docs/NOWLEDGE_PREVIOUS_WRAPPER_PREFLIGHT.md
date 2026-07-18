@@ -218,3 +218,25 @@ jq -e '
 
 If this command fails, inspect `next_actions` first. The action codes are
 stable enough for dashboards and release automation.
+
+## 7. Verify The Whole Preflight Bundle
+
+Use the bundle checker to collapse the four evidence files into one
+release-facing preflight verdict:
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-previous-wrapper-preflight-check \
+  --require-ready \
+  --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
+  --contract-evidence-json "$NMEM_PREFLIGHT_ROOT/contract-evidence.json" \
+  --adapter-smoke-json "$NMEM_PREFLIGHT_ROOT/adapter-smoke.json" \
+  --migration-gate-json "$NMEM_PREFLIGHT_ROOT/migration-gate.json" \
+  --replacement-summary-json "$NMEM_PREFLIGHT_ROOT/replacement-summary.json" \
+  > "$NMEM_PREFLIGHT_ROOT/preflight-check.json"
+```
+
+The verifier checks wrapper identity consistency across the full contract,
+adapter smoke, migration gate, and replacement summary artifacts. It fails
+closed unless every stage is ready and the replacement summary has no blockers,
+missing evidence, or next actions.

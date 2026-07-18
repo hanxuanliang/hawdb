@@ -1,9 +1,11 @@
 mod cli_fixture_contract;
 mod cli_fixture_contract_check;
+mod cli_previous_wrapper_preflight;
 mod cli_replacement_summary;
 
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
+use cli_previous_wrapper_preflight::run_nowledge_previous_wrapper_preflight_check;
 use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
@@ -84,6 +86,17 @@ fn main() -> Result<()> {
             return Err(SkeinError::Execution(
                 "fixture contract command check failed".to_string(),
             ));
+        }
+        if command == "nowledge-previous-wrapper-preflight-check" {
+            let (json, require_ready) = run_nowledge_previous_wrapper_preflight_check(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge previous-wrapper preflight is not ready".to_string(),
+                ));
+            }
+            return Ok(());
         }
         if command == "explain-json" {
             let mut parameters = BTreeMap::new();
