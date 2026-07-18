@@ -500,6 +500,21 @@ pub struct StorageReclamationWatermark {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StorageRecoveryReport {
+    pub durable: bool,
+    pub recovery_mode: RecoveryMode,
+    pub checkpoint_epoch: Option<u64>,
+    pub checkpoint_commit_epoch: Option<u64>,
+    pub wal_present: bool,
+    pub wal_replay_start_lsn: Option<u64>,
+    pub next_lsn_after_replay: Option<u64>,
+    pub replayed_wal_entries: usize,
+    pub torn_tail_ignored: bool,
+    pub torn_tail_reason: Option<String>,
+    pub recovered_commit_epoch: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoreStableIdMapping {
     pub node_stable_ids: BTreeMap<NodeId, Value>,
     pub relationship_stable_ids: BTreeMap<RelId, Value>,
@@ -558,6 +573,7 @@ pub struct GraphStore {
     search_projection_change_log_start_epoch: u64,
     search_projection_graph_changes: Vec<SearchProjectionGraphChange>,
     max_search_projection_change_log_entries: Option<usize>,
+    storage_recovery_report: StorageRecoveryReport,
     durable: Option<DurableStore>,
 }
 
@@ -680,10 +696,11 @@ impl GraphStore {
             search_projection_change_log_start_epoch: 0,
             search_projection_graph_changes: Vec::new(),
             max_search_projection_change_log_entries: None,
+            storage_recovery_report: StorageRecoveryReport::default(),
             durable: Some(durable),
         };
         store.load_checkpoint(catalog)?;
-        store.replay_wal(catalog, replay_config)?;
+        store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
         store.validate_relationship_endpoints()?;
         store.load_projected_graph_artifacts()?;
         store.load_stable_id_mapping()?;
@@ -4309,6 +4326,10 @@ impl GraphStore {
         }
     }
 
+    pub fn storage_recovery_report(&self) -> StorageRecoveryReport {
+        self.storage_recovery_report.clone()
+    }
+
     pub fn statistics(&self) -> GraphStatistics {
         compute_statistics(&self.nodes, &self.relationships, self.commit_epoch)
     }
@@ -4331,6 +4352,7 @@ impl GraphStore {
             search_projection_change_log_start_epoch: self.search_projection_change_log_start_epoch,
             search_projection_graph_changes: self.search_projection_graph_changes.clone(),
             max_search_projection_change_log_entries: self.max_search_projection_change_log_entries,
+            storage_recovery_report: self.storage_recovery_report.clone(),
             durable: None,
         }
     }
@@ -5544,15 +5566,36 @@ impl GraphStore {
         Ok(())
     }
 
-    fn replay_wal(&mut self, catalog: &mut Catalog, config: WalReplayConfig) -> Result<()> {
+    fn replay_wal(
+        &mut self,
+        catalog: &mut Catalog,
+        config: WalReplayConfig,
+    ) -> Result<StorageRecoveryReport> {
         let Some(durable) = &self.durable else {
-            return Ok(());
+            return Ok(StorageRecoveryReport::default());
         };
         let wal_path = durable.wal_path.clone();
+        let checkpoint_epoch = durable.checkpoint_epoch;
+        let checkpoint_commit_epoch = durable.checkpoint_commit_epoch;
+        let wal_replay_start_lsn = durable.wal_replay_start_lsn;
         let mut next_lsn = durable.next_lsn;
         let mut replayed_entries = 0_usize;
+        let mut torn_tail_reason = None;
+        let wal_present = wal_path.exists();
         if !wal_path.exists() {
-            return Ok(());
+            return Ok(StorageRecoveryReport {
+                durable: true,
+                recovery_mode: config.recovery_mode,
+                checkpoint_epoch: Some(checkpoint_epoch),
+                checkpoint_commit_epoch: Some(checkpoint_commit_epoch),
+                wal_present,
+                wal_replay_start_lsn: Some(wal_replay_start_lsn),
+                next_lsn_after_replay: Some(next_lsn),
+                replayed_wal_entries: replayed_entries,
+                torn_tail_ignored: false,
+                torn_tail_reason,
+                recovered_commit_epoch: self.commit_epoch,
+            });
         }
         let file = File::open(&wal_path)?;
         for line in BufReader::new(file).lines() {
@@ -5563,7 +5606,10 @@ impl GraphStore {
             let entry = match WalEntry::decode(&line)? {
                 WalDecodeResult::Entry(entry) => entry,
                 WalDecodeResult::TornTail(reason) => match config.recovery_mode {
-                    RecoveryMode::TolerateTornTail => break,
+                    RecoveryMode::TolerateTornTail => {
+                        torn_tail_reason = Some(reason);
+                        break;
+                    }
                     RecoveryMode::Strict => {
                         return Err(SkeinError::Storage(format!(
                             "strict WAL recovery rejected torn tail: {reason}"
@@ -5608,7 +5654,19 @@ impl GraphStore {
         if let Some(durable) = &mut self.durable {
             durable.next_lsn = next_lsn;
         }
-        Ok(())
+        Ok(StorageRecoveryReport {
+            durable: true,
+            recovery_mode: config.recovery_mode,
+            checkpoint_epoch: Some(checkpoint_epoch),
+            checkpoint_commit_epoch: Some(checkpoint_commit_epoch),
+            wal_present,
+            wal_replay_start_lsn: Some(wal_replay_start_lsn),
+            next_lsn_after_replay: Some(next_lsn),
+            replayed_wal_entries: replayed_entries,
+            torn_tail_ignored: torn_tail_reason.is_some(),
+            torn_tail_reason,
+            recovered_commit_epoch: self.commit_epoch,
+        })
     }
 
     fn apply_wal_op(&mut self, catalog: &mut Catalog, op: WalOp) {
@@ -5797,6 +5855,7 @@ struct DurableStore {
     checkpoint_commit_epoch: u64,
     oldest_reader_commit_epoch: Option<u64>,
     safe_reclaim_commit_epoch: u64,
+    wal_replay_start_lsn: u64,
     next_lsn: u64,
     durability: DurabilityPolicy,
     read_only: bool,
@@ -5853,6 +5912,7 @@ impl DurableStore {
             checkpoint_commit_epoch: manifest.checkpoint_commit_epoch,
             oldest_reader_commit_epoch: manifest.oldest_reader_commit_epoch,
             safe_reclaim_commit_epoch: manifest.safe_reclaim_commit_epoch,
+            wal_replay_start_lsn: manifest.wal_replay_start_lsn,
             next_lsn: manifest.next_lsn,
             durability,
             read_only,
@@ -6323,6 +6383,7 @@ impl DurableStore {
         self.oldest_reader_commit_epoch = oldest_reader_commit_epoch;
         self.safe_reclaim_commit_epoch =
             safe_reclaim_commit_epoch(self.checkpoint_commit_epoch, oldest_reader_commit_epoch);
+        self.wal_replay_start_lsn = self.next_lsn;
         DurableManifest {
             checkpoint_epoch: self.checkpoint_epoch,
             checkpoint_commit_epoch: self.checkpoint_commit_epoch,

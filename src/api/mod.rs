@@ -27,8 +27,8 @@ use crate::search::{
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
     NodeRecord, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction, RecoveryMode,
-    RelRecord, SchemaMaintenanceAction, StorageReclamationWatermark, StoreStableIdMapping,
-    WalReplayConfig,
+    RelRecord, SchemaMaintenanceAction, StorageReclamationWatermark, StorageRecoveryReport,
+    StoreStableIdMapping, WalReplayConfig,
 };
 use crate::value::Value;
 use std::cell::RefCell;
@@ -1562,6 +1562,10 @@ impl Database {
         let oldest_reader_epoch = self.reader_pins.borrow().oldest_epoch();
         self.store
             .storage_reclamation_watermark(oldest_reader_epoch)
+    }
+
+    pub fn storage_recovery_report(&self) -> StorageRecoveryReport {
+        self.store.storage_recovery_report()
     }
 
     pub fn export_canonical_graph_snapshot(&self) -> CanonicalGraphSnapshotExport {

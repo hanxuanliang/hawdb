@@ -106,8 +106,8 @@ pub use search::{
 };
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,
-    OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark, WalReplayConfig,
-    DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark, StorageRecoveryReport,
+    WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 pub use value::Value;
 

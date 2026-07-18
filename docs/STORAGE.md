@@ -82,6 +82,12 @@ boundary in structured form for future page/segment garbage collection: current
 commit epoch, optional checkpoint epoch and checkpoint commit epoch, active
 oldest reader epoch, computed safe reclaim commit epoch, and whether the store
 is durable.
+`Database::storage_recovery_report` exposes the open-time recovery boundary in
+structured form: recovery mode, checkpoint epoch, checkpoint-covered commit
+epoch, WAL presence, replay start LSN, next LSN after replay, replayed WAL
+record count, ignored torn-tail detail for tolerant recovery, recovered commit
+epoch, and whether the store is durable. This report is diagnostic state only;
+it does not change WAL replay semantics or the on-disk format.
 `Database::export_canonical_graph_snapshot` and the same method on
 `DatabaseReadTransaction` expose the current or pinned graph snapshot as
 canonical node and relationship records with a deterministic logical checksum.

@@ -6997,6 +6997,46 @@ fn wal_replay_entry_limit_rejects_long_recovery() {
 }
 
 #[test]
+fn storage_recovery_report_tracks_wal_replay_boundary() {
+    let path = unique_test_dir("storage_recovery_report");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 1, title: 'Checkpointed'})")
+            .unwrap();
+        db.checkpoint().unwrap();
+        db.query("CREATE (:Memory {id: 2, title: 'Replayed'})")
+            .unwrap();
+    }
+
+    let db = Database::open(&path).unwrap();
+    let report = db.storage_recovery_report();
+    assert!(report.durable);
+    assert_eq!(report.recovery_mode, RecoveryMode::TolerateTornTail);
+    assert_eq!(report.checkpoint_epoch, Some(1));
+    assert_eq!(report.checkpoint_commit_epoch, Some(1));
+    assert!(report.wal_present);
+    assert_eq!(report.wal_replay_start_lsn, Some(1));
+    assert_eq!(report.next_lsn_after_replay, Some(2));
+    assert_eq!(report.replayed_wal_entries, 1);
+    assert!(!report.torn_tail_ignored);
+    assert_eq!(report.torn_tail_reason, None);
+    assert_eq!(report.recovered_commit_epoch, 2);
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn in_memory_storage_recovery_report_is_non_durable() {
+    let db = Database::new();
+    let report = db.storage_recovery_report();
+    assert!(!report.durable);
+    assert_eq!(report.recovered_commit_epoch, 0);
+    assert_eq!(report.replayed_wal_entries, 0);
+    assert_eq!(report.checkpoint_epoch, None);
+    assert_eq!(report.next_lsn_after_replay, None);
+}
+
+#[test]
 fn read_only_open_does_not_create_missing_database_path() {
     let path = unique_test_dir("read_only_missing");
     let error = Database::open_with_config(
