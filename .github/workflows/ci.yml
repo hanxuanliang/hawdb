@@ -150,6 +150,50 @@ jobs:
           grep -q '"priority": "background"' "$root/background.json"
           grep -q '"admission": "admit"' "$root/background.json"
 
+      - name: Previous wrapper adapter smoke
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          cat > "$root/previous_wrapper.py" <<'PY'
+          import json
+          import sys
+
+          for line in sys.stdin:
+              request = json.loads(line)
+              op = request.get("op")
+              if op == "query":
+                  print(json.dumps({"rows": [{"title": "Adapter Smoke"}]}), flush=True)
+              elif op == "execute_session":
+                  print(json.dumps({"results": [{"rows": [{"title": "Adapter Smoke"}]}]}), flush=True)
+              elif op == "project_graph":
+                  print(json.dumps({"ok": {
+                      "node_count": 1,
+                      "edge_count": 0,
+                      "incoming": [],
+                      "communities": [],
+                      "hierarchical_communities": [],
+                      "page_rank_scores": [[0, 1.0]],
+                      "page_rank_top_node": 0,
+                  }}), flush=True)
+              else:
+                  print(json.dumps({"error": {"class": "execution", "message": f"unsupported op {op}"}}), flush=True)
+          PY
+          cargo run --quiet --bin skein -- \
+            external-shadow-adapter-smoke \
+            --require-previous-wrapper \
+            --shadow-trace "$root/adapter-shadow.jsonl" \
+            previous-wrapper \
+            cargo run --quiet --example nowledge_previous_wrapper_shadow_adapter -- \
+              --persistent-command python3 -u "$root/previous_wrapper.py" \
+            > "$root/adapter.json"
+          grep -q '"protocol": "skein-external-shadow-adapter-smoke"' "$root/adapter.json"
+          grep -q '"engine_kind": "previous_wrapper"' "$root/adapter.json"
+          grep -q '"adapter_smoke_ready": true' "$root/adapter.json"
+          grep -q '"matched_checks": 2' "$root/adapter.json"
+          grep -q '"primary_only_checks": 0' "$root/adapter.json"
+          grep -q '"request_count": 4' "$root/adapter.json"
+          test -s "$root/adapter-shadow.jsonl"
+
       - name: Migration gate smoke
         run: |
           set -euo pipefail
