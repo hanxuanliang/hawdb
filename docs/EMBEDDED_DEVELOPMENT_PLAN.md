@@ -288,6 +288,10 @@ Nowledge writes such as mentions, source provenance, labels, evolution, and
 compaction links; endpoint filters are applied before writing, relationship
 properties are parameter-bound, and the write routes through the existing
 WAL-backed `MATCH ... CREATE` mutation path.
+Ordered batch relationship creation uses the same endpoint-known facade for
+Nowledge ingestion and annotation fan-out paths. It validates and filters each
+input row first, skips missing, filtered, or idless non-writable endpoints, then
+commits all eligible creates through one transaction-level grouped WAL batch.
 Endpoint-known relationship cleanup uses the same typed facade for label/source
 relation removal, supports optional relationship-property equality filters, and
 routes through the WAL-backed `MATCH ... DELETE r` mutation path.
