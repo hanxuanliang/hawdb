@@ -1191,6 +1191,42 @@ pub struct KnowledgeNeighborsOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipsRequest {
+    pub seeds: Vec<KnowledgeEntityRequest>,
+    pub relationship_type: Option<String>,
+    pub direction: KnowledgeNeighborDirection,
+    pub limit_per_seed: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedRelationshipsRequest {
+    pub relationships: KnowledgeRelationshipsRequest,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipGroup {
+    pub seed: KnowledgeEntityRequest,
+    pub seed_node_id: Option<u64>,
+    pub filtered_out: bool,
+    pub relationships: Vec<KnowledgeGraphContextPath>,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
+    pub fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
+    pub fanout_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipsOutput {
+    pub graph_commit_epoch: u64,
+    pub groups: Vec<KnowledgeRelationshipGroup>,
+    pub relationship_type_found: bool,
+    pub found_seed_count: usize,
+    pub missing_seed_count: usize,
+    pub filtered_out_seed_count: usize,
+    pub relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePathRequest {
     pub source_label: String,
     pub source_external_id: String,
@@ -2672,6 +2708,20 @@ impl Database {
         request: &KnowledgeScopedNeighborsRequest,
     ) -> KnowledgeNeighborsOutput {
         knowledge_scoped_neighbors_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_relationships(
+        &self,
+        request: &KnowledgeRelationshipsRequest,
+    ) -> KnowledgeRelationshipsOutput {
+        knowledge_relationships_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_relationships(
+        &self,
+        request: &KnowledgeScopedRelationshipsRequest,
+    ) -> KnowledgeRelationshipsOutput {
+        knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
@@ -4186,6 +4236,139 @@ fn knowledge_scoped_neighbors_for(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
+    }
+}
+
+fn knowledge_relationships_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeRelationshipsRequest,
+) -> KnowledgeRelationshipsOutput {
+    knowledge_scoped_relationships_for(
+        catalog,
+        store,
+        &KnowledgeScopedRelationshipsRequest {
+            relationships: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn knowledge_scoped_relationships_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeScopedRelationshipsRequest,
+) -> KnowledgeRelationshipsOutput {
+    let relationship_type = match request.relationships.relationship_type.as_deref() {
+        Some(name) => match catalog.rel_type_id(name) {
+            Some(rel_type_id) => Some(rel_type_id),
+            None => {
+                return knowledge_empty_relationship_groups_for_missing_type(store, request);
+            }
+        },
+        None => None,
+    };
+    let mut groups = Vec::with_capacity(request.relationships.seeds.len());
+    let mut found_seed_count = 0;
+    let mut missing_seed_count = 0;
+    let mut filtered_out_seed_count = 0;
+    let mut relationship_count = 0;
+    for (index, seed_request) in request.relationships.seeds.iter().enumerate() {
+        let seed = seed_node_by_label_and_external_id(
+            catalog,
+            store,
+            seed_request.label.as_str(),
+            seed_request.external_id.as_str(),
+        );
+        let Some(seed) = seed else {
+            missing_seed_count += 1;
+            groups.push(KnowledgeRelationshipGroup {
+                seed: seed_request.clone(),
+                seed_node_id: None,
+                filtered_out: false,
+                relationships: Vec::new(),
+                fanout_reason_codes: Vec::new(),
+                fanout_reason_details: Vec::new(),
+                fanout_reasons: Vec::new(),
+            });
+            continue;
+        };
+        if !request.metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(catalog, seed, &request.metadata_filters)
+        {
+            filtered_out_seed_count += 1;
+            groups.push(KnowledgeRelationshipGroup {
+                seed: seed_request.clone(),
+                seed_node_id: Some(seed.id.0),
+                filtered_out: true,
+                relationships: Vec::new(),
+                fanout_reason_codes: Vec::new(),
+                fanout_reason_details: Vec::new(),
+                fanout_reasons: Vec::new(),
+            });
+            continue;
+        }
+        found_seed_count += 1;
+        let (relationships, fanout_reason_details) = expand_knowledge_neighbors_for(
+            catalog,
+            store,
+            KnowledgeNeighborExpansion {
+                seed_hit_id: &format!("seed_{index}"),
+                seed_node_id: seed.id,
+                requested_direction: request.relationships.direction,
+                relationship_type,
+                limit: request.relationships.limit_per_seed,
+                max_hops: 1,
+            },
+        );
+        relationship_count += relationships.len();
+        groups.push(KnowledgeRelationshipGroup {
+            seed: seed_request.clone(),
+            seed_node_id: Some(seed.id.0),
+            filtered_out: false,
+            relationships,
+            fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
+            fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
+            fanout_reason_details,
+        });
+    }
+    KnowledgeRelationshipsOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        groups,
+        relationship_type_found: true,
+        found_seed_count,
+        missing_seed_count,
+        filtered_out_seed_count,
+        relationship_count,
+    }
+}
+
+fn knowledge_empty_relationship_groups_for_missing_type(
+    store: &GraphStore,
+    request: &KnowledgeScopedRelationshipsRequest,
+) -> KnowledgeRelationshipsOutput {
+    KnowledgeRelationshipsOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        groups: request
+            .relationships
+            .seeds
+            .iter()
+            .cloned()
+            .map(|seed| KnowledgeRelationshipGroup {
+                seed,
+                seed_node_id: None,
+                filtered_out: false,
+                relationships: Vec::new(),
+                fanout_reason_codes: Vec::new(),
+                fanout_reason_details: Vec::new(),
+                fanout_reasons: Vec::new(),
+            })
+            .collect(),
+        relationship_type_found: false,
+        found_seed_count: 0,
+        missing_seed_count: 0,
+        filtered_out_seed_count: 0,
+        relationship_count: 0,
     }
 }
 
@@ -6550,6 +6733,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_scoped_neighbors(request)
     }
 
+    pub fn knowledge_relationships(
+        &self,
+        request: &KnowledgeRelationshipsRequest,
+    ) -> KnowledgeRelationshipsOutput {
+        self.db.knowledge_relationships(request)
+    }
+
+    pub fn knowledge_scoped_relationships(
+        &self,
+        request: &KnowledgeScopedRelationshipsRequest,
+    ) -> KnowledgeRelationshipsOutput {
+        self.db.knowledge_scoped_relationships(request)
+    }
+
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
         self.db.knowledge_paths(request)
     }
@@ -6975,6 +7172,20 @@ impl DatabaseReadTransaction {
         request: &KnowledgeScopedNeighborsRequest,
     ) -> KnowledgeNeighborsOutput {
         knowledge_scoped_neighbors_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_relationships(
+        &self,
+        request: &KnowledgeRelationshipsRequest,
+    ) -> KnowledgeRelationshipsOutput {
+        knowledge_relationships_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_relationships(
+        &self,
+        request: &KnowledgeScopedRelationshipsRequest,
+    ) -> KnowledgeRelationshipsOutput {
+        knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
