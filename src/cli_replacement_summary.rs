@@ -46,9 +46,13 @@ pub fn nowledge_replacement_summary_json_with_options(
     let cutover_decision = json_get_str_path(bundle, &["cutover", "decision"]);
     let cutover_evidence_eligible =
         json_get_bool_path(bundle, &["cutover_evidence", "eligible"]).unwrap_or(false);
+    let previous_wrapper_contract_ready =
+        json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "ready"])
+            .unwrap_or(false);
     let production_cutover_ready = migration_gate_decision == Some("ready")
         && cutover_decision == Some("ready")
         && cutover_evidence_eligible
+        && previous_wrapper_contract_ready
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
         1_000_000
@@ -57,12 +61,15 @@ pub fn nowledge_replacement_summary_json_with_options(
     };
     let blocking_categories = nowledge_replacement_blocking_categories(
         bundle,
-        covered_business_surface_per_million,
-        shadow_parity_per_million,
-        replacement_readiness_per_million,
-        migration_gate_decision,
-        cutover_decision,
-        cutover_evidence_eligible,
+        ReplacementReadinessInputs {
+            covered_business_surface_per_million,
+            shadow_parity_per_million,
+            replacement_readiness_per_million,
+            migration_gate_decision,
+            cutover_decision,
+            cutover_evidence_eligible,
+            previous_wrapper_contract_ready,
+        },
     );
     let blockers = nowledge_replacement_blockers(bundle);
     let blocker_details = nowledge_replacement_blocker_details(&blockers, options);
@@ -99,6 +106,14 @@ pub fn nowledge_replacement_summary_json_with_options(
             "background_maintenance_protocol_matches": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_protocol_matches"]),
             "background_maintenance_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "background_maintenance_blocker_codes"]),
             "replacement_readiness_min_per_million": json_get_u64_path(bundle, &["cutover_evidence", "replacement_readiness_min_per_million"]),
+        },
+        "previous_wrapper_contract_evidence": {
+            "ready": previous_wrapper_contract_ready,
+            "evidence_kind": json_get_str_path(bundle, &["previous_wrapper_contract_evidence", "evidence_kind"]),
+            "wrapper_identity": json_get_str_path(bundle, &["previous_wrapper_contract_evidence", "wrapper_identity"]),
+            "requires_full_contract_ready": json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "requires_full_contract_ready"]),
+            "requires_wrapper_identity": json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "requires_wrapper_identity"]),
+            "blocker_codes": json_get_array_path(bundle, &["previous_wrapper_contract_evidence", "blocker_codes"]),
         },
         "blocking_categories": blocking_categories,
         "blocker_summary": {
@@ -215,30 +230,40 @@ fn replacement_readiness_family_summary(
     })
 }
 
-fn nowledge_replacement_blocking_categories(
-    bundle: &serde_json::Value,
+struct ReplacementReadinessInputs<'a> {
     covered_business_surface_per_million: Option<u64>,
     shadow_parity_per_million: Option<u64>,
     replacement_readiness_per_million: Option<u64>,
-    migration_gate_decision: Option<&str>,
-    cutover_decision: Option<&str>,
+    migration_gate_decision: Option<&'a str>,
+    cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
+    previous_wrapper_contract_ready: bool,
+}
+
+fn nowledge_replacement_blocking_categories(
+    bundle: &serde_json::Value,
+    inputs: ReplacementReadinessInputs<'_>,
 ) -> Vec<String> {
     let mut categories = BTreeSet::new();
-    if covered_business_surface_per_million != Some(1_000_000) {
+    if inputs.covered_business_surface_per_million != Some(1_000_000) {
         categories.insert("scanner_coverage".to_string());
     }
-    if shadow_parity_per_million != Some(1_000_000) || cutover_decision != Some("ready") {
+    if inputs.shadow_parity_per_million != Some(1_000_000)
+        || inputs.cutover_decision != Some("ready")
+    {
         categories.insert("shadow_parity".to_string());
     }
-    if replacement_readiness_per_million != Some(1_000_000) {
+    if inputs.replacement_readiness_per_million != Some(1_000_000) {
         categories.insert("query_family_readiness".to_string());
     }
-    if migration_gate_decision != Some("ready") {
+    if inputs.migration_gate_decision != Some("ready") {
         categories.insert("migration_gate".to_string());
     }
-    if !cutover_evidence_eligible {
+    if !inputs.cutover_evidence_eligible {
         categories.insert("cutover_evidence".to_string());
+    }
+    if !inputs.previous_wrapper_contract_ready {
+        categories.insert("previous_wrapper_contract".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
@@ -299,6 +324,9 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     {
         missing.push("replacement_readiness_by_query_family".to_string());
     }
+    if bundle.get("previous_wrapper_contract_evidence").is_none() {
+        missing.push("previous_wrapper_contract_evidence".to_string());
+    }
     if bundle.get("shadow_run").is_none() {
         missing.push("shadow_run".to_string());
     }
@@ -318,6 +346,7 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
         &["cutover_evidence", "storage_recovery_blockers"][..],
         &["cutover_evidence", "background_maintenance_blockers"][..],
         &["cutover_evidence", "replacement_readiness_blockers"][..],
+        &["previous_wrapper_contract_evidence", "blockers"][..],
     ] {
         for blocker in json_get_string_array_path(bundle, path) {
             blockers.insert(blocker);
@@ -400,7 +429,7 @@ mod tests {
         assert_eq!(summary["production_replacement_per_million"], 0);
         assert_eq!(
             summary["blocking_categories"],
-            serde_json::json!(["cutover_evidence"])
+            serde_json::json!(["cutover_evidence", "previous_wrapper_contract"])
         );
         assert!(summary["missing_evidence"]
             .as_array()
@@ -427,10 +456,42 @@ mod tests {
             summary["cutover_evidence"]["background_maintenance_protocol_matches"],
             true
         );
+        assert_eq!(summary["previous_wrapper_contract_evidence"]["ready"], true);
+        assert_eq!(
+            summary["previous_wrapper_contract_evidence"]["wrapper_identity"],
+            "nowledge-previous-wrapper:test"
+        );
         assert_eq!(
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_previous_wrapper_contract_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("previous_wrapper_contract_evidence");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(
+            summary["previous_wrapper_contract_evidence"]["ready"],
+            false
+        );
+        assert_eq!(
+            summary["missing_evidence"],
+            serde_json::json!(["previous_wrapper_contract_evidence"])
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "previous_wrapper_contract"));
     }
 
     #[test]
@@ -634,6 +695,7 @@ mod tests {
                 "background_maintenance",
                 "cutover_evidence",
                 "migration_gate",
+                "previous_wrapper_contract",
                 "query_family_readiness",
                 "shadow_parity",
                 "storage_recovery"
@@ -644,6 +706,7 @@ mod tests {
             serde_json::json!([
                 "storage_recovery",
                 "background_maintenance",
+                "previous_wrapper_contract_evidence",
                 "shadow_run",
                 "shadow_ready"
             ])
@@ -714,6 +777,15 @@ mod tests {
             },
             "shadow_ready": {
                 "engine_kind": "previous_wrapper"
+            },
+            "previous_wrapper_contract_evidence": {
+                "ready": true,
+                "evidence_kind": "previous_wrapper_contract",
+                "wrapper_identity": "nowledge-previous-wrapper:test",
+                "requires_full_contract_ready": true,
+                "requires_wrapper_identity": true,
+                "blocker_codes": [],
+                "blockers": []
             },
             "replacement_readiness_per_million": 1_000_000,
             "replacement_readiness_by_query_family": [
