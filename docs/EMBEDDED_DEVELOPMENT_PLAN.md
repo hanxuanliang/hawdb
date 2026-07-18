@@ -387,6 +387,12 @@ is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty
 references before WAL, preserves endpoint Entity nodes, and commits eligible
 relationship deletes through one grouped WAL batch.
+Entity-to-Community membership writes used by entity lifecycle community
+assignment are available as `Database::create_knowledge_community_memberships_batch`.
+The wrapper is fixed to `Entity` -> `Community` `BELONGS_TO` creation, validates
+non-empty ids and finite strengths before WAL, reports missing or non-writable
+endpoints, preserves endpoint nodes, and commits eligible memberships through
+one grouped WAL batch.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.

@@ -233,6 +233,12 @@ memory/source delete flows. `Database::delete_knowledge_source_reference_relatio
 scans only `RELATES_TO.source_reference`, rejects empty references before WAL,
 preserves endpoint Entity nodes, and commits eligible relationship deletes
 through one grouped WAL batch.
+Entity-to-Community membership writes are covered by
+`Database::create_knowledge_community_memberships_batch` for the Nowledge
+entity lifecycle `BELONGS_TO` creation shape. The wrapper validates non-empty
+Entity and Community ids plus finite strengths before WAL, reports missing or
+non-writable endpoints, preserves endpoint nodes, and commits eligible
+memberships through one grouped WAL batch.
 
 ## Current Direction
 

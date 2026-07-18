@@ -2068,6 +2068,42 @@ pub struct KnowledgeCommunityAssignmentClearOutput {
     pub cleared_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeCommunityMembershipCreate {
+    pub entity_id: String,
+    pub community_id: String,
+    pub strength: f64,
+    pub created_at: Value,
+    pub properties: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeCommunityMembershipCreateBatchRequest {
+    pub memberships: Vec<KnowledgeCommunityMembershipCreate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityMembershipCreateBatchRow {
+    pub entity_id: String,
+    pub community_id: String,
+    pub entity_node_id: Option<u64>,
+    pub community_node_id: Option<u64>,
+    pub matched: bool,
+    pub non_writable: bool,
+    pub created: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityMembershipCreateBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeCommunityMembershipCreateBatchRow>,
+    pub matched_count: usize,
+    pub missing_endpoint_count: usize,
+    pub non_writable_count: usize,
+    pub created_relationship_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphMetaStamp {
     pub meta_id: String,
@@ -4013,6 +4049,13 @@ impl Database {
         request: &KnowledgeCommunityAssignmentClearRequest,
     ) -> Result<KnowledgeCommunityAssignmentClearOutput> {
         clear_knowledge_community_assignments_for(self, request)
+    }
+
+    pub fn create_knowledge_community_memberships_batch(
+        &mut self,
+        request: &KnowledgeCommunityMembershipCreateBatchRequest,
+    ) -> Result<KnowledgeCommunityMembershipCreateBatchOutput> {
+        create_knowledge_community_memberships_batch_for(self, request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(
@@ -8457,6 +8500,92 @@ fn community_assignment_clear_statement(node_id: NodeId) -> (String, BTreeMap<St
             ("community_id".to_string(), Value::Null),
         ]),
     )
+}
+
+fn create_knowledge_community_memberships_batch_for(
+    db: &mut Database,
+    request: &KnowledgeCommunityMembershipCreateBatchRequest,
+) -> Result<KnowledgeCommunityMembershipCreateBatchOutput> {
+    db.ensure_writable()?;
+    for membership in &request.memberships {
+        validate_knowledge_community_membership_create(membership)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let creates = request
+        .memberships
+        .iter()
+        .map(knowledge_community_membership_relationship_create)
+        .collect::<Vec<_>>();
+    let output = create_knowledge_relationship_batch_for(
+        db,
+        &KnowledgeRelationshipCreateBatchRequest { creates },
+    )?;
+    let rows = output
+        .rows
+        .into_iter()
+        .map(|row| KnowledgeCommunityMembershipCreateBatchRow {
+            entity_id: row.source.external_id,
+            community_id: row.target.external_id,
+            entity_node_id: row.source_node_id,
+            community_node_id: row.target_node_id,
+            matched: row.matched,
+            non_writable: row.non_writable,
+            created: row.matched,
+        })
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeCommunityMembershipCreateBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows,
+        matched_count: output.matched_count,
+        missing_endpoint_count: output.missing_endpoint_count,
+        non_writable_count: output.non_writable_count,
+        created_relationship_count: output.created_relationship_count,
+    })
+}
+
+fn validate_knowledge_community_membership_create(
+    membership: &KnowledgeCommunityMembershipCreate,
+) -> Result<()> {
+    if membership.entity_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community membership create requires a non-empty entity_id".to_string(),
+        ));
+    }
+    if membership.community_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community membership create requires a non-empty community_id".to_string(),
+        ));
+    }
+    if !membership.strength.is_finite() {
+        return Err(SkeinError::Semantic(
+            "knowledge community membership strength must be finite".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_community_membership_relationship_create(
+    membership: &KnowledgeCommunityMembershipCreate,
+) -> KnowledgeRelationshipCreateRequest {
+    KnowledgeRelationshipCreateRequest {
+        source: KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: membership.entity_id.clone(),
+        },
+        target: KnowledgeEntityRequest {
+            label: "Community".to_string(),
+            external_id: membership.community_id.clone(),
+        },
+        relationship_type: "BELONGS_TO".to_string(),
+        properties: BTreeMap::from([
+            ("strength".to_string(), Value::Float(membership.strength)),
+            ("created_at".to_string(), membership.created_at.clone()),
+            ("properties".to_string(), membership.properties.clone()),
+        ]),
+    }
 }
 
 fn stamp_knowledge_graph_meta_batch_for(
@@ -13678,6 +13807,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeCommunityAssignmentClearRequest,
     ) -> Result<KnowledgeCommunityAssignmentClearOutput> {
         self.db.clear_knowledge_community_assignments(request)
+    }
+
+    pub fn create_knowledge_community_memberships_batch(
+        &mut self,
+        request: &KnowledgeCommunityMembershipCreateBatchRequest,
+    ) -> Result<KnowledgeCommunityMembershipCreateBatchOutput> {
+        self.db
+            .create_knowledge_community_memberships_batch(request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(

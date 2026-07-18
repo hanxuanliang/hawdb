@@ -43,6 +43,8 @@ pub use api::{
     KnowledgeCandidate, KnowledgeCandidateScoreBreakdown, KnowledgeCandidateScoringPolicy,
     KnowledgeCandidateSource, KnowledgeCommunityAssignmentClearOutput,
     KnowledgeCommunityAssignmentClearRequest, KnowledgeCommunityAssignmentClearRow,
+    KnowledgeCommunityMembershipCreate, KnowledgeCommunityMembershipCreateBatchOutput,
+    KnowledgeCommunityMembershipCreateBatchRequest, KnowledgeCommunityMembershipCreateBatchRow,
     KnowledgeEntity, KnowledgeEntityBatchOutput, KnowledgeEntityBatchRequest,
     KnowledgeEntityCreateBatchOutput, KnowledgeEntityCreateBatchRequest,
     KnowledgeEntityCreateBatchRow, KnowledgeEntityCreateOutput, KnowledgeEntityCreateRequest,
