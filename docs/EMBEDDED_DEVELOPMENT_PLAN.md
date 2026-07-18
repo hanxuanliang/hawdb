@@ -922,6 +922,10 @@ Current implemented slice:
   histograms derived from physical plan metadata, so diagnostics do not need to
   parse English explain text to detect operator mix or schema/mutation/access/
   traversal/relational/procedure composition
+- `skein explain-json <database-path> <cypher>` opens the database read-only and
+  prints the selected plan, fingerprint, recursive cost, warnings, decisions,
+  and structured operator/class histograms as stable JSON for migration gates
+  and CI artifacts
 - endpoint cartesian products whose flattened inputs all estimate to one row
   choose a stable left-deep physical input order by child cost and fingerprint,
   covering Nowledge endpoint-existence checks without changing broader

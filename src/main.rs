@@ -37,6 +37,28 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
         }
+        if command == "explain-json" {
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(explain_json_usage()))?;
+            let query = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(explain_json_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(explain_json_usage()));
+            }
+            let db = Database::open_with_config(
+                path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )?;
+            let explain = db.explain_query(&query)?;
+            let rendered = explain_output_json(&query, &explain);
+            println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            return Ok(());
+        }
         if command == "nowledge-cypher-migration-gate" {
             let mut require_ready = false;
             let mut require_cutover_evidence = false;
@@ -590,6 +612,10 @@ fn main() -> Result<()> {
 fn nowledge_cypher_migration_gate_usage() -> String {
     "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] <root> <shadow-name> <program> [args...]"
         .to_string()
+}
+
+fn explain_json_usage() -> String {
+    "explain-json requires <database-path> <cypher>".to_string()
 }
 
 fn validate_canonical_snapshot_usage() -> String {
@@ -3036,6 +3062,25 @@ fn stable_identity_audit_json(audit: &CanonicalSnapshotIdentityAudit) -> serde_j
     })
 }
 
+fn explain_output_json(query: &str, output: &skein::api::ExplainOutput) -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "skein-explain",
+        "protocol_version": 1,
+        "query": query,
+        "groups": output.trace.groups,
+        "selected_plan": output.trace.selected_plan,
+        "selected_plan_fingerprint": output.trace.selected_plan_fingerprint,
+        "selected_plan_cost": {
+            "estimated_rows": output.trace.selected_plan_cost.estimated_rows,
+            "cost": output.trace.selected_plan_cost.cost,
+        },
+        "selected_plan_operator_counts": output.trace.selected_plan_operator_counts,
+        "selected_plan_class_counts": output.trace.selected_plan_class_counts,
+        "warnings": output.trace.warnings,
+        "decisions": output.trace.decisions,
+    })
+}
+
 fn endpoint_violations_json(
     violations: &[skein::CanonicalSnapshotEndpointViolation],
 ) -> serde_json::Value {
@@ -3076,7 +3121,8 @@ mod tests {
     use super::{
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
         add_shadow_trace_report, canonical_snapshot_validation_json, cutover_evidence_is_eligible,
-        enforce_storage_recovery_requirements, graph_lightning_bootstrap_bundle_json,
+        enforce_storage_recovery_requirements, explain_output_json,
+        graph_lightning_bootstrap_bundle_json,
         graph_lightning_bootstrap_bundle_json_with_storage_recovery,
         graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
         graph_lightning_bootstrap_manifest_usage, graph_lightning_gc_staging_report,
@@ -3094,11 +3140,16 @@ mod tests {
         StorageRecoveryRequirements,
     };
     use skein::{
+        api::ExplainOutput,
+        optimizer::{OptimizerTrace, PhysicalPlan, PlanCost},
+    };
+    use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
         CanonicalSnapshotIdentityAudit, Database, ExternalShadowReady,
         GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, RecoveryMode,
         StorageRecoveryReport, Value,
     };
+    use std::collections::BTreeMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     #[test]
@@ -3483,6 +3534,47 @@ mod tests {
         assert_eq!(json["readiness"]["checkpoint_boundary_present"], true);
         assert_eq!(json["readiness"]["wal_replay_bounded"], true);
         assert_eq!(json["readiness"]["torn_tail_clean"], false);
+    }
+
+    #[test]
+    fn renders_explain_output_json_with_structured_plan_summary() {
+        let mut operator_counts = BTreeMap::new();
+        operator_counts.insert("SeqNodeScan".to_string(), 1);
+        let mut class_counts = BTreeMap::new();
+        class_counts.insert("access".to_string(), 1);
+        let output = ExplainOutput {
+            physical_plan: PhysicalPlan::SeqNodeScan {
+                variable: "m".to_string(),
+                label: "Memory".to_string(),
+            },
+            trace: OptimizerTrace {
+                groups: 1,
+                selected_plan: "SeqNodeScan variable=m label=Memory".to_string(),
+                selected_plan_fingerprint: "SeqNodeScan(1:m:6:Memory)".to_string(),
+                selected_plan_cost: PlanCost {
+                    estimated_rows: 42,
+                    cost: 42,
+                },
+                selected_plan_operator_counts: operator_counts,
+                selected_plan_class_counts: class_counts,
+                warnings: vec!["diagnostic warning".to_string()],
+                decisions: vec!["diagnostic decision".to_string()],
+            },
+        };
+
+        let json = explain_output_json("MATCH (m:Memory) RETURN m", &output);
+
+        assert_eq!(json["protocol"], "skein-explain");
+        assert_eq!(json["protocol_version"], 1);
+        assert_eq!(
+            json["selected_plan_fingerprint"],
+            "SeqNodeScan(1:m:6:Memory)"
+        );
+        assert_eq!(json["selected_plan_cost"]["estimated_rows"], 42);
+        assert_eq!(json["selected_plan_operator_counts"]["SeqNodeScan"], 1);
+        assert_eq!(json["selected_plan_class_counts"]["access"], 1);
+        assert_eq!(json["warnings"][0], "diagnostic warning");
+        assert_eq!(json["decisions"][0], "diagnostic decision");
     }
 
     #[test]
