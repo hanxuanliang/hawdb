@@ -551,6 +551,7 @@ pub struct KnowledgeRetrievalOutput {
     pub evidence: Vec<KnowledgeEvidence>,
     pub graph_seeds: Vec<KnowledgeGraphSeed>,
     pub graph_context_paths: Vec<KnowledgeGraphContextPath>,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
     pub fanout_reasons: Vec<String>,
 }
 
@@ -593,6 +594,7 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_context_fallback_reason_codes: Vec<KnowledgeFallbackReasonCode>,
     pub graph_context_fallback_reasons: Vec<String>,
     pub fanout_reason_count: usize,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
     pub fanout_reasons: Vec<String>,
     pub candidate_count: usize,
     pub candidate_total_count: usize,
@@ -603,6 +605,48 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub warnings: Vec<String>,
     pub empty_reason_codes: Vec<KnowledgeRetrievalEmptyReasonCode>,
     pub empty_reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeFanoutReasonCode {
+    DenseAdjacency,
+    GraphContextLimitReached,
+    GraphSeedLimitReached,
+    CandidateLimitReached,
+    PathLimitReached,
+    NodeLimitReached,
+    RelationshipLimitReached,
+}
+
+impl KnowledgeFanoutReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::DenseAdjacency => "dense_adjacency",
+            Self::GraphContextLimitReached => "graph_context_limit_reached",
+            Self::GraphSeedLimitReached => "graph_seed_limit_reached",
+            Self::CandidateLimitReached => "candidate_limit_reached",
+            Self::PathLimitReached => "path_limit_reached",
+            Self::NodeLimitReached => "node_limit_reached",
+            Self::RelationshipLimitReached => "relationship_limit_reached",
+        }
+    }
+}
+
+impl FromStr for KnowledgeFanoutReasonCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "dense_adjacency" => Ok(Self::DenseAdjacency),
+            "graph_context_limit_reached" => Ok(Self::GraphContextLimitReached),
+            "graph_seed_limit_reached" => Ok(Self::GraphSeedLimitReached),
+            "candidate_limit_reached" => Ok(Self::CandidateLimitReached),
+            "path_limit_reached" => Ok(Self::PathLimitReached),
+            "node_limit_reached" => Ok(Self::NodeLimitReached),
+            "relationship_limit_reached" => Ok(Self::RelationshipLimitReached),
+            _ => Err("unknown knowledge fanout reason code"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -812,6 +856,7 @@ pub struct KnowledgeNeighborsOutput {
     pub graph_commit_epoch: u64,
     pub seed_node_id: Option<u64>,
     pub paths: Vec<KnowledgeGraphContextPath>,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
     pub fanout_reasons: Vec<String>,
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
@@ -834,6 +879,7 @@ pub struct KnowledgePathOutput {
     pub source_node_id: Option<u64>,
     pub target_node_id: Option<u64>,
     pub paths: Vec<KnowledgeGraphPath>,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
     pub fanout_reasons: Vec<String>,
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
@@ -860,6 +906,7 @@ pub struct KnowledgeSubgraphOutput {
     pub seed_node_id: Option<u64>,
     pub nodes: Vec<KnowledgeEntity>,
     pub relationships: Vec<KnowledgeGraphContextPath>,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
     pub fanout_reasons: Vec<String>,
     pub diagnostics: KnowledgeTraversalDiagnostics,
 }
@@ -872,6 +919,7 @@ pub struct KnowledgeTraversalDiagnostics {
     pub node_count: usize,
     pub relationship_count: usize,
     pub fanout_reason_count: usize,
+    pub fanout_reason_codes: Vec<KnowledgeFanoutReasonCode>,
     pub fanout_reasons: Vec<String>,
     pub fallback_reason_codes: Vec<KnowledgeTraversalFallbackReasonCode>,
     pub fallback_reasons: Vec<String>,
@@ -2142,6 +2190,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let mut fanout_reasons = fanout_reasons;
         fanout_reasons.extend(graph_seed_fanout_reasons);
         fanout_reasons.extend(candidate_fanout_reasons);
+        let fanout_reason_codes = knowledge_fanout_reason_codes(&fanout_reasons);
         let diagnostics = knowledge_retrieval_diagnostics(
             &search,
             request,
@@ -2170,6 +2219,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
             evidence,
             graph_seeds,
             graph_context_paths,
+            fanout_reason_codes,
             fanout_reasons,
         }
     }
@@ -2869,6 +2919,7 @@ fn knowledge_retrieval_diagnostics(
         graph_context_fallback_reason_codes: knowledge_graph_context_fallback_reason_codes(request),
         graph_context_fallback_reasons: knowledge_graph_context_fallback_reasons(request),
         fanout_reason_count: input.fanout_reason_count,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reasons),
         fanout_reasons: input.fanout_reasons,
         candidate_count: input.candidate_count,
         candidate_total_count: input.candidate_total_count,
@@ -2879,6 +2930,35 @@ fn knowledge_retrieval_diagnostics(
         warnings: knowledge_retrieval_warnings(projection_freshness, graph_commit_epoch),
         empty_reason_codes,
         empty_reasons,
+    }
+}
+
+fn knowledge_fanout_reason_codes(reasons: &[String]) -> Vec<KnowledgeFanoutReasonCode> {
+    reasons
+        .iter()
+        .filter_map(|reason| knowledge_fanout_reason_code(reason))
+        .collect()
+}
+
+fn knowledge_fanout_reason_code(reason: &str) -> Option<KnowledgeFanoutReasonCode> {
+    if reason.contains(" dense_adjacency ") {
+        Some(KnowledgeFanoutReasonCode::DenseAdjacency)
+    } else if reason.starts_with("graph_context_limit ") {
+        Some(KnowledgeFanoutReasonCode::GraphContextLimitReached)
+    } else if reason.starts_with("knowledge_graph_seed_limit ") {
+        Some(KnowledgeFanoutReasonCode::GraphSeedLimitReached)
+    } else if reason.starts_with("knowledge_candidate_limit ") {
+        Some(KnowledgeFanoutReasonCode::CandidateLimitReached)
+    } else if reason.starts_with("knowledge_neighbors limit ")
+        || reason.starts_with("knowledge_paths limit ")
+    {
+        Some(KnowledgeFanoutReasonCode::PathLimitReached)
+    } else if reason.starts_with("knowledge_subgraph node_limit ") {
+        Some(KnowledgeFanoutReasonCode::NodeLimitReached)
+    } else if reason.starts_with("knowledge_subgraph relationship_limit ") {
+        Some(KnowledgeFanoutReasonCode::RelationshipLimitReached)
+    } else {
+        None
     }
 }
 
@@ -3140,6 +3220,7 @@ fn knowledge_neighbors_for(
             graph_commit_epoch: store.commit_epoch(),
             seed_node_id: None,
             paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: false,
@@ -3171,6 +3252,7 @@ fn knowledge_neighbors_for(
                     graph_commit_epoch: store.commit_epoch(),
                     seed_node_id: Some(seed.id.0),
                     paths: Vec::new(),
+                    fanout_reason_codes: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
@@ -3227,6 +3309,7 @@ fn knowledge_neighbors_for(
             relationship_limit: None,
         }),
         paths,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
         fanout_reasons,
     }
 }
@@ -3257,6 +3340,7 @@ fn knowledge_paths_for(
             source_node_id,
             target_node_id,
             paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: false,
@@ -3290,6 +3374,7 @@ fn knowledge_paths_for(
             source_node_id,
             target_node_id,
             paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: true,
@@ -3321,6 +3406,7 @@ fn knowledge_paths_for(
                     source_node_id,
                     target_node_id,
                     paths: Vec::new(),
+                    fanout_reason_codes: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
@@ -3379,6 +3465,7 @@ fn knowledge_paths_for(
             relationship_limit: None,
         }),
         paths,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
         fanout_reasons,
     }
 }
@@ -3399,6 +3486,7 @@ fn knowledge_subgraph_for(
             seed_node_id: None,
             nodes: Vec::new(),
             relationships: Vec::new(),
+            fanout_reason_codes: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
                 seed_found: false,
@@ -3430,6 +3518,7 @@ fn knowledge_subgraph_for(
                     seed_node_id: Some(seed.id.0),
                     nodes: Vec::new(),
                     relationships: Vec::new(),
+                    fanout_reason_codes: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics: knowledge_traversal_diagnostics(
                         KnowledgeTraversalDiagnosticInput {
@@ -3487,6 +3576,7 @@ fn knowledge_subgraph_for(
         }),
         nodes,
         relationships,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reasons),
         fanout_reasons,
     }
 }
@@ -3520,6 +3610,7 @@ fn knowledge_traversal_diagnostics(
         node_count: input.node_count,
         relationship_count: input.relationship_count,
         fanout_reason_count: input.fanout_reason_count,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&input.fanout_reasons),
         fanout_reasons: input.fanout_reasons,
         fallback_reason_codes,
         fallback_reasons,

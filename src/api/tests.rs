@@ -3,11 +3,12 @@ use super::{
     CanonicalStableIdMapping, Database, DatabaseConfig, DerivedArtifactJobStatus,
     ExternalContentArtifactJobCompletion, ExternalContentArtifactRuntimeManifest,
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
-    KnowledgeFallbackReasonCode, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
-    KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgeRetrievalEmptyReasonCode,
-    KnowledgeRetrievalRequest, KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -149,6 +150,43 @@ fn knowledge_traversal_fallback_reason_codes_have_stable_string_encodings() {
     assert!("missing"
         .parse::<KnowledgeTraversalFallbackReasonCode>()
         .is_err());
+}
+
+#[test]
+fn knowledge_fanout_reason_codes_have_stable_string_encodings() {
+    let cases = [
+        (KnowledgeFanoutReasonCode::DenseAdjacency, "dense_adjacency"),
+        (
+            KnowledgeFanoutReasonCode::GraphContextLimitReached,
+            "graph_context_limit_reached",
+        ),
+        (
+            KnowledgeFanoutReasonCode::GraphSeedLimitReached,
+            "graph_seed_limit_reached",
+        ),
+        (
+            KnowledgeFanoutReasonCode::CandidateLimitReached,
+            "candidate_limit_reached",
+        ),
+        (
+            KnowledgeFanoutReasonCode::PathLimitReached,
+            "path_limit_reached",
+        ),
+        (
+            KnowledgeFanoutReasonCode::NodeLimitReached,
+            "node_limit_reached",
+        ),
+        (
+            KnowledgeFanoutReasonCode::RelationshipLimitReached,
+            "relationship_limit_reached",
+        ),
+    ];
+
+    for (code, name) in cases {
+        assert_eq!(code.as_str(), name);
+        assert_eq!(name.parse::<KnowledgeFanoutReasonCode>(), Ok(code));
+    }
+    assert!("limit".parse::<KnowledgeFanoutReasonCode>().is_err());
 }
 
 #[test]
@@ -1378,6 +1416,14 @@ fn retrieves_knowledge_through_database_facade() {
     assert!(output.diagnostics.warnings.is_empty());
     assert_eq!(output.fanout_reasons.len(), 1);
     assert!(output.fanout_reasons[0].contains("graph_context_limit 1"));
+    assert_eq!(
+        output.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::GraphContextLimitReached]
+    );
+    assert_eq!(
+        output.diagnostics.fanout_reason_codes,
+        output.fanout_reason_codes
+    );
     assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
 }
 
@@ -2998,6 +3044,14 @@ fn knowledge_retrieval_returns_graph_seeds_without_search_hits() {
     );
     assert_eq!(output.fanout_reasons.len(), 1);
     assert!(output.fanout_reasons[0].contains("knowledge_graph_seed_limit 1"));
+    assert_eq!(
+        output.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::GraphSeedLimitReached]
+    );
+    assert_eq!(
+        output.diagnostics.fanout_reason_codes,
+        output.fanout_reason_codes
+    );
     assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
 }
 
@@ -3115,6 +3169,14 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
     );
     assert_eq!(output.fanout_reasons.len(), 1);
     assert!(output.fanout_reasons[0].contains("knowledge_candidate_limit 1"));
+    assert_eq!(
+        output.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::CandidateLimitReached]
+    );
+    assert_eq!(
+        output.diagnostics.fanout_reason_codes,
+        output.fanout_reason_codes
+    );
     assert_eq!(output.diagnostics.fanout_reasons, output.fanout_reasons);
 
     let empty_by_limit = db.retrieve_knowledge(
@@ -3544,6 +3606,14 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
     assert_eq!(limited.diagnostics.path_limit, Some(1));
     assert_eq!(limited.fanout_reasons.len(), 1);
     assert!(limited.fanout_reasons[0].contains("knowledge_neighbors limit 1"));
+    assert_eq!(
+        limited.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::PathLimitReached]
+    );
+    assert_eq!(
+        limited.diagnostics.fanout_reason_codes,
+        limited.fanout_reason_codes
+    );
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let disabled = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
@@ -3627,6 +3697,14 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     assert!(neighbors.fanout_reasons[0]
         .contains("knowledge_neighbors dense_adjacency LINKS outgoing node 0 degree"));
     assert_eq!(
+        neighbors.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::DenseAdjacency]
+    );
+    assert_eq!(
+        neighbors.diagnostics.fanout_reason_codes,
+        neighbors.fanout_reason_codes
+    );
+    assert_eq!(
         neighbors.diagnostics.fanout_reasons,
         neighbors.fanout_reasons
     );
@@ -3646,6 +3724,10 @@ fn typed_knowledge_navigation_reports_dense_adjacency_groups() {
     assert_eq!(untyped_neighbors.diagnostics.fanout_reason_count, 1);
     assert!(untyped_neighbors.fanout_reasons[0]
         .contains("knowledge_neighbors dense_adjacency LINKS outgoing node 0 degree"));
+    assert_eq!(
+        untyped_neighbors.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::DenseAdjacency]
+    );
 
     let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
         label: "Memory".to_string(),
@@ -3823,6 +3905,14 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
     assert_eq!(limited.diagnostics.path_limit, Some(1));
     assert_eq!(limited.fanout_reasons.len(), 1);
     assert!(limited.fanout_reasons[0].contains("knowledge_paths limit 1"));
+    assert_eq!(
+        limited.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::PathLimitReached]
+    );
+    assert_eq!(
+        limited.diagnostics.fanout_reason_codes,
+        limited.fanout_reason_codes
+    );
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
 
     let disabled = db.knowledge_paths(&KnowledgePathRequest {
@@ -4051,6 +4141,14 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert!(node_limited.relationships.is_empty());
     assert!(node_limited.fanout_reasons[0].contains("node_limit 1"));
     assert_eq!(
+        node_limited.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::NodeLimitReached]
+    );
+    assert_eq!(
+        node_limited.diagnostics.fanout_reason_codes,
+        node_limited.fanout_reason_codes
+    );
+    assert_eq!(
         node_limited.diagnostics.fanout_reasons,
         node_limited.fanout_reasons
     );
@@ -4071,6 +4169,14 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
     assert!(relationship_limited.diagnostics.fallback_reasons.is_empty());
     assert_eq!(relationship_limited.diagnostics.relationship_limit, Some(1));
     assert!(relationship_limited.fanout_reasons[0].contains("relationship_limit 1"));
+    assert_eq!(
+        relationship_limited.fanout_reason_codes,
+        vec![KnowledgeFanoutReasonCode::RelationshipLimitReached]
+    );
+    assert_eq!(
+        relationship_limited.diagnostics.fanout_reason_codes,
+        relationship_limited.fanout_reason_codes
+    );
     assert_eq!(
         relationship_limited.diagnostics.fanout_reasons,
         relationship_limited.fanout_reasons
