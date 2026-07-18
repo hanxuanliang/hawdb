@@ -204,12 +204,12 @@ preserving valid Cypher map literals such as `{id: $id}` and string values such
 as `'{}'`; dynamic query builders should be covered by their concrete
 production shapes. The current live scanner coverage gate over the local
 Nowledge graph-source tree is complete for the scanned surface:
-`nowledge-scanned-inventory` requires 694 Cypher checks, the
-`nowledge-memory-core` fixture covers all 694, and `missing_items` is empty.
-The refreshed audit artifact used for this status is
-`/private/tmp/skein-cypher-coverage-doc-refresh.json`. The remaining Phase 1
-work is no longer fixture-gap closure for the current scan; it is to attach the
-previous wrapper through the external shadow adapter when migration-gate
+`nowledge-scanned-inventory` requires 698 Cypher checks, the
+`nowledge-memory-core` fixture covers all 698, and `missing_items` is empty.
+The scanner excludes vendored `upstream_forks` examples from this
+production-source gate. The remaining Phase 1 work is no longer fixture-gap
+closure for the current scan; it is to attach the previous wrapper through the
+external shadow adapter when migration-gate
 evidence is needed, and to rerun the scanner whenever Nowledge adds new graph
 call sites.
 The embedded front door now includes a bounded exact physical-plan LFU cache for

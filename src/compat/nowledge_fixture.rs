@@ -2849,6 +2849,26 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "memory latest promotion update",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.id = $newer_id SET m.is_latest = true",
+                        BTreeMap::from([("newer_id".to_string(), Value::Int(2))]),
+                    ),
+                    ExpectedRows::RowCount(1),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "MATCH (m:Memory {id: 2}) SET m.is_latest = false",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new("MATCH (m:Memory {id: 2}) RETURN m.is_latest"),
+                    ExpectedRows::Exact(vec![compatibility_row([(
+                        "m.is_latest",
+                        Value::Bool(true),
+                    )])]),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "memory latest demotion in space update",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (older:Memory {id: $older_id}) WHERE older.space_id = $space_id SET older.is_latest = false",
@@ -15104,6 +15124,40 @@ pub fn nowledge_memory_core_fixture() -> CompatibilityFixture {
             ),
             CompatibilityCheck::Cypher(
                 CypherFixtureCheck::expect_rows(
+                    "mcp memory relation endpoint spaces read",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN m.space_id, s.space_id",
+                        BTreeMap::from([
+                            (
+                                "memory_id".to_string(),
+                                Value::String("mcp-relation-space-memory".to_string()),
+                            ),
+                            (
+                                "source_id".to_string(),
+                                Value::String("mcp-relation-space-source".to_string()),
+                            ),
+                        ]),
+                    ),
+                    ExpectedRows::Exact(vec![compatibility_row([
+                        ("m.space_id", Value::String("team".to_string())),
+                        ("s.space_id", Value::String("team".to_string())),
+                    ])]),
+                )
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Memory {id: 'mcp-relation-space-memory', space_id: 'team'})",
+                ))
+                .with_setup_query(CypherFixtureStatement::new(
+                    "CREATE (:Source {id: 'mcp-relation-space-source', space_id: 'team'})",
+                ))
+                .with_effect_query(
+                    CypherFixtureStatement::new(
+                        "MATCH (n) WHERE n.id IN ['mcp-relation-space-memory', 'mcp-relation-space-source'] DETACH DELETE n",
+                    ),
+                    ExpectedRows::RowCount(2),
+                ),
+            ),
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
                     "rest memory relation identity detail read",
                     CypherFixtureStatement::with_parameters(
                         "MATCH (m:Memory {id: $memory_id}) RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END, m.metadata, m.is_latest, m.lifecycle_state",
@@ -20567,6 +20621,14 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
                 "MATCH (m:Memory {id: $memory_id}) RETURN m.id, CASE WHEN m.space_id IS NULL OR m.space_id = '' THEN 'default' ELSE m.space_id END",
             ),
             CompatibilityQueryCallSite::new(
+                "mcp memory relation endpoint spaces read",
+                "mcp_read",
+                "nmem-server::mcp_server::memory_relation_validate_spaces",
+            )
+            .with_cypher(
+                "MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN m.space_id, s.space_id",
+            ),
+            CompatibilityQueryCallSite::new(
                 "rest memory relation identity detail read",
                 "memory_relation_read",
                 "nmem-server::rest_memory_relations::memory_identity",
@@ -23790,6 +23852,12 @@ pub fn nowledge_memory_core_inventory() -> CompatibilityQueryInventory {
             .with_cypher(
                 "MATCH (m:Memory) WHERE m.id = $older_id SET m.is_latest = false",
             ),
+            CompatibilityQueryCallSite::new(
+                "memory latest promotion update",
+                "memory_evolution_write",
+                "nmem-graph::repo::add_evolves_edge::promote_replacement_memory",
+            )
+            .with_cypher("MATCH (m:Memory) WHERE m.id = $newer_id SET m.is_latest = true"),
             CompatibilityQueryCallSite::new(
                 "memory latest demotion in space update",
                 "memory_evolution_write",

@@ -86,9 +86,9 @@ human-readable error strings or deleting READY artifacts before publish.
 
 The current live scanner coverage gate over the local Nowledge graph-source tree
 is complete for the scanned Cypher surface: `nowledge-scanned-inventory`
-requires 694 checks, `nowledge-memory-core` covers all 694, and
-`missing_items` is empty. The refreshed local audit artifact is
-`/private/tmp/skein-cypher-coverage-doc-refresh.json`.
+requires 698 checks, `nowledge-memory-core` covers all 698, and
+`missing_items` is empty. The scanner excludes vendored `upstream_forks`
+examples from this production-source gate.
 
 This does not by itself complete migration cutover. The remaining evidence gap
 is external shadow comparison against the previous local graph wrapper when a

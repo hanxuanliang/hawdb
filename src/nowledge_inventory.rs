@@ -102,6 +102,9 @@ fn scan_source_file(source_file: &str) -> bool {
     if source_file.starts_with("crates/nmem-content/") {
         return false;
     }
+    if source_file.starts_with("upstream_forks/") {
+        return false;
+    }
     let parts = source_file.split('/').collect::<Vec<_>>();
     if parts
         .iter()
@@ -1208,6 +1211,12 @@ mod tests {
     #[test]
     fn skips_non_production_graph_sources() {
         assert!(!scan_source_file("crates/nmem-content/src/lib.rs"));
+        assert!(!scan_source_file(
+            "upstream_forks/ladybug/examples/rust/src/main.rs"
+        ));
+        assert!(!scan_source_file(
+            "upstream_forks/rig/crates/rig-neo4j/examples/vector_search_simple.rs"
+        ));
         assert!(!scan_source_file("crates/nmem-server/tests/okf_smoke.rs"));
         assert!(!scan_source_file(
             "crates/nmem-graph/src/bin/community_smoke.rs"
@@ -1245,7 +1254,7 @@ mod tests {
         assert_eq!(coverage["missing_checks"].as_array().unwrap().len(), 0);
         assert_eq!(
             coverage["extra_fixture_checks"].as_array().unwrap().len(),
-            641
+            643
         );
 
         fs::remove_dir_all(root).unwrap();
