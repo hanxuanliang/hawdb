@@ -223,11 +223,15 @@ bound parameter values, graph commit epoch, and optimizer group budget; any
 mutation, schema/index change, or statistics epoch change naturally misses
 instead of reusing a stale physical plan. This is intentionally not yet a
 cross-parameter prepared-plan cache because the current logical plan stores
-bound `Value`s. `foyer` remains a candidate backend once the cache surface is
-abstracted, but v1 keeps a small in-process LFU cache in the
-`skein-plan-cache` crate to avoid unnecessary runtime/dependency and
-memory-growth risk in embedded deployments while keeping the `Database` facade
-focused on graph-specific cache keys and cached physical plans.
+bound `Value`s. Plan-cache stats also distinguish cache hits, misses,
+disabled-capacity misses, explicit bypasses, and evictions so production
+explain artifacts can tell configuration, statement-shape, and eviction
+behavior apart without parsing optimizer decision strings. `foyer` remains a
+candidate backend once the cache surface is abstracted, but v1 keeps a small
+in-process LFU cache in the `skein-plan-cache` crate to avoid unnecessary
+runtime/dependency and memory-growth risk in embedded deployments while keeping
+the `Database` facade focused on graph-specific cache keys and cached physical
+plans.
 
 ### Phase 2: Snapshot Transactions and MVCC
 

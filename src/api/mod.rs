@@ -1612,7 +1612,7 @@ impl Database {
         let cache_mode = if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
-            PlanCacheMode::Bypass
+            PlanCacheMode::Bypass(PlanCacheBypassReason::StatementNotCacheable)
         };
         optimized_query_plan_for(
             cypher_text,
@@ -6408,7 +6408,7 @@ fn mutation_command_for_statement(
         cypher_text,
         statement,
         parameters,
-        PlanCacheMode::Bypass,
+        PlanCacheMode::Bypass(PlanCacheBypassReason::MutationPlanning),
         PlanCacheContext {
             catalog: &db.catalog,
             store: &db.store,
@@ -6423,7 +6423,22 @@ fn mutation_command_for_statement(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanCacheMode {
     Use,
-    Bypass,
+    Bypass(PlanCacheBypassReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanCacheBypassReason {
+    MutationPlanning,
+    StatementNotCacheable,
+}
+
+impl PlanCacheBypassReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::MutationPlanning => "mutation_planning",
+            Self::StatementNotCacheable => "statement_not_cacheable",
+        }
+    }
 }
 
 struct PlanCacheContext<'a> {
@@ -6476,6 +6491,11 @@ fn optimized_query_plan_for(
         trace
             .decisions
             .push("plan cache miss: optimized exact parameterized physical plan".to_string());
+    } else if let PlanCacheMode::Bypass(reason) = cache_mode {
+        context.cache.borrow_mut().record_bypass();
+        trace
+            .decisions
+            .push(format!("plan cache bypass: {}", reason.as_str()));
     }
     Ok((physical_plan, trace))
 }
@@ -6556,7 +6576,7 @@ impl DatabaseReadTransaction {
         let cache_mode = if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
-            PlanCacheMode::Bypass
+            PlanCacheMode::Bypass(PlanCacheBypassReason::StatementNotCacheable)
         };
         optimized_query_plan_for(
             cypher_text,

@@ -4838,6 +4838,8 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
     assert_eq!(stats.entries, 1);
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 1);
+    assert_eq!(stats.disabled_misses, 0);
+    assert_eq!(stats.bypasses, 0);
 }
 
 #[test]
@@ -4865,6 +4867,8 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.disabled_misses, 0);
+    assert_eq!(stats.bypasses, 1);
 }
 
 #[test]
@@ -4900,6 +4904,8 @@ fn plan_cache_misses_after_index_descriptor_changes() {
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.disabled_misses, 0);
+    assert_eq!(stats.bypasses, 1);
 }
 
 #[test]
@@ -4937,6 +4943,8 @@ fn plan_cache_evicts_least_frequently_used_plan() {
     assert_eq!(stats.entries, 2);
     assert_eq!(stats.hits, 2);
     assert_eq!(stats.misses, 4);
+    assert_eq!(stats.disabled_misses, 0);
+    assert_eq!(stats.bypasses, 0);
     assert_eq!(stats.evictions, 2);
 }
 
@@ -4972,6 +4980,33 @@ fn plan_cache_can_be_disabled_with_zero_capacity() {
     assert_eq!(stats.entries, 0);
     assert_eq!(stats.hits, 0);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.disabled_misses, 2);
+    assert_eq!(stats.bypasses, 0);
+    assert_eq!(stats.evictions, 0);
+}
+
+#[test]
+fn plan_cache_records_bypassed_mutation_explain_separately() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+
+    let output = db
+        .explain_query("CREATE (:Memory {id: 1, title: 'Bypassed'})")
+        .unwrap();
+
+    assert!(output
+        .trace
+        .decisions
+        .iter()
+        .any(|decision| decision == "plan cache bypass: statement_not_cacheable"));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 0);
+    assert_eq!(stats.hits, 0);
+    assert_eq!(stats.misses, 0);
+    assert_eq!(stats.disabled_misses, 0);
+    assert_eq!(stats.bypasses, 1);
     assert_eq!(stats.evictions, 0);
 }
 

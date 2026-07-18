@@ -6,6 +6,8 @@ pub struct PlanCacheStats {
     pub entries: usize,
     pub hits: u64,
     pub misses: u64,
+    pub disabled_misses: u64,
+    pub bypasses: u64,
     pub evictions: u64,
 }
 
@@ -23,6 +25,8 @@ pub struct LfuCache<K, V> {
     access_tick: u64,
     hits: u64,
     misses: u64,
+    disabled_misses: u64,
+    bypasses: u64,
     evictions: u64,
 }
 
@@ -38,6 +42,8 @@ where
             access_tick: 0,
             hits: 0,
             misses: 0,
+            disabled_misses: 0,
+            bypasses: 0,
             evictions: 0,
         }
     }
@@ -45,6 +51,7 @@ where
     pub fn get(&mut self, key: &K) -> Option<V> {
         if self.max_entries == Some(0) {
             self.misses += 1;
+            self.disabled_misses += 1;
             return None;
         }
         self.access_tick = self.access_tick.saturating_add(1);
@@ -56,6 +63,10 @@ where
         entry.frequency = entry.frequency.saturating_add(1);
         entry.last_access_tick = self.access_tick;
         Some(entry.value.clone())
+    }
+
+    pub fn record_bypass(&mut self) {
+        self.bypasses = self.bypasses.saturating_add(1);
     }
 
     pub fn insert(&mut self, key: K, value: V) {
@@ -114,6 +125,8 @@ where
             entries: self.entries.len(),
             hits: self.hits,
             misses: self.misses,
+            disabled_misses: self.disabled_misses,
+            bypasses: self.bypasses,
             evictions: self.evictions,
         }
     }
@@ -158,5 +171,17 @@ mod tests {
         assert_eq!(cache.get(&"ignored"), None);
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().misses, 1);
+        assert_eq!(cache.stats().disabled_misses, 1);
+    }
+
+    #[test]
+    fn cache_records_bypassed_plans_separately_from_misses() {
+        let mut cache: LfuCache<&str, i32> = LfuCache::new(Some(2));
+
+        cache.record_bypass();
+
+        assert_eq!(cache.stats().bypasses, 1);
+        assert_eq!(cache.stats().misses, 0);
+        assert_eq!(cache.stats().hits, 0);
     }
 }
