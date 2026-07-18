@@ -169,6 +169,17 @@ pub enum SearchEmptyReasonCode {
     LimitExcludedAllHits,
 }
 
+impl SearchEmptyReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ProjectionEmpty => "projection_empty",
+            Self::MetadataFilterEmpty => "metadata_filter_empty",
+            Self::RetrieverNoHits => "retriever_no_hits",
+            Self::LimitExcludedAllHits => "limit_excluded_all_hits",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchCandidateSetReport {
     pub id_space: String,
@@ -3754,6 +3765,7 @@ mod tests {
             result.empty_reason_codes,
             vec![SearchEmptyReasonCode::ProjectionEmpty]
         );
+        assert_eq!(result.empty_reason_codes[0].as_str(), "projection_empty");
         assert_eq!(
             result.empty_reasons,
             vec!["search projection has no documents".to_string()]

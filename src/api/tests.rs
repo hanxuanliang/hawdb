@@ -2994,6 +2994,12 @@ fn knowledge_retrieval_applies_candidate_limit_after_merge() {
     assert!(empty_by_limit
         .diagnostics
         .empty_reason_codes
+        .iter()
+        .map(|code| code.as_str())
+        .any(|code| code == "candidate_limit_excluded_all_candidates"));
+    assert!(empty_by_limit
+        .diagnostics
+        .empty_reason_codes
         .contains(&KnowledgeRetrievalEmptyReasonCode::NoCandidates));
     assert!(!empty_by_limit
         .diagnostics

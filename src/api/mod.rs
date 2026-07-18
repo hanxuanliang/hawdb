@@ -539,6 +539,21 @@ pub enum KnowledgeRetrievalEmptyReasonCode {
     NoCandidates,
 }
 
+impl KnowledgeRetrievalEmptyReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SearchProjectionEmpty => "search_projection_empty",
+            Self::SearchMetadataFilterEmpty => "search_metadata_filter_empty",
+            Self::SearchRetrieverNoHits => "search_retriever_no_hits",
+            Self::SearchLimitExcludedAllHits => "search_limit_excluded_all_hits",
+            Self::GraphSeedLimitZero => "graph_seed_limit_zero",
+            Self::GraphSeedNoCandidates => "graph_seed_no_candidates",
+            Self::CandidateLimitExcludedAllCandidates => "candidate_limit_excluded_all_candidates",
+            Self::NoCandidates => "no_candidates",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeRetrieverReport {
     pub name: String,
