@@ -366,6 +366,27 @@ Any operation can return an error:
 Unknown classes are treated as `execution`. The message is included in the
 Skein-side error with the shadow engine name.
 
+## Adapter Smoke Command
+
+Before running the full Nowledge migration gate, a wrapper can be checked with:
+
+```text
+skein external-shadow-adapter-smoke [--require-previous-wrapper] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <shadow-name> <program> [args...]
+```
+
+The smoke command sends `ready`, then runs a minimal fixture that exercises
+`execute_session` and `project_graph`. It prints a
+`skein-external-shadow-adapter-smoke` JSON report with the accepted ready
+metadata, matched check counts, primary-only projection reasons, request count,
+and optional shadow trace summary.
+
+Use `--require-previous-wrapper` when validating the real previous database
+wrapper. This rejects protocol-only self-shadow adapters whose `ready`
+`engine_kind` is not `previous_wrapper`. A primary-only `project_graph` response
+is allowed in this smoke command so early wrapper integration can prove request
+routing before projection metadata parity exists. The production cutover gate
+below still treats primary-only projected graph checks as blockers.
+
 ## Gate Command
 
 The current migration-gate entry point is:

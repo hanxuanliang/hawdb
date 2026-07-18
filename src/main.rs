@@ -6,12 +6,15 @@ use skein::{
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
     scan_nowledge_query_inventory_to_json, storage_recovery_evidence_health_from_bundle,
-    CanonicalGraphSnapshotValidation, CanonicalSnapshotIdentityAudit,
-    CompatibilityRollbackEvidence, Database, DatabaseConfig, ExternalShadowCommand,
-    ExternalShadowReady, GraphLightningBootstrapManifest, NowledgeCypherMigrationGateJsonOptions,
-    RecoveryMode, Result, SkeinError, StorageRecoveryReport, Value,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    CanonicalGraphSnapshotValidation, CanonicalSnapshotIdentityAudit, CompatibilityCheck,
+    CompatibilityRollbackEvidence, CompatibilityShadowReport, CompatibilityShadowStatus,
+    CypherFixtureCheck, CypherFixtureStatement, Database, DatabaseConfig, ExpectedRows,
+    ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
+    NowledgeCypherMigrationGateJsonOptions, ProjectedGraphFixtureCheck, RecoveryMode, Result,
+    SkeinError, StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
+use skein::{run_compatibility_fixture_with_shadow, CompatibilityFixture};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
@@ -75,6 +78,82 @@ fn main() -> Result<()> {
             let rendered =
                 explain_output_json(&query, &parameters, &explain, &db.plan_cache_stats());
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            return Ok(());
+        }
+        if command == "external-shadow-adapter-smoke" {
+            let mut require_previous_wrapper = false;
+            let mut shadow_trace = None;
+            let mut shadow_timeout = None;
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--require-previous-wrapper" => {
+                        require_previous_wrapper = true;
+                        args.next();
+                    }
+                    "--shadow-trace" => {
+                        args.next();
+                        shadow_trace = Some(args.next().ok_or_else(|| {
+                            SkeinError::Semantic(external_shadow_adapter_smoke_usage())
+                        })?);
+                    }
+                    "--shadow-timeout-ms" => {
+                        args.next();
+                        let raw_timeout = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(external_shadow_adapter_smoke_usage())
+                        })?;
+                        shadow_timeout = Some(parse_shadow_timeout_ms(&raw_timeout)?);
+                    }
+                    _ => break,
+                }
+            }
+            let shadow_name = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(external_shadow_adapter_smoke_usage()))?;
+            let program = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(external_shadow_adapter_smoke_usage()))?;
+            let program_args = args.collect::<Vec<_>>();
+            let shadow_trace_report = shadow_trace.clone();
+            let mut shadow = match (shadow_trace, shadow_timeout) {
+                (Some(trace_path), Some(timeout)) => {
+                    ExternalShadowCommand::spawn_with_trace_path_and_request_timeout(
+                        shadow_name,
+                        program,
+                        program_args,
+                        trace_path,
+                        timeout,
+                    )?
+                }
+                (Some(trace_path), None) => ExternalShadowCommand::spawn_with_trace_path(
+                    shadow_name,
+                    program,
+                    program_args,
+                    trace_path,
+                )?,
+                (None, Some(timeout)) => ExternalShadowCommand::spawn_with_request_timeout(
+                    shadow_name,
+                    program,
+                    program_args,
+                    timeout,
+                )?,
+                (None, None) => ExternalShadowCommand::spawn(shadow_name, program, program_args)?,
+            };
+            let ready = shadow.require_ready()?;
+            let mut db = Database::new();
+            let fixture = external_shadow_adapter_smoke_fixture();
+            let report = run_compatibility_fixture_with_shadow(&mut db, &fixture, &mut shadow)?;
+            let json = external_shadow_adapter_smoke_report_json(
+                &ready,
+                &report,
+                shadow.request_count(),
+                shadow_trace_report.as_deref(),
+            );
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            enforce_external_shadow_adapter_smoke_requirements(
+                &ready,
+                &report,
+                require_previous_wrapper,
+            )?;
             return Ok(());
         }
         if command == "nowledge-cypher-migration-gate" {
@@ -659,6 +738,11 @@ fn nowledge_cypher_migration_gate_usage() -> String {
         .to_string()
 }
 
+fn external_shadow_adapter_smoke_usage() -> String {
+    "external-shadow-adapter-smoke requires [--require-previous-wrapper] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <shadow-name> <program> [args...]"
+        .to_string()
+}
+
 fn explain_json_usage() -> String {
     "explain-json requires [--params-json <json-object>] <database-path> <cypher>".to_string()
 }
@@ -998,6 +1082,144 @@ fn add_shadow_trace_report(
         "shadow_trace".to_string(),
         external_shadow_trace_report_json(trace_path, request_count),
     );
+    Ok(())
+}
+
+fn external_shadow_adapter_smoke_fixture() -> CompatibilityFixture {
+    CompatibilityFixture {
+        name: "external-shadow-adapter-smoke".to_string(),
+        setup: vec![CypherFixtureStatement::new(
+            "CREATE (:Memory {id: 1, stable_id: 'smoke-memory', title: 'Adapter Smoke'})",
+        )],
+        checks: vec![
+            CompatibilityCheck::Cypher(
+                CypherFixtureCheck::expect_rows(
+                    "session query returns seeded memory",
+                    CypherFixtureStatement::with_parameters(
+                        "MATCH (m:Memory) WHERE m.stable_id = $stable_id RETURN m.title AS title",
+                        BTreeMap::from([(
+                            "stable_id".to_string(),
+                            Value::String("smoke-memory".to_string()),
+                        )]),
+                    ),
+                    ExpectedRows::Exact(vec![BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String("Adapter Smoke".to_string()),
+                    )])]),
+                )
+                .with_session_execution(),
+            ),
+            CompatibilityCheck::ProjectedGraph(ProjectedGraphFixtureCheck {
+                name: "single memory projection".to_string(),
+                rel_type: None,
+                expected_node_count: 1,
+                expected_edge_count: 0,
+                expected_incoming: Vec::new(),
+                expected_communities: Vec::new(),
+                expected_hierarchical_communities: Vec::new(),
+                expected_page_rank_scores: Vec::new(),
+                page_rank_top_node: None,
+                tolerance: Default::default(),
+            }),
+        ],
+    }
+}
+
+fn external_shadow_adapter_smoke_report_json(
+    ready: &ExternalShadowReady,
+    report: &CompatibilityShadowReport,
+    request_count: u64,
+    trace_path: Option<&str>,
+) -> serde_json::Value {
+    let missing_capabilities = external_shadow_ready_missing_capabilities(Some(ready));
+    let matched_checks = report
+        .shadow_checks
+        .iter()
+        .filter(|check| check.status == CompatibilityShadowStatus::Matched)
+        .count();
+    let primary_only_checks = report
+        .shadow_checks
+        .iter()
+        .filter(|check| check.status == CompatibilityShadowStatus::PrimaryOnly)
+        .count();
+    let primary_only_reasons = report
+        .shadow_checks
+        .iter()
+        .filter_map(|check| {
+            check
+                .primary_only_reason
+                .as_ref()
+                .map(|reason| (check.name.clone(), reason.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut json = serde_json::json!({
+        "protocol": "skein-external-shadow-adapter-smoke",
+        "ready": {
+            "protocol_version": ready.protocol_version,
+            "engine_kind": ready.engine_kind,
+            "capabilities": ready.capabilities,
+            "missing_capabilities": missing_capabilities,
+        },
+        "fixture": report.fixture,
+        "shadow_engine": report.shadow_engine,
+        "total_checks": report.shadow_checks.len(),
+        "matched_checks": matched_checks,
+        "primary_only_checks": primary_only_checks,
+        "primary_only_reasons": primary_only_reasons,
+        "request_count": request_count,
+        "operation_expectations": {
+            "ready": true,
+            "execute_session": true,
+            "project_graph": true,
+        },
+        "adapter_smoke_ready": missing_capabilities.is_empty() && matched_checks > 0,
+    });
+    if let Some(trace_path) = trace_path {
+        if let Some(object) = json.as_object_mut() {
+            object.insert(
+                "shadow_trace".to_string(),
+                external_shadow_trace_report_json(trace_path, request_count),
+            );
+        }
+    }
+    json
+}
+
+fn enforce_external_shadow_adapter_smoke_requirements(
+    ready: &ExternalShadowReady,
+    report: &CompatibilityShadowReport,
+    require_previous_wrapper: bool,
+) -> Result<()> {
+    let missing_capabilities = external_shadow_ready_missing_capabilities(Some(ready));
+    if !missing_capabilities.is_empty() {
+        return Err(SkeinError::Execution(format!(
+            "external shadow adapter smoke missing required capabilities: {}",
+            missing_capabilities.join(", ")
+        )));
+    }
+    if require_previous_wrapper && ready.engine_kind.as_deref() != Some("previous_wrapper") {
+        return Err(SkeinError::Execution(
+            "external shadow adapter smoke requires engine_kind 'previous_wrapper'".to_string(),
+        ));
+    }
+    if !report
+        .shadow_checks
+        .iter()
+        .any(|check| check.status == CompatibilityShadowStatus::Matched)
+    {
+        return Err(SkeinError::Execution(
+            "external shadow adapter smoke did not match any shadow checks".to_string(),
+        ));
+    }
+    if !report
+        .shadow_checks
+        .iter()
+        .any(|check| check.name == "single memory projection")
+    {
+        return Err(SkeinError::Execution(
+            "external shadow adapter smoke did not exercise project_graph".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -3326,8 +3548,9 @@ mod tests {
     use super::{
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
         add_shadow_trace_report, canonical_snapshot_validation_json, cutover_evidence_is_eligible,
-        enforce_storage_recovery_requirements, explain_json_usage, explain_output_json,
-        graph_lightning_bootstrap_bundle_json,
+        enforce_external_shadow_adapter_smoke_requirements, enforce_storage_recovery_requirements,
+        explain_json_usage, explain_output_json, external_shadow_adapter_smoke_fixture,
+        external_shadow_adapter_smoke_report_json, graph_lightning_bootstrap_bundle_json,
         graph_lightning_bootstrap_bundle_json_with_storage_recovery,
         graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
         graph_lightning_bootstrap_manifest_usage, graph_lightning_gc_staging_report,
@@ -3350,9 +3573,11 @@ mod tests {
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
-        CanonicalSnapshotIdentityAudit, Database, ExternalShadowReady,
-        GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, PlanCacheStats,
-        RecoveryMode, StorageRecoveryReport, Value,
+        CanonicalSnapshotIdentityAudit, CompatibilityCheck, CompatibilityCheckReport,
+        CompatibilityShadowCheckReport, CompatibilityShadowReport, CompatibilityShadowStatus,
+        Database, ExternalShadowReady, GraphLightningBootstrapManifest,
+        GraphLightningGraphStreamValidation, PlanCacheStats, RecoveryMode, StorageRecoveryReport,
+        Value,
     };
     use std::collections::BTreeMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -3505,6 +3730,95 @@ mod tests {
         assert_eq!(bundle["shadow_run"]["shadow_name"], "skein-shadow-self");
         assert_eq!(bundle["shadow_run"]["self_shadow"], true);
         assert_eq!(bundle["shadow_run"]["evidence_kind"], "protocol_smoke");
+    }
+
+    #[test]
+    fn adapter_smoke_fixture_exercises_session_and_project_graph() {
+        let fixture = external_shadow_adapter_smoke_fixture();
+
+        assert_eq!(fixture.name, "external-shadow-adapter-smoke");
+        assert_eq!(fixture.setup.len(), 1);
+        assert!(fixture.checks.iter().any(|check| matches!(
+            check,
+            CompatibilityCheck::Cypher(cypher)
+                if cypher.name == "session query returns seeded memory"
+                    && cypher.execution_mode == skein::compat::CypherExecutionMode::Session
+        )));
+        assert!(fixture.checks.iter().any(|check| matches!(
+            check,
+            CompatibilityCheck::ProjectedGraph(projected)
+                if projected.name == "single memory projection"
+                    && projected.expected_node_count == 1
+                    && projected.expected_edge_count == 0
+        )));
+    }
+
+    #[test]
+    fn adapter_smoke_requires_previous_wrapper_when_requested() {
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("protocol_smoke".to_string()),
+        };
+        let report = adapter_smoke_report(vec![
+            adapter_smoke_shadow_check(
+                "session query returns seeded memory",
+                CompatibilityShadowStatus::Matched,
+                None,
+            ),
+            adapter_smoke_shadow_check(
+                "single memory projection",
+                CompatibilityShadowStatus::PrimaryOnly,
+                Some("projection metadata is not exposed"),
+            ),
+        ]);
+
+        let error =
+            enforce_external_shadow_adapter_smoke_requirements(&ready, &report, true).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("requires engine_kind 'previous_wrapper'"));
+    }
+
+    #[test]
+    fn adapter_smoke_report_allows_primary_only_projection() {
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("previous_wrapper".to_string()),
+        };
+        let report = adapter_smoke_report(vec![
+            adapter_smoke_shadow_check(
+                "session query returns seeded memory",
+                CompatibilityShadowStatus::Matched,
+                None,
+            ),
+            adapter_smoke_shadow_check(
+                "single memory projection",
+                CompatibilityShadowStatus::PrimaryOnly,
+                Some("projection metadata is not exposed"),
+            ),
+        ]);
+
+        enforce_external_shadow_adapter_smoke_requirements(&ready, &report, true).unwrap();
+        let json = external_shadow_adapter_smoke_report_json(&ready, &report, 3, None);
+
+        assert_eq!(json["adapter_smoke_ready"], true);
+        assert_eq!(json["matched_checks"], 1);
+        assert_eq!(json["primary_only_checks"], 1);
+        assert_eq!(
+            json["primary_only_reasons"]["single memory projection"],
+            "projection metadata is not exposed"
+        );
     }
 
     #[test]
@@ -6060,5 +6374,30 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("skein-{name}-{nanos}"))
+    }
+
+    fn adapter_smoke_report(
+        shadow_checks: Vec<CompatibilityShadowCheckReport>,
+    ) -> CompatibilityShadowReport {
+        CompatibilityShadowReport {
+            fixture: "external-shadow-adapter-smoke".to_string(),
+            shadow_engine: "legacy-wrapper".to_string(),
+            primary_checks: vec![CompatibilityCheckReport {
+                name: "session query returns seeded memory".to_string(),
+            }],
+            shadow_checks,
+        }
+    }
+
+    fn adapter_smoke_shadow_check(
+        name: &str,
+        status: CompatibilityShadowStatus,
+        primary_only_reason: Option<&str>,
+    ) -> CompatibilityShadowCheckReport {
+        CompatibilityShadowCheckReport {
+            name: name.to_string(),
+            status,
+            primary_only_reason: primary_only_reason.map(str::to_string),
+        }
     }
 }
