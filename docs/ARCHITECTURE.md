@@ -716,8 +716,8 @@ Required test suites:
 - logical plan snapshot tests
 - optimizer rule and plan-shape tests
 - deterministic optimizer trace tests
-- read-only `explain-json` CLI smoke tests for structured selected-plan
-  operator/class summaries
+- read-only parameterized `explain-json` CLI smoke tests for structured
+  selected-plan operator/class summaries
 - transaction commit/rollback tests
 - WAL recovery and checkpoint tests
 - internal Nowledge-shaped compatibility fixtures against the Skein facade

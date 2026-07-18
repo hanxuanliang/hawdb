@@ -38,6 +38,19 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if command == "explain-json" {
+            let mut parameters = BTreeMap::new();
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--params-json" => {
+                        args.next();
+                        let raw_parameters = args
+                            .next()
+                            .ok_or_else(|| SkeinError::Semantic(explain_json_usage()))?;
+                        parameters = parse_parameters_json(&raw_parameters)?;
+                    }
+                    _ => break,
+                }
+            }
             let path = args
                 .next()
                 .ok_or_else(|| SkeinError::Semantic(explain_json_usage()))?;
@@ -54,8 +67,8 @@ fn main() -> Result<()> {
                     ..DatabaseConfig::default()
                 },
             )?;
-            let explain = db.explain_query(&query)?;
-            let rendered = explain_output_json(&query, &explain);
+            let explain = db.explain_query_with_params(&query, &parameters)?;
+            let rendered = explain_output_json(&query, &parameters, &explain);
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
             return Ok(());
         }
@@ -615,7 +628,7 @@ fn nowledge_cypher_migration_gate_usage() -> String {
 }
 
 fn explain_json_usage() -> String {
-    "explain-json requires <database-path> <cypher>".to_string()
+    "explain-json requires [--params-json <json-object>] <database-path> <cypher>".to_string()
 }
 
 fn validate_canonical_snapshot_usage() -> String {
@@ -3062,11 +3075,21 @@ fn stable_identity_audit_json(audit: &CanonicalSnapshotIdentityAudit) -> serde_j
     })
 }
 
-fn explain_output_json(query: &str, output: &skein::api::ExplainOutput) -> serde_json::Value {
+fn explain_output_json(
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
+    output: &skein::api::ExplainOutput,
+) -> serde_json::Value {
     serde_json::json!({
         "protocol": "skein-explain",
         "protocol_version": 1,
         "query": query,
+        "parameters": serde_json::Value::Object(
+            parameters
+                .iter()
+                .map(|(key, value)| (key.clone(), value_json(value)))
+                .collect()
+        ),
         "groups": output.trace.groups,
         "selected_plan": output.trace.selected_plan,
         "selected_plan_fingerprint": output.trace.selected_plan_fingerprint,
@@ -3079,6 +3102,18 @@ fn explain_output_json(query: &str, output: &skein::api::ExplainOutput) -> serde
         "warnings": output.trace.warnings,
         "decisions": output.trace.decisions,
     })
+}
+
+fn parse_parameters_json(raw_parameters: &str) -> Result<BTreeMap<String, Value>> {
+    let value = serde_json::from_str::<serde_json::Value>(raw_parameters)
+        .map_err(|error| SkeinError::Semantic(format!("invalid --params-json object: {error}")))?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| SkeinError::Semantic("--params-json must be a JSON object".to_string()))?;
+    object
+        .iter()
+        .map(|(key, value)| Ok((key.clone(), value_from_json(value)?)))
+        .collect()
 }
 
 fn endpoint_violations_json(
@@ -3116,12 +3151,41 @@ fn value_json(value: &Value) -> serde_json::Value {
     }
 }
 
+fn value_from_json(value: &serde_json::Value) -> Result<Value> {
+    match value {
+        serde_json::Value::Null => Ok(Value::Null),
+        serde_json::Value::Bool(value) => Ok(Value::Bool(*value)),
+        serde_json::Value::Number(value) => {
+            if let Some(value) = value.as_i64() {
+                Ok(Value::Int(value))
+            } else if let Some(value) = value.as_f64() {
+                Ok(Value::Float(value))
+            } else {
+                Err(SkeinError::Semantic(format!(
+                    "unsupported JSON number in --params-json: {value}"
+                )))
+            }
+        }
+        serde_json::Value::String(value) => Ok(Value::String(value.clone())),
+        serde_json::Value::Array(values) => values
+            .iter()
+            .map(value_from_json)
+            .collect::<Result<Vec<_>>>()
+            .map(Value::List),
+        serde_json::Value::Object(values) => values
+            .iter()
+            .map(|(key, value)| Ok((key.clone(), value_from_json(value)?)))
+            .collect::<Result<BTreeMap<_, _>>>()
+            .map(Value::Map),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
         add_shadow_trace_report, canonical_snapshot_validation_json, cutover_evidence_is_eligible,
-        enforce_storage_recovery_requirements, explain_output_json,
+        enforce_storage_recovery_requirements, explain_json_usage, explain_output_json,
         graph_lightning_bootstrap_bundle_json,
         graph_lightning_bootstrap_bundle_json_with_storage_recovery,
         graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
@@ -3130,8 +3194,8 @@ mod tests {
         graph_lightning_import_status, graph_lightning_publish_staging_usage,
         graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
         graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
-        is_self_shadow_command, parse_max_wal_replay_entries, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog,
+        is_self_shadow_command, parse_max_wal_replay_entries, parse_parameters_json,
+        parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
@@ -3562,10 +3626,12 @@ mod tests {
             },
         };
 
-        let json = explain_output_json("MATCH (m:Memory) RETURN m", &output);
+        let parameters = BTreeMap::from([("id".to_string(), Value::Int(42))]);
+        let json = explain_output_json("MATCH (m:Memory {id: $id}) RETURN m", &parameters, &output);
 
         assert_eq!(json["protocol"], "skein-explain");
         assert_eq!(json["protocol_version"], 1);
+        assert_eq!(json["parameters"]["id"], 42);
         assert_eq!(
             json["selected_plan_fingerprint"],
             "SeqNodeScan(1:m:6:Memory)"
@@ -3575,6 +3641,39 @@ mod tests {
         assert_eq!(json["selected_plan_class_counts"]["access"], 1);
         assert_eq!(json["warnings"][0], "diagnostic warning");
         assert_eq!(json["decisions"][0], "diagnostic decision");
+    }
+
+    #[test]
+    fn parses_explain_json_parameters_as_skein_values() {
+        let parameters = parse_parameters_json(
+            r#"{"id":42,"needle":"graph","tags":["a","b"],"meta":{"ok":true}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(parameters.get("id"), Some(&Value::Int(42)));
+        assert_eq!(
+            parameters.get("needle"),
+            Some(&Value::String("graph".to_string()))
+        );
+        assert_eq!(
+            parameters.get("tags"),
+            Some(&Value::List(vec![
+                Value::String("a".to_string()),
+                Value::String("b".to_string())
+            ]))
+        );
+        assert_eq!(
+            parameters.get("meta"),
+            Some(&Value::Map(BTreeMap::from([(
+                "ok".to_string(),
+                Value::Bool(true)
+            )])))
+        );
+
+        let error = parse_parameters_json(r#"["not", "an", "object"]"#).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--params-json must be a JSON object"));
     }
 
     #[test]
@@ -5354,6 +5453,13 @@ mod tests {
     fn validates_canonical_snapshot_usage_text() {
         assert!(validate_canonical_snapshot_usage().contains("<database-path>"));
         assert!(validate_canonical_snapshot_usage().contains("--require-import-ready"));
+    }
+
+    #[test]
+    fn validates_explain_json_usage_text() {
+        assert!(explain_json_usage().contains("<database-path>"));
+        assert!(explain_json_usage().contains("<cypher>"));
+        assert!(explain_json_usage().contains("--params-json"));
     }
 
     #[test]
