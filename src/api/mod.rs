@@ -1434,6 +1434,57 @@ pub struct KnowledgeEntityCreateBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityUpsertRequest {
+    pub label: String,
+    pub external_id: String,
+    pub create_properties: BTreeMap<String, Value>,
+    pub update_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityUpsertOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub updated: bool,
+    pub already_exists: bool,
+    pub non_writable: bool,
+    pub created_node_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityUpsertBatchRequest {
+    pub upserts: Vec<KnowledgeEntityUpsertRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityUpsertBatchRow {
+    pub label: String,
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub updated: bool,
+    pub already_exists: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityUpsertBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeEntityUpsertBatchRow>,
+    pub created_count: usize,
+    pub updated_count: usize,
+    pub already_exists_count: usize,
+    pub non_writable_count: usize,
+    pub created_node_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePropertyBatchRequest {
     pub entities: Vec<KnowledgeEntityRequest>,
     pub property_names: Vec<String>,
@@ -3087,6 +3138,20 @@ impl Database {
         request: &KnowledgeEntityCreateBatchRequest,
     ) -> Result<KnowledgeEntityCreateBatchOutput> {
         create_knowledge_entity_batch_for(self, request)
+    }
+
+    pub fn upsert_knowledge_entity(
+        &mut self,
+        request: &KnowledgeEntityUpsertRequest,
+    ) -> Result<KnowledgeEntityUpsertOutput> {
+        upsert_knowledge_entity_for(self, request)
+    }
+
+    pub fn upsert_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeEntityUpsertBatchRequest,
+    ) -> Result<KnowledgeEntityUpsertBatchOutput> {
+        upsert_knowledge_entity_batch_for(self, request)
     }
 
     pub fn knowledge_property_batch(
@@ -4805,6 +4870,302 @@ fn knowledge_entity_create_statement(
     }
     cypher.push_str("})");
     (cypher, parameters)
+}
+
+fn upsert_knowledge_entity_for(
+    db: &mut Database,
+    request: &KnowledgeEntityUpsertRequest,
+) -> Result<KnowledgeEntityUpsertOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_entity_upsert(request)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let update_properties = knowledge_entity_upsert_update_properties(request);
+    if let Some(existing) = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.label.as_str(),
+        request.external_id.as_str(),
+    ) {
+        let node_id = existing.id.0;
+        if !node_has_external_id_property(existing, request.external_id.as_str()) {
+            return Ok(KnowledgeEntityUpsertOutput {
+                graph_commit_epoch_before,
+                graph_commit_epoch_after: graph_commit_epoch_before,
+                node_id: Some(node_id),
+                created: false,
+                updated: false,
+                already_exists: true,
+                non_writable: true,
+                created_node_count: 0,
+                updated_property_count: 0,
+            });
+        }
+        if update_properties.is_empty() {
+            return Ok(KnowledgeEntityUpsertOutput {
+                graph_commit_epoch_before,
+                graph_commit_epoch_after: graph_commit_epoch_before,
+                node_id: Some(node_id),
+                created: false,
+                updated: false,
+                already_exists: true,
+                non_writable: false,
+                created_node_count: 0,
+                updated_property_count: 0,
+            });
+        }
+        let (cypher, parameters) = knowledge_property_update_statement(
+            request.label.as_str(),
+            node_id,
+            &update_properties,
+        );
+        db.query_with_params(cypher.as_str(), &parameters)?;
+        return Ok(KnowledgeEntityUpsertOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: db.store.commit_epoch(),
+            node_id: Some(node_id),
+            created: false,
+            updated: true,
+            already_exists: true,
+            non_writable: false,
+            created_node_count: 0,
+            updated_property_count: update_properties.len(),
+        });
+    }
+
+    let create = knowledge_entity_upsert_create_request(request);
+    let (cypher, parameters) = knowledge_entity_create_statement(&create);
+    let output = db.query_with_params(cypher.as_str(), &parameters)?;
+    let node_id = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.label.as_str(),
+        request.external_id.as_str(),
+    )
+    .map(|node| node.id.0);
+    Ok(KnowledgeEntityUpsertOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        node_id,
+        created: true,
+        updated: false,
+        already_exists: false,
+        non_writable: false,
+        created_node_count: output.rows.len(),
+        updated_property_count: 0,
+    })
+}
+
+fn upsert_knowledge_entity_batch_for(
+    db: &mut Database,
+    request: &KnowledgeEntityUpsertBatchRequest,
+) -> Result<KnowledgeEntityUpsertBatchOutput> {
+    db.ensure_writable()?;
+    for upsert in &request.upserts {
+        validate_knowledge_entity_upsert(upsert)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.upserts.len());
+    let mut created_count = 0;
+    let mut updated_count = 0;
+    let mut already_exists_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_property_count = 0;
+    let mut eligible_creates = Vec::new();
+    let mut eligible_updates = Vec::new();
+    let mut pending_identities = BTreeSet::new();
+
+    for upsert in &request.upserts {
+        if let Some(existing) = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            upsert.label.as_str(),
+            upsert.external_id.as_str(),
+        ) {
+            let node_id = existing.id.0;
+            already_exists_count += 1;
+            if !node_has_external_id_property(existing, upsert.external_id.as_str()) {
+                non_writable_count += 1;
+                rows.push(KnowledgeEntityUpsertBatchRow {
+                    label: upsert.label.clone(),
+                    external_id: upsert.external_id.clone(),
+                    node_id: Some(node_id),
+                    created: false,
+                    updated: false,
+                    already_exists: true,
+                    non_writable: true,
+                    updated_property_count: 0,
+                });
+                continue;
+            }
+            let update_properties = knowledge_entity_upsert_update_properties(upsert);
+            if update_properties.is_empty() {
+                rows.push(KnowledgeEntityUpsertBatchRow {
+                    label: upsert.label.clone(),
+                    external_id: upsert.external_id.clone(),
+                    node_id: Some(node_id),
+                    created: false,
+                    updated: false,
+                    already_exists: true,
+                    non_writable: false,
+                    updated_property_count: 0,
+                });
+                continue;
+            }
+            let row_updated_property_count = update_properties.len();
+            updated_count += 1;
+            updated_property_count += row_updated_property_count;
+            eligible_updates.push((upsert.label.clone(), node_id, update_properties));
+            rows.push(KnowledgeEntityUpsertBatchRow {
+                label: upsert.label.clone(),
+                external_id: upsert.external_id.clone(),
+                node_id: Some(node_id),
+                created: false,
+                updated: true,
+                already_exists: true,
+                non_writable: false,
+                updated_property_count: row_updated_property_count,
+            });
+            continue;
+        }
+
+        let identity = (upsert.label.clone(), upsert.external_id.clone());
+        if !pending_identities.insert(identity) {
+            already_exists_count += 1;
+            rows.push(KnowledgeEntityUpsertBatchRow {
+                label: upsert.label.clone(),
+                external_id: upsert.external_id.clone(),
+                node_id: None,
+                created: false,
+                updated: false,
+                already_exists: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        created_count += 1;
+        eligible_creates.push(knowledge_entity_upsert_create_request(upsert));
+        rows.push(KnowledgeEntityUpsertBatchRow {
+            label: upsert.label.clone(),
+            external_id: upsert.external_id.clone(),
+            node_id: None,
+            created: true,
+            updated: false,
+            already_exists: false,
+            non_writable: false,
+            updated_property_count: 0,
+        });
+    }
+
+    if eligible_creates.is_empty() && eligible_updates.is_empty() {
+        return Ok(KnowledgeEntityUpsertBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            created_count,
+            updated_count,
+            already_exists_count,
+            non_writable_count,
+            created_node_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for create in &eligible_creates {
+        let (cypher, parameters) = knowledge_entity_create_statement(create);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    for (label, node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement(label.as_str(), *node_id, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+    for row in &mut rows {
+        if row.created {
+            row.node_id = seed_node_by_label_and_external_id(
+                &db.catalog,
+                &db.store,
+                row.label.as_str(),
+                row.external_id.as_str(),
+            )
+            .map(|node| node.id.0);
+        }
+    }
+    Ok(KnowledgeEntityUpsertBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        created_count,
+        updated_count,
+        already_exists_count,
+        non_writable_count,
+        created_node_count: eligible_creates.len(),
+        updated_property_count,
+    })
+}
+
+fn validate_knowledge_entity_upsert(request: &KnowledgeEntityUpsertRequest) -> Result<()> {
+    validate_cypher_identifier(&request.label, "label")?;
+    if request.external_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity upsert requires a non-empty external id".to_string(),
+        ));
+    }
+    validate_knowledge_entity_upsert_properties(
+        request.external_id.as_str(),
+        "create",
+        &request.create_properties,
+    )?;
+    validate_knowledge_entity_upsert_properties(
+        request.external_id.as_str(),
+        "update",
+        &request.update_properties,
+    )
+}
+
+fn validate_knowledge_entity_upsert_properties(
+    external_id: &str,
+    phase: &str,
+    properties: &BTreeMap<String, Value>,
+) -> Result<()> {
+    for property in properties.keys() {
+        validate_cypher_identifier(property, "property")?;
+    }
+    if let Some(id) = properties.get("id") {
+        let property_external_id = value_to_external_id(id);
+        if property_external_id != external_id {
+            return Err(SkeinError::Semantic(format!(
+                "knowledge entity upsert {phase} id property {property_external_id:?} does not match external id {external_id:?}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn knowledge_entity_upsert_create_request(
+    request: &KnowledgeEntityUpsertRequest,
+) -> KnowledgeEntityCreateRequest {
+    KnowledgeEntityCreateRequest {
+        label: request.label.clone(),
+        external_id: request.external_id.clone(),
+        properties: request.create_properties.clone(),
+    }
+}
+
+fn knowledge_entity_upsert_update_properties(
+    request: &KnowledgeEntityUpsertRequest,
+) -> BTreeMap<String, Value> {
+    request
+        .update_properties
+        .iter()
+        .filter(|(property, _)| property.as_str() != "id")
+        .map(|(property, value)| (property.clone(), value.clone()))
+        .collect()
 }
 
 fn knowledge_property_batch_for(
@@ -8982,6 +9343,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeEntityCreateBatchRequest,
     ) -> Result<KnowledgeEntityCreateBatchOutput> {
         self.db.create_knowledge_entity_batch(request)
+    }
+
+    pub fn upsert_knowledge_entity(
+        &mut self,
+        request: &KnowledgeEntityUpsertRequest,
+    ) -> Result<KnowledgeEntityUpsertOutput> {
+        self.db.upsert_knowledge_entity(request)
+    }
+
+    pub fn upsert_knowledge_entity_batch(
+        &mut self,
+        request: &KnowledgeEntityUpsertBatchRequest,
+    ) -> Result<KnowledgeEntityUpsertBatchOutput> {
+        self.db.upsert_knowledge_entity_batch(request)
     }
 
     pub fn knowledge_property_batch(

@@ -5,14 +5,14 @@ use super::{
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityBatchRequest,
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
-    KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-    KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,
-    KnowledgePropertyUpdateRequest, KnowledgeRelationshipCreateBatchRequest,
-    KnowledgeRelationshipCreateRequest, KnowledgeRelationshipDeleteBatchRequest,
-    KnowledgeRelationshipDeleteRequest, KnowledgeRelationshipUpdateBatchRequest,
-    KnowledgeRelationshipUpdateRequest, KnowledgeRelationshipsRequest,
-    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
+    KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
+    KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeNeighborDirection,
+    KnowledgeNeighborsRequest, KnowledgePathRequest, KnowledgePropertyBatchRequest,
+    KnowledgePropertyUpdateBatchRequest, KnowledgePropertyUpdateRequest,
+    KnowledgeRelationshipCreateBatchRequest, KnowledgeRelationshipCreateRequest,
+    KnowledgeRelationshipDeleteBatchRequest, KnowledgeRelationshipDeleteRequest,
+    KnowledgeRelationshipUpdateBatchRequest, KnowledgeRelationshipUpdateRequest,
+    KnowledgeRelationshipsRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
     KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityDeleteBatchRequest,
     KnowledgeScopedEntityDeleteRequest, KnowledgeScopedEntityRequest,
     KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
@@ -4065,6 +4065,311 @@ fn typed_knowledge_entity_batch_create_persists_as_one_wal_batch_and_replays() {
             ],
         });
         assert_eq!(output.found_count, 2);
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn upserts_knowledge_entity_through_typed_api() {
+    let mut db = Database::new();
+
+    let created = db
+        .upsert_knowledge_entity(&KnowledgeEntityUpsertRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+            create_properties: BTreeMap::from([(
+                "title".to_string(),
+                Value::String("First".to_string()),
+            )]),
+            update_properties: BTreeMap::from([(
+                "updated_at".to_string(),
+                Value::String("ignored-on-create".to_string()),
+            )]),
+        })
+        .unwrap();
+
+    assert!(created.created);
+    assert!(!created.updated);
+    assert!(!created.already_exists);
+    assert_eq!(created.node_id, Some(0));
+    assert_eq!(created.created_node_count, 1);
+    assert_eq!(created.updated_property_count, 0);
+    let existing = db
+        .upsert_knowledge_entity(&KnowledgeEntityUpsertRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+            create_properties: BTreeMap::from([(
+                "title".to_string(),
+                Value::String("Should Not Replace".to_string()),
+            )]),
+            update_properties: BTreeMap::from([
+                ("id".to_string(), Value::String("memory_1".to_string())),
+                (
+                    "updated_at".to_string(),
+                    Value::String("2026-07-19".to_string()),
+                ),
+            ]),
+        })
+        .unwrap();
+
+    assert!(!existing.created);
+    assert!(existing.updated);
+    assert!(existing.already_exists);
+    assert!(!existing.non_writable);
+    assert_eq!(existing.node_id, Some(0));
+    assert_eq!(existing.updated_property_count, 1);
+    let entity = db
+        .knowledge_entity(&KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+        })
+        .entity
+        .expect("expected upserted memory");
+    assert_eq!(
+        entity.properties.get("title"),
+        Some(&Value::String("First".to_string()))
+    );
+    assert_eq!(
+        entity.properties.get("updated_at"),
+        Some(&Value::String("2026-07-19".to_string()))
+    );
+}
+
+#[test]
+fn knowledge_entity_upsert_rejects_id_mismatch_before_writing() {
+    let mut db = Database::new();
+
+    let error = db
+        .upsert_knowledge_entity(&KnowledgeEntityUpsertRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+            create_properties: BTreeMap::new(),
+            update_properties: BTreeMap::from([(
+                "id".to_string(),
+                Value::String("different".to_string()),
+            )]),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("does not match external id"));
+    assert_eq!(db.store.commit_epoch(), 0);
+}
+
+#[test]
+fn knowledge_entity_upsert_does_not_write_projected_idless_identity() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {name: 'Skein', description: 'old'})")
+        .unwrap();
+
+    let output = db
+        .upsert_knowledge_entity(&KnowledgeEntityUpsertRequest {
+            label: "Entity".to_string(),
+            external_id: "0".to_string(),
+            create_properties: BTreeMap::from([(
+                "description".to_string(),
+                Value::String("create".to_string()),
+            )]),
+            update_properties: BTreeMap::from([(
+                "description".to_string(),
+                Value::String("new".to_string()),
+            )]),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 1);
+    assert_eq!(output.graph_commit_epoch_after, 1);
+    assert_eq!(output.node_id, Some(0));
+    assert!(output.already_exists);
+    assert!(output.non_writable);
+    assert!(!output.updated);
+    let entity = db
+        .knowledge_entity(&KnowledgeEntityRequest {
+            label: "Entity".to_string(),
+            external_id: "0".to_string(),
+        })
+        .entity
+        .expect("expected projected entity");
+    assert_eq!(
+        entity.properties.get("description"),
+        Some(&Value::String("old".to_string()))
+    );
+}
+
+#[test]
+fn upserts_knowledge_entity_batch_through_typed_api() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'existing', title: 'Old'})")
+        .unwrap();
+
+    let output = db
+        .upsert_knowledge_entity_batch(&KnowledgeEntityUpsertBatchRequest {
+            upserts: vec![
+                KnowledgeEntityUpsertRequest {
+                    label: "Memory".to_string(),
+                    external_id: "created".to_string(),
+                    create_properties: BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String("Created".to_string()),
+                    )]),
+                    update_properties: BTreeMap::new(),
+                },
+                KnowledgeEntityUpsertRequest {
+                    label: "Memory".to_string(),
+                    external_id: "existing".to_string(),
+                    create_properties: BTreeMap::new(),
+                    update_properties: BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String("Updated".to_string()),
+                    )]),
+                },
+                KnowledgeEntityUpsertRequest {
+                    label: "Memory".to_string(),
+                    external_id: "created".to_string(),
+                    create_properties: BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String("Duplicate".to_string()),
+                    )]),
+                    update_properties: BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String("Duplicate Update".to_string()),
+                    )]),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 1);
+    assert_eq!(output.graph_commit_epoch_after, 2);
+    assert_eq!(output.created_count, 1);
+    assert_eq!(output.updated_count, 1);
+    assert_eq!(output.already_exists_count, 2);
+    assert_eq!(output.created_node_count, 1);
+    assert_eq!(output.updated_property_count, 1);
+    assert!(output.rows[0].created);
+    assert!(output.rows[0].node_id.is_some());
+    assert!(output.rows[1].updated);
+    assert_eq!(output.rows[1].node_id, Some(0));
+    assert!(output.rows[2].already_exists);
+    assert_eq!(output.rows[2].node_id, None);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "created".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "existing".to_string(),
+            },
+        ],
+        property_names: vec!["title".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("title"),
+        Some(&Some(Value::String("Created".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("title"),
+        Some(&Some(Value::String("Updated".to_string())))
+    );
+}
+
+#[test]
+fn read_only_database_rejects_typed_knowledge_entity_upsert() {
+    let path = unique_test_dir("read_only_typed_knowledge_entity_upsert");
+    {
+        let _db = Database::open(&path).unwrap();
+    }
+    {
+        let mut db = Database::open_with_config(
+            &path,
+            DatabaseConfig {
+                read_only: true,
+                ..DatabaseConfig::default()
+            },
+        )
+        .unwrap();
+        let error = db
+            .upsert_knowledge_entity(&KnowledgeEntityUpsertRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+                create_properties: BTreeMap::new(),
+                update_properties: BTreeMap::new(),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("read-only"));
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn typed_knowledge_entity_batch_upsert_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_knowledge_entity_batch_upsert_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'existing', title: 'Old'})")
+            .unwrap();
+        let batch_count_before_upsert = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.upsert_knowledge_entity_batch(&KnowledgeEntityUpsertBatchRequest {
+            upserts: vec![
+                KnowledgeEntityUpsertRequest {
+                    label: "Memory".to_string(),
+                    external_id: "created".to_string(),
+                    create_properties: BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String("Created".to_string()),
+                    )]),
+                    update_properties: BTreeMap::new(),
+                },
+                KnowledgeEntityUpsertRequest {
+                    label: "Memory".to_string(),
+                    external_id: "existing".to_string(),
+                    create_properties: BTreeMap::new(),
+                    update_properties: BTreeMap::from([(
+                        "title".to_string(),
+                        Value::String("Updated".to_string()),
+                    )]),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_upsert = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_upsert, batch_count_before_upsert + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("create_node"));
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "created".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "existing".to_string(),
+                },
+            ],
+            property_names: vec!["title".to_string()],
+        });
+        assert_eq!(rows.found_count, 2);
+        assert_eq!(
+            rows.rows[0].properties.get("title"),
+            Some(&Some(Value::String("Created".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("title"),
+            Some(&Some(Value::String("Updated".to_string())))
+        );
     }
     std::fs::remove_dir_all(path).unwrap();
 }
