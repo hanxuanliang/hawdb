@@ -8057,6 +8057,64 @@ fn external_content_runtime_manifest_exposes_import_work_plan() {
 }
 
 #[test]
+fn external_content_runtime_manifest_runs_only_claimable_jobs() {
+    let mut db = Database::new();
+    let missing = db.schedule_external_content_artifact_job("source-missing", "parse");
+    let parse = db.schedule_external_content_artifact_job_with_payload(
+        "source-parse",
+        "parse",
+        BTreeMap::from([
+            (
+                "content_uri".to_string(),
+                Value::String("file:///nowledge/source-parse.md".to_string()),
+            ),
+            ("sha256".to_string(), Value::String("parse-sha".to_string())),
+        ]),
+    );
+    let crawl = db.schedule_external_content_artifact_job_with_payload(
+        "source-crawl",
+        "crawl",
+        BTreeMap::from([
+            (
+                "content_uri".to_string(),
+                Value::String("https://example.invalid/source-crawl".to_string()),
+            ),
+            ("sha256".to_string(), Value::String("crawl-sha".to_string())),
+        ]),
+    );
+
+    let manifest = ExternalContentArtifactRuntimeManifest::new("markdown-parser")
+        .with_supported_action("parse")
+        .with_required_payload_key("content_uri")
+        .with_required_payload_key("sha256")
+        .with_estimated_operations(7);
+
+    let report = db
+        .run_next_external_content_artifact_job_for_runtime_with(&manifest, |job| {
+            assert_eq!(job.id, parse.id);
+            assert_eq!(job.action, "parse");
+            Ok(QueryOutput {
+                rows: vec![BTreeMap::from([
+                    ("job_id".to_string(), Value::Int(job.id as i64)),
+                    (
+                        "runtime_name".to_string(),
+                        Value::String("markdown-parser".to_string()),
+                    ),
+                ])],
+            })
+        })
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.job.id, parse.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+    let pending = db.pending_external_content_artifact_jobs(8);
+    assert_eq!(pending.len(), 2);
+    assert_eq!(pending[0].id, missing.id);
+    assert_eq!(pending[1].id, crawl.id);
+}
+
+#[test]
 fn background_maintenance_candidates_are_empty_without_pending_work() {
     let db = Database::new();
     let search_index = SearchIndex::in_memory();
@@ -9194,6 +9252,67 @@ fn background_content_artifact_completion_uses_qos_admission() {
     assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
     assert_eq!(jobs[0].attempts, 0);
     assert!(jobs[0].last_output.is_none());
+}
+
+#[test]
+fn background_content_artifact_completion_for_runtime_uses_manifest_claim_and_qos() {
+    let mut db = Database::new();
+    let missing = db.schedule_external_content_artifact_job("source-missing", "parse");
+    let parse = db.schedule_external_content_artifact_job_with_payload(
+        "source-parse",
+        "parse",
+        BTreeMap::from([(
+            "content_uri".to_string(),
+            Value::String("file:///nowledge/source-parse.md".to_string()),
+        )]),
+    );
+    let manifest = ExternalContentArtifactRuntimeManifest::new("parser")
+        .with_supported_action("parse")
+        .with_required_payload_key("content_uri")
+        .with_estimated_operations(5);
+    let policy = LocalQosPolicy {
+        max_background_operations: Some(4),
+        ..LocalQosPolicy::default()
+    };
+
+    let error = db
+        .complete_next_background_external_content_artifact_job_for_runtime_with(
+            &policy,
+            &LocalQosState::default(),
+            &manifest,
+            |_| unreachable!(),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("deferred"));
+    let jobs = db.derived_artifact_jobs();
+    assert_eq!(jobs[0].id, missing.id);
+    assert_eq!(jobs[0].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[0].attempts, 0);
+    assert_eq!(jobs[1].id, parse.id);
+    assert_eq!(jobs[1].status, DerivedArtifactJobStatus::Pending);
+    assert_eq!(jobs[1].attempts, 0);
+
+    let report = db
+        .complete_next_background_external_content_artifact_job_for_runtime_with(
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            &manifest,
+            |job| {
+                assert_eq!(job.id, parse.id);
+                Ok(ExternalContentArtifactJobCompletion::new("parser")
+                    .with_projection("search", "search:source-parse")
+                    .with_rows_produced(2))
+            },
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(report.job.id, parse.id);
+    assert_eq!(report.job.status, DerivedArtifactJobStatus::Succeeded);
+    let pending = db.pending_external_content_artifact_jobs(8);
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, missing.id);
 }
 
 #[test]

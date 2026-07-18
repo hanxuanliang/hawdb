@@ -658,6 +658,22 @@ impl Database {
         self.run_external_content_artifact_job_at_index(index, &mut runtime)
     }
 
+    pub fn run_next_external_content_artifact_job_for_runtime_with(
+        &mut self,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.status == DerivedArtifactJobStatus::Pending
+                && external_content_runtime_can_claim(manifest, job)
+        }) else {
+            return Ok(None);
+        };
+
+        self.run_external_content_artifact_job_at_index(index, &mut runtime)
+    }
+
     pub fn run_next_background_external_content_artifact_job_for_action_with(
         &mut self,
         policy: &LocalQosPolicy,
@@ -729,6 +745,75 @@ impl Database {
         result
     }
 
+    pub fn run_next_background_external_content_artifact_job_for_runtime_with(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.status == DerivedArtifactJobStatus::Pending
+                && external_content_runtime_can_claim(manifest, job)
+        }) else {
+            return Ok(None);
+        };
+
+        match policy.admit(
+            state,
+            &self.derived_artifact_jobs[index]
+                .background_work_request(manifest.estimated_operations),
+        ) {
+            QosAdmission::Admit => {
+                self.run_external_content_artifact_job_at_index(index, &mut runtime)
+            }
+            QosAdmission::Defer { reason, .. } => Err(SkeinError::Storage(format!(
+                "background external content artifact job deferred: {reason}"
+            ))),
+            QosAdmission::Reject { reason, .. } => Err(SkeinError::Storage(format!(
+                "background external content artifact job rejected: {reason}"
+            ))),
+        }
+    }
+
+    pub fn run_next_scheduled_background_external_content_artifact_job_for_runtime_with(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<QueryOutput>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.ensure_writable()?;
+        let Some(index) = self.derived_artifact_jobs.iter().position(|job| {
+            job.status == DerivedArtifactJobStatus::Pending
+                && external_content_runtime_can_claim(manifest, job)
+        }) else {
+            return Ok(None);
+        };
+
+        let permit = match scheduler.try_start(
+            self.derived_artifact_jobs[index]
+                .background_work_request(manifest.estimated_operations),
+        ) {
+            Ok(permit) => permit,
+            Err(QosAdmission::Defer { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background external content artifact job deferred: {reason}"
+                )));
+            }
+            Err(QosAdmission::Reject { reason, .. }) => {
+                return Err(SkeinError::Storage(format!(
+                    "background external content artifact job rejected: {reason}"
+                )));
+            }
+            Err(QosAdmission::Admit) => unreachable!("admitted work returns a permit"),
+        };
+
+        let result = self.run_external_content_artifact_job_at_index(index, &mut runtime);
+        scheduler.finish(permit);
+        result
+    }
+
     pub fn run_external_content_artifact_job_with(
         &mut self,
         job_id: u64,
@@ -767,6 +852,17 @@ impl Database {
         })
     }
 
+    pub fn complete_next_external_content_artifact_job_for_runtime_with(
+        &mut self,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_next_external_content_artifact_job_for_runtime_with(manifest, |job| {
+            let completion = runtime(job)?;
+            Ok(external_content_artifact_completion_output(job, completion))
+        })
+    }
+
     pub fn complete_next_background_external_content_artifact_job_with(
         &mut self,
         policy: &LocalQosPolicy,
@@ -782,6 +878,40 @@ impl Database {
                 Ok(external_content_artifact_completion_output(job, completion))
             },
             estimated_operations,
+        )
+    }
+
+    pub fn complete_next_background_external_content_artifact_job_for_runtime_with(
+        &mut self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_next_background_external_content_artifact_job_for_runtime_with(
+            policy,
+            state,
+            manifest,
+            |job| {
+                let completion = runtime(job)?;
+                Ok(external_content_artifact_completion_output(job, completion))
+            },
+        )
+    }
+
+    pub fn complete_next_scheduled_background_external_content_artifact_job_for_runtime_with(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        manifest: &ExternalContentArtifactRuntimeManifest,
+        mut runtime: impl FnMut(&DerivedArtifactJob) -> Result<ExternalContentArtifactJobCompletion>,
+    ) -> Result<Option<DerivedArtifactJobReport>> {
+        self.run_next_scheduled_background_external_content_artifact_job_for_runtime_with(
+            scheduler,
+            manifest,
+            |job| {
+                let completion = runtime(job)?;
+                Ok(external_content_artifact_completion_output(job, completion))
+            },
         )
     }
 
