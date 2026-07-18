@@ -1,5 +1,6 @@
 use skein::{Result, SkeinError};
-use std::process::{Command, Output, Stdio};
+use std::io::{BufRead, BufReader, Write};
+use std::process::{Child, ChildStdin, ChildStdout, Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -14,6 +15,7 @@ pub struct FixtureContractCommandCheckOptions {
     pub command_timeout: Duration,
     pub allow_primary_only_project_graph: bool,
     pub require_full_contract: bool,
+    pub command_mode: FixtureCommandMode,
 }
 
 impl Default for FixtureContractCommandCheckOptions {
@@ -25,12 +27,13 @@ impl Default for FixtureContractCommandCheckOptions {
             command_timeout: Duration::from_millis(DEFAULT_COMMAND_TIMEOUT_MS),
             allow_primary_only_project_graph: false,
             require_full_contract: false,
+            command_mode: FixtureCommandMode::SpawnPerRequest,
         }
     }
 }
 
 pub fn nowledge_fixture_contract_command_check_usage() -> String {
-    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]".to_string()
+    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]".to_string()
 }
 
 pub fn run_nowledge_fixture_contract_command_check(
@@ -84,7 +87,21 @@ pub fn run_nowledge_fixture_contract_command_check(
     let program = positional
         .get(1)
         .ok_or_else(|| SkeinError::Semantic(nowledge_fixture_contract_command_check_usage()))?;
-    let command_args = positional.iter().skip(2).cloned().collect::<Vec<_>>();
+    let (program, command_args) = if program == "--persistent-command" {
+        options.command_mode = FixtureCommandMode::Persistent;
+        let program = positional
+            .get(2)
+            .ok_or_else(|| SkeinError::Semantic(nowledge_fixture_contract_command_check_usage()))?;
+        (
+            program.as_str(),
+            positional.iter().skip(3).cloned().collect::<Vec<_>>(),
+        )
+    } else {
+        (
+            program.as_str(),
+            positional.iter().skip(2).cloned().collect::<Vec<_>>(),
+        )
+    };
     let contract = read_contract(contract_path)?;
     check_contract_command(&contract, program, &command_args, &options)
 }
@@ -113,11 +130,12 @@ fn check_contract_command(
             "fixture contract protocol must be skein-nowledge-fixture-contract".to_string(),
         ));
     }
-    let command = FixtureCommand {
+    let mut command = FixtureCommand::new(
         program,
-        args: command_args,
-        timeout: options.command_timeout,
-    };
+        command_args,
+        options.command_timeout,
+        options.command_mode,
+    )?;
     let mut failures = Vec::new();
     let mut matched_checks = 0usize;
     let mut primary_only_project_graph_checks = Vec::new();
@@ -170,31 +188,33 @@ fn check_contract_command(
         .min(selected_check_count);
     for check in selected_checks.iter().take(check_limit) {
         match check.get("kind").and_then(serde_json::Value::as_str) {
-            Some("cypher") => match check_cypher_contract_check(&command, check) {
+            Some("cypher") => match check_cypher_contract_check(&mut command, check) {
                 Ok(()) => matched_checks += 1,
                 Err(error) => failures.push(failure_json("check", check, error.to_string())),
             },
-            Some("projected_graph") => match check_project_graph_contract_check(&command, check) {
-                Ok(ProjectGraphCheckOutcome::Matched) => matched_checks += 1,
-                Ok(ProjectGraphCheckOutcome::PrimaryOnly(reason)) => {
-                    let name = check
-                        .get("name")
-                        .and_then(serde_json::Value::as_str)
-                        .unwrap_or("<unnamed>");
-                    primary_only_project_graph_checks.push(serde_json::json!({
-                        "name": name,
-                        "reason": reason,
-                    }));
-                    if !options.allow_primary_only_project_graph {
-                        failures.push(failure_json(
-                            "check",
-                            check,
-                            "project_graph returned primary_only".to_string(),
-                        ));
+            Some("projected_graph") => {
+                match check_project_graph_contract_check(&mut command, check) {
+                    Ok(ProjectGraphCheckOutcome::Matched) => matched_checks += 1,
+                    Ok(ProjectGraphCheckOutcome::PrimaryOnly(reason)) => {
+                        let name = check
+                            .get("name")
+                            .and_then(serde_json::Value::as_str)
+                            .unwrap_or("<unnamed>");
+                        primary_only_project_graph_checks.push(serde_json::json!({
+                            "name": name,
+                            "reason": reason,
+                        }));
+                        if !options.allow_primary_only_project_graph {
+                            failures.push(failure_json(
+                                "check",
+                                check,
+                                "project_graph returned primary_only".to_string(),
+                            ));
+                        }
                     }
+                    Err(error) => failures.push(failure_json("check", check, error.to_string())),
                 }
-                Err(error) => failures.push(failure_json("check", check, error.to_string())),
-            },
+            }
             Some(kind) => failures.push(failure_json(
                 "check",
                 check,
@@ -245,7 +265,7 @@ fn contract_check_index(check: &serde_json::Value) -> Option<usize> {
 }
 
 fn check_cypher_contract_check(
-    command: &FixtureCommand<'_>,
+    command: &mut FixtureCommand,
     check: &serde_json::Value,
 ) -> Result<()> {
     let mut session_statements = Vec::new();
@@ -294,7 +314,7 @@ enum ProjectGraphCheckOutcome {
 }
 
 fn check_project_graph_contract_check(
-    command: &FixtureCommand<'_>,
+    command: &mut FixtureCommand,
     check: &serde_json::Value,
 ) -> Result<ProjectGraphCheckOutcome> {
     let request = check
@@ -446,16 +466,56 @@ fn expected_rows_matches(
     Ok(())
 }
 
-struct FixtureCommand<'a> {
-    program: &'a str,
-    args: &'a [String],
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixtureCommandMode {
+    SpawnPerRequest,
+    Persistent,
+}
+
+enum FixtureCommand {
+    SpawnPerRequest(SpawnPerRequestFixtureCommand),
+    Persistent(PersistentFixtureCommand),
+}
+
+impl FixtureCommand {
+    fn new(
+        program: &str,
+        args: &[String],
+        timeout: Duration,
+        mode: FixtureCommandMode,
+    ) -> Result<Self> {
+        match mode {
+            FixtureCommandMode::SpawnPerRequest => {
+                Ok(Self::SpawnPerRequest(SpawnPerRequestFixtureCommand {
+                    program: program.to_string(),
+                    args: args.to_vec(),
+                    timeout,
+                }))
+            }
+            FixtureCommandMode::Persistent => Ok(Self::Persistent(
+                PersistentFixtureCommand::spawn(program, args)?,
+            )),
+        }
+    }
+
+    fn invoke(&mut self, request: serde_json::Value) -> Result<serde_json::Value> {
+        match self {
+            Self::SpawnPerRequest(command) => command.invoke(request),
+            Self::Persistent(command) => command.invoke(request),
+        }
+    }
+}
+
+struct SpawnPerRequestFixtureCommand {
+    program: String,
+    args: Vec<String>,
     timeout: Duration,
 }
 
-impl FixtureCommand<'_> {
+impl SpawnPerRequestFixtureCommand {
     fn invoke(&self, request: serde_json::Value) -> Result<serde_json::Value> {
-        let mut child = Command::new(self.program)
-            .args(self.args)
+        let mut child = Command::new(&self.program)
+            .args(&self.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -530,6 +590,87 @@ impl FixtureCommand<'_> {
     }
 }
 
+struct PersistentFixtureCommand {
+    program: String,
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+}
+
+impl PersistentFixtureCommand {
+    fn spawn(program: &str, args: &[String]) -> Result<Self> {
+        let mut child = Command::new(program)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .map_err(|error| {
+                SkeinError::Execution(format!(
+                    "failed to spawn persistent fixture contract command '{program}': {error}"
+                ))
+            })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            let _ = child.kill();
+            SkeinError::Execution(
+                "persistent fixture contract command stdin is not available".to_string(),
+            )
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            let _ = child.kill();
+            SkeinError::Execution(
+                "persistent fixture contract command stdout is not available".to_string(),
+            )
+        })?;
+        Ok(Self {
+            program: program.to_string(),
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn invoke(&mut self, request: serde_json::Value) -> Result<serde_json::Value> {
+        writeln!(self.stdin, "{request}").map_err(|error| {
+            SkeinError::Execution(format!(
+                "failed to write persistent fixture contract command request: {error}"
+            ))
+        })?;
+        self.stdin.flush().map_err(|error| {
+            SkeinError::Execution(format!(
+                "failed to flush persistent fixture contract command request: {error}"
+            ))
+        })?;
+        let mut line = String::new();
+        let bytes = self.stdout.read_line(&mut line).map_err(|error| {
+            SkeinError::Execution(format!(
+                "failed to read persistent fixture contract command response: {error}"
+            ))
+        })?;
+        if bytes == 0 {
+            return Err(SkeinError::Execution(format!(
+                "persistent fixture contract command '{}' closed stdout",
+                self.program
+            )));
+        }
+        serde_json::from_str(&line).map_err(|error| {
+            SkeinError::Execution(format!(
+                "persistent fixture contract command returned invalid JSON: {error}; stdout: {}",
+                line.trim()
+            ))
+        })
+    }
+}
+
+impl Drop for PersistentFixtureCommand {
+    fn drop(&mut self) {
+        if let Ok(None) = self.child.try_wait() {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
 fn command_check_report_json(
     contract: &serde_json::Value,
     options: &FixtureContractCommandCheckOptions,
@@ -567,6 +708,7 @@ fn command_check_report_json(
             "command_timeout_ms": options.command_timeout.as_millis() as u64,
             "allow_primary_only_project_graph": options.allow_primary_only_project_graph,
             "require_full_contract": options.require_full_contract,
+            "command_mode": fixture_command_mode_json(options.command_mode),
         },
         "selected_subset_ready": selected_subset_ready,
         "full_contract_checked": full_contract_checked,
@@ -578,6 +720,13 @@ fn command_check_report_json(
         },
         "contract_command_check_ready": selected_subset_ready,
     })
+}
+
+fn fixture_command_mode_json(mode: FixtureCommandMode) -> &'static str {
+    match mode {
+        FixtureCommandMode::SpawnPerRequest => "spawn_per_request",
+        FixtureCommandMode::Persistent => "persistent",
+    }
 }
 
 fn failure_json(phase: &str, value: &serde_json::Value, message: String) -> serde_json::Value {
@@ -629,7 +778,7 @@ fn json_debug(value: Option<&serde_json::Value>) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_contract_command, FixtureContractCommandCheckOptions};
+    use super::{check_contract_command, FixtureCommandMode, FixtureContractCommandCheckOptions};
 
     #[test]
     fn contract_command_check_reports_row_count_mismatch() {
@@ -856,5 +1005,81 @@ mod tests {
         assert_eq!(report["failed_checks"], 1);
         assert_eq!(report["failures"][0]["phase"], "selection");
         assert_eq!(report["contract_command_check_ready"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn contract_command_check_persistent_command_reuses_json_lines_process() {
+        let contract = serde_json::json!({
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 2,
+            "setup": [],
+            "checks": [
+                {
+                    "index": 0,
+                    "kind": "cypher",
+                    "name": "first",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "exact",
+                        "rows": [
+                            {
+                                "request_index": 1
+                            }
+                        ]
+                    }
+                },
+                {
+                    "index": 1,
+                    "kind": "cypher",
+                    "name": "second",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (m) RETURN m",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "exact",
+                        "rows": [
+                            {
+                                "request_index": 2
+                            }
+                        ]
+                    }
+                }
+            ]
+        });
+        let options = FixtureContractCommandCheckOptions {
+            command_mode: FixtureCommandMode::Persistent,
+            ..FixtureContractCommandCheckOptions::default()
+        };
+        let report = check_contract_command(
+            &contract,
+            "/bin/sh",
+            &[
+                "-c".to_string(),
+                "i=0; while IFS= read -r line; do i=$((i + 1)); printf '{\"rows\":[{\"request_index\":%s}]}\\n' \"$i\"; done".to_string(),
+            ],
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(report["checked_checks"], 2);
+        assert_eq!(report["matched_checks"], 2);
+        assert_eq!(report["full_contract_ready"], true);
+        assert_eq!(report["required_contract_ready"], true);
     }
 }
