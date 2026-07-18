@@ -45,11 +45,11 @@ pub use api::{
     KnowledgeNeighborDirection, KnowledgeNeighborsOutput, KnowledgeNeighborsRequest,
     KnowledgePathOutput, KnowledgePathRequest, KnowledgeRetrievalDiagnostics,
     KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalOutput, KnowledgeRetrievalRequest,
-    KnowledgeRetrieverCandidate, KnowledgeRetrieverReport, KnowledgeSubgraphOutput,
-    KnowledgeSubgraphRequest, KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
-    NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheStats, QueryOutput,
-    RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
+    KnowledgeRetrieverCandidate, KnowledgeRetrieverReport, KnowledgeScopedNeighborsRequest,
+    KnowledgeSubgraphOutput, KnowledgeSubgraphRequest, KnowledgeTraversalDiagnostics,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphExplainOutput, NowledgeGraphStatement, NowledgeGraphTransactionOutput,
+    PlanCacheStats, QueryOutput, RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{

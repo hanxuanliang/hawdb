@@ -1174,6 +1174,12 @@ pub struct KnowledgeNeighborsRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedNeighborsRequest {
+    pub navigation: KnowledgeNeighborsRequest,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeNeighborsOutput {
     pub graph_commit_epoch: u64,
     pub seed_node_id: Option<u64>,
@@ -2601,6 +2607,13 @@ impl Database {
         knowledge_neighbors_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_scoped_neighbors(
+        &self,
+        request: &KnowledgeScopedNeighborsRequest,
+    ) -> KnowledgeNeighborsOutput {
+        knowledge_scoped_neighbors_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
         knowledge_paths_for(&self.catalog, &self.store, request)
     }
@@ -3845,12 +3858,48 @@ fn knowledge_neighbors_for(
     store: &GraphStore,
     request: &KnowledgeNeighborsRequest,
 ) -> KnowledgeNeighborsOutput {
+    knowledge_scoped_neighbors_for(
+        catalog,
+        store,
+        &KnowledgeScopedNeighborsRequest {
+            navigation: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn knowledge_scoped_neighbors_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeScopedNeighborsRequest,
+) -> KnowledgeNeighborsOutput {
+    let navigation = &request.navigation;
     let Some(seed) = seed_node_by_label_and_external_id(
         catalog,
         store,
-        request.label.as_str(),
-        request.external_id.as_str(),
+        navigation.label.as_str(),
+        navigation.external_id.as_str(),
     ) else {
+        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch: store.commit_epoch(),
+            seed_found: false,
+            target_found: None,
+            path_count: 0,
+            node_count: 0,
+            relationship_count: 0,
+            fanout_reason_details: Vec::new(),
+            missing_seed_identity: Some(knowledge_identity_description(
+                navigation.label.as_str(),
+                navigation.external_id.as_str(),
+            )),
+            missing_target_identity: None,
+            missing_relationship_type: None,
+            max_hops: navigation.max_hops,
+            path_limit: Some(navigation.limit),
+            node_limit: None,
+            relationship_limit: None,
+        });
+        attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
         return KnowledgeNeighborsOutput {
             graph_commit_epoch: store.commit_epoch(),
             seed_node_id: None,
@@ -3858,32 +3907,62 @@ fn knowledge_neighbors_for(
             fanout_reason_codes: Vec::new(),
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
-            diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-                graph_commit_epoch: store.commit_epoch(),
-                seed_found: false,
-                target_found: None,
-                path_count: 0,
-                node_count: 0,
-                relationship_count: 0,
-                fanout_reason_details: Vec::new(),
-                missing_seed_identity: Some(knowledge_identity_description(
-                    request.label.as_str(),
-                    request.external_id.as_str(),
-                )),
-                missing_target_identity: None,
-                missing_relationship_type: None,
-                max_hops: request.max_hops,
-                path_limit: Some(request.limit),
-                node_limit: None,
-                relationship_limit: None,
-            }),
+            diagnostics,
         };
     };
+    if !request.metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(catalog, seed, &request.metadata_filters)
+    {
+        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch: store.commit_epoch(),
+            seed_found: false,
+            target_found: None,
+            path_count: 0,
+            node_count: 0,
+            relationship_count: 0,
+            fanout_reason_details: Vec::new(),
+            missing_seed_identity: None,
+            missing_target_identity: None,
+            missing_relationship_type: None,
+            max_hops: navigation.max_hops,
+            path_limit: Some(navigation.limit),
+            node_limit: None,
+            relationship_limit: None,
+        });
+        attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
+        return KnowledgeNeighborsOutput {
+            graph_commit_epoch: store.commit_epoch(),
+            seed_node_id: Some(seed.id.0),
+            paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
+            fanout_reasons: Vec::new(),
+            diagnostics,
+        };
+    }
 
-    let relationship_type = match request.relationship_type.as_deref() {
+    let relationship_type = match navigation.relationship_type.as_deref() {
         Some(name) => match catalog.rel_type_id(name) {
             Some(rel_type_id) => Some(rel_type_id),
             None => {
+                let mut diagnostics =
+                    knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                        graph_commit_epoch: store.commit_epoch(),
+                        seed_found: true,
+                        target_found: None,
+                        path_count: 0,
+                        node_count: 0,
+                        relationship_count: 0,
+                        fanout_reason_details: Vec::new(),
+                        missing_seed_identity: None,
+                        missing_target_identity: None,
+                        missing_relationship_type: Some(name.to_string()),
+                        max_hops: navigation.max_hops,
+                        path_limit: Some(navigation.limit),
+                        node_limit: None,
+                        relationship_limit: None,
+                    });
+                attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
                 return KnowledgeNeighborsOutput {
                     graph_commit_epoch: store.commit_epoch(),
                     seed_node_id: Some(seed.id.0),
@@ -3891,24 +3970,7 @@ fn knowledge_neighbors_for(
                     fanout_reason_codes: Vec::new(),
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
-                    diagnostics: knowledge_traversal_diagnostics(
-                        KnowledgeTraversalDiagnosticInput {
-                            graph_commit_epoch: store.commit_epoch(),
-                            seed_found: true,
-                            target_found: None,
-                            path_count: 0,
-                            node_count: 0,
-                            relationship_count: 0,
-                            fanout_reason_details: Vec::new(),
-                            missing_seed_identity: None,
-                            missing_target_identity: None,
-                            missing_relationship_type: Some(name.to_string()),
-                            max_hops: request.max_hops,
-                            path_limit: Some(request.limit),
-                            node_limit: None,
-                            relationship_limit: None,
-                        },
-                    ),
+                    diagnostics,
                 };
             }
         },
@@ -3920,31 +3982,33 @@ fn knowledge_neighbors_for(
         KnowledgeNeighborExpansion {
             seed_hit_id: "seed",
             seed_node_id: seed.id,
-            requested_direction: request.direction,
+            requested_direction: navigation.direction,
             relationship_type,
-            limit: request.limit,
-            max_hops: request.max_hops,
+            limit: navigation.limit,
+            max_hops: navigation.max_hops,
         },
     );
+    let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+        graph_commit_epoch: store.commit_epoch(),
+        seed_found: true,
+        target_found: None,
+        path_count: paths.len(),
+        node_count: knowledge_context_path_node_count(&paths),
+        relationship_count: paths.len(),
+        fanout_reason_details: fanout_reason_details.clone(),
+        missing_seed_identity: None,
+        missing_target_identity: None,
+        missing_relationship_type: None,
+        max_hops: navigation.max_hops,
+        path_limit: Some(navigation.limit),
+        node_limit: None,
+        relationship_limit: None,
+    });
+    attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
     KnowledgeNeighborsOutput {
         graph_commit_epoch: store.commit_epoch(),
         seed_node_id: Some(seed.id.0),
-        diagnostics: knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
-            graph_commit_epoch: store.commit_epoch(),
-            seed_found: true,
-            target_found: None,
-            path_count: paths.len(),
-            node_count: knowledge_context_path_node_count(&paths),
-            relationship_count: paths.len(),
-            fanout_reason_details: fanout_reason_details.clone(),
-            missing_seed_identity: None,
-            missing_target_identity: None,
-            missing_relationship_type: None,
-            max_hops: request.max_hops,
-            path_limit: Some(request.limit),
-            node_limit: None,
-            relationship_limit: None,
-        }),
+        diagnostics,
         paths,
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
@@ -4269,6 +4333,18 @@ fn knowledge_traversal_diagnostics(
         node_limit: input.node_limit,
         relationship_limit: input.relationship_limit,
     }
+}
+
+fn attach_traversal_metadata_filters(
+    diagnostics: &mut KnowledgeTraversalDiagnostics,
+    metadata_filters: &BTreeMap<String, String>,
+    filtered_out_count: usize,
+) {
+    if metadata_filters.is_empty() && filtered_out_count == 0 {
+        return;
+    }
+    diagnostics.input_candidate_set.metadata_filters = metadata_filters.clone();
+    diagnostics.input_candidate_set.filtered_out_count = filtered_out_count;
 }
 
 fn knowledge_traversal_input_candidate_set_report(
@@ -6107,6 +6183,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_neighbors(request)
     }
 
+    pub fn knowledge_scoped_neighbors(
+        &self,
+        request: &KnowledgeScopedNeighborsRequest,
+    ) -> KnowledgeNeighborsOutput {
+        self.db.knowledge_scoped_neighbors(request)
+    }
+
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
         self.db.knowledge_paths(request)
     }
@@ -6470,6 +6553,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeNeighborsRequest,
     ) -> KnowledgeNeighborsOutput {
         knowledge_neighbors_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_neighbors(
+        &self,
+        request: &KnowledgeScopedNeighborsRequest,
+    ) -> KnowledgeNeighborsOutput {
+        knowledge_scoped_neighbors_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {

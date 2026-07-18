@@ -5,10 +5,10 @@ use super::{
     KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeScopedNeighborsRequest,
+    KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode,
+    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -3812,6 +3812,69 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
     assert_eq!(
         unknown_type.diagnostics.fallback_reason_codes,
         vec![KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound]
+    );
+}
+
+#[test]
+fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'root', title: 'Root', space_id: ''})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})",
+    )
+    .unwrap();
+
+    let scoped = db.knowledge_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
+        navigation: KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 4,
+            max_hops: 1,
+        },
+        metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+    });
+
+    assert_eq!(scoped.paths.len(), 1);
+    assert!(scoped.diagnostics.seed_found);
+    assert_eq!(scoped.diagnostics.input_candidate_set.filtered_out_count, 0);
+    assert_eq!(
+        scoped
+            .diagnostics
+            .input_candidate_set
+            .metadata_filters
+            .get("space_id")
+            .map(String::as_str),
+        Some("default")
+    );
+
+    let filtered = db.knowledge_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
+        navigation: KnowledgeNeighborsRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            limit: 4,
+            max_hops: 1,
+        },
+        metadata_filters: BTreeMap::from([("space_id".to_string(), "team".to_string())]),
+    });
+
+    assert_eq!(filtered.seed_node_id, Some(0));
+    assert!(filtered.paths.is_empty());
+    assert!(!filtered.diagnostics.seed_found);
+    assert_eq!(
+        filtered.diagnostics.input_candidate_set.filtered_out_count,
+        1
+    );
+    assert_eq!(
+        filtered
+            .diagnostics
+            .input_candidate_set
+            .metadata_filters
+            .get("space_id")
+            .map(String::as_str),
+        Some("team")
     );
 }
 
