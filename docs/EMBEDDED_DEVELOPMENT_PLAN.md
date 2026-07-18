@@ -875,6 +875,8 @@ Scope:
   storage, search, compatibility, and executor boundaries; use internal module
   splits first when public contracts are still moving, and promote boundaries to
   workspace packages only when the dependency direction is acyclic and stable
+- `skein-cypher` owns syntax-only AST and parser modules, while root
+  `src/cypher.rs` remains a compatibility re-export facade
 - Chryso-style rule and cost interfaces
 - crate-owned generic memo storage with root-owned graph expression payloads
 - persistent statistics and index descriptors

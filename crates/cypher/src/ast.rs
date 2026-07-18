@@ -1,4 +1,4 @@
-use crate::value::Value;
+use skein_core::Value;
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq)]

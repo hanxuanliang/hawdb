@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::error::Result;
-use crate::value::Value;
+use skein_core::{Result, Value};
 
 use super::super::ast::*;
 use super::Parser;

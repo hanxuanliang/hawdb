@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use crate::error::Result;
+use skein_core::Result;
 
 use super::super::ast::*;
 use super::Parser;
@@ -600,7 +600,7 @@ impl Parser<'_> {
                 self.expect_char(')')?;
                 self.expect_char(',')?;
                 let property = match self.parse_value()? {
-                    ValueExpression::Literal(crate::value::Value::String(property)) => property,
+                    ValueExpression::Literal(skein_core::Value::String(property)) => property,
                     _ => return Err(self.error("node property projection requires a string key")),
                 };
                 self.expect_char(')')?;
@@ -1098,7 +1098,7 @@ impl Parser<'_> {
         }
         self.expect_char('=')?;
         let empty = self.parse_value()?;
-        if empty != ValueExpression::Literal(crate::value::Value::String(String::new())) {
+        if empty != ValueExpression::Literal(skein_core::Value::String(String::new())) {
             return Err(self.error(
                 "OPTIONAL relationship count filter only supports an empty-string fallback",
             ));

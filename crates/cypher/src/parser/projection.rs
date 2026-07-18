@@ -1,4 +1,4 @@
-use crate::error::Result;
+use skein_core::Result;
 
 use super::super::ast::*;
 use super::Parser;
@@ -294,7 +294,7 @@ impl Parser<'_> {
         }
         if variable.eq_ignore_ascii_case("date_part") && self.consume_char('(') {
             let part = match self.parse_value()? {
-                ValueExpression::Literal(crate::value::Value::String(part)) => part,
+                ValueExpression::Literal(skein_core::Value::String(part)) => part,
                 _ => return Err(self.error("date_part part requires a string literal")),
             };
             self.expect_char(',')?;
@@ -649,12 +649,12 @@ impl Parser<'_> {
             return Err(self.error("expected CASE floor expression '<'"));
         }
         let zero = self.parse_value()?;
-        if zero != ValueExpression::Literal(crate::value::Value::Int(0)) {
+        if zero != ValueExpression::Literal(skein_core::Value::Int(0)) {
             return Err(self.error("CASE floor expression only supports zero lower bound"));
         }
         self.expect_keyword("THEN")?;
         let then_zero = self.parse_value()?;
-        if then_zero != ValueExpression::Literal(crate::value::Value::Int(0)) {
+        if then_zero != ValueExpression::Literal(skein_core::Value::Int(0)) {
             return Err(self.error("CASE floor expression THEN must be zero"));
         }
         self.expect_keyword("ELSE")?;
@@ -669,9 +669,7 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_coalesce_difference_terms(
-        &mut self,
-    ) -> Result<(String, Vec<crate::cypher::CoalesceDifferenceTerm>)> {
+    fn parse_coalesce_difference_terms(&mut self) -> Result<(String, Vec<CoalesceDifferenceTerm>)> {
         let (variable, first) = self.parse_coalesce_difference_term()?;
         let mut terms = vec![first];
         loop {
@@ -691,9 +689,7 @@ impl Parser<'_> {
         Ok((variable, terms))
     }
 
-    fn parse_coalesce_difference_term(
-        &mut self,
-    ) -> Result<(String, crate::cypher::CoalesceDifferenceTerm)> {
+    fn parse_coalesce_difference_term(&mut self) -> Result<(String, CoalesceDifferenceTerm)> {
         self.skip_ws();
         self.expect_keyword("COALESCE")?;
         self.expect_char('(')?;
@@ -703,10 +699,7 @@ impl Parser<'_> {
         self.expect_char(',')?;
         let default = self.parse_value()?;
         self.expect_char(')')?;
-        Ok((
-            variable,
-            crate::cypher::CoalesceDifferenceTerm { property, default },
-        ))
+        Ok((variable, CoalesceDifferenceTerm { property, default }))
     }
 }
 

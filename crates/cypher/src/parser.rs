@@ -1,5 +1,5 @@
 use super::ast::Statement;
-use crate::error::Result;
+use skein_core::Result;
 
 mod cursor;
 mod ddl;

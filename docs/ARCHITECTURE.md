@@ -55,11 +55,12 @@ Skein follows a RisingWave/Chryso-style workspace-and-facade layout. The root
 crate remains the stable embedded facade, while implementation crates are split
 out as interfaces harden and dependency direction becomes acyclic. The current
 crate split includes `skein-core` for common graph primitives and
+`skein-cypher` for syntax-only Cypher AST/parser support, and
 `skein-optimizer` for Cascades-style optimizer primitives, stable physical
 operator metadata, generic plan-node traversal helpers, structured cost
 summaries, and bounded search reporting. Cypher graph logical and physical
-operators still live in the root crate until parser/planner/executor contracts
-are stable enough to move without creating cycles.
+operators still live in the root crate until planner/executor contracts are
+stable enough to move without creating cycles.
 
 ```text
 crates/
@@ -76,19 +77,20 @@ crates/
 ```
 
 The public facade should stay in the root `skein` crate. Internal crates should
-be allowed to evolve while the embedded API stays small and stable. Shared
-optimizer primitives should remain free of Cypher AST, planner, executor, and
-storage dependencies; graph-specific rules can then migrate behind that boundary
-incrementally.
+be allowed to evolve while the embedded API stays small and stable. `src/cypher.rs`
+is now a compatibility re-export facade over `skein-cypher`; parser tests live
+with the parser crate. Shared optimizer primitives should remain free of Cypher
+AST, planner, executor, and storage dependencies; graph-specific rules can then
+migrate behind that boundary incrementally.
 
-Inside the root crate, larger subsystems should still be split by ownership. The
-current Cypher module uses:
+The current Cypher crate uses:
 
 ```text
-src/cypher.rs          public facade and re-exports
-src/cypher/ast.rs      syntax-only statement and expression types
-src/cypher/parser.rs   cursor-based parser implementation
-src/cypher/tests.rs    parser coverage for the supported subset
+crates/cypher/src/lib.rs       public crate facade and re-exports
+crates/cypher/src/ast.rs       syntax-only statement and expression types
+crates/cypher/src/parser.rs    cursor-based parser entry point
+crates/cypher/src/parser/*     parser helpers by statement/expression family
+crates/cypher/src/tests.rs     parser coverage for the supported subset
 ```
 
 ## Data Model

@@ -6,7 +6,7 @@ use super::{
     SetValueExpression, Statement, ValueExpression, WithAliasFilter, WithAliasFilterExpression,
     WithAliasFilterOp,
 };
-use crate::value::Value;
+use skein_core::Value;
 
 #[test]
 fn parses_create_node() {

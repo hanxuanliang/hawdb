@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use crate::error::Result;
+use skein_core::Result;
 
 use super::super::ast::*;
 use super::Parser;
@@ -698,7 +698,7 @@ impl Parser<'_> {
         let preserve = self.parse_value()?;
         self.expect_char('=')?;
         let preserve_true = self.parse_value()?;
-        if preserve_true != ValueExpression::Literal(crate::value::Value::Bool(true)) {
+        if preserve_true != ValueExpression::Literal(skein_core::Value::Bool(true)) {
             return Err(self.error("CASE preserve SET only supports comparison to true"));
         }
         self.expect_keyword("AND")?;
@@ -752,7 +752,7 @@ impl Parser<'_> {
         let condition_property = self.parse_ident()?;
         self.expect_char('>')?;
         let threshold = self.parse_value()?;
-        if threshold != ValueExpression::Literal(crate::value::Value::Int(0)) {
+        if threshold != ValueExpression::Literal(skein_core::Value::Int(0)) {
             return Err(self.error("CASE decrement SET only supports a zero threshold"));
         }
         self.expect_keyword("THEN")?;
@@ -764,12 +764,12 @@ impl Parser<'_> {
         }
         self.expect_char('-')?;
         let decrement = self.parse_value()?;
-        if decrement != ValueExpression::Literal(crate::value::Value::Int(1)) {
+        if decrement != ValueExpression::Literal(skein_core::Value::Int(1)) {
             return Err(self.error("CASE decrement SET only supports decrement by one"));
         }
         self.expect_keyword("ELSE")?;
         let floor = self.parse_value()?;
-        if floor != ValueExpression::Literal(crate::value::Value::Int(0)) {
+        if floor != ValueExpression::Literal(skein_core::Value::Int(0)) {
             return Err(self.error("CASE decrement SET only supports a zero floor"));
         }
         self.expect_keyword("END")?;

@@ -1,4 +1,4 @@
-use crate::error::{Result, SkeinError};
+use skein_core::{Result, SkeinError};
 
 use super::Parser;
 
