@@ -14,6 +14,28 @@ pub enum WorkClass {
     Shadow,
 }
 
+impl WorkPriority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkPriority::Foreground => "foreground",
+            WorkPriority::Background => "background",
+        }
+    }
+}
+
+impl WorkClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkClass::Query => "query",
+            WorkClass::Mutation => "mutation",
+            WorkClass::Projection => "projection",
+            WorkClass::Import => "import",
+            WorkClass::Analytics => "analytics",
+            WorkClass::Shadow => "shadow",
+        }
+    }
+}
+
 pub const WORK_CLASS_COUNT: usize = 6;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,8 +524,24 @@ impl LocalQosScheduler {
 mod tests {
     use super::{
         BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-        QosAdmission, QosAdmissionCode, WorkClass, WorkRequest,
+        QosAdmission, QosAdmissionCode, WorkClass, WorkPriority, WorkRequest,
     };
+
+    #[test]
+    fn work_priorities_have_stable_string_encodings() {
+        assert_eq!(WorkPriority::Foreground.as_str(), "foreground");
+        assert_eq!(WorkPriority::Background.as_str(), "background");
+    }
+
+    #[test]
+    fn work_classes_have_stable_string_encodings() {
+        assert_eq!(WorkClass::Query.as_str(), "query");
+        assert_eq!(WorkClass::Mutation.as_str(), "mutation");
+        assert_eq!(WorkClass::Projection.as_str(), "projection");
+        assert_eq!(WorkClass::Import.as_str(), "import");
+        assert_eq!(WorkClass::Analytics.as_str(), "analytics");
+        assert_eq!(WorkClass::Shadow.as_str(), "shadow");
+    }
 
     #[test]
     fn qos_admission_codes_have_stable_string_encodings() {

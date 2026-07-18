@@ -7630,6 +7630,8 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
 
     assert_eq!(ranked[0].name, "search_projection_graph_delta");
     assert_eq!(ranked[0].plan.request.class, WorkClass::Projection);
+    assert_eq!(ranked[0].plan.request.class.as_str(), "projection");
+    assert_eq!(ranked[0].plan.request.priority.as_str(), "background");
     assert!(matches!(ranked[0].decision.admission, QosAdmission::Admit));
     assert!(ranked[0]
         .decision
