@@ -1689,6 +1689,80 @@ pub struct KnowledgeRelationshipCreateBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpsertRequest {
+    pub source: KnowledgeEntityRequest,
+    pub target: KnowledgeEntityRequest,
+    pub relationship_type: String,
+    pub create_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedRelationshipUpsertRequest {
+    pub upsert: KnowledgeRelationshipUpsertRequest,
+    pub source_metadata_filters: BTreeMap<String, String>,
+    pub target_metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpsertOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub source_node_id: Option<u64>,
+    pub target_node_id: Option<u64>,
+    pub relationship_id: Option<u64>,
+    pub matched: bool,
+    pub created: bool,
+    pub already_exists: bool,
+    pub source_filtered_out: bool,
+    pub target_filtered_out: bool,
+    pub non_writable: bool,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpsertBatchRequest {
+    pub upserts: Vec<KnowledgeRelationshipUpsertRequest>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedRelationshipUpsertBatchRequest {
+    pub upserts: Vec<KnowledgeRelationshipUpsertRequest>,
+    pub source_metadata_filters: BTreeMap<String, String>,
+    pub target_metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpsertBatchRow {
+    pub source: KnowledgeEntityRequest,
+    pub target: KnowledgeEntityRequest,
+    pub relationship_type: String,
+    pub source_node_id: Option<u64>,
+    pub target_node_id: Option<u64>,
+    pub relationship_id: Option<u64>,
+    pub matched: bool,
+    pub created: bool,
+    pub already_exists: bool,
+    pub source_filtered_out: bool,
+    pub target_filtered_out: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelationshipUpsertBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeRelationshipUpsertBatchRow>,
+    pub matched_count: usize,
+    pub created_count: usize,
+    pub already_exists_count: usize,
+    pub missing_endpoint_count: usize,
+    pub source_filtered_out_count: usize,
+    pub target_filtered_out_count: usize,
+    pub non_writable_count: usize,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipDeleteRequest {
     pub source: KnowledgeEntityRequest,
     pub target: KnowledgeEntityRequest,
@@ -3250,6 +3324,34 @@ impl Database {
         request: &KnowledgeScopedRelationshipCreateBatchRequest,
     ) -> Result<KnowledgeRelationshipCreateBatchOutput> {
         create_scoped_knowledge_relationship_batch_for(self, request)
+    }
+
+    pub fn upsert_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipUpsertRequest,
+    ) -> Result<KnowledgeRelationshipUpsertOutput> {
+        upsert_knowledge_relationship_for(self, request)
+    }
+
+    pub fn upsert_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpsertRequest,
+    ) -> Result<KnowledgeRelationshipUpsertOutput> {
+        upsert_scoped_knowledge_relationship_for(self, request)
+    }
+
+    pub fn upsert_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeRelationshipUpsertBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
+        upsert_knowledge_relationship_batch_for(self, request)
+    }
+
+    pub fn upsert_scoped_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpsertBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
+        upsert_scoped_knowledge_relationship_batch_for(self, request)
     }
 
     pub fn delete_knowledge_relationship(
@@ -6009,6 +6111,435 @@ fn create_scoped_knowledge_relationship_batch_for(
         non_writable_count,
         created_relationship_count,
     })
+}
+
+fn upsert_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeRelationshipUpsertRequest,
+) -> Result<KnowledgeRelationshipUpsertOutput> {
+    upsert_scoped_knowledge_relationship_for(
+        db,
+        &KnowledgeScopedRelationshipUpsertRequest {
+            upsert: request.clone(),
+            source_metadata_filters: BTreeMap::new(),
+            target_metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn upsert_scoped_knowledge_relationship_for(
+    db: &mut Database,
+    request: &KnowledgeScopedRelationshipUpsertRequest,
+) -> Result<KnowledgeRelationshipUpsertOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_relationship_upsert(&request.upsert)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let source = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.upsert.source.label.as_str(),
+        request.upsert.source.external_id.as_str(),
+    );
+    let target = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        request.upsert.target.label.as_str(),
+        request.upsert.target.external_id.as_str(),
+    );
+    let source_node_id = source.map(|node| node.id.0);
+    let target_node_id = target.map(|node| node.id.0);
+    let (Some(source), Some(target)) = (source, target) else {
+        return Ok(KnowledgeRelationshipUpsertOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            relationship_id: None,
+            matched: false,
+            created: false,
+            already_exists: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            non_writable: false,
+            created_relationship_count: 0,
+        });
+    };
+    if !node_has_external_id_property(source, request.upsert.source.external_id.as_str())
+        || !node_has_external_id_property(target, request.upsert.target.external_id.as_str())
+    {
+        return Ok(KnowledgeRelationshipUpsertOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            relationship_id: None,
+            matched: false,
+            created: false,
+            already_exists: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            non_writable: true,
+            created_relationship_count: 0,
+        });
+    }
+
+    let source_filtered_out = !request.source_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            source,
+            &request.source_metadata_filters,
+        );
+    let target_filtered_out = !request.target_metadata_filters.is_empty()
+        && !knowledge_graph_seed_matches_filters(
+            &db.catalog,
+            target,
+            &request.target_metadata_filters,
+        );
+    if source_filtered_out || target_filtered_out {
+        return Ok(KnowledgeRelationshipUpsertOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            relationship_id: None,
+            matched: false,
+            created: false,
+            already_exists: false,
+            source_filtered_out,
+            target_filtered_out,
+            non_writable: false,
+            created_relationship_count: 0,
+        });
+    }
+
+    let source_id = source.id;
+    let target_id = target.id;
+    if let Some(relationship_id) = existing_knowledge_relationship_id(
+        &db.catalog,
+        &db.store,
+        source_id,
+        target_id,
+        request.upsert.relationship_type.as_str(),
+    ) {
+        return Ok(KnowledgeRelationshipUpsertOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_node_id,
+            target_node_id,
+            relationship_id: Some(relationship_id),
+            matched: true,
+            created: false,
+            already_exists: true,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            non_writable: false,
+            created_relationship_count: 0,
+        });
+    }
+
+    let create = knowledge_relationship_upsert_create_request(&request.upsert);
+    let (cypher, parameters) = knowledge_relationship_create_statement(&create);
+    let output = db.query_with_params(cypher.as_str(), &parameters)?;
+    let relationship_id = existing_knowledge_relationship_id(
+        &db.catalog,
+        &db.store,
+        source_id,
+        target_id,
+        request.upsert.relationship_type.as_str(),
+    );
+    Ok(KnowledgeRelationshipUpsertOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        source_node_id,
+        target_node_id,
+        relationship_id,
+        matched: true,
+        created: true,
+        already_exists: false,
+        source_filtered_out: false,
+        target_filtered_out: false,
+        non_writable: false,
+        created_relationship_count: output.rows.len(),
+    })
+}
+
+fn upsert_knowledge_relationship_batch_for(
+    db: &mut Database,
+    request: &KnowledgeRelationshipUpsertBatchRequest,
+) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
+    upsert_scoped_knowledge_relationship_batch_for(
+        db,
+        &KnowledgeScopedRelationshipUpsertBatchRequest {
+            upserts: request.upserts.clone(),
+            source_metadata_filters: BTreeMap::new(),
+            target_metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn upsert_scoped_knowledge_relationship_batch_for(
+    db: &mut Database,
+    request: &KnowledgeScopedRelationshipUpsertBatchRequest,
+) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
+    db.ensure_writable()?;
+    for upsert in &request.upserts {
+        validate_knowledge_relationship_upsert(upsert)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.upserts.len());
+    let mut matched_count = 0;
+    let mut created_count = 0;
+    let mut already_exists_count = 0;
+    let mut missing_endpoint_count = 0;
+    let mut source_filtered_out_count = 0;
+    let mut target_filtered_out_count = 0;
+    let mut non_writable_count = 0;
+    let mut eligible_creates = Vec::new();
+    let mut pending_relationships = BTreeSet::new();
+
+    for upsert in &request.upserts {
+        let source = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            upsert.source.label.as_str(),
+            upsert.source.external_id.as_str(),
+        );
+        let target = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            upsert.target.label.as_str(),
+            upsert.target.external_id.as_str(),
+        );
+        let source_node_id = source.map(|node| node.id.0);
+        let target_node_id = target.map(|node| node.id.0);
+        let (Some(source), Some(target)) = (source, target) else {
+            missing_endpoint_count += 1;
+            rows.push(KnowledgeRelationshipUpsertBatchRow {
+                source: upsert.source.clone(),
+                target: upsert.target.clone(),
+                relationship_type: upsert.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                relationship_id: None,
+                matched: false,
+                created: false,
+                already_exists: false,
+                source_filtered_out: false,
+                target_filtered_out: false,
+                non_writable: false,
+            });
+            continue;
+        };
+        if !node_has_external_id_property(source, upsert.source.external_id.as_str())
+            || !node_has_external_id_property(target, upsert.target.external_id.as_str())
+        {
+            non_writable_count += 1;
+            rows.push(KnowledgeRelationshipUpsertBatchRow {
+                source: upsert.source.clone(),
+                target: upsert.target.clone(),
+                relationship_type: upsert.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                relationship_id: None,
+                matched: false,
+                created: false,
+                already_exists: false,
+                source_filtered_out: false,
+                target_filtered_out: false,
+                non_writable: true,
+            });
+            continue;
+        }
+
+        let source_filtered_out = !request.source_metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(
+                &db.catalog,
+                source,
+                &request.source_metadata_filters,
+            );
+        let target_filtered_out = !request.target_metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(
+                &db.catalog,
+                target,
+                &request.target_metadata_filters,
+            );
+        if source_filtered_out || target_filtered_out {
+            if source_filtered_out {
+                source_filtered_out_count += 1;
+            }
+            if target_filtered_out {
+                target_filtered_out_count += 1;
+            }
+            rows.push(KnowledgeRelationshipUpsertBatchRow {
+                source: upsert.source.clone(),
+                target: upsert.target.clone(),
+                relationship_type: upsert.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                relationship_id: None,
+                matched: false,
+                created: false,
+                already_exists: false,
+                source_filtered_out,
+                target_filtered_out,
+                non_writable: false,
+            });
+            continue;
+        }
+
+        matched_count += 1;
+        if let Some(relationship_id) = existing_knowledge_relationship_id(
+            &db.catalog,
+            &db.store,
+            source.id,
+            target.id,
+            upsert.relationship_type.as_str(),
+        ) {
+            already_exists_count += 1;
+            rows.push(KnowledgeRelationshipUpsertBatchRow {
+                source: upsert.source.clone(),
+                target: upsert.target.clone(),
+                relationship_type: upsert.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                relationship_id: Some(relationship_id),
+                matched: true,
+                created: false,
+                already_exists: true,
+                source_filtered_out: false,
+                target_filtered_out: false,
+                non_writable: false,
+            });
+            continue;
+        }
+
+        let identity = (source.id.0, target.id.0, upsert.relationship_type.clone());
+        if !pending_relationships.insert(identity) {
+            already_exists_count += 1;
+            rows.push(KnowledgeRelationshipUpsertBatchRow {
+                source: upsert.source.clone(),
+                target: upsert.target.clone(),
+                relationship_type: upsert.relationship_type.clone(),
+                source_node_id,
+                target_node_id,
+                relationship_id: None,
+                matched: true,
+                created: false,
+                already_exists: true,
+                source_filtered_out: false,
+                target_filtered_out: false,
+                non_writable: false,
+            });
+            continue;
+        }
+
+        created_count += 1;
+        eligible_creates.push(knowledge_relationship_upsert_create_request(upsert));
+        rows.push(KnowledgeRelationshipUpsertBatchRow {
+            source: upsert.source.clone(),
+            target: upsert.target.clone(),
+            relationship_type: upsert.relationship_type.clone(),
+            source_node_id,
+            target_node_id,
+            relationship_id: None,
+            matched: true,
+            created: true,
+            already_exists: false,
+            source_filtered_out: false,
+            target_filtered_out: false,
+            non_writable: false,
+        });
+    }
+
+    if eligible_creates.is_empty() {
+        return Ok(KnowledgeRelationshipUpsertBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            created_count,
+            already_exists_count,
+            missing_endpoint_count,
+            source_filtered_out_count,
+            target_filtered_out_count,
+            non_writable_count,
+            created_relationship_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for create in &eligible_creates {
+        let (cypher, parameters) = knowledge_relationship_create_statement(create);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+    for row in &mut rows {
+        if row.created {
+            if let (Some(source_node_id), Some(target_node_id)) =
+                (row.source_node_id, row.target_node_id)
+            {
+                row.relationship_id = existing_knowledge_relationship_id(
+                    &db.catalog,
+                    &db.store,
+                    NodeId(source_node_id),
+                    NodeId(target_node_id),
+                    row.relationship_type.as_str(),
+                );
+            }
+        }
+    }
+    Ok(KnowledgeRelationshipUpsertBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        created_count,
+        already_exists_count,
+        missing_endpoint_count,
+        source_filtered_out_count,
+        target_filtered_out_count,
+        non_writable_count,
+        created_relationship_count: eligible_creates.len(),
+    })
+}
+
+fn validate_knowledge_relationship_upsert(
+    request: &KnowledgeRelationshipUpsertRequest,
+) -> Result<()> {
+    validate_cypher_identifier(&request.source.label, "source label")?;
+    validate_cypher_identifier(&request.target.label, "target label")?;
+    validate_cypher_identifier(&request.relationship_type, "relationship type")?;
+    for property in request.create_properties.keys() {
+        validate_cypher_identifier(property, "relationship property")?;
+    }
+    Ok(())
+}
+
+fn knowledge_relationship_upsert_create_request(
+    request: &KnowledgeRelationshipUpsertRequest,
+) -> KnowledgeRelationshipCreateRequest {
+    KnowledgeRelationshipCreateRequest {
+        source: request.source.clone(),
+        target: request.target.clone(),
+        relationship_type: request.relationship_type.clone(),
+        properties: request.create_properties.clone(),
+    }
+}
+
+fn existing_knowledge_relationship_id(
+    catalog: &Catalog,
+    store: &GraphStore,
+    source: NodeId,
+    target: NodeId,
+    relationship_type: &str,
+) -> Option<u64> {
+    let rel_type_id = catalog.rel_type_id(relationship_type)?;
+    store
+        .outgoing_relationships(source, rel_type_id)
+        .find(|relationship| relationship.target == target)
+        .map(|relationship| relationship.id.0)
 }
 
 fn delete_knowledge_relationship_for(
@@ -9455,6 +9986,34 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedRelationshipCreateBatchRequest,
     ) -> Result<KnowledgeRelationshipCreateBatchOutput> {
         self.db.create_scoped_knowledge_relationship_batch(request)
+    }
+
+    pub fn upsert_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeRelationshipUpsertRequest,
+    ) -> Result<KnowledgeRelationshipUpsertOutput> {
+        self.db.upsert_knowledge_relationship(request)
+    }
+
+    pub fn upsert_scoped_knowledge_relationship(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpsertRequest,
+    ) -> Result<KnowledgeRelationshipUpsertOutput> {
+        self.db.upsert_scoped_knowledge_relationship(request)
+    }
+
+    pub fn upsert_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeRelationshipUpsertBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
+        self.db.upsert_knowledge_relationship_batch(request)
+    }
+
+    pub fn upsert_scoped_knowledge_relationship_batch(
+        &mut self,
+        request: &KnowledgeScopedRelationshipUpsertBatchRequest,
+    ) -> Result<KnowledgeRelationshipUpsertBatchOutput> {
+        self.db.upsert_scoped_knowledge_relationship_batch(request)
     }
 
     pub fn delete_knowledge_relationship(
