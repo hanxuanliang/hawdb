@@ -9,8 +9,8 @@ use crate::planner::{
 };
 use crate::value::Value;
 pub use skein_optimizer::{
-    GroupId, OptimizerConfig, OptimizerTrace, PhysicalPlanClass, PhysicalPlanKind, PlanCost,
-    PlanCostBreakdown,
+    GroupId, OptimizationSearchReport, OptimizerConfig, OptimizerTrace, PhysicalPlanClass,
+    PhysicalPlanKind, PlanCost, PlanCostBreakdown, SelectedPlanTrace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1963,57 +1963,22 @@ impl CascadesOptimizer {
         if required_groups > self.config.max_groups {
             let mut decisions = Vec::new();
             let plan = logical_to_physical_direct(logical, catalog, &mut decisions);
-            let selected_plan = plan.explain(0);
-            let selected_plan_fingerprint = plan.fingerprint();
-            let selected_plan_cost = estimate_physical_plan_cost(&plan, catalog);
-            let selected_plan_cost_breakdown =
-                estimate_physical_plan_cost_breakdown(&plan, catalog);
-            let selected_plan_operator_counts = physical_plan_operator_counts(&plan);
-            let selected_plan_class_counts = physical_plan_class_counts(&plan);
-            decisions.push(format_selected_plan_cost(selected_plan_cost));
-            return (
-                plan,
-                OptimizerTrace {
-                    groups: required_groups,
-                    selected_plan,
-                    selected_plan_fingerprint,
-                    selected_plan_cost,
-                    selected_plan_cost_breakdown,
-                    selected_plan_operator_counts,
-                    selected_plan_class_counts,
-                    warnings: vec![format!(
-                        "optimizer memo budget exceeded: required_groups={required_groups} max_groups={}; used deterministic direct physical fallback",
-                        self.config.max_groups
-                    )],
-                    decisions,
-                },
-            );
+            let mut report =
+                OptimizationSearchReport::direct_fallback(required_groups, self.config.max_groups);
+            report.extend_decisions(decisions);
+            let selected = selected_plan_trace(&plan, catalog);
+            report.record_selected_plan_cost(selected.cost);
+            return (plan, report.into_trace(selected));
         }
         let mut memo = Memo::default();
         let root = memo.insert(logical);
         let mut decisions = Vec::new();
         let plan = memo.best_physical(root, catalog, &mut decisions);
-        let selected_plan = plan.explain(0);
-        let selected_plan_fingerprint = plan.fingerprint();
-        let selected_plan_cost = estimate_physical_plan_cost(&plan, catalog);
-        let selected_plan_cost_breakdown = estimate_physical_plan_cost_breakdown(&plan, catalog);
-        let selected_plan_operator_counts = physical_plan_operator_counts(&plan);
-        let selected_plan_class_counts = physical_plan_class_counts(&plan);
-        decisions.push(format_selected_plan_cost(selected_plan_cost));
-        (
-            plan,
-            OptimizerTrace {
-                groups: memo.groups.len(),
-                selected_plan,
-                selected_plan_fingerprint,
-                selected_plan_cost,
-                selected_plan_cost_breakdown,
-                selected_plan_operator_counts,
-                selected_plan_class_counts,
-                warnings: Vec::new(),
-                decisions,
-            },
-        )
+        let mut report = OptimizationSearchReport::memo(memo.groups.len());
+        report.extend_decisions(decisions);
+        let selected = selected_plan_trace(&plan, catalog);
+        report.record_selected_plan_cost(selected.cost);
+        (plan, report.into_trace(selected))
     }
 }
 
@@ -4061,11 +4026,16 @@ fn push_expand_estimate_decision(
     ));
 }
 
-fn format_selected_plan_cost(cost: PlanCost) -> String {
-    format!(
-        "selected physical plan cost: estimated_rows={} cost={}",
-        cost.estimated_rows, cost.cost
-    )
+fn selected_plan_trace(plan: &PhysicalPlan, catalog: &OptimizerCatalog) -> SelectedPlanTrace {
+    let selected_plan_cost = estimate_physical_plan_cost(plan, catalog);
+    SelectedPlanTrace {
+        explain: plan.explain(0),
+        fingerprint: plan.fingerprint(),
+        cost: selected_plan_cost,
+        cost_breakdown: estimate_physical_plan_cost_breakdown(plan, catalog),
+        operator_counts: physical_plan_operator_counts(plan),
+        class_counts: physical_plan_class_counts(plan),
+    }
 }
 
 fn physical_plan_operator_counts(plan: &PhysicalPlan) -> BTreeMap<String, usize> {

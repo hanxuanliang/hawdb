@@ -929,6 +929,11 @@ Current implemented slice:
   metadata, so diagnostics do not need to parse English explain text to detect
   operator mix or schema/mutation/access/traversal/relational/procedure
   composition
+- `skein-optimizer` owns `OptimizationSearchReport`, `SearchMode`,
+  `RuleEvent`, `RuleOutcome`, and `SelectedPlanTrace`, so group-budget fallback
+  warnings and selected-plan trace materialization are crate-level optimizer
+  scaffolding while root `src/optimizer.rs` still owns Cypher-specific graph
+  rules and catalog-dependent costing
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,

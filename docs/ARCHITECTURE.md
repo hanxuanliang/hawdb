@@ -56,16 +56,16 @@ crate remains the stable embedded facade, while implementation crates are split
 out as interfaces harden and dependency direction becomes acyclic. The current
 crate split includes `skein-core` for common graph primitives and
 `skein-optimizer` for Cascades-style optimizer primitives, stable physical
-operator metadata, generic plan-child metadata, and structured cost summaries.
-Cypher graph logical and physical operators still live in the root crate until
-parser/planner/executor
-contracts are stable enough to move without creating cycles.
+operator metadata, generic plan-child metadata, structured cost summaries, and
+bounded search reporting. Cypher graph logical and physical operators still
+live in the root crate until parser/planner/executor contracts are stable
+enough to move without creating cycles.
 
 ```text
 crates/
   core/                errors, values, ids, catalog names, schema descriptors
   optimizer/           Cascades cost, memo ids/groups, operator metadata,
-                       properties, trace config
+                       properties, search reports, trace config
   cypher/              token cursor, parser, AST, parameter model
   catalog/             labels, relationship types, property schema, stats
   planner/             semantic analysis, logical plan, physical plan
@@ -181,8 +181,9 @@ The optimizer should follow the same incremental split while graph-specific
 contracts are still in the root crate:
 
 ```text
-src/optimizer.rs                optimizer facade, plan enum, memo search, rules
-src/optimizer/physical_plan.rs  physical plan metadata and child traversal
+crates/optimizer/               generic Cascades primitives and trace reports
+src/optimizer.rs                optimizer facade, graph plan enum, graph rules
+src/optimizer/physical_plan.rs  graph facade to optimizer operator metadata
 ```
 
 ## Logical Plan
@@ -228,9 +229,10 @@ in that direction incrementally:
 
 - keep `PhysicalPlan` as the public compatibility facade until executor
   contracts are stable
-- keep `PhysicalPlanKind`, `PhysicalPlanClass`, and `PlanChildren` in
-  `skein-optimizer`; root graph plans only map facade variants and child
-  references to those crate-owned identities
+- keep `PhysicalPlanKind`, `PhysicalPlanClass`, `PlanChildren`,
+  `OptimizationSearchReport`, and `SelectedPlanTrace` in `skein-optimizer`;
+  root graph plans only map facade variants, child references, costs, and
+  selected-plan summaries to those crate-owned identities
 - split large physical operators into modules and later into per-node structs
   behind the facade
 - move graph-specific implementation rules into a `graph-optimizer` crate only
@@ -271,6 +273,9 @@ Skein should use a Cascades model similar to Chryso:
   selected-plan row/cost summary that includes bounded expand estimates.
 - `PhysicalProperties`: required and delivered ordering, distinctness, and
   binding properties.
+- `OptimizationSearchReport`: records generic search mode, group count, budget
+  warnings, and rule/decision events before the root facade materializes the
+  legacy `OptimizerTrace` surface.
 - `OptimizerTrace`: deterministic diagnostics for rules, groups, candidates,
   costs, warnings, search limits, and selected physical plan operator/class
   histograms. If a logical plan exceeds `OptimizerConfig::max_groups`, Skein
