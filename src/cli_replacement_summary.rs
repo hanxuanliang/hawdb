@@ -76,6 +76,19 @@ pub fn nowledge_replacement_summary_json_with_options(
     let missing_evidence = nowledge_replacement_missing_evidence(bundle);
     let family_details = replacement_readiness_family_details(bundle, options);
     let family_summary = replacement_readiness_family_summary(bundle, family_details.omitted_count);
+    let next_actions = nowledge_replacement_next_actions(
+        bundle,
+        NextActionInputs {
+            covered_business_surface_per_million,
+            shadow_parity_per_million,
+            replacement_readiness_per_million,
+            migration_gate_decision,
+            cutover_decision,
+            cutover_evidence_eligible,
+            previous_wrapper_contract_ready,
+            production_cutover_ready,
+        },
+    );
 
     serde_json::json!({
         "protocol": "skein-nowledge-replacement-summary",
@@ -122,6 +135,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         },
         "blockers": blocker_details.blockers,
         "missing_evidence": missing_evidence,
+        "next_actions": next_actions,
         "replacement_readiness_family_summary": family_summary,
         "replacement_readiness_by_query_family": family_details.families,
     })
@@ -240,6 +254,17 @@ struct ReplacementReadinessInputs<'a> {
     previous_wrapper_contract_ready: bool,
 }
 
+struct NextActionInputs<'a> {
+    covered_business_surface_per_million: Option<u64>,
+    shadow_parity_per_million: Option<u64>,
+    replacement_readiness_per_million: Option<u64>,
+    migration_gate_decision: Option<&'a str>,
+    cutover_decision: Option<&'a str>,
+    cutover_evidence_eligible: bool,
+    previous_wrapper_contract_ready: bool,
+    production_cutover_ready: bool,
+}
+
 fn nowledge_replacement_blocking_categories(
     bundle: &serde_json::Value,
     inputs: ReplacementReadinessInputs<'_>,
@@ -294,6 +319,136 @@ fn nowledge_replacement_blocking_categories(
         categories.insert("query_family_readiness".to_string());
     }
     categories.into_iter().collect()
+}
+
+fn nowledge_replacement_next_actions(
+    bundle: &serde_json::Value,
+    inputs: NextActionInputs<'_>,
+) -> Vec<serde_json::Value> {
+    if inputs.production_cutover_ready {
+        return Vec::new();
+    }
+
+    let mut actions = Vec::new();
+    if inputs.covered_business_surface_per_million != Some(1_000_000) {
+        actions.push(next_action(
+            "refresh_nowledge_cypher_inventory",
+            "scanner coverage is below full Nowledge business-surface coverage",
+            [
+                "inventory_gate.coverage_per_million",
+                "coverage.coverage_per_million",
+            ],
+        ));
+    }
+    if inputs.replacement_readiness_per_million != Some(1_000_000)
+        || has_blocked_replacement_family(bundle)
+    {
+        actions.push(next_action(
+            "close_blocked_query_families",
+            "one or more query families are below full replacement readiness",
+            [
+                "replacement_readiness_per_million",
+                "replacement_readiness_by_query_family",
+            ],
+        ));
+    }
+    if inputs.shadow_parity_per_million != Some(1_000_000)
+        || inputs.cutover_decision != Some("ready")
+        || inputs.migration_gate_decision != Some("ready")
+    {
+        actions.push(next_action(
+            "run_previous_wrapper_shadow_gate",
+            "shadow parity or migration gate decision is not ready",
+            [
+                "cutover.matched_per_million",
+                "cutover.decision",
+                "migration_gate.decision",
+            ],
+        ));
+    }
+    if !inputs.cutover_evidence_eligible {
+        actions.push(next_action(
+            "provide_eligible_cutover_evidence",
+            "cutover evidence is missing or not eligible for production replacement",
+            [
+                "cutover_evidence.eligible",
+                "cutover_evidence.evidence_kind",
+                "cutover_evidence.ready_engine_kind",
+                "cutover_evidence.ready_wrapper_identity",
+            ],
+        ));
+    }
+    if !inputs.previous_wrapper_contract_ready {
+        actions.push(next_action(
+            "run_full_previous_wrapper_contract_check",
+            "previous-wrapper contract evidence is missing or not ready",
+            [
+                "previous_wrapper_contract_evidence.ready",
+                "previous_wrapper_contract_evidence.wrapper_identity",
+                "previous_wrapper_contract_evidence.blocker_codes",
+            ],
+        ));
+    }
+    if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
+        && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
+    {
+        actions.push(next_action(
+            "attach_storage_recovery_report",
+            "required storage recovery evidence is missing or blocked",
+            [
+                "cutover_evidence.storage_recovery_present",
+                "cutover_evidence.storage_recovery_ready",
+                "cutover_evidence.storage_recovery_blocker_codes",
+            ],
+        ));
+    }
+    if json_get_bool_path(
+        bundle,
+        &["cutover_evidence", "background_maintenance_required"],
+    ) == Some(true)
+        && json_get_bool_path(
+            bundle,
+            &["cutover_evidence", "background_maintenance_ready"],
+        ) != Some(true)
+    {
+        actions.push(next_action(
+            "attach_background_maintenance_report",
+            "required background maintenance QoS evidence is missing or blocked",
+            [
+                "cutover_evidence.background_maintenance_present",
+                "cutover_evidence.background_maintenance_ready",
+                "cutover_evidence.background_maintenance_blocker_codes",
+            ],
+        ));
+    }
+
+    actions
+}
+
+fn has_blocked_replacement_family(bundle: &serde_json::Value) -> bool {
+    bundle
+        .get("replacement_readiness_by_query_family")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|family| {
+            family
+                .get("replacement_readiness_per_million")
+                .and_then(serde_json::Value::as_u64)
+                != Some(1_000_000)
+        })
+}
+
+fn next_action(
+    action: &str,
+    reason: &str,
+    evidence_fields: impl IntoIterator<Item = &'static str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "action": action,
+        "reason": reason,
+        "evidence_fields": evidence_fields.into_iter().collect::<Vec<_>>(),
+    })
 }
 
 fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<String> {
@@ -448,6 +603,7 @@ mod tests {
         assert_eq!(summary["production_replacement_per_million"], 1_000_000);
         assert_eq!(summary["blocking_categories"], serde_json::json!([]));
         assert_eq!(summary["missing_evidence"], serde_json::json!([]));
+        assert_eq!(summary["next_actions"], serde_json::json!([]));
         assert_eq!(
             summary["cutover_evidence"]["storage_recovery_protocol_matches"],
             true
@@ -486,6 +642,10 @@ mod tests {
         assert_eq!(
             summary["missing_evidence"],
             serde_json::json!(["previous_wrapper_contract_evidence"])
+        );
+        assert_eq!(
+            summary["next_actions"][0]["action"],
+            "run_full_previous_wrapper_contract_check"
         );
         assert!(summary["blocking_categories"]
             .as_array()
@@ -600,6 +760,11 @@ mod tests {
             summary["replacement_readiness_family_summary"]["blocked_query_families"],
             serde_json::json!(["search_projection"])
         );
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "close_blocked_query_families"));
     }
 
     #[test]
@@ -723,6 +888,65 @@ mod tests {
         assert_eq!(
             summary["cutover_evidence"]["background_maintenance_blocker_codes"],
             serde_json::json!(["missing_evidence"])
+        );
+        assert_eq!(
+            summary["next_actions"],
+            serde_json::json!([
+                {
+                    "action": "close_blocked_query_families",
+                    "reason": "one or more query families are below full replacement readiness",
+                    "evidence_fields": [
+                        "replacement_readiness_per_million",
+                        "replacement_readiness_by_query_family"
+                    ]
+                },
+                {
+                    "action": "run_previous_wrapper_shadow_gate",
+                    "reason": "shadow parity or migration gate decision is not ready",
+                    "evidence_fields": [
+                        "cutover.matched_per_million",
+                        "cutover.decision",
+                        "migration_gate.decision"
+                    ]
+                },
+                {
+                    "action": "provide_eligible_cutover_evidence",
+                    "reason": "cutover evidence is missing or not eligible for production replacement",
+                    "evidence_fields": [
+                        "cutover_evidence.eligible",
+                        "cutover_evidence.evidence_kind",
+                        "cutover_evidence.ready_engine_kind",
+                        "cutover_evidence.ready_wrapper_identity"
+                    ]
+                },
+                {
+                    "action": "run_full_previous_wrapper_contract_check",
+                    "reason": "previous-wrapper contract evidence is missing or not ready",
+                    "evidence_fields": [
+                        "previous_wrapper_contract_evidence.ready",
+                        "previous_wrapper_contract_evidence.wrapper_identity",
+                        "previous_wrapper_contract_evidence.blocker_codes"
+                    ]
+                },
+                {
+                    "action": "attach_storage_recovery_report",
+                    "reason": "required storage recovery evidence is missing or blocked",
+                    "evidence_fields": [
+                        "cutover_evidence.storage_recovery_present",
+                        "cutover_evidence.storage_recovery_ready",
+                        "cutover_evidence.storage_recovery_blocker_codes"
+                    ]
+                },
+                {
+                    "action": "attach_background_maintenance_report",
+                    "reason": "required background maintenance QoS evidence is missing or blocked",
+                    "evidence_fields": [
+                        "cutover_evidence.background_maintenance_present",
+                        "cutover_evidence.background_maintenance_ready",
+                        "cutover_evidence.background_maintenance_blocker_codes"
+                    ]
+                }
+            ])
         );
         assert_eq!(summary["production_replacement_per_million"], 0);
     }

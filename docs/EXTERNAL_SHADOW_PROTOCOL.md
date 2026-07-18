@@ -654,6 +654,11 @@ omitted-item counts in `replacement_readiness_family_summary` and
 `blocker_summary`. `--max-family-items <n>` keeps only the first `n`
 family-detail rows and reports the omitted count. `--max-blockers <n>` keeps
 only the first `n` blocker strings and reports the omitted count.
+The summary also includes a bounded `next_actions` array. Each entry contains a
+stable `action` code, a short `reason`, and the JSON `evidence_fields` that led
+to the action. These actions are diagnostic hints for release automation and
+dashboards; they do not override the fail-closed `production_cutover_ready`
+decision.
 
 When the caller requires rollback proof, the migration gate can also carry
 caller-owned rollback evidence through `rollback_required`, `rollback_ready`,
