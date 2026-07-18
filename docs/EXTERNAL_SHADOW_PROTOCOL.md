@@ -414,8 +414,19 @@ delta candidate carries an executable request. Executable search deltas also
 report operation, upsert, delete, max-operation, and complete-through graph
 commit epoch fields so caller-owned schedulers can distinguish precise
 incremental projection work from planning-only freshness signals. This object
-is resource readiness evidence for caller-owned scheduling; it does not change
-the compatibility or cutover decision.
+is resource readiness evidence for caller-owned scheduling. When
+`--require-background-maintenance-evidence` is passed, `cutover_evidence`
+reports `background_maintenance_required`, `background_maintenance_present`,
+`background_maintenance_ready`, `background_maintenance_total_candidates`,
+`background_maintenance_ranked_count`,
+`background_maintenance_foreground_ranked_count`,
+`background_maintenance_unknown_admission_count`, and
+`background_maintenance_blockers`. Required background maintenance evidence is
+ready only when the summary is present, it contains non-empty candidate and
+ranked-work counts, all ranked work is background priority, and admission values
+use the stable `admit`, `defer`, or `reject` strings. Deferred or rejected
+background work does not block cutover evidence because resource-constrained
+deployments are expected to delay internal work under pressure.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover

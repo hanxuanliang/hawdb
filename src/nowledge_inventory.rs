@@ -34,6 +34,7 @@ pub struct NowledgeCypherMigrationGateJsonOptions {
     pub include_cutover_evidence: bool,
     pub storage_recovery_required: bool,
     pub storage_recovery: Option<serde_json::Value>,
+    pub background_maintenance_required: bool,
     pub rollback: CompatibilityRollbackEvidence,
 }
 
@@ -47,6 +48,18 @@ pub struct StorageRecoveryEvidenceHealth {
     pub checkpoint_boundary_present: Option<bool>,
     pub wal_replay_bounded: Option<bool>,
     pub torn_tail_clean: Option<bool>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackgroundMaintenanceEvidenceHealth {
+    pub required: bool,
+    pub present: bool,
+    pub ready: bool,
+    pub total_candidates: Option<u64>,
+    pub ranked_count: Option<u64>,
+    pub foreground_ranked_count: u64,
+    pub unknown_admission_count: u64,
     pub blockers: Vec<String>,
 }
 
@@ -263,6 +276,7 @@ fn add_shadow_metadata_to_migration_gate_json(
             ready_preflight,
             options.shadow_ready.as_ref(),
             options.storage_recovery_required,
+            options.background_maintenance_required,
         )?;
     }
     Ok(())
@@ -329,6 +343,7 @@ fn insert_cutover_evidence_json(
     ready_preflight: bool,
     shadow_ready: Option<&ExternalShadowReady>,
     storage_recovery_required: bool,
+    background_maintenance_required: bool,
 ) -> Result<()> {
     let migration_gate = bundle
         .get("migration_gate")
@@ -348,6 +363,8 @@ fn insert_cutover_evidence_json(
     let shadow_trace_health = external_shadow_trace_health_from_bundle(bundle);
     let storage_recovery_health =
         storage_recovery_evidence_health_from_bundle(bundle, storage_recovery_required);
+    let background_maintenance_health =
+        background_maintenance_evidence_health_from_bundle(bundle, background_maintenance_required);
     let mut blockers = Vec::new();
     if self_shadow {
         blockers.push("shadow run is protocol smoke, not previous-wrapper evidence".to_string());
@@ -366,6 +383,9 @@ fn insert_cutover_evidence_json(
     }
     if !storage_recovery_health.ready {
         blockers.extend(storage_recovery_health.blockers.iter().cloned());
+    }
+    if !background_maintenance_health.ready {
+        blockers.extend(background_maintenance_health.blockers.iter().cloned());
     }
     if !migration_gate_ready {
         blockers.push("migration gate decision is not ready".to_string());
@@ -401,6 +421,14 @@ fn insert_cutover_evidence_json(
             "storage_recovery_wal_replay_bounded": storage_recovery_health.wal_replay_bounded,
             "storage_recovery_torn_tail_clean": storage_recovery_health.torn_tail_clean,
             "storage_recovery_blockers": storage_recovery_health.blockers,
+            "background_maintenance_required": background_maintenance_health.required,
+            "background_maintenance_present": background_maintenance_health.present,
+            "background_maintenance_ready": background_maintenance_health.ready,
+            "background_maintenance_total_candidates": background_maintenance_health.total_candidates,
+            "background_maintenance_ranked_count": background_maintenance_health.ranked_count,
+            "background_maintenance_foreground_ranked_count": background_maintenance_health.foreground_ranked_count,
+            "background_maintenance_unknown_admission_count": background_maintenance_health.unknown_admission_count,
+            "background_maintenance_blockers": background_maintenance_health.blockers,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
         }),
@@ -413,6 +441,85 @@ pub fn storage_recovery_evidence_health_from_bundle(
     required: bool,
 ) -> StorageRecoveryEvidenceHealth {
     storage_recovery_evidence_health(bundle.get("storage_recovery"), required)
+}
+
+pub fn background_maintenance_evidence_health_from_bundle(
+    bundle: &serde_json::Value,
+    required: bool,
+) -> BackgroundMaintenanceEvidenceHealth {
+    background_maintenance_evidence_health(bundle.get("background_maintenance"), required)
+}
+
+pub fn background_maintenance_evidence_health(
+    background_maintenance: Option<&serde_json::Value>,
+    required: bool,
+) -> BackgroundMaintenanceEvidenceHealth {
+    let Some(background_maintenance) = background_maintenance else {
+        let blockers = if required {
+            vec!["background maintenance evidence is required before cutover".to_string()]
+        } else {
+            Vec::new()
+        };
+        return BackgroundMaintenanceEvidenceHealth {
+            required,
+            present: false,
+            ready: !required,
+            total_candidates: None,
+            ranked_count: None,
+            foreground_ranked_count: 0,
+            unknown_admission_count: 0,
+            blockers,
+        };
+    };
+    let total_candidates = background_maintenance
+        .get("total_candidates")
+        .and_then(serde_json::Value::as_u64);
+    let ranked = background_maintenance
+        .get("ranked")
+        .and_then(serde_json::Value::as_array);
+    let ranked_count = ranked.map(|items| items.len() as u64);
+    let foreground_ranked_count = ranked
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            item.get("priority").and_then(serde_json::Value::as_str) == Some("foreground")
+        })
+        .count() as u64;
+    let unknown_admission_count = background_maintenance
+        .get("ranked")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|item| {
+            !matches!(
+                item.get("admission").and_then(serde_json::Value::as_str),
+                Some("admit" | "defer" | "reject")
+            )
+        })
+        .count() as u64;
+    let mut blockers = Vec::new();
+    if required && total_candidates.unwrap_or_default() == 0 {
+        blockers.push("background maintenance evidence has no candidates".to_string());
+    }
+    if required && ranked_count.unwrap_or_default() == 0 {
+        blockers.push("background maintenance evidence has no ranked work".to_string());
+    }
+    if foreground_ranked_count > 0 {
+        blockers.push("background maintenance evidence ranked foreground work".to_string());
+    }
+    if unknown_admission_count > 0 {
+        blockers.push("background maintenance evidence has unknown admission values".to_string());
+    }
+    BackgroundMaintenanceEvidenceHealth {
+        required,
+        present: true,
+        ready: blockers.is_empty(),
+        total_candidates,
+        ranked_count,
+        foreground_ranked_count,
+        unknown_admission_count,
+        blockers,
+    }
 }
 
 pub fn storage_recovery_evidence_health(
@@ -1572,6 +1679,7 @@ mod tests {
                         "torn_tail_clean": true
                     }
                 })),
+                background_maintenance_required: true,
                 rollback: CompatibilityRollbackEvidence {
                     required: true,
                     ready: true,
@@ -1635,6 +1743,32 @@ mod tests {
             bundle["cutover_evidence"]["storage_recovery_wal_replay_bounded"],
             true
         );
+        assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_required"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_present"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_ready"],
+            true
+        );
+        assert!(
+            bundle["cutover_evidence"]["background_maintenance_total_candidates"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_foreground_ranked_count"],
+            0
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_unknown_admission_count"],
+            0
+        );
         assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);
         assert_eq!(bundle["migration_gate"]["rollback_required"], true);
@@ -1651,6 +1785,46 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn background_maintenance_evidence_health_requires_present_summary() {
+        let health = super::background_maintenance_evidence_health(None, true);
+
+        assert!(health.required);
+        assert!(!health.present);
+        assert!(!health.ready);
+        assert_eq!(
+            health.blockers,
+            vec!["background maintenance evidence is required before cutover".to_string()]
+        );
+    }
+
+    #[test]
+    fn background_maintenance_evidence_health_rejects_foreground_ranked_work() {
+        let summary = serde_json::json!({
+            "total_candidates": 1,
+            "ranked": [
+                {
+                    "kind": "schema_maintenance",
+                    "work_class": "mutation",
+                    "priority": "foreground",
+                    "admission": "admit"
+                }
+            ]
+        });
+
+        let health = super::background_maintenance_evidence_health(Some(&summary), true);
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.total_candidates, Some(1));
+        assert_eq!(health.ranked_count, Some(1));
+        assert_eq!(health.foreground_ranked_count, 1);
+        assert_eq!(
+            health.blockers,
+            vec!["background maintenance evidence ranked foreground work".to_string()]
+        );
     }
 
     #[test]
