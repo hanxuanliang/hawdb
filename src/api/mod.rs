@@ -1392,6 +1392,36 @@ pub struct KnowledgeEntityBatchOutput {
     pub filtered_out_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePropertyBatchRequest {
+    pub entities: Vec<KnowledgeEntityRequest>,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeScopedPropertyBatchRequest {
+    pub projection: KnowledgePropertyBatchRequest,
+    pub metadata_filters: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgePropertyRow {
+    pub entity: KnowledgeEntityRequest,
+    pub node_id: Option<u64>,
+    pub filtered_out: bool,
+    pub properties: BTreeMap<String, Option<Value>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgePropertyBatchOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgePropertyRow>,
+    pub found_count: usize,
+    pub missing_count: usize,
+    pub filtered_out_count: usize,
+    pub property_names: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {
     pub node_id: u64,
@@ -2694,6 +2724,20 @@ impl Database {
         request: &KnowledgeScopedEntityBatchRequest,
     ) -> KnowledgeEntityBatchOutput {
         knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_property_batch(
+        &self,
+        request: &KnowledgePropertyBatchRequest,
+    ) -> KnowledgePropertyBatchOutput {
+        knowledge_property_batch_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_property_batch(
+        &self,
+        request: &KnowledgeScopedPropertyBatchRequest,
+    ) -> KnowledgePropertyBatchOutput {
+        knowledge_scoped_property_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_neighbors(
@@ -4074,6 +4118,109 @@ fn knowledge_scoped_entity_match(
         return KnowledgeScopedEntityMatch::FilteredOut;
     }
     KnowledgeScopedEntityMatch::Found(knowledge_entity_from_node(catalog, node))
+}
+
+fn knowledge_property_batch_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgePropertyBatchRequest,
+) -> KnowledgePropertyBatchOutput {
+    knowledge_scoped_property_batch_for(
+        catalog,
+        store,
+        &KnowledgeScopedPropertyBatchRequest {
+            projection: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn knowledge_scoped_property_batch_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeScopedPropertyBatchRequest,
+) -> KnowledgePropertyBatchOutput {
+    let property_names = dedup_property_names(&request.projection.property_names);
+    let mut rows = Vec::with_capacity(request.projection.entities.len());
+    let mut found_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    for entity_request in &request.projection.entities {
+        let node = seed_node_by_label_and_external_id(
+            catalog,
+            store,
+            entity_request.label.as_str(),
+            entity_request.external_id.as_str(),
+        );
+        let Some(node) = node else {
+            missing_count += 1;
+            rows.push(KnowledgePropertyRow {
+                entity: entity_request.clone(),
+                node_id: None,
+                filtered_out: false,
+                properties: empty_property_projection(&property_names),
+            });
+            continue;
+        };
+        if !request.metadata_filters.is_empty()
+            && !knowledge_graph_seed_matches_filters(catalog, node, &request.metadata_filters)
+        {
+            filtered_out_count += 1;
+            rows.push(KnowledgePropertyRow {
+                entity: entity_request.clone(),
+                node_id: Some(node.id.0),
+                filtered_out: true,
+                properties: empty_property_projection(&property_names),
+            });
+            continue;
+        }
+        found_count += 1;
+        rows.push(KnowledgePropertyRow {
+            entity: entity_request.clone(),
+            node_id: Some(node.id.0),
+            filtered_out: false,
+            properties: project_node_properties(node, &property_names),
+        });
+    }
+    KnowledgePropertyBatchOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        rows,
+        found_count,
+        missing_count,
+        filtered_out_count,
+        property_names,
+    }
+}
+
+fn dedup_property_names(property_names: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    property_names
+        .iter()
+        .filter(|name| seen.insert((*name).clone()))
+        .cloned()
+        .collect()
+}
+
+fn empty_property_projection(property_names: &[String]) -> BTreeMap<String, Option<Value>> {
+    property_names
+        .iter()
+        .cloned()
+        .map(|name| (name, None))
+        .collect()
+}
+
+fn project_node_properties(
+    node: &NodeRecord,
+    property_names: &[String],
+) -> BTreeMap<String, Option<Value>> {
+    property_names
+        .iter()
+        .cloned()
+        .map(|name| {
+            let value = node.properties.get(&name).cloned();
+            (name, value)
+        })
+        .collect()
 }
 
 fn knowledge_neighbors_for(
@@ -6719,6 +6866,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_scoped_entity_batch(request)
     }
 
+    pub fn knowledge_property_batch(
+        &self,
+        request: &KnowledgePropertyBatchRequest,
+    ) -> KnowledgePropertyBatchOutput {
+        self.db.knowledge_property_batch(request)
+    }
+
+    pub fn knowledge_scoped_property_batch(
+        &self,
+        request: &KnowledgeScopedPropertyBatchRequest,
+    ) -> KnowledgePropertyBatchOutput {
+        self.db.knowledge_scoped_property_batch(request)
+    }
+
     pub fn knowledge_neighbors(
         &self,
         request: &KnowledgeNeighborsRequest,
@@ -7158,6 +7319,20 @@ impl DatabaseReadTransaction {
         request: &KnowledgeScopedEntityBatchRequest,
     ) -> KnowledgeEntityBatchOutput {
         knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_property_batch(
+        &self,
+        request: &KnowledgePropertyBatchRequest,
+    ) -> KnowledgePropertyBatchOutput {
+        knowledge_property_batch_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_scoped_property_batch(
+        &self,
+        request: &KnowledgeScopedPropertyBatchRequest,
+    ) -> KnowledgePropertyBatchOutput {
+        knowledge_scoped_property_batch_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_neighbors(

@@ -265,11 +265,11 @@ Checkpoint, manifest, and projected graph artifact publication sync the
 published file and parent directory around the atomic rename boundary without
 adding per-mutation directory syncs.
 Read transactions also expose the typed knowledge entity, ordered bulk entity,
-ordered relationship, neighborhood, path, and subgraph operations, including
-metadata-scoped entity, ordered bulk entity, ordered relationship, neighborhood,
-path endpoint, and subgraph variants, over their pinned graph snapshot, so
-knowledge navigation can remain snapshot-stable without constructing ad hoc
-Cypher.
+ordered property projection, ordered relationship, neighborhood, path, and
+subgraph operations, including metadata-scoped entity, ordered bulk entity,
+ordered property projection, ordered relationship, neighborhood, path endpoint,
+and subgraph variants, over their pinned graph snapshot, so knowledge navigation
+can remain snapshot-stable without constructing ad hoc Cypher.
 Page-level MVCC, physical page/segment reclamation, and concurrent writer
 coordination remain.
 
