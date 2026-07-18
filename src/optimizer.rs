@@ -12,7 +12,7 @@ pub use skein_optimizer::{
     apply_rule_batch, plan_class_counts, plan_operator_counts, Distribution, GroupId, Memo,
     OptimizationSearchReport, OptimizerConfig, OptimizerRule, OptimizerTrace, PhysicalPlanClass,
     PhysicalPlanKind, PhysicalProperties, PlanCost, PlanCostBreakdown, RuleApplication, RuleEvent,
-    RuleId, RuleKind, RuleOutcome, RulePromise, SelectedPlanTrace,
+    RuleId, RuleKind, RuleOutcome, RulePromise, SearchMode, SelectedPlanTrace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 

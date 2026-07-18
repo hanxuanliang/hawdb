@@ -2,6 +2,7 @@ use crate::cost::{PlanCost, PlanCostBreakdown};
 use crate::properties::PhysicalProperties;
 use crate::trace::OptimizerTrace;
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SearchMode {
@@ -118,6 +119,7 @@ impl OptimizationSearchReport {
     pub fn into_trace(self, selected: SelectedPlanTrace) -> OptimizerTrace {
         OptimizerTrace {
             groups: self.groups,
+            search_mode: self.mode,
             selected_plan: selected.explain,
             selected_plan_fingerprint: selected.fingerprint,
             selected_plan_cost: selected.cost,
@@ -176,11 +178,39 @@ impl RuleEvent {
     fn from_decision(decision: &str) -> Option<Self> {
         let (outcome, rest) = decision.split_once(' ')?;
         let (rule, detail) = rest.split_once(": ")?;
-        Some(Self::new(rule, RuleOutcome::from_str(outcome)?, detail))
+        Some(Self::new(
+            rule,
+            outcome.parse::<RuleOutcome>().ok()?,
+            detail,
+        ))
+    }
+}
+
+impl SearchMode {
+    pub fn all() -> &'static [Self] {
+        const ALL: &[SearchMode] = &[SearchMode::Memo, SearchMode::DirectFallback];
+        ALL
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            SearchMode::Memo => "memo",
+            SearchMode::DirectFallback => "direct_fallback",
+        }
     }
 }
 
 impl RuleOutcome {
+    pub fn all() -> &'static [Self] {
+        const ALL: &[RuleOutcome] = &[
+            RuleOutcome::Applied,
+            RuleOutcome::Skipped,
+            RuleOutcome::Estimated,
+            RuleOutcome::Selected,
+        ];
+        ALL
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             RuleOutcome::Applied => "apply",
@@ -189,15 +219,29 @@ impl RuleOutcome {
             RuleOutcome::Selected => "selected",
         }
     }
+}
 
-    fn from_str(value: &str) -> Option<Self> {
-        match value {
-            "apply" => Some(Self::Applied),
-            "skip" => Some(Self::Skipped),
-            "estimate" => Some(Self::Estimated),
-            "selected" => Some(Self::Selected),
-            _ => None,
-        }
+impl FromStr for SearchMode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|mode| mode.as_str() == value)
+            .ok_or("unknown optimizer search mode")
+    }
+}
+
+impl FromStr for RuleOutcome {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|outcome| outcome.as_str() == value)
+            .ok_or("unknown optimizer rule outcome")
     }
 }
 
@@ -220,6 +264,14 @@ mod tests {
     }
 
     #[test]
+    fn search_mode_strings_round_trip_for_diagnostics() {
+        for mode in SearchMode::all() {
+            assert_eq!(mode.as_str().parse::<SearchMode>(), Ok(*mode));
+        }
+        assert!("unknown".parse::<SearchMode>().is_err());
+    }
+
+    #[test]
     fn rule_event_formats_stable_decision_text() {
         let event = RuleEvent::estimated("index_seek", "rows=1 cost=3");
 
@@ -227,6 +279,14 @@ mod tests {
         assert_eq!(event.outcome(), RuleOutcome::Estimated);
         assert_eq!(event.detail(), "rows=1 cost=3");
         assert_eq!(event.into_decision(), "estimate index_seek: rows=1 cost=3");
+    }
+
+    #[test]
+    fn rule_outcome_strings_round_trip_for_diagnostics() {
+        for outcome in RuleOutcome::all() {
+            assert_eq!(outcome.as_str().parse::<RuleOutcome>(), Ok(*outcome));
+        }
+        assert!("unknown".parse::<RuleOutcome>().is_err());
     }
 
     #[test]
@@ -252,6 +312,7 @@ mod tests {
         });
 
         assert_eq!(trace.groups, 2);
+        assert_eq!(trace.search_mode, SearchMode::Memo);
         assert!(trace.warnings.is_empty());
         assert_eq!(trace.decisions[0], "choose IndexNodeSeek");
         assert_eq!(

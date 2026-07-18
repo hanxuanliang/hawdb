@@ -1,6 +1,6 @@
 use crate::cost::{PlanCost, PlanCostBreakdown};
 use crate::properties::PhysicalProperties;
-use crate::search::RuleEvent;
+use crate::search::{RuleEvent, SearchMode};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -17,6 +17,7 @@ impl Default for OptimizerConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptimizerTrace {
     pub groups: usize,
+    pub search_mode: SearchMode,
     pub selected_plan: String,
     pub selected_plan_fingerprint: String,
     pub selected_plan_cost: PlanCost,

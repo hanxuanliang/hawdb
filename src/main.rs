@@ -3093,6 +3093,7 @@ fn explain_output_json(
                 .collect()
         ),
         "groups": output.trace.groups,
+        "search_mode": output.trace.search_mode.as_str(),
         "selected_plan": output.trace.selected_plan,
         "selected_plan_fingerprint": output.trace.selected_plan_fingerprint,
         "selected_plan_cost": {
@@ -3671,6 +3672,7 @@ mod tests {
             },
             trace: OptimizerTrace {
                 groups: 1,
+                search_mode: skein::optimizer::SearchMode::Memo,
                 selected_plan: "SeqNodeScan variable=m label=Memory".to_string(),
                 selected_plan_fingerprint: "SeqNodeScan(1:m:6:Memory)".to_string(),
                 selected_plan_cost: PlanCost {
@@ -3717,6 +3719,7 @@ mod tests {
 
         assert_eq!(json["protocol"], "skein-explain");
         assert_eq!(json["protocol_version"], 1);
+        assert_eq!(json["search_mode"], "memo");
         assert_eq!(json["parameters"]["id"], 42);
         assert_eq!(
             json["selected_plan_fingerprint"],
