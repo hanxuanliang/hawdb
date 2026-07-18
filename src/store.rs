@@ -503,6 +503,7 @@ pub struct StorageReclamationWatermark {
 pub struct StorageRecoveryReport {
     pub durable: bool,
     pub recovery_mode: RecoveryMode,
+    pub max_wal_replay_entries: Option<usize>,
     pub checkpoint_epoch: Option<u64>,
     pub checkpoint_commit_epoch: Option<u64>,
     pub wal_present: bool,
@@ -5586,6 +5587,7 @@ impl GraphStore {
             return Ok(StorageRecoveryReport {
                 durable: true,
                 recovery_mode: config.recovery_mode,
+                max_wal_replay_entries: config.max_entries,
                 checkpoint_epoch: Some(checkpoint_epoch),
                 checkpoint_commit_epoch: Some(checkpoint_commit_epoch),
                 wal_present,
@@ -5657,6 +5659,7 @@ impl GraphStore {
         Ok(StorageRecoveryReport {
             durable: true,
             recovery_mode: config.recovery_mode,
+            max_wal_replay_entries: config.max_entries,
             checkpoint_epoch: Some(checkpoint_epoch),
             checkpoint_commit_epoch: Some(checkpoint_commit_epoch),
             wal_present,

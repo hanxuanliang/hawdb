@@ -7008,10 +7008,18 @@ fn storage_recovery_report_tracks_wal_replay_boundary() {
             .unwrap();
     }
 
-    let db = Database::open(&path).unwrap();
+    let db = Database::open_with_config(
+        &path,
+        DatabaseConfig {
+            max_wal_replay_entries: Some(8),
+            ..DatabaseConfig::default()
+        },
+    )
+    .unwrap();
     let report = db.storage_recovery_report();
     assert!(report.durable);
     assert_eq!(report.recovery_mode, RecoveryMode::TolerateTornTail);
+    assert_eq!(report.max_wal_replay_entries, Some(8));
     assert_eq!(report.checkpoint_epoch, Some(1));
     assert_eq!(report.checkpoint_commit_epoch, Some(1));
     assert!(report.wal_present);
@@ -7032,6 +7040,7 @@ fn in_memory_storage_recovery_report_is_non_durable() {
     assert!(!report.durable);
     assert_eq!(report.recovered_commit_epoch, 0);
     assert_eq!(report.replayed_wal_entries, 0);
+    assert_eq!(report.max_wal_replay_entries, None);
     assert_eq!(report.checkpoint_epoch, None);
     assert_eq!(report.next_lsn_after_replay, None);
 }

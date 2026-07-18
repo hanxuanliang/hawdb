@@ -85,14 +85,18 @@ is durable.
 `Database::storage_recovery_report` exposes the open-time recovery boundary in
 structured form: recovery mode, checkpoint epoch, checkpoint-covered commit
 epoch, WAL presence, replay start LSN, next LSN after replay, replayed WAL
-record count, ignored torn-tail detail for tolerant recovery, recovered commit
-epoch, and whether the store is durable. This report is diagnostic state only;
-it does not change WAL replay semantics or the on-disk format.
+record count, configured WAL replay entry bound when present, ignored torn-tail
+detail for tolerant recovery, recovered commit epoch, and whether the store is
+durable. This report is diagnostic state only; it does not change WAL replay
+semantics or the on-disk format.
 The CLI command `skein storage-recovery-report [--strict]
-[--max-wal-replay-entries <n>] <database-path>` opens an existing database
-read-only and prints the same report as JSON. Use this as CI or migration
-evidence for the real database path, separate from in-memory compatibility
-fixtures.
+[--max-wal-replay-entries <n>] [--require-durable]
+[--require-checkpoint-boundary] [--require-bounded-wal-replay]
+[--require-clean-tail] <database-path>` opens an existing database read-only
+and prints the same report as JSON. Use this as CI or migration evidence for
+the real database path, separate from in-memory compatibility fixtures. The
+`wal_replay_bounded` readiness flag is true only when the open used an explicit
+WAL replay entry bound.
 `Database::export_canonical_graph_snapshot` and the same method on
 `DatabaseReadTransaction` expose the current or pinned graph snapshot as
 canonical node and relationship records with a deterministic logical checksum.

@@ -184,6 +184,10 @@ fn main() -> Result<()> {
         if command == "storage-recovery-report" {
             let mut recovery_mode = RecoveryMode::default();
             let mut max_wal_replay_entries = None;
+            let mut require_durable = false;
+            let mut require_checkpoint_boundary = false;
+            let mut require_bounded_wal_replay = false;
+            let mut require_clean_tail = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--strict" => {
@@ -196,6 +200,22 @@ fn main() -> Result<()> {
                             .next()
                             .ok_or_else(|| SkeinError::Semantic(storage_recovery_report_usage()))?;
                         max_wal_replay_entries = Some(parse_max_wal_replay_entries(&raw_limit)?);
+                    }
+                    "--require-durable" => {
+                        require_durable = true;
+                        args.next();
+                    }
+                    "--require-checkpoint-boundary" => {
+                        require_checkpoint_boundary = true;
+                        args.next();
+                    }
+                    "--require-bounded-wal-replay" => {
+                        require_bounded_wal_replay = true;
+                        args.next();
+                    }
+                    "--require-clean-tail" => {
+                        require_clean_tail = true;
+                        args.next();
                     }
                     _ => break,
                 }
@@ -218,6 +238,15 @@ fn main() -> Result<()> {
             let rendered =
                 storage_recovery_report_json(db.storage_version(), &db.storage_recovery_report());
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            enforce_storage_recovery_requirements(
+                &db.storage_recovery_report(),
+                StorageRecoveryRequirements {
+                    require_durable,
+                    require_checkpoint_boundary,
+                    require_bounded_wal_replay,
+                    require_clean_tail,
+                },
+            )?;
             return Ok(());
         }
         if command == "validate-canonical-snapshot" {
@@ -560,7 +589,7 @@ fn validate_canonical_snapshot_usage() -> String {
 }
 
 fn storage_recovery_report_usage() -> String {
-    "storage-recovery-report requires [--strict] [--max-wal-replay-entries <n>] <database-path>"
+    "storage-recovery-report requires [--strict] [--max-wal-replay-entries <n>] [--require-durable] [--require-checkpoint-boundary] [--require-bounded-wal-replay] [--require-clean-tail] <database-path>"
         .to_string()
 }
 
@@ -676,6 +705,40 @@ fn parse_max_wal_replay_entries(raw_limit: &str) -> Result<usize> {
         ));
     }
     Ok(limit)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct StorageRecoveryRequirements {
+    require_durable: bool,
+    require_checkpoint_boundary: bool,
+    require_bounded_wal_replay: bool,
+    require_clean_tail: bool,
+}
+
+fn enforce_storage_recovery_requirements(
+    report: &StorageRecoveryReport,
+    requirements: StorageRecoveryRequirements,
+) -> Result<()> {
+    let mut blockers = Vec::new();
+    if requirements.require_durable && !report.durable {
+        blockers.push("durable recovery was not observed");
+    }
+    if requirements.require_checkpoint_boundary && report.checkpoint_epoch.is_none() {
+        blockers.push("checkpoint boundary is missing");
+    }
+    if requirements.require_bounded_wal_replay && report.max_wal_replay_entries.is_none() {
+        blockers.push("WAL replay was not opened with a configured entry bound");
+    }
+    if requirements.require_clean_tail && report.torn_tail_ignored {
+        blockers.push("torn WAL tail was ignored during recovery");
+    }
+    if blockers.is_empty() {
+        return Ok(());
+    }
+    Err(SkeinError::Execution(format!(
+        "storage recovery report requirements failed: {}",
+        blockers.join("; ")
+    )))
 }
 
 fn add_shadow_ready_report(
@@ -866,6 +929,7 @@ fn storage_recovery_report_json(
         "storage_version": storage_version,
         "durable": report.durable,
         "recovery_mode": recovery_mode_name(report.recovery_mode),
+        "max_wal_replay_entries": report.max_wal_replay_entries,
         "checkpoint_epoch": report.checkpoint_epoch,
         "checkpoint_commit_epoch": report.checkpoint_commit_epoch,
         "wal_present": report.wal_present,
@@ -878,7 +942,7 @@ fn storage_recovery_report_json(
         "readiness": {
             "durable_recovery_observed": report.durable,
             "checkpoint_boundary_present": report.checkpoint_epoch.is_some(),
-            "wal_replay_bounded": true,
+            "wal_replay_bounded": report.max_wal_replay_entries.is_some(),
             "torn_tail_clean": !report.torn_tail_ignored,
         },
     })
@@ -2822,19 +2886,20 @@ mod tests {
     use super::{
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
         add_shadow_trace_report, canonical_snapshot_validation_json, cutover_evidence_is_eligible,
-        graph_lightning_bootstrap_bundle_json, graph_lightning_bootstrap_bundle_usage,
-        graph_lightning_bootstrap_manifest_json, graph_lightning_bootstrap_manifest_usage,
-        graph_lightning_gc_staging_report, graph_lightning_graph_stream_usage,
-        graph_lightning_graph_stream_validation_json, graph_lightning_import_status,
-        graph_lightning_publish_staging_usage, graph_lightning_stage_bootstrap_usage,
-        graph_lightning_verify_export_usage, graph_lightning_verify_published_usage,
-        graph_lightning_verify_staging_usage, is_self_shadow_command, parse_max_wal_replay_entries,
-        parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
+        enforce_storage_recovery_requirements, graph_lightning_bootstrap_bundle_json,
+        graph_lightning_bootstrap_bundle_usage, graph_lightning_bootstrap_manifest_json,
+        graph_lightning_bootstrap_manifest_usage, graph_lightning_gc_staging_report,
+        graph_lightning_graph_stream_usage, graph_lightning_graph_stream_validation_json,
+        graph_lightning_import_status, graph_lightning_publish_staging_usage,
+        graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
+        graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
+        is_self_shadow_command, parse_max_wal_replay_entries, parse_shadow_timeout_ms,
+        publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         storage_recovery_report_json, validate_canonical_snapshot_usage, value_json,
         verify_graph_lightning_published_manifest, verify_graph_lightning_staging_catalog,
-        PublishGraphLightningOptions,
+        PublishGraphLightningOptions, StorageRecoveryRequirements,
     };
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
@@ -3196,6 +3261,7 @@ mod tests {
         let report = StorageRecoveryReport {
             durable: true,
             recovery_mode: RecoveryMode::Strict,
+            max_wal_replay_entries: Some(64),
             checkpoint_epoch: Some(2),
             checkpoint_commit_epoch: Some(8),
             wal_present: true,
@@ -3212,6 +3278,7 @@ mod tests {
         assert_eq!(json["protocol"], "skein-storage-recovery-report");
         assert_eq!(json["storage_version"], "skein-storage-v1");
         assert_eq!(json["recovery_mode"], "strict");
+        assert_eq!(json["max_wal_replay_entries"], 64);
         assert_eq!(json["checkpoint_epoch"], 2);
         assert_eq!(json["checkpoint_commit_epoch"], 8);
         assert_eq!(json["wal_replay_start_lsn"], 9);
@@ -3224,6 +3291,37 @@ mod tests {
         assert_eq!(json["readiness"]["checkpoint_boundary_present"], true);
         assert_eq!(json["readiness"]["wal_replay_bounded"], true);
         assert_eq!(json["readiness"]["torn_tail_clean"], false);
+    }
+
+    #[test]
+    fn storage_recovery_requirements_reject_unbounded_wal_replay() {
+        let report = StorageRecoveryReport {
+            durable: true,
+            recovery_mode: RecoveryMode::TolerateTornTail,
+            max_wal_replay_entries: None,
+            checkpoint_epoch: Some(1),
+            checkpoint_commit_epoch: Some(1),
+            wal_present: true,
+            wal_replay_start_lsn: Some(1),
+            next_lsn_after_replay: Some(1),
+            replayed_wal_entries: 0,
+            torn_tail_ignored: false,
+            torn_tail_reason: None,
+            recovered_commit_epoch: 1,
+        };
+
+        let error = enforce_storage_recovery_requirements(
+            &report,
+            StorageRecoveryRequirements {
+                require_bounded_wal_replay: true,
+                ..StorageRecoveryRequirements::default()
+            },
+        )
+        .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("WAL replay was not opened with a configured entry bound"));
     }
 
     #[test]
