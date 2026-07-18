@@ -5970,6 +5970,9 @@ fn explicit_index_ddl_enables_index_multi_seek_plans_for_property_in() {
         .decisions
         .iter()
         .any(|decision| decision.contains("choose IndexNodeMultiSeek")));
+    assert!(explain.trace.decisions.iter().any(|decision| {
+        decision.starts_with("apply implementation:node_in_index_multi_seek:")
+    }));
 
     let output = db
         .query("MATCH (m:Memory) WHERE m.id IN ['a', 'b', 'a'] RETURN m.id AS id ORDER BY id ASC")

@@ -943,6 +943,10 @@ Current implemented slice:
   single-property node equality seeks, preserving the existing physical plan and
   fingerprint while recording a stable
   `implementation:node_equality_index_seek` rule event in the optimizer trace
+- single-property node `IN` predicates now use the same implementation-rule
+  path for `IndexNodeMultiSeek`, preserving legacy decision strings while
+  adding a stable `implementation:node_in_index_multi_seek` rule event for
+  feed/source lookup diagnostics
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,
