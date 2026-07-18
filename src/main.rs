@@ -68,7 +68,8 @@ fn main() -> Result<()> {
                 },
             )?;
             let explain = db.explain_query_with_params(&query, &parameters)?;
-            let rendered = explain_output_json(&query, &parameters, &explain);
+            let rendered =
+                explain_output_json(&query, &parameters, &explain, &db.plan_cache_stats());
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
             return Ok(());
         }
@@ -3079,6 +3080,7 @@ fn explain_output_json(
     query: &str,
     parameters: &BTreeMap<String, Value>,
     output: &skein::api::ExplainOutput,
+    plan_cache_stats: &skein::PlanCacheStats,
 ) -> serde_json::Value {
     serde_json::json!({
         "protocol": "skein-explain",
@@ -3108,6 +3110,13 @@ fn explain_output_json(
         "selected_plan_properties": physical_properties_json(&output.trace.selected_plan_properties),
         "selected_plan_operator_counts": output.trace.selected_plan_operator_counts,
         "selected_plan_class_counts": output.trace.selected_plan_class_counts,
+        "plan_cache_stats": {
+            "max_entries": plan_cache_stats.max_entries,
+            "entries": plan_cache_stats.entries,
+            "hits": plan_cache_stats.hits,
+            "misses": plan_cache_stats.misses,
+            "evictions": plan_cache_stats.evictions,
+        },
         "warnings": output.trace.warnings,
         "decisions": output.trace.decisions,
         "rule_events": output
@@ -3259,8 +3268,8 @@ mod tests {
     use skein::{
         CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
         CanonicalSnapshotIdentityAudit, Database, ExternalShadowReady,
-        GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, RecoveryMode,
-        StorageRecoveryReport, Value,
+        GraphLightningBootstrapManifest, GraphLightningGraphStreamValidation, PlanCacheStats,
+        RecoveryMode, StorageRecoveryReport, Value,
     };
     use std::collections::BTreeMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -3692,7 +3701,19 @@ mod tests {
         };
 
         let parameters = BTreeMap::from([("id".to_string(), Value::Int(42))]);
-        let json = explain_output_json("MATCH (m:Memory {id: $id}) RETURN m", &parameters, &output);
+        let plan_cache_stats = PlanCacheStats {
+            max_entries: Some(128),
+            entries: 1,
+            hits: 2,
+            misses: 3,
+            evictions: 4,
+        };
+        let json = explain_output_json(
+            "MATCH (m:Memory {id: $id}) RETURN m",
+            &parameters,
+            &output,
+            &plan_cache_stats,
+        );
 
         assert_eq!(json["protocol"], "skein-explain");
         assert_eq!(json["protocol_version"], 1);
@@ -3713,6 +3734,11 @@ mod tests {
         assert_eq!(json["selected_plan_properties"]["ordering"][0], "title asc");
         assert_eq!(json["selected_plan_operator_counts"]["SeqNodeScan"], 1);
         assert_eq!(json["selected_plan_class_counts"]["access"], 1);
+        assert_eq!(json["plan_cache_stats"]["max_entries"], 128);
+        assert_eq!(json["plan_cache_stats"]["entries"], 1);
+        assert_eq!(json["plan_cache_stats"]["hits"], 2);
+        assert_eq!(json["plan_cache_stats"]["misses"], 3);
+        assert_eq!(json["plan_cache_stats"]["evictions"], 4);
         assert_eq!(json["warnings"][0], "diagnostic warning");
         assert_eq!(json["decisions"][0], "diagnostic decision");
         assert_eq!(

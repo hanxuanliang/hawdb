@@ -983,11 +983,11 @@ Current implemented slice:
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,
-  structured operator/class histograms, and typed rule events as stable JSON
-  for migration gates and CI artifacts; legacy decision strings remain for
-  compatibility, while `rule_events` exposes `rule`, `outcome`, and `detail`
-  fields for implementation-rule diagnostics without parsing English explain
-  text
+  structured operator/class histograms, plan-cache hit/miss/eviction counters,
+  and typed rule events as stable JSON for migration gates and CI artifacts;
+  legacy decision strings remain for compatibility, while `rule_events` exposes
+  `rule`, `outcome`, and `detail` fields for implementation-rule diagnostics
+  without parsing English explain text
 - endpoint cartesian products whose flattened inputs all estimate to one row
   choose a stable left-deep physical input order by child cost and fingerprint,
   covering Nowledge endpoint-existence checks without changing broader
