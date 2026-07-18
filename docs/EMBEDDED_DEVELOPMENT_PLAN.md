@@ -58,10 +58,10 @@ Three codebases define the work:
 - explicit read and write transactions
 - commit, rollback, and checkpoint
 - bounded resource configuration
-- basic local QoS hooks for internal background admission, operation budgets,
-  optional per-class background budgets, and deferrable work; performance
-  should come from clean architecture and bounded work units before low-level
-  tuning
+- basic local QoS hooks owned by `skein-qos` for internal background admission,
+  operation budgets, optional per-class background budgets, and deferrable work;
+  performance should come from clean architecture and bounded work units before
+  low-level tuning
 
 ### Cypher and Semantic Analysis
 

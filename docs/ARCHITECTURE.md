@@ -54,8 +54,9 @@ outside the graph engine.
 Skein follows a RisingWave/Chryso-style workspace-and-facade layout. The root
 crate remains the stable embedded facade, while implementation crates are split
 out as interfaces harden and dependency direction becomes acyclic. The current
-crate split includes `skein-core` for common graph primitives and
-`skein-cypher` for syntax-only Cypher AST/parser support, and
+crate split includes `skein-core` for common graph primitives,
+`skein-cypher` for syntax-only Cypher AST/parser support, `skein-qos` for
+local resource classes, background admission, and expected-value ranking, and
 `skein-optimizer` for Cascades-style optimizer primitives, stable physical
 operator metadata, generic plan-node traversal helpers, structured cost
 summaries, and bounded search reporting. Cypher graph logical and physical
@@ -65,6 +66,7 @@ stable enough to move without creating cycles.
 ```text
 crates/
   core/                errors, values, ids, catalog names, schema descriptors
+  qos/                 work classes, local admission, background ranking
   optimizer/           Cascades cost, memo ids/groups, operator metadata,
                        plan traversal, properties, search reports, trace config
   cypher/              token cursor, parser, AST, parameter model
@@ -82,6 +84,13 @@ is now a compatibility re-export facade over `skein-cypher`; parser tests live
 with the parser crate. Shared optimizer primitives should remain free of Cypher
 AST, planner, executor, and storage dependencies; graph-specific rules can then
 migrate behind that boundary incrementally.
+
+`src/qos.rs` is also a compatibility re-export facade over `skein-qos`. The
+QoS crate owns local foreground/background work classes, admission decisions,
+background hints, expected-value ranking, and scheduler state. It must remain
+free of graph storage, search index, planner, and executor dependencies so
+resource policy can be reused by projection, import, schema maintenance, and
+retrieval loops without creating ownership cycles.
 
 The current Cypher crate uses:
 

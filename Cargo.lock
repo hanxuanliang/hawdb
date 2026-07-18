@@ -190,6 +190,7 @@ dependencies = [
  "skein-core",
  "skein-cypher",
  "skein-optimizer",
+ "skein-qos",
  "zstd",
 ]
 
@@ -206,6 +207,10 @@ dependencies = [
 
 [[package]]
 name = "skein-optimizer"
+version = "0.1.0"
+
+[[package]]
+name = "skein-qos"
 version = "0.1.0"
 
 [[package]]
