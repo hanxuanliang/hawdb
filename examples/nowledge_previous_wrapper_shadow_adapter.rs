@@ -16,16 +16,34 @@ const COMMAND_WAIT_POLL_MS: u64 = 10;
 fn main() -> Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
-    let backend = PreviousWrapperShadowBackend::new(previous_wrapper_from_args()?);
+    let config = previous_wrapper_from_args()?;
+    let backend = PreviousWrapperShadowBackend::new(config.adapter, config.wrapper_identity);
     let mut server = ExternalShadowProtocolServer::new(backend);
     server.run_json_lines(BufReader::new(stdin.lock()), stdout.lock())
 }
 
-fn previous_wrapper_from_args() -> Result<PreviousWrapperAdapter> {
+struct PreviousWrapperConfig {
+    adapter: PreviousWrapperAdapter,
+    wrapper_identity: Option<String>,
+}
+
+fn previous_wrapper_from_args() -> Result<PreviousWrapperConfig> {
     let mut args = std::env::args().skip(1);
     let mut timeout = Duration::from_millis(DEFAULT_COMMAND_TIMEOUT_MS);
+    let mut wrapper_identity = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--wrapper-identity" => {
+                let Some(value) = args.next() else {
+                    return Err(SkeinError::Semantic(command_usage()));
+                };
+                if value.trim().is_empty() {
+                    return Err(SkeinError::Semantic(
+                        "--wrapper-identity must not be empty".to_string(),
+                    ));
+                }
+                wrapper_identity = Some(value);
+            }
             "--command-timeout-ms" => {
                 let Some(value) = args.next() else {
                     return Err(SkeinError::Semantic(command_usage()));
@@ -36,19 +54,25 @@ fn previous_wrapper_from_args() -> Result<PreviousWrapperAdapter> {
                 let Some(program) = args.next() else {
                     return Err(SkeinError::Semantic(command_usage()));
                 };
-                return Ok(PreviousWrapperAdapter::Command(CommandPreviousWrapper {
-                    program,
-                    args: args.collect(),
-                    timeout,
-                }));
+                return Ok(PreviousWrapperConfig {
+                    adapter: PreviousWrapperAdapter::Command(CommandPreviousWrapper {
+                        program,
+                        args: args.collect(),
+                        timeout,
+                    }),
+                    wrapper_identity,
+                });
             }
             "--persistent-command" => {
                 let Some(program) = args.next() else {
                     return Err(SkeinError::Semantic(command_usage()));
                 };
-                return Ok(PreviousWrapperAdapter::PersistentCommand(
-                    PersistentCommandPreviousWrapper::spawn(program, args.collect())?,
-                ));
+                return Ok(PreviousWrapperConfig {
+                    adapter: PreviousWrapperAdapter::PersistentCommand(
+                        PersistentCommandPreviousWrapper::spawn(program, args.collect())?,
+                    ),
+                    wrapper_identity,
+                });
             }
             "--help" | "-h" => return Err(SkeinError::Semantic(command_usage())),
             other => {
@@ -59,9 +83,10 @@ fn previous_wrapper_from_args() -> Result<PreviousWrapperAdapter> {
             }
         }
     }
-    Ok(PreviousWrapperAdapter::Unavailable(
-        UnavailablePreviousWrapper,
-    ))
+    Ok(PreviousWrapperConfig {
+        adapter: PreviousWrapperAdapter::Unavailable(UnavailablePreviousWrapper),
+        wrapper_identity,
+    })
 }
 
 fn parse_timeout_ms(value: &str) -> Result<u64> {
@@ -73,7 +98,7 @@ fn parse_timeout_ms(value: &str) -> Result<u64> {
 }
 
 fn command_usage() -> String {
-    "usage: nowledge_previous_wrapper_shadow_adapter [--command-timeout-ms <ms>] [--command <program> [args...]] [--persistent-command <program> [args...]]".to_string()
+    "usage: nowledge_previous_wrapper_shadow_adapter [--wrapper-identity <id>] [--command-timeout-ms <ms>] [--command <program> [args...]] [--persistent-command <program> [args...]]".to_string()
 }
 
 trait PreviousWrapperGraph {
@@ -146,11 +171,15 @@ impl PreviousWrapperGraph for PreviousWrapperAdapter {
 
 struct PreviousWrapperShadowBackend<G> {
     graph: G,
+    wrapper_identity: Option<String>,
 }
 
 impl<G> PreviousWrapperShadowBackend<G> {
-    fn new(graph: G) -> Self {
-        Self { graph }
+    fn new(graph: G, wrapper_identity: Option<String>) -> Self {
+        Self {
+            graph,
+            wrapper_identity,
+        }
     }
 }
 
@@ -160,6 +189,10 @@ where
 {
     fn engine_kind(&self) -> &'static str {
         "previous_wrapper"
+    }
+
+    fn wrapper_identity(&self) -> Option<&str> {
+        self.wrapper_identity.as_deref()
     }
 
     fn execute(&mut self, statement: ExternalShadowStatementRequest) -> Result<QueryOutput> {
@@ -559,7 +592,10 @@ mod tests {
 
     #[test]
     fn scaffold_reports_previous_wrapper_ready() {
-        let backend = PreviousWrapperShadowBackend::new(RecordingPreviousWrapper::default());
+        let backend = PreviousWrapperShadowBackend::new(
+            RecordingPreviousWrapper::default(),
+            Some("nowledge-previous-wrapper:test".to_string()),
+        );
         let mut server = ExternalShadowProtocolServer::new(backend);
 
         let response = server.handle_request(&serde_json::json!({
@@ -569,6 +605,10 @@ mod tests {
 
         assert_eq!(response["ok"]["engine_kind"], "previous_wrapper");
         assert_eq!(
+            response["ok"]["wrapper_identity"],
+            "nowledge-previous-wrapper:test"
+        );
+        assert_eq!(
             response["ok"]["capabilities"],
             serde_json::json!(["execute", "execute_session", "project_graph"])
         );
@@ -576,7 +616,7 @@ mod tests {
 
     #[test]
     fn scaffold_converts_json_rows_to_shadow_output() {
-        let backend = PreviousWrapperShadowBackend::new(RecordingPreviousWrapper::default());
+        let backend = PreviousWrapperShadowBackend::new(RecordingPreviousWrapper::default(), None);
         let mut server = ExternalShadowProtocolServer::new(backend);
 
         let response = server.handle_request(&serde_json::json!({
@@ -597,7 +637,7 @@ mod tests {
 
     #[test]
     fn scaffold_defaults_project_graph_to_primary_only() {
-        let backend = PreviousWrapperShadowBackend::new(RecordingPreviousWrapper::default());
+        let backend = PreviousWrapperShadowBackend::new(RecordingPreviousWrapper::default(), None);
         let mut server = ExternalShadowProtocolServer::new(backend);
 
         let response = server.handle_request(&serde_json::json!({

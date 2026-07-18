@@ -188,6 +188,7 @@ jobs:
             > "$root/adapter.json"
           grep -q '"protocol": "skein-external-shadow-adapter-smoke"' "$root/adapter.json"
           grep -q '"engine_kind": "previous_wrapper"' "$root/adapter.json"
+          grep -q '"wrapper_identity": null' "$root/adapter.json"
           grep -q '"adapter_smoke_ready": true' "$root/adapter.json"
           grep -q '"matched_checks": 2' "$root/adapter.json"
           grep -q '"primary_only_checks": 0' "$root/adapter.json"

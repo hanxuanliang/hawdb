@@ -352,6 +352,7 @@ fn insert_shadow_ready_json(
             "protocol_version": ready.protocol_version,
             "capabilities": &ready.capabilities,
             "engine_kind": &ready.engine_kind,
+            "wrapper_identity": &ready.wrapper_identity,
         }),
     );
     Ok(())
@@ -388,6 +389,7 @@ fn insert_cutover_evidence_json(
         .and_then(serde_json::Value::as_str)
         == Some("ready");
     let ready_engine_kind = shadow_ready.and_then(|ready| ready.engine_kind.as_deref());
+    let ready_wrapper_identity = shadow_ready.and_then(|ready| ready.wrapper_identity.as_deref());
     let ready_missing_capabilities = external_shadow_ready_missing_capabilities(shadow_ready);
     let shadow_evidence_present = migration_gate
         .get("shadow_evidence_present")
@@ -414,6 +416,12 @@ fn insert_cutover_evidence_json(
         if engine_kind != "previous_wrapper" {
             blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
         }
+    }
+    if ready_preflight
+        && ready_engine_kind == Some("previous_wrapper")
+        && ready_wrapper_identity.is_none()
+    {
+        blockers.push("shadow ready response missing wrapper_identity".to_string());
     }
     if ready_preflight && !ready_missing_capabilities.is_empty() {
         blockers.push("shadow ready response missing required capabilities".to_string());
@@ -455,6 +463,7 @@ fn insert_cutover_evidence_json(
         "requires_ready_engine_kind",
         "previous_wrapper",
     );
+    insert_json(&mut evidence, "requires_ready_wrapper_identity", true);
     insert_json(
         &mut evidence,
         "requires_ready_capabilities",
@@ -463,6 +472,11 @@ fn insert_cutover_evidence_json(
     insert_json(&mut evidence, "requires_shadow_evidence", true);
     insert_json(&mut evidence, "ready_preflight", ready_preflight);
     insert_json(&mut evidence, "ready_engine_kind", ready_engine_kind);
+    insert_json(
+        &mut evidence,
+        "ready_wrapper_identity",
+        ready_wrapper_identity,
+    );
     insert_json(
         &mut evidence,
         "ready_missing_capabilities",
@@ -1974,6 +1988,7 @@ mod tests {
                         "project_graph".to_string(),
                     ],
                     engine_kind: Some("previous_wrapper".to_string()),
+                    wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
                 }),
                 shadow_trace_path: Some(trace_path.to_string_lossy().into_owned()),
                 shadow_request_count: Some(2),
@@ -2159,6 +2174,7 @@ mod tests {
                         "project_graph".to_string(),
                     ],
                     engine_kind: None,
+                    wrapper_identity: None,
                 }),
                 include_cutover_evidence: true,
                 ..NowledgeCypherMigrationGateJsonOptions::default()
@@ -2176,6 +2192,64 @@ mod tests {
         assert_eq!(
             bundle["cutover_evidence"]["blockers"][0],
             "shadow ready response missing engine_kind"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_cypher_migration_gate_requires_previous_wrapper_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-migration-gate-wrapper-identity-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let mut shadow = TestShadowEngine::default();
+        let bundle = scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+            &root,
+            &mut shadow,
+            NowledgeCypherMigrationGateJsonOptions {
+                shadow_name: Some("shadow-without-wrapper-identity".to_string()),
+                shadow_ready: Some(ExternalShadowReady {
+                    protocol_version: crate::EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                    capabilities: vec![
+                        "execute".to_string(),
+                        "execute_session".to_string(),
+                        "project_graph".to_string(),
+                    ],
+                    engine_kind: Some("previous_wrapper".to_string()),
+                    wrapper_identity: None,
+                }),
+                include_cutover_evidence: true,
+                ..NowledgeCypherMigrationGateJsonOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(bundle["migration_gate"]["decision"], "ready");
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert_eq!(
+            bundle["cutover_evidence"]["requires_ready_wrapper_identity"],
+            true
+        );
+        assert!(bundle["cutover_evidence"]["ready_wrapper_identity"].is_null());
+        assert_eq!(
+            bundle["cutover_evidence"]["blockers"][0],
+            "shadow ready response missing wrapper_identity"
         );
 
         fs::remove_dir_all(root).unwrap();
@@ -2216,6 +2290,7 @@ mod tests {
                         "project_graph".to_string(),
                     ],
                     engine_kind: Some("previous_wrapper".to_string()),
+                    wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
                 }),
                 include_cutover_evidence: true,
                 background_maintenance_required: true,
@@ -2491,6 +2566,7 @@ mod tests {
                         "project_graph".to_string(),
                     ],
                     engine_kind: Some("previous_wrapper".to_string()),
+                    wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
                 }),
                 include_cutover_evidence: true,
                 storage_recovery_required: true,

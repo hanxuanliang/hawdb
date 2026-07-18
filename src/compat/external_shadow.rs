@@ -45,6 +45,10 @@ pub enum ExternalShadowProjectGraphReply {
 pub trait ExternalShadowProtocolBackend {
     fn engine_kind(&self) -> &'static str;
 
+    fn wrapper_identity(&self) -> Option<&str> {
+        None
+    }
+
     fn capabilities(&self) -> Vec<&'static str> {
         REQUIRED_EXTERNAL_SHADOW_CAPABILITIES.to_vec()
     }
@@ -87,6 +91,7 @@ pub struct ExternalShadowReady {
     pub protocol_version: u64,
     pub capabilities: Vec<String>,
     pub engine_kind: Option<String>,
+    pub wrapper_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -199,6 +204,7 @@ where
             "ok": {
                 "protocol_version": EXTERNAL_SHADOW_PROTOCOL_VERSION,
                 "engine_kind": self.backend.engine_kind(),
+                "wrapper_identity": self.backend.wrapper_identity(),
                 "capabilities": self.backend.capabilities(),
             }
         })
@@ -1271,10 +1277,12 @@ pub(super) fn decode_external_ready_response(
         }
     }
     let engine_kind = optional_external_string(engine_name, ok, "engine_kind")?;
+    let wrapper_identity = optional_external_string(engine_name, ok, "wrapper_identity")?;
     Ok(ExternalShadowReady {
         protocol_version,
         capabilities,
         engine_kind,
+        wrapper_identity,
     })
 }
 

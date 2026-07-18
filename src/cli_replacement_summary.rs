@@ -89,6 +89,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "eligible": cutover_evidence_eligible,
             "evidence_kind": json_get_str_path(bundle, &["cutover_evidence", "evidence_kind"]),
             "ready_engine_kind": json_get_str_path(bundle, &["cutover_evidence", "ready_engine_kind"]),
+            "ready_wrapper_identity": json_get_str_path(bundle, &["cutover_evidence", "ready_wrapper_identity"]),
             "storage_recovery_required": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]),
             "storage_recovery_ready": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]),
             "storage_recovery_protocol_matches": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_protocol_matches"]),

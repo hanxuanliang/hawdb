@@ -1111,6 +1111,7 @@ fn add_shadow_ready_report(
             "protocol_version": ready.protocol_version,
             "capabilities": &ready.capabilities,
             "engine_kind": &ready.engine_kind,
+            "wrapper_identity": &ready.wrapper_identity,
         }),
     );
     Ok(())
@@ -1153,6 +1154,7 @@ fn add_cutover_evidence_report(
     };
     let ready_preflight = shadow_ready.is_some();
     let ready_engine_kind = shadow_ready.and_then(|ready| ready.engine_kind.as_deref());
+    let ready_wrapper_identity = shadow_ready.and_then(|ready| ready.wrapper_identity.as_deref());
     let ready_missing_capabilities = external_shadow_ready_missing_capabilities(shadow_ready);
     let migration_gate = bundle
         .get("migration_gate")
@@ -1190,6 +1192,12 @@ fn add_cutover_evidence_report(
             blockers.push("shadow ready engine_kind is not previous_wrapper".to_string());
         }
     }
+    if ready_preflight
+        && ready_engine_kind == Some("previous_wrapper")
+        && ready_wrapper_identity.is_none()
+    {
+        blockers.push("shadow ready response missing wrapper_identity".to_string());
+    }
     if ready_preflight && !ready_missing_capabilities.is_empty() {
         blockers.push("shadow ready response missing required capabilities".to_string());
     }
@@ -1225,6 +1233,7 @@ fn add_cutover_evidence_report(
         "requires_ready_engine_kind",
         "previous_wrapper",
     );
+    insert_json(&mut evidence, "requires_ready_wrapper_identity", true);
     insert_json(
         &mut evidence,
         "requires_ready_capabilities",
@@ -1233,6 +1242,11 @@ fn add_cutover_evidence_report(
     insert_json(&mut evidence, "requires_shadow_evidence", true);
     insert_json(&mut evidence, "ready_preflight", ready_preflight);
     insert_json(&mut evidence, "ready_engine_kind", ready_engine_kind);
+    insert_json(
+        &mut evidence,
+        "ready_wrapper_identity",
+        ready_wrapper_identity,
+    );
     insert_json(
         &mut evidence,
         "ready_missing_capabilities",
@@ -1489,6 +1503,7 @@ fn external_shadow_adapter_smoke_report_json(
         "ready": {
             "protocol_version": ready.protocol_version,
             "engine_kind": ready.engine_kind,
+            "wrapper_identity": ready.wrapper_identity,
             "capabilities": ready.capabilities,
             "missing_capabilities": missing_capabilities,
         },
@@ -4071,6 +4086,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_shadow_ready_report(&mut bundle, &ready).unwrap();
@@ -4144,6 +4160,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("protocol_smoke".to_string()),
+            wrapper_identity: None,
         };
         let report = adapter_smoke_report(vec![
             adapter_smoke_shadow_check(
@@ -4176,6 +4193,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
         let report = adapter_smoke_report(vec![
             adapter_smoke_shadow_check(
@@ -4219,6 +4237,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, false).unwrap();
@@ -4228,6 +4247,14 @@ mod tests {
         assert_eq!(
             bundle["cutover_evidence"]["evidence_kind"],
             "previous_wrapper"
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["requires_ready_wrapper_identity"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["ready_wrapper_identity"],
+            "nowledge-previous-wrapper:test"
         );
         assert_eq!(
             bundle["cutover_evidence"]["ready_missing_capabilities"]
@@ -4270,6 +4297,41 @@ mod tests {
     }
 
     #[test]
+    fn requires_previous_wrapper_identity_for_cutover_evidence() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready",
+                "shadow_evidence_present": true
+            }
+        });
+
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: None,
+        };
+
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, false).unwrap();
+
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
+        assert_eq!(
+            bundle["cutover_evidence"]["requires_ready_wrapper_identity"],
+            true
+        );
+        assert!(bundle["cutover_evidence"]["ready_wrapper_identity"].is_null());
+        assert_eq!(
+            bundle["cutover_evidence"]["blockers"][0],
+            "shadow ready response missing wrapper_identity"
+        );
+    }
+
+    #[test]
     fn blocks_cutover_when_ready_missing_required_capabilities() {
         let mut bundle = serde_json::json!({
             "migration_gate": {
@@ -4282,6 +4344,7 @@ mod tests {
             protocol_version: 1,
             capabilities: vec!["execute".to_string(), "project_graph".to_string()],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, false).unwrap();
@@ -4315,6 +4378,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), true, false).unwrap();
@@ -4360,6 +4424,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, true).unwrap();
@@ -4416,6 +4481,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, true).unwrap();
@@ -4475,6 +4541,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, false).unwrap();
@@ -4526,6 +4593,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("previous_wrapper".to_string()),
+            wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, false).unwrap();
@@ -4561,6 +4629,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: Some("protocol_smoke".to_string()),
+            wrapper_identity: None,
         };
 
         add_cutover_evidence_report(&mut bundle, true, Some(&ready), false, false).unwrap();
@@ -4612,6 +4681,7 @@ mod tests {
                 "project_graph".to_string(),
             ],
             engine_kind: None,
+            wrapper_identity: None,
         };
 
         add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, false).unwrap();
