@@ -1951,6 +1951,65 @@ pub struct KnowledgeLabelLifecycleBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgePageRankScoreUpdate {
+    pub label: String,
+    pub external_id: String,
+    pub score: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgePageRankScoreBatchRequest {
+    pub updates: Vec<KnowledgePageRankScoreUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankScoreBatchRow {
+    pub label: String,
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankScoreBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgePageRankScoreBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankClearRequest {
+    pub labels: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankClearRow {
+    pub label: String,
+    pub external_id: Option<String>,
+    pub node_id: u64,
+    pub cleared: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankClearOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgePageRankClearRow>,
+    pub candidate_count: usize,
+    pub cleared_count: usize,
+    pub non_writable_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
@@ -3720,6 +3779,20 @@ impl Database {
         request: &KnowledgeLabelLifecycleBatchRequest,
     ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
         update_knowledge_label_lifecycle_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_pagerank_scores_batch(
+        &mut self,
+        request: &KnowledgePageRankScoreBatchRequest,
+    ) -> Result<KnowledgePageRankScoreBatchOutput> {
+        update_knowledge_pagerank_scores_batch_for(self, request)
+    }
+
+    pub fn clear_knowledge_pagerank_scores(
+        &mut self,
+        request: &KnowledgePageRankClearRequest,
+    ) -> Result<KnowledgePageRankClearOutput> {
+        clear_knowledge_pagerank_scores_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -7645,6 +7718,242 @@ fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeM
     insert_optional_assignment(&mut assignments, "metadata", &update.metadata);
     insert_optional_assignment(&mut assignments, "updated_at", &update.updated_at);
     assignments
+}
+
+fn update_knowledge_pagerank_scores_batch_for(
+    db: &mut Database,
+    request: &KnowledgePageRankScoreBatchRequest,
+) -> Result<KnowledgePageRankScoreBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        validate_pagerank_label(update.label.as_str())?;
+        if update.external_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge pagerank score update requires a non-empty external id".to_string(),
+            ));
+        }
+        if !update.score.is_finite() || update.score < 0.0 {
+            return Err(SkeinError::Semantic(
+                "knowledge pagerank score update requires a finite non-negative score".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let label = pagerank_label(update.label.as_str());
+        let Some(seed) = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            label,
+            update.external_id.as_str(),
+        ) else {
+            missing_count += 1;
+            rows.push(KnowledgePageRankScoreBatchRow {
+                label: label.to_string(),
+                external_id: update.external_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.external_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgePageRankScoreBatchRow {
+                label: label.to_string(),
+                external_id: update.external_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgePageRankScoreBatchRow {
+                label: label.to_string(),
+                external_id: update.external_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+            });
+            continue;
+        }
+
+        matched_count += 1;
+        updated_count += 1;
+        let assignments =
+            BTreeMap::from([("pagerank_score".to_string(), Value::Float(update.score))]);
+        eligible_updates.push((label.to_string(), node_id, assignments));
+        rows.push(KnowledgePageRankScoreBatchRow {
+            label: label.to_string(),
+            external_id: update.external_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgePageRankScoreBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (label, node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement(label.as_str(), node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgePageRankScoreBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+    })
+}
+
+fn clear_knowledge_pagerank_scores_for(
+    db: &mut Database,
+    request: &KnowledgePageRankClearRequest,
+) -> Result<KnowledgePageRankClearOutput> {
+    db.ensure_writable()?;
+    if request.labels.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge pagerank clear requires at least one label".to_string(),
+        ));
+    }
+    for label in &request.labels {
+        validate_pagerank_label(label.as_str())?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::new();
+    let mut candidate_count = 0;
+    let mut cleared_count = 0;
+    let mut non_writable_count = 0;
+    let mut eligible_updates = Vec::new();
+    let mut seen_node_ids = BTreeSet::new();
+
+    for requested_label in &request.labels {
+        let label = pagerank_label(requested_label.as_str());
+        let Some(label_id) = db.catalog.label_id(label) else {
+            continue;
+        };
+        for node in db.store.scan_nodes(Some(label_id)) {
+            if !seen_node_ids.insert(node.id) {
+                continue;
+            }
+            if node
+                .properties
+                .get("pagerank_score")
+                .is_none_or(|value| value == &Value::Null)
+            {
+                continue;
+            }
+            candidate_count += 1;
+            let external_id = node_external_id(node);
+            if external_id.is_none() {
+                non_writable_count += 1;
+                rows.push(KnowledgePageRankClearRow {
+                    label: label.to_string(),
+                    external_id,
+                    node_id: node.id.0,
+                    cleared: false,
+                    non_writable: true,
+                });
+                continue;
+            }
+            let assignments = BTreeMap::from([("pagerank_score".to_string(), Value::Null)]);
+            eligible_updates.push((label.to_string(), node.id, assignments));
+            cleared_count += 1;
+            rows.push(KnowledgePageRankClearRow {
+                label: label.to_string(),
+                external_id,
+                node_id: node.id.0,
+                cleared: true,
+                non_writable: false,
+            });
+        }
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgePageRankClearOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            candidate_count,
+            cleared_count: 0,
+            non_writable_count,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (label, node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement(label.as_str(), node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgePageRankClearOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        candidate_count,
+        cleared_count,
+        non_writable_count,
+    })
+}
+
+fn validate_pagerank_label(label: &str) -> Result<()> {
+    match label {
+        "Memory" | "memory" | "Entity" | "entity" => Ok(()),
+        _ => Err(SkeinError::Semantic(
+            "knowledge pagerank operations support only Memory and Entity labels".to_string(),
+        )),
+    }
+}
+
+fn pagerank_label(label: &str) -> &'static str {
+    match label {
+        "Memory" | "memory" => "Memory",
+        "Entity" | "entity" => "Entity",
+        _ => unreachable!("pagerank label should be validated before canonicalization"),
+    }
 }
 
 fn delete_knowledge_entity_for(
@@ -12061,6 +12370,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeLabelLifecycleBatchRequest,
     ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
         self.db.update_knowledge_label_lifecycle_batch(request)
+    }
+
+    pub fn update_knowledge_pagerank_scores_batch(
+        &mut self,
+        request: &KnowledgePageRankScoreBatchRequest,
+    ) -> Result<KnowledgePageRankScoreBatchOutput> {
+        self.db.update_knowledge_pagerank_scores_batch(request)
+    }
+
+    pub fn clear_knowledge_pagerank_scores(
+        &mut self,
+        request: &KnowledgePageRankClearRequest,
+    ) -> Result<KnowledgePageRankClearOutput> {
+        self.db.clear_knowledge_pagerank_scores(request)
     }
 
     pub fn delete_knowledge_entity(

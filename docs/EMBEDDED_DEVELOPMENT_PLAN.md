@@ -170,6 +170,8 @@ denormalized message-count refreshes are exposed as a typed batch for Nowledge
 `updated_at` behavior.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
+PageRank score persistence and clear operations are exposed as typed batches
+for Nowledge Memory and Entity `pagerank_score` writes.
 `DatabaseConfig` provides read-only operation and bounded read-result
 configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,

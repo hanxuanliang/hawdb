@@ -197,6 +197,11 @@ updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names
 before WAL, reports missing, idless, and duplicate rows without writing, and
 commits eligible Label rows through one grouped WAL batch.
+PageRank score writes are covered by typed batches for Nowledge Memory and
+Entity `pagerank_score` persistence and clear operations. The wrapper accepts
+only finite non-negative scores for Memory/Entity identities, reports missing,
+idless, duplicate, and clear-only non-writable rows without writing, and commits
+eligible score writes or clears through one grouped WAL batch.
 
 ## Current Direction
 

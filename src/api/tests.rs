@@ -10,13 +10,15 @@ use super::{
     KnowledgeLabelLifecycleUpdate, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePathRequest, KnowledgePropertyBatchRequest,
-    KnowledgePropertyUpdateBatchRequest, KnowledgePropertyUpdateRequest,
-    KnowledgeRelationshipCreateBatchRequest, KnowledgeRelationshipCreateRequest,
-    KnowledgeRelationshipDeleteBatchRequest, KnowledgeRelationshipDeleteRequest,
-    KnowledgeRelationshipUpdateBatchRequest, KnowledgeRelationshipUpdateRequest,
-    KnowledgeRelationshipUpsertBatchRequest, KnowledgeRelationshipUpsertRequest,
-    KnowledgeRelationshipsRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
+    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankClearRequest,
+    KnowledgePageRankScoreBatchRequest, KnowledgePageRankScoreUpdate, KnowledgePathRequest,
+    KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,
+    KnowledgePropertyUpdateRequest, KnowledgeRelationshipCreateBatchRequest,
+    KnowledgeRelationshipCreateRequest, KnowledgeRelationshipDeleteBatchRequest,
+    KnowledgeRelationshipDeleteRequest, KnowledgeRelationshipUpdateBatchRequest,
+    KnowledgeRelationshipUpdateRequest, KnowledgeRelationshipUpsertBatchRequest,
+    KnowledgeRelationshipUpsertRequest, KnowledgeRelationshipsRequest,
+    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
     KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityDeleteBatchRequest,
     KnowledgeScopedEntityDeleteRequest, KnowledgeScopedEntityRequest,
     KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
@@ -6769,6 +6771,202 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("canonical_name"),
             Some(&Some(Value::String("renamed".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_and_clears_pagerank_scores_for_nowledge_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_rank_1', title: 'Rank One'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_rank_2', title: 'Rank Two'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_rank_1', name: 'Entity One'})")
+        .unwrap();
+    db.query("CREATE (:Entity {name: 'Projected Entity', pagerank_score: 0.9})")
+        .unwrap();
+
+    let output = db
+        .update_knowledge_pagerank_scores_batch(&KnowledgePageRankScoreBatchRequest {
+            updates: vec![
+                KnowledgePageRankScoreUpdate {
+                    label: "Memory".to_string(),
+                    external_id: "memory_rank_1".to_string(),
+                    score: 0.42,
+                },
+                KnowledgePageRankScoreUpdate {
+                    label: "Entity".to_string(),
+                    external_id: "entity_rank_1".to_string(),
+                    score: 0.84,
+                },
+                KnowledgePageRankScoreUpdate {
+                    label: "Memory".to_string(),
+                    external_id: "memory_rank_1".to_string(),
+                    score: 0.99,
+                },
+                KnowledgePageRankScoreUpdate {
+                    label: "Entity".to_string(),
+                    external_id: "missing".to_string(),
+                    score: 0.1,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 4);
+    assert_eq!(output.graph_commit_epoch_after, 5);
+    assert_eq!(output.rows.len(), 4);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 2);
+    assert!(output.rows[2].duplicate);
+    assert!(!output.rows[3].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_rank_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_rank_1".to_string(),
+            },
+        ],
+        property_names: vec!["pagerank_score".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("pagerank_score"),
+        Some(&Some(Value::Float(0.42)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("pagerank_score"),
+        Some(&Some(Value::Float(0.84)))
+    );
+
+    let clear = db
+        .clear_knowledge_pagerank_scores(&KnowledgePageRankClearRequest {
+            labels: vec!["Entity".to_string(), "Memory".to_string()],
+        })
+        .unwrap();
+    assert_eq!(clear.graph_commit_epoch_before, 5);
+    assert_eq!(clear.graph_commit_epoch_after, 6);
+    assert_eq!(clear.candidate_count, 3);
+    assert_eq!(clear.cleared_count, 2);
+    assert_eq!(clear.non_writable_count, 1);
+    assert_eq!(clear.rows.iter().filter(|row| row.cleared).count(), 2);
+    assert_eq!(clear.rows.iter().filter(|row| row.non_writable).count(), 1);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_rank_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Entity".to_string(),
+                external_id: "entity_rank_1".to_string(),
+            },
+        ],
+        property_names: vec!["pagerank_score".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("pagerank_score"),
+        Some(&Some(Value::Null))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("pagerank_score"),
+        Some(&Some(Value::Null))
+    );
+    let still_scored = db
+        .query("MATCH (e:Entity) WHERE e.pagerank_score IS NOT NULL RETURN COUNT(e) AS total")
+        .unwrap();
+    assert_eq!(still_scored.rows[0].get("total"), Some(&Value::Int(1)));
+}
+
+#[test]
+fn pagerank_score_batch_rejects_invalid_score_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_rank_1', title: 'Rank One'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_pagerank_scores_batch(&KnowledgePageRankScoreBatchRequest {
+            updates: vec![KnowledgePageRankScoreUpdate {
+                label: "Memory".to_string(),
+                external_id: "memory_rank_1".to_string(),
+                score: f64::NAN,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("finite non-negative score"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_pagerank_score_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_rank_1', title: 'Rank One'})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'entity_rank_1', name: 'Entity One'})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_pagerank_scores_batch(&KnowledgePageRankScoreBatchRequest {
+            updates: vec![
+                KnowledgePageRankScoreUpdate {
+                    label: "Memory".to_string(),
+                    external_id: "memory_rank_1".to_string(),
+                    score: 0.42,
+                },
+                KnowledgePageRankScoreUpdate {
+                    label: "Entity".to_string(),
+                    external_id: "entity_rank_1".to_string(),
+                    score: 0.84,
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_rank_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Entity".to_string(),
+                    external_id: "entity_rank_1".to_string(),
+                },
+            ],
+            property_names: vec!["pagerank_score".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("pagerank_score"),
+            Some(&Some(Value::Float(0.42)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("pagerank_score"),
+            Some(&Some(Value::Float(0.84)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
