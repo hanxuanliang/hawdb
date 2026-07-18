@@ -6,9 +6,10 @@ use super::{
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
     KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeScopedNeighborsRequest,
-    KnowledgeScopedSubgraphRequest, KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeScopedPathRequest, KnowledgeScopedSubgraphRequest, KnowledgeSubgraphRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -4234,6 +4235,94 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
         .segments
         .iter()
         .all(|segment| segment.relationship_type == "LINKS"));
+}
+
+#[test]
+fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'root', title: 'Root', source_id: 'thread_1'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf', space_id: 'default'})",
+    )
+    .unwrap();
+
+    let scoped = db.knowledge_scoped_paths(&KnowledgeScopedPathRequest {
+        navigation: KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        },
+        source_metadata_filters: BTreeMap::from([(
+            "source_id".to_string(),
+            "thread_1".to_string(),
+        )]),
+        target_metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+    });
+
+    assert_eq!(scoped.paths.len(), 1);
+    assert!(scoped.diagnostics.seed_found);
+    assert_eq!(scoped.diagnostics.target_found, Some(true));
+    assert_eq!(scoped.diagnostics.input_candidate_set.filtered_out_count, 0);
+    assert_eq!(
+        scoped
+            .diagnostics
+            .input_candidate_set
+            .metadata_filters
+            .get("source.source_id")
+            .map(String::as_str),
+        Some("thread_1")
+    );
+    assert_eq!(
+        scoped
+            .diagnostics
+            .input_candidate_set
+            .metadata_filters
+            .get("target.space_id")
+            .map(String::as_str),
+        Some("default")
+    );
+
+    let filtered = db.knowledge_scoped_paths(&KnowledgeScopedPathRequest {
+        navigation: KnowledgePathRequest {
+            source_label: "Memory".to_string(),
+            source_external_id: "root".to_string(),
+            target_label: "Entity".to_string(),
+            target_external_id: "leaf".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            limit: 4,
+        },
+        source_metadata_filters: BTreeMap::from([(
+            "source_id".to_string(),
+            "thread_1".to_string(),
+        )]),
+        target_metadata_filters: BTreeMap::from([("space_id".to_string(), "archive".to_string())]),
+    });
+
+    assert_eq!(filtered.source_node_id, Some(0));
+    assert_eq!(filtered.target_node_id, Some(1));
+    assert!(filtered.diagnostics.seed_found);
+    assert_eq!(filtered.diagnostics.target_found, Some(false));
+    assert!(filtered.paths.is_empty());
+    assert_eq!(
+        filtered.diagnostics.input_candidate_set.filtered_out_count,
+        1
+    );
+    assert_eq!(
+        filtered
+            .diagnostics
+            .input_candidate_set
+            .metadata_filters
+            .get("target.space_id")
+            .map(String::as_str),
+        Some("archive")
+    );
+    assert!(filtered.diagnostics.fallback_reasons.is_empty());
 }
 
 #[test]
