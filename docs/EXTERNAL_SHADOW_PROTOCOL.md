@@ -130,6 +130,34 @@ shape. In Nowledge, the `PreviousWrapperGraph::query` hook should call the
 existing Kuzu/Ladybug raw read/write wrapper with the decoded parameters, and
 `execute_session` should use the wrapper's single-connection transaction/session
 path so fixture setup, mutation, and effect checks observe one mutable state.
+For integration work where linking the wrapper into the example binary is too
+heavy, the example also supports:
+
+```text
+cargo run --example nowledge_previous_wrapper_shadow_adapter -- --command <program> [args...]
+```
+
+In this mode the adapter keeps the Skein external-shadow JSON-lines protocol on
+stdin/stdout and delegates each operation to the command as a separate JSON
+request on the command's stdin. The command should return one JSON value on
+stdout:
+
+- query request:
+  `{"op":"query","cypher":"...","parameters":{...}}`
+  expects `{"rows":[{...}]}`
+- session request:
+  `{"op":"execute_session","statements":[{"op":"query","cypher":"...","parameters":{...}}]}`
+  expects `{"results":[{"rows":[{...}]}]}`; bare row arrays are also accepted
+  per result for small shims
+- projected-graph request:
+  `{"op":"project_graph","rel_type":"...","expected_incoming_nodes":[...],"include_communities":false,"include_hierarchical_communities":false}`
+  expects either `{"primary_only":true,"reason":"..."}` for early wiring or a
+  full `{"ok": ...}` projected-graph payload
+
+The command bridge is intentionally process-owned by Nowledge. It lets the real
+Kuzu/Ladybug wrapper keep its dependencies and transaction/session handling
+outside Skein while still producing `engine_kind: "previous_wrapper"` shadow
+evidence through the shared protocol server.
 
 ## `execute`
 
