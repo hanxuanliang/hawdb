@@ -10,8 +10,8 @@ use super::{
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
-    BackgroundWorkHint, LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission, WorkClass,
-    WorkRequest,
+    BackgroundWorkHint, BackgroundWorkReasonCode, LocalQosPolicy, LocalQosScheduler, LocalQosState,
+    QosAdmission, WorkClass, WorkRequest,
 };
 use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
@@ -7709,6 +7709,10 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
         Ok(ranked[0].plan.request.priority)
     );
     assert!(matches!(ranked[0].decision.admission, QosAdmission::Admit));
+    assert!(ranked[0]
+        .decision
+        .reason_codes
+        .contains(&BackgroundWorkReasonCode::RecentDeltaOperations));
     assert!(ranked[0]
         .decision
         .reasons

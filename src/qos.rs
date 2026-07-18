@@ -97,6 +97,7 @@ pub struct BackgroundWorkPlan {
 pub struct BackgroundWorkDecision {
     pub admission: QosAdmission,
     pub score: u64,
+    pub reason_codes: Vec<BackgroundWorkReasonCode>,
     pub reasons: Vec<String>,
 }
 
@@ -104,6 +105,59 @@ pub struct BackgroundWorkDecision {
 pub struct RankedBackgroundWork {
     pub index: usize,
     pub decision: BackgroundWorkDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundWorkReasonCode {
+    ForegroundNotRanked,
+    TenantBudgetBelowEstimate,
+    ActiveTopic,
+    QueryProbability,
+    RecentDeltaOperations,
+    SourceGraphCommitLag,
+    StalenessTtl,
+    FreshnessSlo,
+    AdmissionDeferred,
+    AdmissionRejected,
+}
+
+impl BackgroundWorkReasonCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackgroundWorkReasonCode::ForegroundNotRanked => "foreground_not_ranked",
+            BackgroundWorkReasonCode::TenantBudgetBelowEstimate => "tenant_budget_below_estimate",
+            BackgroundWorkReasonCode::ActiveTopic => "active_topic",
+            BackgroundWorkReasonCode::QueryProbability => "query_probability",
+            BackgroundWorkReasonCode::RecentDeltaOperations => "recent_delta_operations",
+            BackgroundWorkReasonCode::SourceGraphCommitLag => "source_graph_commit_lag",
+            BackgroundWorkReasonCode::StalenessTtl => "staleness_ttl",
+            BackgroundWorkReasonCode::FreshnessSlo => "freshness_slo",
+            BackgroundWorkReasonCode::AdmissionDeferred => "admission_deferred",
+            BackgroundWorkReasonCode::AdmissionRejected => "admission_rejected",
+        }
+    }
+}
+
+impl FromStr for BackgroundWorkReasonCode {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "foreground_not_ranked" => Ok(BackgroundWorkReasonCode::ForegroundNotRanked),
+            "tenant_budget_below_estimate" => {
+                Ok(BackgroundWorkReasonCode::TenantBudgetBelowEstimate)
+            }
+            "active_topic" => Ok(BackgroundWorkReasonCode::ActiveTopic),
+            "query_probability" => Ok(BackgroundWorkReasonCode::QueryProbability),
+            "recent_delta_operations" => Ok(BackgroundWorkReasonCode::RecentDeltaOperations),
+            "source_graph_commit_lag" => Ok(BackgroundWorkReasonCode::SourceGraphCommitLag),
+            "staleness_ttl" => Ok(BackgroundWorkReasonCode::StalenessTtl),
+            "freshness_slo" => Ok(BackgroundWorkReasonCode::FreshnessSlo),
+            "admission_deferred" => Ok(BackgroundWorkReasonCode::AdmissionDeferred),
+            "admission_rejected" => Ok(BackgroundWorkReasonCode::AdmissionRejected),
+            _ => Err("unknown background work reason code"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,33 +281,41 @@ impl BackgroundWorkHint {
         self.score_with_reasons(0).0
     }
 
-    fn score_with_reasons(&self, estimated_operations: usize) -> (u64, Vec<String>) {
+    fn score_with_reasons(
+        &self,
+        estimated_operations: usize,
+    ) -> (u64, Vec<BackgroundWorkReasonCode>, Vec<String>) {
         let mut score = 0u64;
+        let mut reason_codes = Vec::new();
         let mut reasons = Vec::new();
 
         if let Some(remaining) = self.tenant_budget_remaining_operations {
             if remaining < estimated_operations {
+                reason_codes.push(BackgroundWorkReasonCode::TenantBudgetBelowEstimate);
                 reasons.push(format!(
                     "tenant budget remaining {remaining} below estimated operations {estimated_operations}"
                 ));
-                return (0, reasons);
+                return (0, reason_codes, reasons);
             }
         }
 
         if self.active_topic {
             score = score.saturating_add(1_000_000);
+            reason_codes.push(BackgroundWorkReasonCode::ActiveTopic);
             reasons.push("active topic".to_string());
         }
 
         let query_probability = u64::from(self.query_probability_per_million).min(1_000_000);
         if query_probability > 0 {
             score = score.saturating_add(query_probability);
+            reason_codes.push(BackgroundWorkReasonCode::QueryProbability);
             reasons.push(format!("query probability {query_probability} per million"));
         }
 
         let recent_delta_score = (self.recent_delta_operations as u64).min(1_000_000);
         if recent_delta_score > 0 {
             score = score.saturating_add(recent_delta_score);
+            reason_codes.push(BackgroundWorkReasonCode::RecentDeltaOperations);
             reasons.push(format!(
                 "recent delta operations {}",
                 self.recent_delta_operations
@@ -263,6 +325,7 @@ impl BackgroundWorkHint {
         let source_graph_commit_lag_score = self.source_graph_commit_lag.min(1_000_000);
         if source_graph_commit_lag_score > 0 {
             score = score.saturating_add(source_graph_commit_lag_score);
+            reason_codes.push(BackgroundWorkReasonCode::SourceGraphCommitLag);
             reasons.push(format!(
                 "source graph commit lag {}",
                 self.source_graph_commit_lag
@@ -273,6 +336,7 @@ impl BackgroundWorkHint {
             let staleness_score = scaled_staleness_score(self.staleness_millis, ttl);
             if staleness_score > 0 {
                 score = score.saturating_add(staleness_score);
+                reason_codes.push(BackgroundWorkReasonCode::StalenessTtl);
                 if self.staleness_millis >= ttl {
                     reasons.push(format!(
                         "staleness ttl reached at {} ms",
@@ -291,6 +355,7 @@ impl BackgroundWorkHint {
             let freshness_score = scaled_staleness_score(self.staleness_millis, slo);
             if freshness_score > 0 {
                 score = score.saturating_add(freshness_score);
+                reason_codes.push(BackgroundWorkReasonCode::FreshnessSlo);
                 if self.staleness_millis >= slo {
                     reasons.push(format!(
                         "freshness slo missed at {} ms",
@@ -305,7 +370,7 @@ impl BackgroundWorkHint {
             }
         }
 
-        (score, reasons)
+        (score, reason_codes, reasons)
     }
 }
 
@@ -340,6 +405,7 @@ impl LocalQosPolicy {
             return BackgroundWorkDecision {
                 admission: policy_admission,
                 score: 0,
+                reason_codes: vec![BackgroundWorkReasonCode::ForegroundNotRanked],
                 reasons: vec!["foreground work is not background-ranked".to_string()],
             };
         }
@@ -355,15 +421,17 @@ impl LocalQosPolicy {
             },
             (admission, _) => admission,
         };
-        let (score, mut reasons) = plan
+        let (score, mut reason_codes, mut reasons) = plan
             .hint
             .score_with_reasons(plan.request.estimated_operations);
         match &admission {
             QosAdmission::Admit => {}
             QosAdmission::Defer { reason, .. } => {
+                reason_codes.push(BackgroundWorkReasonCode::AdmissionDeferred);
                 reasons.push(format!("admission deferred: {reason}"));
             }
             QosAdmission::Reject { reason, .. } => {
+                reason_codes.push(BackgroundWorkReasonCode::AdmissionRejected);
                 reasons.push(format!("admission rejected: {reason}"));
             }
         }
@@ -371,6 +439,7 @@ impl LocalQosPolicy {
         BackgroundWorkDecision {
             admission,
             score,
+            reason_codes,
             reasons,
         }
     }
@@ -568,8 +637,9 @@ impl LocalQosScheduler {
 #[cfg(test)]
 mod tests {
     use super::{
-        BackgroundWorkHint, BackgroundWorkPlan, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-        QosAdmission, QosAdmissionCode, WorkClass, WorkPriority, WorkRequest,
+        BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode, LocalQosPolicy,
+        LocalQosScheduler, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass, WorkPriority,
+        WorkRequest,
     };
 
     #[test]
@@ -650,6 +720,49 @@ mod tests {
     }
 
     #[test]
+    fn background_work_reason_codes_have_stable_string_encodings() {
+        let cases = [
+            (
+                BackgroundWorkReasonCode::ForegroundNotRanked,
+                "foreground_not_ranked",
+            ),
+            (
+                BackgroundWorkReasonCode::TenantBudgetBelowEstimate,
+                "tenant_budget_below_estimate",
+            ),
+            (BackgroundWorkReasonCode::ActiveTopic, "active_topic"),
+            (
+                BackgroundWorkReasonCode::QueryProbability,
+                "query_probability",
+            ),
+            (
+                BackgroundWorkReasonCode::RecentDeltaOperations,
+                "recent_delta_operations",
+            ),
+            (
+                BackgroundWorkReasonCode::SourceGraphCommitLag,
+                "source_graph_commit_lag",
+            ),
+            (BackgroundWorkReasonCode::StalenessTtl, "staleness_ttl"),
+            (BackgroundWorkReasonCode::FreshnessSlo, "freshness_slo"),
+            (
+                BackgroundWorkReasonCode::AdmissionDeferred,
+                "admission_deferred",
+            ),
+            (
+                BackgroundWorkReasonCode::AdmissionRejected,
+                "admission_rejected",
+            ),
+        ];
+
+        for (code, name) in cases {
+            assert_eq!(code.as_str(), name);
+            assert_eq!(name.parse::<BackgroundWorkReasonCode>(), Ok(code));
+        }
+        assert!("cron_reason".parse::<BackgroundWorkReasonCode>().is_err());
+    }
+
+    #[test]
     fn admits_foreground_work_without_budget_gate() {
         let policy = LocalQosPolicy::default();
         let request = WorkRequest::foreground(WorkClass::Query, usize::MAX);
@@ -683,6 +796,28 @@ mod tests {
             admission,
             QosAdmission::Defer { reason, .. } if reason.contains("disabled")
         ));
+    }
+
+    #[test]
+    fn foreground_work_evaluation_reports_not_ranked_code() {
+        let decision = LocalQosPolicy::default().evaluate_background_work(
+            &LocalQosState::default(),
+            &BackgroundWorkPlan {
+                request: WorkRequest::foreground(WorkClass::Query, 1),
+                hint: BackgroundWorkHint::default(),
+            },
+        );
+
+        assert_eq!(decision.admission, QosAdmission::Admit);
+        assert_eq!(decision.score, 0);
+        assert_eq!(
+            decision.reason_codes,
+            vec![BackgroundWorkReasonCode::ForegroundNotRanked]
+        );
+        assert_eq!(
+            decision.reasons,
+            vec!["foreground work is not background-ranked".to_string()]
+        );
     }
 
     #[test]
@@ -767,6 +902,24 @@ mod tests {
         assert_eq!(decision.admission, QosAdmission::Admit);
         assert!(decision.score > 0);
         assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::ActiveTopic));
+        assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::QueryProbability));
+        assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::RecentDeltaOperations));
+        assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::SourceGraphCommitLag));
+        assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::StalenessTtl));
+        assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::FreshnessSlo));
+        assert!(decision
             .reasons
             .iter()
             .any(|reason| reason.contains("active topic")));
@@ -813,6 +966,9 @@ mod tests {
         ));
         assert!(decision.score > 0);
         assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::AdmissionDeferred));
+        assert!(decision
             .reasons
             .iter()
             .any(|reason| reason.contains("admission deferred")));
@@ -851,6 +1007,12 @@ mod tests {
             QosAdmission::Defer { ref reason, .. } if reason.contains("tenant budget remaining 4")
         ));
         assert_eq!(decision.score, 0);
+        assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::TenantBudgetBelowEstimate));
+        assert!(decision
+            .reason_codes
+            .contains(&BackgroundWorkReasonCode::AdmissionDeferred));
         assert!(decision
             .reasons
             .iter()
