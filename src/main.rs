@@ -1,5 +1,7 @@
+mod cli_fixture_contract;
 mod cli_replacement_summary;
 
+use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
@@ -20,7 +22,9 @@ use skein::{
     SkeinError, StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
     REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
-use skein::{run_compatibility_fixture_with_shadow, CompatibilityFixture};
+use skein::{
+    nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow, CompatibilityFixture,
+};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::Write;
@@ -47,6 +51,18 @@ fn main() -> Result<()> {
         if command == "scan-nowledge-cypher-coverage-detail" {
             let root = args.next().unwrap_or_else(|| ".".to_string());
             let json = scan_nowledge_query_inventory_cypher_coverage_detail_to_json(root)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            return Ok(());
+        }
+        if command == "nowledge-fixture-contract" {
+            let fixture_name = args
+                .next()
+                .unwrap_or_else(|| "nowledge-memory-core".to_string());
+            if args.next().is_some() || fixture_name != "nowledge-memory-core" {
+                return Err(SkeinError::Semantic(nowledge_fixture_contract_usage()));
+            }
+            let fixture = nowledge_memory_core_fixture();
+            let json = nowledge_fixture_contract_json(&fixture);
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
         }

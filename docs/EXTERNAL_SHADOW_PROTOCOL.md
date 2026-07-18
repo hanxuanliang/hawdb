@@ -161,6 +161,22 @@ evidence through the shared protocol server. `--command-timeout-ms` bounds each
 delegated command invocation so a hung wrapper fails with a direct adapter error
 instead of only surfacing as an outer shadow request timeout.
 
+To generate the exact production-shaped fixture contract for a wrapper shim,
+use:
+
+```text
+skein nowledge-fixture-contract [nowledge-memory-core]
+```
+
+The command prints `skein-nowledge-fixture-contract` JSON with the fixture setup
+statements, each check's Cypher statement, parameters, expected rows or row
+count, execution mode, effect queries, projected-graph requests, and the command
+bridge request/response shapes. It does not open a database or run the shadow
+engine. Use it as the machine-readable contract when implementing the Nowledge
+Kuzu/Ladybug wrapper process, then validate that process with
+`external-shadow-adapter-smoke --require-previous-wrapper` before running the
+full migration gate.
+
 ## `execute`
 
 `execute` runs one Cypher statement against the shadow engine.
