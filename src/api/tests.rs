@@ -322,6 +322,21 @@ fn nowledge_graph_adapter_retrieves_knowledge_with_external_projection() {
         SearchFusionWeights::default()
     );
     assert_eq!(output.diagnostics.graph_seed_limit, 2);
+    assert_eq!(
+        output.diagnostics.graph_seed_input_candidate_set.id_space,
+        "canonical_graph_node_id"
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .representation,
+        "filtered_node_ids"
+    );
+    assert_eq!(
+        output.diagnostics.graph_seed_candidate_set.representation,
+        "ranked_node_ids"
+    );
     assert!(!output.diagnostics.graph_seed_truncated);
     assert!(output.diagnostics.graph_seed_truncation_reasons.is_empty());
     assert_eq!(output.diagnostics.graph_context_limit, 4);
@@ -1358,7 +1373,7 @@ fn retrieves_knowledge_through_database_facade() {
         graph_seed_report.input_candidate_set.representation,
         "filtered_node_ids"
     );
-    assert_eq!(graph_seed_report.input_candidate_set.cardinality, 2);
+    assert_eq!(graph_seed_report.input_candidate_set.cardinality, 4);
     assert_eq!(graph_seed_report.input_candidate_set.filtered_out_count, 0);
     assert_eq!(
         graph_seed_report
@@ -1936,6 +1951,28 @@ fn knowledge_retrieval_applies_metadata_filters_to_search_and_graph_seeds() {
     );
     assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
     assert_eq!(output.diagnostics.graph_seed_returned_count, 1);
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .metadata_filters,
+        BTreeMap::from([("source_id".to_string(), "thread_1".to_string())])
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .filtered_out_count,
+        1
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .cardinality,
+        1
+    );
+    assert_eq!(output.diagnostics.graph_seed_candidate_set.cardinality, 1);
     assert_eq!(output.diagnostics.graph_context_path_count, 0);
     assert_eq!(output.diagnostics.fanout_reason_count, 0);
     assert_eq!(output.diagnostics.candidate_count, 1);
@@ -1963,6 +2000,11 @@ fn knowledge_retrieval_applies_metadata_filters_to_search_and_graph_seeds() {
         .find(|report| report.name == "graph_seed")
         .expect("graph seed retriever report");
     assert_eq!(graph_seed_report.candidate_count, 1);
+    assert_eq!(graph_seed_report.input_candidate_set.filtered_out_count, 1);
+    assert_eq!(
+        graph_seed_report.input_candidate_set.metadata_filters,
+        BTreeMap::from([("source_id".to_string(), "thread_1".to_string())])
+    );
     assert_eq!(graph_seed_report.top_candidates[0].id, "Memory:mem_1");
 }
 

@@ -580,6 +580,8 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub search_fallback_reasons: Vec<String>,
     pub rank_window: Option<usize>,
     pub search_fusion_weights: SearchFusionWeights,
+    pub graph_seed_input_candidate_set: SearchCandidateSetReport,
+    pub graph_seed_candidate_set: SearchRetrieverCandidateSetReport,
     pub graph_seed_candidate_count: usize,
     pub graph_seed_returned_count: usize,
     pub graph_seed_limit: usize,
@@ -2330,16 +2332,15 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 policy_epoch: None,
             },
         );
-        let (graph_seeds, graph_seed_candidate_count, graph_seed_fanout_details) = self
-            .search_knowledge_graph_seeds(
-                &request.query_text,
-                request.graph_seed_limit,
-                &request.metadata_filters,
-            );
+        let graph_seed_search = self.search_knowledge_graph_seeds(
+            &request.query_text,
+            request.graph_seed_limit,
+            &request.metadata_filters,
+        );
         let (graph_context_paths, fanout_details, graph_context_truncation_reasons) = self
             .expand_knowledge_context(
                 &search,
-                &graph_seeds,
+                &graph_seed_search.seeds,
                 request.graph_context_limit,
                 request.graph_context_max_hops,
             );
@@ -2349,12 +2350,15 @@ impl KnowledgeRetrievalGraphContext<'_> {
         let retrievers = knowledge_retriever_reports(
             &search,
             &evidence,
-            &graph_seeds,
+            &graph_seed_search.seeds,
             &graph_context_paths,
             &projection_freshness,
             KnowledgeGraphSeedRetrieverInput {
                 limit: request.graph_seed_limit,
-                candidate_count: graph_seed_candidate_count,
+                input_candidate_count: graph_seed_search.input_candidate_count,
+                input_filtered_out_count: graph_seed_search.input_filtered_out_count,
+                metadata_filters: request.metadata_filters.clone(),
+                candidate_count: graph_seed_search.candidate_count,
                 graph_commit_epoch,
             },
         );
@@ -2362,13 +2366,13 @@ impl KnowledgeRetrievalGraphContext<'_> {
             .knowledge_candidates(
                 &search,
                 &evidence,
-                &graph_seeds,
+                &graph_seed_search.seeds,
                 &graph_context_paths,
                 request.candidate_limit,
                 request.candidate_scoring,
             );
         let mut fanout_reason_details = fanout_details;
-        fanout_reason_details.extend(graph_seed_fanout_details);
+        fanout_reason_details.extend(graph_seed_search.fanout_reason_details.clone());
         fanout_reason_details.extend(candidate_fanout_details);
         let fanout_reason_codes = knowledge_fanout_reason_codes(&fanout_reason_details);
         let fanout_reasons = knowledge_fanout_reason_messages(&fanout_reason_details);
@@ -2378,8 +2382,18 @@ impl KnowledgeRetrievalGraphContext<'_> {
             &projection_freshness,
             graph_commit_epoch,
             KnowledgeRetrievalDiagnosticsInput {
-                graph_seed_candidate_count,
-                graph_seed_returned_count: graph_seeds.len(),
+                graph_seed_input_candidate_set: knowledge_graph_seed_input_candidate_set_report(
+                    graph_seed_search.input_candidate_count,
+                    graph_commit_epoch,
+                    graph_seed_search.input_filtered_out_count,
+                    request.metadata_filters.clone(),
+                ),
+                graph_seed_candidate_set: knowledge_graph_seed_candidate_set_report(
+                    graph_seed_search.seeds.len(),
+                    graph_commit_epoch,
+                ),
+                graph_seed_candidate_count: graph_seed_search.candidate_count,
+                graph_seed_returned_count: graph_seed_search.seeds.len(),
                 graph_context_path_count: graph_context_paths.len(),
                 graph_context_node_count: knowledge_context_path_node_count(&graph_context_paths),
                 graph_context_relationship_count: graph_context_paths.len(),
@@ -2397,7 +2411,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
             diagnostics,
             candidates,
             evidence,
-            graph_seeds,
+            graph_seeds: graph_seed_search.seeds,
             graph_context_paths,
             fanout_reason_codes,
             fanout_reason_details,
@@ -2680,26 +2694,25 @@ impl KnowledgeRetrievalGraphContext<'_> {
         query_text: &str,
         limit: usize,
         metadata_filters: &BTreeMap<String, String>,
-    ) -> (
-        Vec<KnowledgeGraphSeed>,
-        usize,
-        Vec<KnowledgeFanoutReasonDetail>,
-    ) {
+    ) -> KnowledgeGraphSeedSearchOutput {
         if limit == 0 {
-            return (Vec::new(), 0, Vec::new());
+            return KnowledgeGraphSeedSearchOutput::default();
         }
         let query_terms = knowledge_query_terms(query_text);
         if query_terms.is_empty() {
-            return (Vec::new(), 0, Vec::new());
+            return KnowledgeGraphSeedSearchOutput::default();
         }
         let normalized_query = query_text.trim().to_ascii_lowercase();
-        let mut scored = self
-            .store
-            .scan_nodes(None)
-            .filter(|node| {
-                knowledge_graph_seed_matches_filters(self.catalog, node, metadata_filters)
-            })
-            .filter_map(|node| {
+        let mut input_candidate_count = 0usize;
+        let mut input_filtered_out_count = 0usize;
+        let mut scored = Vec::new();
+        for node in self.store.scan_nodes(None) {
+            if !knowledge_graph_seed_matches_filters(self.catalog, node, metadata_filters) {
+                input_filtered_out_count += 1;
+                continue;
+            }
+            input_candidate_count += 1;
+            if let Some(seed) = {
                 let (score, matched_properties) =
                     graph_seed_score(node, &query_terms, &normalized_query);
                 (score > 0.0).then(|| KnowledgeGraphSeed {
@@ -2707,8 +2720,10 @@ impl KnowledgeRetrievalGraphContext<'_> {
                     score,
                     matched_properties,
                 })
-            })
-            .collect::<Vec<_>>();
+            } {
+                scored.push(seed);
+            }
+        }
 
         scored.sort_by(|left, right| {
             right
@@ -2724,8 +2739,23 @@ impl KnowledgeRetrievalGraphContext<'_> {
         } else {
             Vec::new()
         };
-        (scored, total, fanout_reasons)
+        KnowledgeGraphSeedSearchOutput {
+            seeds: scored,
+            input_candidate_count,
+            input_filtered_out_count,
+            candidate_count: total,
+            fanout_reason_details: fanout_reasons,
+        }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct KnowledgeGraphSeedSearchOutput {
+    seeds: Vec<KnowledgeGraphSeed>,
+    input_candidate_count: usize,
+    input_filtered_out_count: usize,
+    candidate_count: usize,
+    fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
 }
 
 fn knowledge_retriever_reports(
@@ -2801,8 +2831,10 @@ fn knowledge_retriever_reports(
         name: "graph_seed".to_string(),
         available: graph_seed_input.limit > 0,
         input_candidate_set: knowledge_graph_seed_input_candidate_set_report(
-            graph_seed_input.candidate_count,
+            graph_seed_input.input_candidate_count,
             graph_seed_input.graph_commit_epoch,
+            graph_seed_input.input_filtered_out_count,
+            graph_seed_input.metadata_filters,
         ),
         candidate_count: graph_seed_input.candidate_count,
         candidate_set: knowledge_graph_seed_candidate_set_report(
@@ -2854,9 +2886,12 @@ fn knowledge_retriever_reports(
     reports
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct KnowledgeGraphSeedRetrieverInput {
     limit: usize,
+    input_candidate_count: usize,
+    input_filtered_out_count: usize,
+    metadata_filters: BTreeMap<String, String>,
     candidate_count: usize,
     graph_commit_epoch: u64,
 }
@@ -2987,6 +3022,8 @@ fn knowledge_graph_seed_candidate_set_report(
 fn knowledge_graph_seed_input_candidate_set_report(
     cardinality: usize,
     graph_commit_epoch: u64,
+    filtered_out_count: usize,
+    metadata_filters: BTreeMap<String, String>,
 ) -> SearchCandidateSetReport {
     SearchCandidateSetReport {
         id_space: "canonical_graph_node_id".to_string(),
@@ -2995,8 +3032,8 @@ fn knowledge_graph_seed_input_candidate_set_report(
         exact: true,
         snapshot_source_graph_commit_epoch: Some(graph_commit_epoch),
         policy_epoch: None,
-        filtered_out_count: 0,
-        metadata_filters: BTreeMap::new(),
+        filtered_out_count,
+        metadata_filters,
     }
 }
 
@@ -3026,6 +3063,8 @@ fn knowledge_graph_context_fallback_reason_codes(
 
 #[derive(Debug, Clone)]
 struct KnowledgeRetrievalDiagnosticsInput {
+    graph_seed_input_candidate_set: SearchCandidateSetReport,
+    graph_seed_candidate_set: SearchRetrieverCandidateSetReport,
     graph_seed_candidate_count: usize,
     graph_seed_returned_count: usize,
     graph_context_path_count: usize,
@@ -3112,6 +3151,8 @@ fn knowledge_retrieval_diagnostics(
         search_fallback_reasons: search.fallback_reasons.clone(),
         rank_window: search.rank_window,
         search_fusion_weights: search.fusion_weights,
+        graph_seed_input_candidate_set: input.graph_seed_input_candidate_set,
+        graph_seed_candidate_set: input.graph_seed_candidate_set,
         graph_seed_candidate_count: input.graph_seed_candidate_count,
         graph_seed_returned_count: input.graph_seed_returned_count,
         graph_seed_limit: request.graph_seed_limit,
