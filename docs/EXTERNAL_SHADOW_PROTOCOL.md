@@ -177,6 +177,20 @@ Kuzu/Ladybug wrapper process, then validate that process with
 `external-shadow-adapter-smoke --require-previous-wrapper` before running the
 full migration gate.
 
+For a command shim that already implements the contract bridge shape, run:
+
+```text
+skein nowledge-fixture-contract-command-check [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> <program> [args...]
+```
+
+This command reads a `skein-nowledge-fixture-contract` file, invokes the command
+shim directly with the exported query/session/project-graph requests, and checks
+the command's JSON rows against the fixture expectations. It is a wrapper
+bring-up diagnostic; production replacement still requires the full
+`nowledge-cypher-migration-gate --require-cutover-evidence` path with
+previous-wrapper identity, storage recovery evidence, background-maintenance
+evidence, and per-family readiness.
+
 ## `execute`
 
 `execute` runs one Cypher statement against the shadow engine.

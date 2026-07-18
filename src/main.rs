@@ -1,7 +1,9 @@
 mod cli_fixture_contract;
+mod cli_fixture_contract_check;
 mod cli_replacement_summary;
 
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
+use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
 use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
@@ -65,6 +67,20 @@ fn main() -> Result<()> {
             let json = nowledge_fixture_contract_json(&fixture);
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
+        }
+        if command == "nowledge-fixture-contract-command-check" {
+            let json = run_nowledge_fixture_contract_command_check(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if json
+                .get("contract_command_check_ready")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+            {
+                return Ok(());
+            }
+            return Err(SkeinError::Execution(
+                "fixture contract command check failed".to_string(),
+            ));
         }
         if command == "explain-json" {
             let mut parameters = BTreeMap::new();
