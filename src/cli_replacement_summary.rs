@@ -275,6 +275,23 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     if bundle.get("cutover_evidence").is_none() {
         missing.push("cutover_evidence".to_string());
     }
+    if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
+        && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_present"])
+            != Some(true)
+    {
+        missing.push("storage_recovery".to_string());
+    }
+    if json_get_bool_path(
+        bundle,
+        &["cutover_evidence", "background_maintenance_required"],
+    ) == Some(true)
+        && json_get_bool_path(
+            bundle,
+            &["cutover_evidence", "background_maintenance_present"],
+        ) != Some(true)
+    {
+        missing.push("background_maintenance".to_string());
+    }
     if bundle
         .get("replacement_readiness_by_query_family")
         .is_none()
@@ -584,12 +601,14 @@ mod tests {
             "cutover_evidence": {
                 "eligible": false,
                 "storage_recovery_required": true,
+                "storage_recovery_present": false,
                 "storage_recovery_ready": false,
                 "storage_recovery_blocker_codes": ["wal_replay_unbounded"],
                 "storage_recovery_blockers": [
                     "WAL replay was not opened with a configured entry bound"
                 ],
                 "background_maintenance_required": true,
+                "background_maintenance_present": false,
                 "background_maintenance_ready": false,
                 "background_maintenance_blocker_codes": ["missing_evidence"],
                 "background_maintenance_blockers": [
@@ -617,6 +636,15 @@ mod tests {
                 "query_family_readiness",
                 "shadow_parity",
                 "storage_recovery"
+            ])
+        );
+        assert_eq!(
+            summary["missing_evidence"],
+            serde_json::json!([
+                "storage_recovery",
+                "background_maintenance",
+                "shadow_run",
+                "shadow_ready"
             ])
         );
         assert!(summary["blockers"]
@@ -664,11 +692,13 @@ mod tests {
                 "evidence_kind": "previous_wrapper",
                 "ready_engine_kind": "previous_wrapper",
                 "storage_recovery_required": true,
+                "storage_recovery_present": true,
                 "storage_recovery_ready": true,
                 "storage_recovery_protocol_matches": true,
                 "storage_recovery_blocker_codes": [],
                 "storage_recovery_blockers": [],
                 "background_maintenance_required": true,
+                "background_maintenance_present": true,
                 "background_maintenance_ready": true,
                 "background_maintenance_protocol_matches": true,
                 "background_maintenance_blocker_codes": [],
