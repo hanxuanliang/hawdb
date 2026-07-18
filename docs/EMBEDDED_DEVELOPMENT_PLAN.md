@@ -960,6 +960,10 @@ Current implemented slice:
   filter and legacy decision string while adding a stable
   `implementation:node_composite_index_seek` rule event for multi-property
   lookup diagnostics
+- conjunctions with single-property equality or `IN` index candidates now use
+  the implementation-rule path for the existing cost-based best-candidate
+  selection, preserving residual filters and legacy decision strings while
+  adding a stable `implementation:node_conjunction_index_seek` rule event
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   recursive cost, cost breakdown, typed parameter echo, warnings, decisions,

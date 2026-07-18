@@ -6025,6 +6025,9 @@ fn indexed_property_in_parameter_list_keeps_residual_filters() {
         .decisions
         .iter()
         .any(|decision| decision.contains("choose IndexNodeMultiSeek")));
+    assert!(explain.trace.decisions.iter().any(|decision| {
+        decision.starts_with("apply implementation:node_conjunction_index_seek:")
+    }));
 
     let output = db
         .query_with_params(

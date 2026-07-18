@@ -1904,6 +1904,10 @@ struct NodeCompositeSeekRule<'a> {
     catalog: &'a OptimizerCatalog,
 }
 
+struct NodeConjunctionSeekRule<'a> {
+    catalog: &'a OptimizerCatalog,
+}
+
 #[derive(Debug)]
 struct GroupExpr {
     logical: LogicalPlan,
@@ -5844,6 +5848,55 @@ impl OptimizerRule<GraphRuleExpr> for NodeCompositeSeekRule<'_> {
     }
 }
 
+impl OptimizerRule<GraphRuleExpr> for NodeConjunctionSeekRule<'_> {
+    fn id(&self) -> RuleId {
+        RuleId::new("node_conjunction_index_seek", RuleKind::Implementation)
+    }
+
+    fn promise(&self, expression: &GraphRuleExpr) -> RulePromise {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return RulePromise::NEVER;
+        };
+        let Predicate::And(predicates) = predicate.as_ref() else {
+            return RulePromise::NEVER;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return RulePromise::NEVER;
+        };
+        if equality_index_seek_candidate(predicates, predicate, scan_variable, label, self.catalog)
+            .is_some()
+        {
+            RulePromise::new(80)
+        } else {
+            RulePromise::NEVER
+        }
+    }
+
+    fn apply(&self, expression: &GraphRuleExpr) -> Option<RuleApplication<GraphRuleExpr>> {
+        let GraphRuleExpr::Filter { predicate, input } = expression else {
+            return None;
+        };
+        let Predicate::And(predicates) = predicate.as_ref() else {
+            return None;
+        };
+        let LogicalPlan::NodeScan {
+            variable: scan_variable,
+            label,
+        } = input.as_ref()
+        else {
+            return None;
+        };
+        equality_index_seek_candidate(predicates, predicate, scan_variable, label, self.catalog)
+            .map(|(_, plan, decision)| {
+                RuleApplication::new(GraphRuleExpr::Physical(Box::new(plan)), decision)
+            })
+    }
+}
+
 impl OptimizerRule<GraphRuleExpr> for NodeRangeSeekRule<'_> {
     fn id(&self) -> RuleId {
         RuleId::new("node_range_index_seek", RuleKind::Implementation)
@@ -6138,6 +6191,20 @@ fn composite_index_seek_from_rule(
     physical_plan_from_rule_batch(&expression, &[&rule], decisions)
 }
 
+fn conjunction_index_seek_from_rule(
+    predicate: &Predicate,
+    input: &LogicalPlan,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+) -> Option<PhysicalPlan> {
+    let expression = GraphRuleExpr::Filter {
+        predicate: Box::new(predicate.clone()),
+        input: Box::new(input.clone()),
+    };
+    let rule = NodeConjunctionSeekRule { catalog };
+    physical_plan_from_rule_batch(&expression, &[&rule], decisions)
+}
+
 fn range_index_seek_from_rule(
     predicate: &Predicate,
     input: &LogicalPlan,
@@ -6249,6 +6316,31 @@ fn equality_index_seek_from_conjunction(
     ) {
         return Some(plan);
     }
+    let logical_scan = LogicalPlan::NodeScan {
+        variable: scan_variable.to_string(),
+        label: label.to_string(),
+    };
+    if let Some(plan) =
+        conjunction_index_seek_from_rule(full_predicate, &logical_scan, catalog, decisions)
+    {
+        return Some(plan);
+    }
+    if let Some((_, plan, decision)) =
+        equality_index_seek_candidate(predicates, full_predicate, scan_variable, label, catalog)
+    {
+        decisions.push(decision);
+        return Some(plan);
+    }
+    None
+}
+
+fn equality_index_seek_candidate(
+    predicates: &[Predicate],
+    full_predicate: &Predicate,
+    scan_variable: &str,
+    label: &str,
+    catalog: &OptimizerCatalog,
+) -> Option<(u64, PhysicalPlan, String)> {
     let label_count = catalog.label_count(label);
     let scan_cost = label_count.saturating_add(4);
     let mut best_candidate: Option<(u64, PhysicalPlan, String)> = None;
@@ -6331,11 +6423,7 @@ fn equality_index_seek_from_conjunction(
             }
         }
     }
-    if let Some((_, plan, decision)) = best_candidate {
-        decisions.push(decision);
-        return Some(plan);
-    }
-    None
+    best_candidate
 }
 
 fn composite_index_seek_from_conjunction(
