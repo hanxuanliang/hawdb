@@ -1,6 +1,7 @@
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
     external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,
+    replacement_readiness_family_evidence_health_from_bundle,
     scan_nowledge_query_inventory_cypher_coverage_detail_to_json,
     scan_nowledge_query_inventory_cypher_coverage_to_json,
     scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json,
@@ -895,6 +896,8 @@ fn add_cutover_evidence_report(
         storage_recovery_evidence_health_from_bundle(bundle, storage_recovery_required);
     let background_maintenance_health =
         background_maintenance_evidence_health_from_bundle(bundle, background_maintenance_required);
+    let replacement_family_health =
+        replacement_readiness_family_evidence_health_from_bundle(bundle);
     let mut blockers = Vec::new();
     if self_shadow {
         blockers.push("shadow run is protocol smoke, not previous-wrapper evidence".to_string());
@@ -924,6 +927,9 @@ fn add_cutover_evidence_report(
     }
     if !background_maintenance_health.ready {
         blockers.extend(background_maintenance_health.blockers.iter().cloned());
+    }
+    if !replacement_family_health.ready {
+        blockers.extend(replacement_family_health.blockers.iter().cloned());
     }
     if !migration_gate_ready {
         blockers.push("migration gate decision is not ready".to_string());
@@ -968,6 +974,11 @@ fn add_cutover_evidence_report(
             "background_maintenance_foreground_ranked_count": background_maintenance_health.foreground_ranked_count,
             "background_maintenance_unknown_admission_count": background_maintenance_health.unknown_admission_count,
             "background_maintenance_blockers": background_maintenance_health.blockers,
+            "replacement_readiness_family_report_present": replacement_family_health.present,
+            "replacement_readiness_min_per_million": replacement_family_health.min_replacement_readiness_per_million,
+            "replacement_readiness_invalid_family_count": replacement_family_health.invalid_family_count,
+            "replacement_readiness_blocked_query_families": replacement_family_health.blocked_query_families,
+            "replacement_readiness_blockers": replacement_family_health.blockers,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
         }),
@@ -3556,6 +3567,11 @@ mod tests {
             bundle["cutover_evidence"]["background_maintenance_ready"],
             true
         );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_family_report_present"],
+            false
+        );
+        assert!(bundle["cutover_evidence"]["replacement_readiness_min_per_million"].is_null());
     }
 
     #[test]
@@ -3714,6 +3730,69 @@ mod tests {
         assert_eq!(
             bundle["cutover_evidence"]["background_maintenance_blockers"][0],
             "background maintenance evidence ranked foreground work"
+        );
+    }
+
+    #[test]
+    fn blocks_cutover_when_query_family_replacement_readiness_is_incomplete() {
+        let mut bundle = serde_json::json!({
+            "migration_gate": {
+                "decision": "ready",
+                "shadow_evidence_present": true
+            },
+            "replacement_readiness_by_query_family": [
+                {
+                    "query_family": "mutation",
+                    "required_checks": 1,
+                    "covered_checks": 1,
+                    "shadow_matched_checks": 0,
+                    "shadow_primary_only_checks": 1,
+                    "replacement_readiness_per_million": 0
+                },
+                {
+                    "query_family": "read",
+                    "required_checks": 1,
+                    "covered_checks": 1,
+                    "shadow_matched_checks": 1,
+                    "shadow_primary_only_checks": 0,
+                    "replacement_readiness_per_million": 1_000_000
+                }
+            ]
+        });
+
+        let ready = ExternalShadowReady {
+            protocol_version: 1,
+            capabilities: vec![
+                "execute".to_string(),
+                "execute_session".to_string(),
+                "project_graph".to_string(),
+            ],
+            engine_kind: Some("previous_wrapper".to_string()),
+        };
+
+        add_cutover_evidence_report(&mut bundle, false, Some(&ready), false, false).unwrap();
+
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert!(!cutover_evidence_is_eligible(&bundle));
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_family_report_present"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_min_per_million"],
+            0
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_invalid_family_count"],
+            0
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_blocked_query_families"][0],
+            "mutation"
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_blockers"][0],
+            "replacement readiness is incomplete for query families: mutation"
         );
     }
 

@@ -64,6 +64,16 @@ pub struct BackgroundMaintenanceEvidenceHealth {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplacementReadinessFamilyEvidenceHealth {
+    pub present: bool,
+    pub ready: bool,
+    pub min_replacement_readiness_per_million: Option<u64>,
+    pub invalid_family_count: u64,
+    pub blocked_query_families: Vec<String>,
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RustStringLiteral {
     value: String,
     line: usize,
@@ -365,6 +375,8 @@ fn insert_cutover_evidence_json(
         storage_recovery_evidence_health_from_bundle(bundle, storage_recovery_required);
     let background_maintenance_health =
         background_maintenance_evidence_health_from_bundle(bundle, background_maintenance_required);
+    let replacement_family_health =
+        replacement_readiness_family_evidence_health_from_bundle(bundle);
     let mut blockers = Vec::new();
     if self_shadow {
         blockers.push("shadow run is protocol smoke, not previous-wrapper evidence".to_string());
@@ -386,6 +398,9 @@ fn insert_cutover_evidence_json(
     }
     if !background_maintenance_health.ready {
         blockers.extend(background_maintenance_health.blockers.iter().cloned());
+    }
+    if !replacement_family_health.ready {
+        blockers.extend(replacement_family_health.blockers.iter().cloned());
     }
     if !migration_gate_ready {
         blockers.push("migration gate decision is not ready".to_string());
@@ -429,6 +444,11 @@ fn insert_cutover_evidence_json(
             "background_maintenance_foreground_ranked_count": background_maintenance_health.foreground_ranked_count,
             "background_maintenance_unknown_admission_count": background_maintenance_health.unknown_admission_count,
             "background_maintenance_blockers": background_maintenance_health.blockers,
+            "replacement_readiness_family_report_present": replacement_family_health.present,
+            "replacement_readiness_min_per_million": replacement_family_health.min_replacement_readiness_per_million,
+            "replacement_readiness_invalid_family_count": replacement_family_health.invalid_family_count,
+            "replacement_readiness_blocked_query_families": replacement_family_health.blocked_query_families,
+            "replacement_readiness_blockers": replacement_family_health.blockers,
             "migration_gate_ready": migration_gate_ready,
             "blockers": blockers,
         }),
@@ -448,6 +468,87 @@ pub fn background_maintenance_evidence_health_from_bundle(
     required: bool,
 ) -> BackgroundMaintenanceEvidenceHealth {
     background_maintenance_evidence_health(bundle.get("background_maintenance"), required)
+}
+
+pub fn replacement_readiness_family_evidence_health_from_bundle(
+    bundle: &serde_json::Value,
+) -> ReplacementReadinessFamilyEvidenceHealth {
+    replacement_readiness_family_evidence_health(
+        bundle.get("replacement_readiness_by_query_family"),
+    )
+}
+
+pub fn replacement_readiness_family_evidence_health(
+    replacement_readiness_by_query_family: Option<&serde_json::Value>,
+) -> ReplacementReadinessFamilyEvidenceHealth {
+    let Some(families) =
+        replacement_readiness_by_query_family.and_then(serde_json::Value::as_array)
+    else {
+        return ReplacementReadinessFamilyEvidenceHealth {
+            present: false,
+            ready: true,
+            min_replacement_readiness_per_million: None,
+            invalid_family_count: 0,
+            blocked_query_families: Vec::new(),
+            blockers: Vec::new(),
+        };
+    };
+
+    let invalid_family_count = families
+        .iter()
+        .filter(|family| {
+            family
+                .get("query_family")
+                .and_then(serde_json::Value::as_str)
+                .is_none()
+                || family
+                    .get("replacement_readiness_per_million")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_none()
+        })
+        .count() as u64;
+    let min_replacement_readiness_per_million = families
+        .iter()
+        .filter_map(|family| {
+            family
+                .get("replacement_readiness_per_million")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .min();
+    let blocked_query_families = families
+        .iter()
+        .filter(|family| {
+            family
+                .get("replacement_readiness_per_million")
+                .and_then(serde_json::Value::as_u64)
+                .is_some_and(|readiness| readiness < 1_000_000)
+        })
+        .filter_map(|family| {
+            family
+                .get("query_family")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    let mut blockers = Vec::new();
+    if invalid_family_count > 0 {
+        blockers.push("replacement readiness family report has invalid entries".to_string());
+    }
+    if !blocked_query_families.is_empty() {
+        blockers.push(format!(
+            "replacement readiness is incomplete for query families: {}",
+            blocked_query_families.join(", ")
+        ));
+    }
+
+    ReplacementReadinessFamilyEvidenceHealth {
+        present: true,
+        ready: blockers.is_empty(),
+        min_replacement_readiness_per_million,
+        invalid_family_count,
+        blocked_query_families,
+        blockers,
+    }
 }
 
 pub fn background_maintenance_evidence_health(
@@ -1769,6 +1870,25 @@ mod tests {
             bundle["cutover_evidence"]["background_maintenance_unknown_admission_count"],
             0
         );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_family_report_present"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_min_per_million"],
+            1_000_000
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_invalid_family_count"],
+            0
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["replacement_readiness_blocked_query_families"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
         assert_eq!(bundle["cutover_evidence"]["ready_preflight"], true);
         assert_eq!(bundle["cutover_evidence"]["shadow_evidence_present"], true);
         assert_eq!(bundle["migration_gate"]["rollback_required"], true);
@@ -1785,6 +1905,63 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn replacement_readiness_family_evidence_health_blocks_incomplete_families() {
+        let families = serde_json::json!([
+            {
+                "query_family": "mutation",
+                "replacement_readiness_per_million": 500_000
+            },
+            {
+                "query_family": "read",
+                "replacement_readiness_per_million": 1_000_000
+            }
+        ]);
+
+        let health = super::replacement_readiness_family_evidence_health(Some(&families));
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.min_replacement_readiness_per_million, Some(500_000));
+        assert_eq!(health.invalid_family_count, 0);
+        assert_eq!(health.blocked_query_families, vec!["mutation".to_string()]);
+        assert_eq!(
+            health.blockers,
+            vec!["replacement readiness is incomplete for query families: mutation".to_string()]
+        );
+    }
+
+    #[test]
+    fn replacement_readiness_family_evidence_health_is_optional_for_legacy_bundles() {
+        let health = super::replacement_readiness_family_evidence_health(None);
+
+        assert!(!health.present);
+        assert!(health.ready);
+        assert_eq!(health.min_replacement_readiness_per_million, None);
+        assert_eq!(health.invalid_family_count, 0);
+        assert!(health.blocked_query_families.is_empty());
+        assert!(health.blockers.is_empty());
+    }
+
+    #[test]
+    fn replacement_readiness_family_evidence_health_rejects_invalid_entries() {
+        let families = serde_json::json!([
+            {
+                "query_family": "read"
+            }
+        ]);
+
+        let health = super::replacement_readiness_family_evidence_health(Some(&families));
+
+        assert!(health.present);
+        assert!(!health.ready);
+        assert_eq!(health.invalid_family_count, 1);
+        assert_eq!(
+            health.blockers,
+            vec!["replacement readiness family report has invalid entries".to_string()]
+        );
     }
 
     #[test]

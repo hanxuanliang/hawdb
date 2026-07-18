@@ -393,6 +393,16 @@ is readable, the reported request count matches request events in the trace,
 and no traced request remains pending. An incomplete present trace blocks
 cutover evidence; omitting trace logging does not by itself block cutover
 eligibility.
+When the bundle includes `replacement_readiness_by_query_family`,
+`cutover_evidence` also reports
+`replacement_readiness_family_report_present`,
+`replacement_readiness_min_per_million`,
+`replacement_readiness_invalid_family_count`,
+`replacement_readiness_blocked_query_families`, and
+`replacement_readiness_blockers`. Any query family below full replacement
+readiness, or any malformed family entry, blocks cutover evidence, so
+automation that primarily reads `cutover_evidence` does not collapse scanner
+coverage and shadow parity into a single global ratio.
 `--storage-recovery-report-json <path>` attaches a JSON report produced by
 `skein storage-recovery-report`. When present, or when
 `--require-storage-recovery-evidence` is passed, `cutover_evidence` reports
