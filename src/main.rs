@@ -1,7 +1,8 @@
 mod cli_replacement_summary;
 
 use cli_replacement_summary::{
-    nowledge_replacement_summary_json, nowledge_replacement_summary_usage,
+    nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
+    nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
@@ -334,11 +335,35 @@ fn main() -> Result<()> {
         }
         if command == "nowledge-replacement-summary" {
             let mut require_production_ready = false;
+            let mut options = NowledgeReplacementSummaryOptions::default();
+            let mut custom_summary_options = false;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-production-ready" => {
                         require_production_ready = true;
                         args.next();
+                    }
+                    "--compact" => {
+                        options.include_family_details = false;
+                        options.include_blocker_details = false;
+                        custom_summary_options = true;
+                        args.next();
+                    }
+                    "--max-family-items" => {
+                        args.next();
+                        let raw_limit = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_replacement_summary_usage())
+                        })?;
+                        options.max_family_items = Some(parse_max_family_items(&raw_limit)?);
+                        custom_summary_options = true;
+                    }
+                    "--max-blockers" => {
+                        args.next();
+                        let raw_limit = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_replacement_summary_usage())
+                        })?;
+                        options.max_blockers = Some(parse_max_blockers(&raw_limit)?);
+                        custom_summary_options = true;
                     }
                     _ => break,
                 }
@@ -350,7 +375,11 @@ fn main() -> Result<()> {
                 return Err(SkeinError::Semantic(nowledge_replacement_summary_usage()));
             }
             let bundle = read_json_file(Path::new(&bundle_path))?;
-            let summary = nowledge_replacement_summary_json(&bundle);
+            let summary = if custom_summary_options {
+                nowledge_replacement_summary_json_with_options(&bundle, options)
+            } else {
+                nowledge_replacement_summary_json(&bundle)
+            };
             println!("{}", serde_json::to_string_pretty(&summary).unwrap());
             if require_production_ready
                 && summary
@@ -903,6 +932,30 @@ fn parse_max_wal_replay_entries(raw_limit: &str) -> Result<usize> {
     if limit == 0 {
         return Err(SkeinError::Semantic(
             "--max-wal-replay-entries must be greater than zero".to_string(),
+        ));
+    }
+    Ok(limit)
+}
+
+fn parse_max_family_items(raw_limit: &str) -> Result<usize> {
+    let limit = raw_limit.parse::<usize>().map_err(|error| {
+        SkeinError::Semantic(format!("invalid --max-family-items '{raw_limit}': {error}"))
+    })?;
+    if limit == 0 {
+        return Err(SkeinError::Semantic(
+            "--max-family-items must be greater than zero".to_string(),
+        ));
+    }
+    Ok(limit)
+}
+
+fn parse_max_blockers(raw_limit: &str) -> Result<usize> {
+    let limit = raw_limit.parse::<usize>().map_err(|error| {
+        SkeinError::Semantic(format!("invalid --max-blockers '{raw_limit}': {error}"))
+    })?;
+    if limit == 0 {
+        return Err(SkeinError::Semantic(
+            "--max-blockers must be greater than zero".to_string(),
         ));
     }
     Ok(limit)
@@ -3595,8 +3648,9 @@ mod tests {
         graph_lightning_import_status, graph_lightning_publish_staging_usage,
         graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
         graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
-        is_self_shadow_command, parse_max_wal_replay_entries, parse_parameters_json,
-        parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
+        is_self_shadow_command, parse_max_blockers, parse_max_family_items,
+        parse_max_wal_replay_entries, parse_parameters_json, parse_shadow_timeout_ms,
+        publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
@@ -3690,6 +3744,34 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--max-wal-replay-entries must be greater than zero"));
+    }
+
+    #[test]
+    fn parses_max_family_items() {
+        assert_eq!(parse_max_family_items("3").unwrap(), 3);
+    }
+
+    #[test]
+    fn rejects_zero_max_family_items() {
+        let error = parse_max_family_items("0").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("--max-family-items must be greater than zero"));
+    }
+
+    #[test]
+    fn parses_max_blockers() {
+        assert_eq!(parse_max_blockers("5").unwrap(), 5);
+    }
+
+    #[test]
+    fn rejects_zero_max_blockers() {
+        let error = parse_max_blockers("0").unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("--max-blockers must be greater than zero"));
     }
 
     #[test]

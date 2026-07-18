@@ -98,7 +98,10 @@ ready preflight to declare `engine_kind: "previous_wrapper"`.
 
 The stable way to report "how much of Nowledge can be replaced" is to run
 `skein nowledge-replacement-summary <migration-gate-json>` over a generated
-migration-gate bundle. The summary intentionally separates three numbers:
+migration-gate bundle, or add `--compact`/`--max-family-items <n>` when the
+bundle contains large per-family diagnostic arrays. Add `--max-blockers <n>`
+when the release artifact needs a bounded blocker sample instead of full blocker
+strings. The summary intentionally separates three numbers:
 `business_surface.covered_per_million` for scanned Cypher coverage,
 `shadow_parity.matched_per_million` for previous-wrapper comparison, and
 `production_replacement_per_million` for conservative production replacement
