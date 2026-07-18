@@ -876,6 +876,7 @@ Scope:
   splits first when public contracts are still moving, and promote boundaries to
   workspace packages only when the dependency direction is acyclic and stable
 - Chryso-style rule and cost interfaces
+- crate-owned generic memo storage with root-owned graph expression payloads
 - persistent statistics and index descriptors
 - pattern join ordering and scan/seek/expand costing
 - optimizer budget, trace, and plan fingerprint regression tests

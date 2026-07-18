@@ -263,9 +263,13 @@ index seeks matter more than full relational join sophistication.
 
 Skein should use a Cascades model similar to Chryso:
 
-- `Memo`: stores equivalent plan alternatives.
+- `Memo`: stores equivalent plan alternatives. The generic group storage lives
+  in `skein-optimizer`; the root graph optimizer stores Cypher-specific
+  `GroupExpr` payloads in that crate-owned memo.
 - `Group`: represents a logical equivalence class.
-- `GroupExpr`: stores an operator plus child group references.
+- `GroupExpr`: stores an operator plus child group references. Graph-specific
+  lowering still owns this payload until logical operator contracts move out of
+  the root crate.
 - `Rule`: transforms logical expressions into equivalent logical alternatives.
 - `ImplementationRule`: maps logical expressions to physical alternatives.
 - `CostModel`: scores physical alternatives using graph statistics. The current

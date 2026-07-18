@@ -9,9 +9,9 @@ use crate::planner::{
 };
 use crate::value::Value;
 pub use skein_optimizer::{
-    plan_class_counts, plan_operator_counts, GroupId, OptimizationSearchReport, OptimizerConfig,
-    OptimizerTrace, PhysicalPlanClass, PhysicalPlanKind, PlanCost, PlanCostBreakdown,
-    SelectedPlanTrace,
+    plan_class_counts, plan_operator_counts, GroupId, Memo, OptimizationSearchReport,
+    OptimizerConfig, OptimizerTrace, PhysicalPlanClass, PhysicalPlanKind, PlanCost,
+    PlanCostBreakdown, SelectedPlanTrace,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1872,15 +1872,7 @@ impl PhysicalPlan {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct Memo {
-    groups: Vec<Group>,
-}
-
-#[derive(Debug)]
-struct Group {
-    expressions: Vec<GroupExpr>,
-}
+type GraphMemo = Memo<GroupExpr>;
 
 #[derive(Debug)]
 struct GroupExpr {
@@ -1971,11 +1963,11 @@ impl CascadesOptimizer {
             report.record_selected_plan_cost(selected.cost);
             return (plan, report.into_trace(selected));
         }
-        let mut memo = Memo::default();
-        let root = memo.insert(logical);
+        let mut memo = GraphMemo::default();
+        let root = insert_logical_group(&mut memo, logical);
         let mut decisions = Vec::new();
-        let plan = memo.best_physical(root, catalog, &mut decisions);
-        let mut report = OptimizationSearchReport::memo(memo.groups.len());
+        let plan = best_physical(&memo, root, catalog, &mut decisions);
+        let mut report = OptimizationSearchReport::memo(memo.group_count());
         report.extend_decisions(decisions);
         let selected = selected_plan_trace(&plan, catalog);
         report.record_selected_plan_cost(selected.cost);
@@ -2629,29 +2621,26 @@ struct HopEstimate {
     exact: bool,
 }
 
-impl Memo {
-    pub fn insert(&mut self, logical: &LogicalPlan) -> GroupId {
-        let expr = GroupExpr::from_logical(logical, self);
-        let id = GroupId::new(self.groups.len());
-        self.groups.push(Group {
-            expressions: vec![expr],
-        });
-        id
-    }
+fn insert_logical_group(memo: &mut GraphMemo, logical: &LogicalPlan) -> GroupId {
+    let expr = GroupExpr::from_logical(logical, memo);
+    memo.insert_group(expr)
+}
 
-    fn best_physical(
-        &self,
-        root: GroupId,
-        catalog: &OptimizerCatalog,
-        decisions: &mut Vec<String>,
-    ) -> PhysicalPlan {
-        let group = &self.groups[root.index()];
-        group.expressions[0].to_physical(self, catalog, decisions)
-    }
+fn best_physical(
+    memo: &GraphMemo,
+    root: GroupId,
+    catalog: &OptimizerCatalog,
+    decisions: &mut Vec<String>,
+) -> PhysicalPlan {
+    let group = memo.group(root).expect("memo group id should exist");
+    group
+        .first_expression()
+        .expect("memo group should contain at least one expression")
+        .to_physical(memo, catalog, decisions)
 }
 
 impl GroupExpr {
-    fn from_logical(logical: &LogicalPlan, memo: &mut Memo) -> Self {
+    fn from_logical(logical: &LogicalPlan, memo: &mut GraphMemo) -> Self {
         match logical {
             LogicalPlan::CreateNodeLabel { .. }
             | LogicalPlan::CreateRelationshipType { .. }
@@ -2696,7 +2685,10 @@ impl GroupExpr {
             },
             LogicalPlan::NodeCartesianProduct { left, right } => Self {
                 logical: logical.clone(),
-                children: vec![memo.insert(left), memo.insert(right)],
+                children: vec![
+                    insert_logical_group(memo, left),
+                    insert_logical_group(memo, right),
+                ],
             },
             LogicalPlan::Expand { input, .. }
             | LogicalPlan::NodeColumnLookup { input, .. }
@@ -2708,14 +2700,14 @@ impl GroupExpr {
             | LogicalPlan::Sort { input, .. }
             | LogicalPlan::Limit { input, .. } => Self {
                 logical: logical.clone(),
-                children: vec![memo.insert(input)],
+                children: vec![insert_logical_group(memo, input)],
             },
         }
     }
 
     fn to_physical(
         &self,
-        memo: &Memo,
+        memo: &GraphMemo,
         catalog: &OptimizerCatalog,
         decisions: &mut Vec<String>,
     ) -> PhysicalPlan {
@@ -3131,8 +3123,8 @@ impl GroupExpr {
                 label: label.clone(),
             },
             LogicalPlan::NodeCartesianProduct { .. } => {
-                let left = memo.best_physical(self.children[0], catalog, decisions);
-                let right = memo.best_physical(self.children[1], catalog, decisions);
+                let left = best_physical(memo, self.children[0], catalog, decisions);
+                let right = best_physical(memo, self.children[1], catalog, decisions);
                 let (left, right) =
                     order_single_row_cartesian_product_children(catalog, decisions, left, right);
                 push_cartesian_product_cost_decision(catalog, decisions, &left, &right);
@@ -3154,7 +3146,7 @@ impl GroupExpr {
                 property: property.clone(),
                 column: column.clone(),
                 optional: *optional,
-                input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
             },
             LogicalPlan::Expand {
                 source_variable,
@@ -3194,7 +3186,7 @@ impl GroupExpr {
                     min_hops: *min_hops,
                     max_hops: *max_hops,
                     optional: *optional,
-                    input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                    input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
                 }
             }
             LogicalPlan::OptionalDegree {
@@ -3214,7 +3206,7 @@ impl GroupExpr {
                 target_label: target_label.clone(),
                 target_properties: target_properties.clone(),
                 alias: alias.clone(),
-                input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
             },
             LogicalPlan::OptionalRelationshipCountSum {
                 variable,
@@ -3284,32 +3276,32 @@ impl GroupExpr {
                 } else {
                     PhysicalPlan::FilterExec {
                         predicate: predicate.clone(),
-                        input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                        input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
                     }
                 }
             }
             LogicalPlan::Project { items, .. } => PhysicalPlan::ProjectExec {
                 items: items.clone(),
-                input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
             },
             LogicalPlan::Aggregate {
                 group_keys, items, ..
             } => PhysicalPlan::AggregateExec {
                 group_keys: group_keys.clone(),
                 items: items.clone(),
-                input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
             },
             LogicalPlan::Distinct { .. } => PhysicalPlan::DistinctExec {
-                input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
             },
             LogicalPlan::Sort { items, .. } => PhysicalPlan::SortExec {
                 items: items.clone(),
-                input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
             },
             LogicalPlan::Limit { offset, limit, .. } => PhysicalPlan::LimitExec {
                 offset: *offset,
                 limit: *limit,
-                input: Box::new(memo.best_physical(self.children[0], catalog, decisions)),
+                input: Box::new(best_physical(memo, self.children[0], catalog, decisions)),
             },
         }
     }

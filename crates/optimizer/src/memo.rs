@@ -27,6 +27,14 @@ impl<E> MemoGroup<E> {
         &self.expressions
     }
 
+    pub fn first_expression(&self) -> Option<&E> {
+        self.expressions.first()
+    }
+
+    pub fn expression_count(&self) -> usize {
+        self.expressions.len()
+    }
+
     pub fn push(&mut self, expression: E) {
         self.expressions.push(expression);
     }
@@ -62,6 +70,10 @@ impl<E> Memo<E> {
         self.groups.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.groups.is_empty()
+    }
+
     pub fn groups(&self) -> &[MemoGroup<E>] {
         &self.groups
     }
@@ -81,7 +93,9 @@ mod tests {
         assert_eq!(first.index(), 0);
         assert_eq!(second.index(), 1);
         assert_eq!(memo.group_count(), 2);
+        assert!(!memo.is_empty());
         assert_eq!(memo.group(first).unwrap().expressions(), &["scan"]);
+        assert_eq!(memo.group(first).unwrap().first_expression(), Some(&"scan"));
     }
 
     #[test]
@@ -95,5 +109,6 @@ mod tests {
             memo.group(group).unwrap().expressions(),
             &["seq_scan", "index_scan"]
         );
+        assert_eq!(memo.group(group).unwrap().expression_count(), 2);
     }
 }
