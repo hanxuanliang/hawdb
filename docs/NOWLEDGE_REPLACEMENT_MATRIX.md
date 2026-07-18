@@ -192,6 +192,11 @@ Nowledge `message_count` refreshes with optional `updated_at` stamping and
 ids and non-negative counts before WAL, keeps newer existing timestamps when
 requested, reports missing, idless, and duplicate rows without writing, and
 commits eligible Thread rows through one grouped WAL batch.
+Label lifecycle writes are covered by a typed batch for Nowledge metadata
+updates, canonical-name backfill, and rename/canonical-name updates. The
+wrapper validates Label ids, non-empty names, and non-empty canonical names
+before WAL, reports missing, idless, and duplicate rows without writing, and
+commits eligible Label rows through one grouped WAL batch.
 
 ## Current Direction
 

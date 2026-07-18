@@ -6,9 +6,10 @@ use super::{
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryLifecycleBatchRequest,
-    KnowledgeMemoryLifecycleUpdate, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection, KnowledgeLabelLifecycleBatchRequest,
+    KnowledgeLabelLifecycleUpdate, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePathRequest, KnowledgePropertyBatchRequest,
     KnowledgePropertyUpdateBatchRequest, KnowledgePropertyUpdateRequest,
     KnowledgeRelationshipCreateBatchRequest, KnowledgeRelationshipCreateRequest,
@@ -6548,6 +6549,226 @@ fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("updated_at"),
             Some(&Some(Value::Int(150)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_label_lifecycle_batch_for_nowledge_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'label_meta', name: 'Meta', metadata: '{}', updated_at: 1})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'label_canonical', name: 'Canonical'})")
+        .unwrap();
+    db.query(
+        "CREATE (:Label {id: 'label_rename', name: 'Old', canonical_name: 'old', updated_at: 1})",
+    )
+    .unwrap();
+
+    let output = db
+        .update_knowledge_label_lifecycle_batch(&KnowledgeLabelLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeLabelLifecycleUpdate {
+                    label_id: "label_meta".to_string(),
+                    name: None,
+                    canonical_name: None,
+                    metadata: Some(Value::String("{\"owner\":\"mem\"}".to_string())),
+                    updated_at: Some(Value::Int(100)),
+                },
+                KnowledgeLabelLifecycleUpdate {
+                    label_id: "label_canonical".to_string(),
+                    name: None,
+                    canonical_name: Some("canonical-label".to_string()),
+                    metadata: None,
+                    updated_at: None,
+                },
+                KnowledgeLabelLifecycleUpdate {
+                    label_id: "label_rename".to_string(),
+                    name: Some("Renamed".to_string()),
+                    canonical_name: Some("renamed".to_string()),
+                    metadata: None,
+                    updated_at: Some(Value::Int(200)),
+                },
+                KnowledgeLabelLifecycleUpdate {
+                    label_id: "label_rename".to_string(),
+                    name: Some("Duplicate".to_string()),
+                    canonical_name: Some("duplicate".to_string()),
+                    metadata: None,
+                    updated_at: Some(Value::Int(300)),
+                },
+                KnowledgeLabelLifecycleUpdate {
+                    label_id: "missing".to_string(),
+                    name: None,
+                    canonical_name: Some("missing".to_string()),
+                    metadata: None,
+                    updated_at: None,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 3);
+    assert_eq!(output.graph_commit_epoch_after, 4);
+    assert_eq!(output.rows.len(), 5);
+    assert_eq!(output.matched_count, 3);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert_eq!(output.updated_count, 3);
+    assert_eq!(output.updated_property_count, 6);
+    assert_eq!(output.rows[0].updated_property_count, 2);
+    assert_eq!(output.rows[1].updated_property_count, 1);
+    assert_eq!(output.rows[2].updated_property_count, 3);
+    assert!(output.rows[3].duplicate);
+    assert!(!output.rows[4].matched);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Label".to_string(),
+                external_id: "label_meta".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Label".to_string(),
+                external_id: "label_canonical".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Label".to_string(),
+                external_id: "label_rename".to_string(),
+            },
+        ],
+        property_names: vec![
+            "name".to_string(),
+            "canonical_name".to_string(),
+            "metadata".to_string(),
+            "updated_at".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("metadata"),
+        Some(&Some(Value::String("{\"owner\":\"mem\"}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("updated_at"),
+        Some(&Some(Value::Int(100)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("canonical_name"),
+        Some(&Some(Value::String("canonical-label".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("name"),
+        Some(&Some(Value::String("Renamed".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("canonical_name"),
+        Some(&Some(Value::String("renamed".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("updated_at"),
+        Some(&Some(Value::Int(200)))
+    );
+}
+
+#[test]
+fn label_lifecycle_batch_rejects_empty_canonical_name_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'label_1', name: 'Label'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_label_lifecycle_batch(&KnowledgeLabelLifecycleBatchRequest {
+            updates: vec![KnowledgeLabelLifecycleUpdate {
+                label_id: "label_1".to_string(),
+                name: None,
+                canonical_name: Some(String::new()),
+                metadata: None,
+                updated_at: None,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty canonical name"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_label_lifecycle_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Label {id: 'label_meta', name: 'Meta', metadata: '{}', updated_at: 1})")
+            .unwrap();
+        db.query("CREATE (:Label {id: 'label_rename', name: 'Old', canonical_name: 'old', updated_at: 1})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_label_lifecycle_batch(&KnowledgeLabelLifecycleBatchRequest {
+            updates: vec![
+                KnowledgeLabelLifecycleUpdate {
+                    label_id: "label_meta".to_string(),
+                    name: None,
+                    canonical_name: None,
+                    metadata: Some(Value::String("{\"owner\":\"mem\"}".to_string())),
+                    updated_at: Some(Value::Int(100)),
+                },
+                KnowledgeLabelLifecycleUpdate {
+                    label_id: "label_rename".to_string(),
+                    name: Some("Renamed".to_string()),
+                    canonical_name: Some("renamed".to_string()),
+                    metadata: None,
+                    updated_at: Some(Value::Int(200)),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Label".to_string(),
+                    external_id: "label_meta".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Label".to_string(),
+                    external_id: "label_rename".to_string(),
+                },
+            ],
+            property_names: vec![
+                "name".to_string(),
+                "canonical_name".to_string(),
+                "metadata".to_string(),
+                "updated_at".to_string(),
+            ],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("metadata"),
+            Some(&Some(Value::String("{\"owner\":\"mem\"}".to_string())))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("updated_at"),
+            Some(&Some(Value::Int(100)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("name"),
+            Some(&Some(Value::String("Renamed".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("canonical_name"),
+            Some(&Some(Value::String("renamed".to_string())))
         );
     }
     std::fs::remove_dir_all(path).unwrap();

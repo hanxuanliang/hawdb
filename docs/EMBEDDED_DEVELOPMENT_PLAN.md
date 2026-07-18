@@ -168,6 +168,8 @@ for Nowledge `metadata` writes with optional `updated_at` stamping. Thread
 denormalized message-count refreshes are exposed as a typed batch for Nowledge
 `message_count` writes with optional timestamp stamping and preserve-newer
 `updated_at` behavior.
+Label lifecycle writes are exposed as a typed batch for Nowledge metadata
+updates, canonical-name backfill, and rename/canonical-name updates.
 `DatabaseConfig` provides read-only operation and bounded read-result
 configuration. `read_only` opens only existing database directories without
 creating missing paths, then rejects Cypher mutations, transaction mutations,

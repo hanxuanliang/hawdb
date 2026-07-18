@@ -1914,6 +1914,44 @@ pub struct KnowledgeThreadMessageCountBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelLifecycleUpdate {
+    pub label_id: String,
+    pub name: Option<String>,
+    pub canonical_name: Option<String>,
+    pub metadata: Option<Value>,
+    pub updated_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelLifecycleBatchRequest {
+    pub updates: Vec<KnowledgeLabelLifecycleUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelLifecycleBatchRow {
+    pub label_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelLifecycleBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeLabelLifecycleBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3675,6 +3713,13 @@ impl Database {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         update_knowledge_thread_message_count_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_label_lifecycle_batch(
+        &mut self,
+        request: &KnowledgeLabelLifecycleBatchRequest,
+    ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
+        update_knowledge_label_lifecycle_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -7444,6 +7489,162 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
         (Value::String(left), Value::String(right)) => left > right,
         _ => false,
     }
+}
+
+fn update_knowledge_label_lifecycle_batch_for(
+    db: &mut Database,
+    request: &KnowledgeLabelLifecycleBatchRequest,
+) -> Result<KnowledgeLabelLifecycleBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.label_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge label lifecycle update requires a non-empty label id".to_string(),
+            ));
+        }
+        if update.name.as_deref().is_some_and(str::is_empty) {
+            return Err(SkeinError::Semantic(
+                "knowledge label lifecycle update requires a non-empty name".to_string(),
+            ));
+        }
+        if update.canonical_name.as_deref().is_some_and(str::is_empty) {
+            return Err(SkeinError::Semantic(
+                "knowledge label lifecycle update requires a non-empty canonical name".to_string(),
+            ));
+        }
+        if !label_lifecycle_update_has_business_field(update) {
+            return Err(SkeinError::Semantic(
+                "knowledge label lifecycle update requires at least one lifecycle field"
+                    .to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Label", &update.label_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeLabelLifecycleBatchRow {
+                label_id: update.label_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.label_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeLabelLifecycleBatchRow {
+                label_id: update.label_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeLabelLifecycleBatchRow {
+                label_id: update.label_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let assignments = label_lifecycle_assignments(update);
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeLabelLifecycleBatchRow {
+            label_id: update.label_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeLabelLifecycleBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Label", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeLabelLifecycleBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
+}
+
+fn label_lifecycle_update_has_business_field(update: &KnowledgeLabelLifecycleUpdate) -> bool {
+    update.name.is_some() || update.canonical_name.is_some() || update.metadata.is_some()
+}
+
+fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeMap<String, Value> {
+    let mut assignments = BTreeMap::new();
+    if let Some(name) = &update.name {
+        assignments.insert("name".to_string(), Value::String(name.clone()));
+    }
+    if let Some(canonical_name) = &update.canonical_name {
+        assignments.insert(
+            "canonical_name".to_string(),
+            Value::String(canonical_name.clone()),
+        );
+    }
+    insert_optional_assignment(&mut assignments, "metadata", &update.metadata);
+    insert_optional_assignment(&mut assignments, "updated_at", &update.updated_at);
+    assignments
 }
 
 fn delete_knowledge_entity_for(
@@ -11853,6 +12054,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         self.db.update_knowledge_thread_message_count_batch(request)
+    }
+
+    pub fn update_knowledge_label_lifecycle_batch(
+        &mut self,
+        request: &KnowledgeLabelLifecycleBatchRequest,
+    ) -> Result<KnowledgeLabelLifecycleBatchOutput> {
+        self.db.update_knowledge_label_lifecycle_batch(request)
     }
 
     pub fn delete_knowledge_entity(
