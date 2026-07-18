@@ -588,6 +588,8 @@ pub struct KnowledgeRetrievalDiagnostics {
     pub graph_seed_truncated: bool,
     pub graph_seed_truncation_reason_codes: Vec<KnowledgeTruncationReasonCode>,
     pub graph_seed_truncation_reasons: Vec<String>,
+    pub graph_context_input_candidate_set: SearchCandidateSetReport,
+    pub graph_context_candidate_set: SearchRetrieverCandidateSetReport,
     pub graph_context_path_count: usize,
     pub graph_context_node_count: usize,
     pub graph_context_relationship_count: usize,
@@ -2337,21 +2339,20 @@ impl KnowledgeRetrievalGraphContext<'_> {
             request.graph_seed_limit,
             &request.metadata_filters,
         );
-        let (graph_context_paths, fanout_details, graph_context_truncation_reasons) = self
-            .expand_knowledge_context(
-                &search,
-                &graph_seed_search.seeds,
-                request.graph_context_limit,
-                request.graph_context_max_hops,
-            );
-        let evidence = self.knowledge_evidence_for_search(&search, &graph_context_paths);
+        let graph_context_search = self.expand_knowledge_context(
+            &search,
+            &graph_seed_search.seeds,
+            request.graph_context_limit,
+            request.graph_context_max_hops,
+        );
+        let evidence = self.knowledge_evidence_for_search(&search, &graph_context_search.paths);
         let projection_freshness = search_index.projection_freshness();
         let graph_commit_epoch = self.store.commit_epoch();
         let retrievers = knowledge_retriever_reports(
             &search,
             &evidence,
             &graph_seed_search.seeds,
-            &graph_context_paths,
+            &graph_context_search.paths,
             &projection_freshness,
             KnowledgeGraphSeedRetrieverInput {
                 limit: request.graph_seed_limit,
@@ -2367,11 +2368,11 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 &search,
                 &evidence,
                 &graph_seed_search.seeds,
-                &graph_context_paths,
+                &graph_context_search.paths,
                 request.candidate_limit,
                 request.candidate_scoring,
             );
-        let mut fanout_reason_details = fanout_details;
+        let mut fanout_reason_details = graph_context_search.fanout_reason_details.clone();
         fanout_reason_details.extend(graph_seed_search.fanout_reason_details.clone());
         fanout_reason_details.extend(candidate_fanout_details);
         let fanout_reason_codes = knowledge_fanout_reason_codes(&fanout_reason_details);
@@ -2394,10 +2395,21 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 ),
                 graph_seed_candidate_count: graph_seed_search.candidate_count,
                 graph_seed_returned_count: graph_seed_search.seeds.len(),
-                graph_context_path_count: graph_context_paths.len(),
-                graph_context_node_count: knowledge_context_path_node_count(&graph_context_paths),
-                graph_context_relationship_count: graph_context_paths.len(),
-                graph_context_truncation_reasons,
+                graph_context_input_candidate_set:
+                    knowledge_graph_context_input_candidate_set_report(
+                        graph_context_search.input_seed_count,
+                        graph_commit_epoch,
+                    ),
+                graph_context_candidate_set: knowledge_graph_context_candidate_set_report(
+                    graph_context_search.expanded_relationship_count,
+                    graph_commit_epoch,
+                ),
+                graph_context_path_count: graph_context_search.paths.len(),
+                graph_context_node_count: knowledge_context_path_node_count(
+                    &graph_context_search.paths,
+                ),
+                graph_context_relationship_count: graph_context_search.paths.len(),
+                graph_context_truncation_reasons: graph_context_search.truncation_reasons.clone(),
                 fanout_reason_details: fanout_reason_details.clone(),
                 candidate_count: candidates.len(),
                 candidate_total_count,
@@ -2412,7 +2424,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
             candidates,
             evidence,
             graph_seeds: graph_seed_search.seeds,
-            graph_context_paths,
+            graph_context_paths: graph_context_search.paths,
             fanout_reason_codes,
             fanout_reason_details,
             fanout_reasons,
@@ -2425,11 +2437,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         graph_seeds: &[KnowledgeGraphSeed],
         graph_context_limit: usize,
         graph_context_max_hops: usize,
-    ) -> (
-        Vec<KnowledgeGraphContextPath>,
-        Vec<KnowledgeFanoutReasonDetail>,
-        Vec<String>,
-    ) {
+    ) -> KnowledgeGraphContextSearchOutput {
         let mut paths = Vec::new();
         let mut fanout_reasons = Vec::new();
         let mut truncation_reasons = Vec::new();
@@ -2455,6 +2463,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 frontier.push_back((seed_id, seed_node, 0usize));
             }
         }
+        let input_seed_count = seen_frontier_nodes.len();
 
         while let Some((seed_hit_id, current_node, depth)) = frontier.pop_front() {
             if depth >= graph_context_max_hops {
@@ -2488,7 +2497,14 @@ impl KnowledgeRetrievalGraphContext<'_> {
                     );
                     truncation_reasons.push(detail.message.clone());
                     fanout_reasons.push(detail);
-                    return (paths, fanout_reasons, truncation_reasons);
+                    let expanded_relationship_count = paths.len();
+                    return KnowledgeGraphContextSearchOutput {
+                        paths,
+                        input_seed_count,
+                        expanded_relationship_count,
+                        fanout_reason_details: fanout_reasons,
+                        truncation_reasons,
+                    };
                 }
                 let Some(path) = self.context_path_for_relationship(
                     &seed_hit_id,
@@ -2505,7 +2521,14 @@ impl KnowledgeRetrievalGraphContext<'_> {
             }
         }
 
-        (paths, fanout_reasons, truncation_reasons)
+        let expanded_relationship_count = paths.len();
+        KnowledgeGraphContextSearchOutput {
+            paths,
+            input_seed_count,
+            expanded_relationship_count,
+            fanout_reason_details: fanout_reasons,
+            truncation_reasons,
+        }
     }
 
     fn seed_node_for_hit(
@@ -2747,6 +2770,15 @@ impl KnowledgeRetrievalGraphContext<'_> {
             fanout_reason_details: fanout_reasons,
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+struct KnowledgeGraphContextSearchOutput {
+    paths: Vec<KnowledgeGraphContextPath>,
+    input_seed_count: usize,
+    expanded_relationship_count: usize,
+    fanout_reason_details: Vec<KnowledgeFanoutReasonDetail>,
+    truncation_reasons: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -3037,6 +3069,36 @@ fn knowledge_graph_seed_input_candidate_set_report(
     }
 }
 
+fn knowledge_graph_context_input_candidate_set_report(
+    cardinality: usize,
+    graph_commit_epoch: u64,
+) -> SearchCandidateSetReport {
+    SearchCandidateSetReport {
+        id_space: "canonical_graph_node_id".to_string(),
+        representation: "context_seed_node_ids".to_string(),
+        cardinality,
+        exact: true,
+        snapshot_source_graph_commit_epoch: Some(graph_commit_epoch),
+        policy_epoch: None,
+        filtered_out_count: 0,
+        metadata_filters: BTreeMap::new(),
+    }
+}
+
+fn knowledge_graph_context_candidate_set_report(
+    cardinality: usize,
+    graph_commit_epoch: u64,
+) -> SearchRetrieverCandidateSetReport {
+    SearchRetrieverCandidateSetReport {
+        id_space: "canonical_graph_relationship_id".to_string(),
+        representation: "expanded_relationship_ids".to_string(),
+        cardinality,
+        exact: true,
+        snapshot_source_graph_commit_epoch: Some(graph_commit_epoch),
+        policy_epoch: None,
+    }
+}
+
 fn knowledge_graph_context_fallback_reasons(request: &KnowledgeRetrievalRequest) -> Vec<String> {
     let mut reasons = Vec::new();
     if request.graph_context_limit == 0 {
@@ -3067,6 +3129,8 @@ struct KnowledgeRetrievalDiagnosticsInput {
     graph_seed_candidate_set: SearchRetrieverCandidateSetReport,
     graph_seed_candidate_count: usize,
     graph_seed_returned_count: usize,
+    graph_context_input_candidate_set: SearchCandidateSetReport,
+    graph_context_candidate_set: SearchRetrieverCandidateSetReport,
     graph_context_path_count: usize,
     graph_context_node_count: usize,
     graph_context_relationship_count: usize,
@@ -3159,6 +3223,8 @@ fn knowledge_retrieval_diagnostics(
         graph_seed_truncated: !graph_seed_truncation_reasons.is_empty(),
         graph_seed_truncation_reason_codes,
         graph_seed_truncation_reasons,
+        graph_context_input_candidate_set: input.graph_context_input_candidate_set,
+        graph_context_candidate_set: input.graph_context_candidate_set,
         graph_context_path_count: input.graph_context_path_count,
         graph_context_node_count: input.graph_context_node_count,
         graph_context_relationship_count: input.graph_context_relationship_count,

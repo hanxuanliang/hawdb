@@ -337,6 +337,31 @@ fn nowledge_graph_adapter_retrieves_knowledge_with_external_projection() {
         output.diagnostics.graph_seed_candidate_set.representation,
         "ranked_node_ids"
     );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_context_input_candidate_set
+            .id_space,
+        "canonical_graph_node_id"
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_context_input_candidate_set
+            .representation,
+        "context_seed_node_ids"
+    );
+    assert_eq!(
+        output.diagnostics.graph_context_candidate_set.id_space,
+        "canonical_graph_relationship_id"
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_context_candidate_set
+            .representation,
+        "expanded_relationship_ids"
+    );
     assert!(!output.diagnostics.graph_seed_truncated);
     assert!(output.diagnostics.graph_seed_truncation_reasons.is_empty());
     assert_eq!(output.diagnostics.graph_context_limit, 4);
@@ -1824,6 +1849,21 @@ fn knowledge_retrieval_expands_graph_context_by_ordered_adjacency() {
     );
 
     assert_eq!(output.graph_context_paths.len(), 1);
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_context_input_candidate_set
+            .cardinality,
+        1
+    );
+    assert_eq!(
+        output.diagnostics.graph_context_candidate_set.cardinality,
+        1
+    );
+    assert_eq!(
+        output.diagnostics.graph_context_candidate_set.id_space,
+        "canonical_graph_relationship_id"
+    );
     assert_eq!(
         output.graph_context_paths[0].target_external_id.as_deref(),
         Some("lower-neighbor")
