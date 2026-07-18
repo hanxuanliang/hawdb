@@ -209,6 +209,7 @@ fn main() -> Result<()> {
             let mut storage_recovery_required = false;
             let mut storage_recovery = None;
             let mut background_maintenance_required = false;
+            let mut background_maintenance = None;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-ready" => {
@@ -264,6 +265,13 @@ fn main() -> Result<()> {
                             SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
                         })?;
                         storage_recovery = Some(read_json_file(Path::new(&path))?);
+                    }
+                    "--background-maintenance-report-json" => {
+                        args.next();
+                        let path = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_cypher_migration_gate_usage())
+                        })?;
+                        background_maintenance = Some(read_json_file(Path::new(&path))?);
                     }
                     _ => break,
                 }
@@ -331,6 +339,7 @@ fn main() -> Result<()> {
                         storage_recovery_required,
                         storage_recovery,
                         background_maintenance_required,
+                        background_maintenance,
                         ..NowledgeCypherMigrationGateJsonOptions::default()
                     },
                 )?;
@@ -879,7 +888,7 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 
@@ -3896,9 +3905,9 @@ mod tests {
         graph_lightning_import_status, graph_lightning_publish_staging_usage,
         graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
         graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
-        is_self_shadow_command, parse_max_blockers, parse_max_family_items,
-        parse_max_wal_replay_entries, parse_parameters_json, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog,
+        is_self_shadow_command, nowledge_cypher_migration_gate_usage, parse_max_blockers,
+        parse_max_family_items, parse_max_wal_replay_entries, parse_parameters_json,
+        parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
@@ -4785,6 +4794,13 @@ mod tests {
     fn background_maintenance_report_usage_mentions_cutover_ready_gate() {
         assert!(background_maintenance_report_usage().contains("--require-cutover-ready"));
         assert!(background_maintenance_report_usage().contains("<database-path>"));
+    }
+
+    #[test]
+    fn migration_gate_usage_mentions_background_report_input() {
+        assert!(
+            nowledge_cypher_migration_gate_usage().contains("--background-maintenance-report-json")
+        );
     }
 
     #[test]

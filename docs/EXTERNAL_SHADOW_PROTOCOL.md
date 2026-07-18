@@ -474,7 +474,7 @@ below still treats primary-only projected graph checks as blockers.
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] <root> <shadow-name> <program> [args...]
+skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -571,6 +571,10 @@ admission, and search-projection-delta fields used by the migration-gate
 background-maintenance evidence health rules used by cutover evidence and exits
 with an error when stable blocker codes such as `no_candidates`,
 `no_ranked_work`, `foreground_ranked_work`, or `unknown_admission` are present.
+Pass the resulting JSON to `nowledge-cypher-migration-gate` with
+`--background-maintenance-report-json <path>` when cutover evidence should use a
+caller-owned durable database preflight instead of the fixture-local
+`background_maintenance` summary.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover

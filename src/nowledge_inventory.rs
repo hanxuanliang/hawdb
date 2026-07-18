@@ -35,6 +35,7 @@ pub struct NowledgeCypherMigrationGateJsonOptions {
     pub storage_recovery_required: bool,
     pub storage_recovery: Option<serde_json::Value>,
     pub background_maintenance_required: bool,
+    pub background_maintenance: Option<serde_json::Value>,
     pub rollback: CompatibilityRollbackEvidence,
 }
 
@@ -248,7 +249,14 @@ pub fn scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
         options.rollback.clone(),
     );
     let mut json = compatibility_migration_gate_bundle_to_json(&bundle);
-    insert_background_maintenance_summary_json(&mut json, &primary)?;
+    if let Some(background_maintenance) = options.background_maintenance.as_ref() {
+        migration_gate_json_object(&mut json)?.insert(
+            "background_maintenance".to_string(),
+            background_maintenance.clone(),
+        );
+    } else {
+        insert_background_maintenance_summary_json(&mut json, &primary)?;
+    }
     add_shadow_metadata_to_migration_gate_json(&mut json, &shadow_engine_name, options)?;
     Ok(json)
 }
@@ -2152,6 +2160,72 @@ mod tests {
         assert_eq!(
             bundle["cutover_evidence"]["blockers"][0],
             "shadow ready response missing engine_kind"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn scanned_cypher_migration_gate_can_use_caller_background_maintenance_report() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-migration-gate-background-report-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_dir = root.join("crates/nmem-graph/src");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(
+            source_dir.join("repo.rs"),
+            r#"
+                pub fn query() -> &'static str {
+                    "MATCH (m:Memory) WHERE m.id = $id RETURN m.title AS title"
+                }
+            "#,
+        )
+        .unwrap();
+
+        let mut shadow = TestShadowEngine::default();
+        let bundle = scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
+            &root,
+            &mut shadow,
+            NowledgeCypherMigrationGateJsonOptions {
+                shadow_name: Some("previous-wrapper".to_string()),
+                shadow_ready: Some(ExternalShadowReady {
+                    protocol_version: crate::EXTERNAL_SHADOW_PROTOCOL_VERSION,
+                    capabilities: vec![
+                        "execute".to_string(),
+                        "execute_session".to_string(),
+                        "project_graph".to_string(),
+                    ],
+                    engine_kind: Some("previous_wrapper".to_string()),
+                }),
+                include_cutover_evidence: true,
+                background_maintenance_required: true,
+                background_maintenance: Some(serde_json::json!({
+                    "protocol": "skein-background-maintenance-report",
+                    "total_candidates": 0,
+                    "ranked": []
+                })),
+                ..NowledgeCypherMigrationGateJsonOptions::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            bundle["background_maintenance"]["protocol"],
+            "skein-background-maintenance-report"
+        );
+        assert_eq!(bundle["background_maintenance"]["total_candidates"], 0);
+        assert_eq!(bundle["cutover_evidence"]["eligible"], false);
+        assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_present"],
+            true
+        );
+        assert_eq!(
+            bundle["cutover_evidence"]["background_maintenance_blocker_codes"],
+            serde_json::json!(["no_candidates", "no_ranked_work"])
         );
 
         fs::remove_dir_all(root).unwrap();
