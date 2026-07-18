@@ -1,12 +1,12 @@
 use super::{
-    validate_graph_lightning_graph_stream, BackgroundMaintenanceOptions, CanonicalStableIdMapping,
-    Database, DatabaseConfig, DerivedArtifactJobStatus, ExternalContentArtifactJobCompletion,
-    ExternalContentArtifactRuntimeManifest, KnowledgeCandidateScoringPolicy,
-    KnowledgeCandidateSource, KnowledgeEntityRequest, KnowledgeGraphPathDirection,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
-    KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeSubgraphRequest,
-    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    validate_graph_lightning_graph_stream, BackgroundMaintenanceKind, BackgroundMaintenanceOptions,
+    CanonicalStableIdMapping, Database, DatabaseConfig, DerivedArtifactJobStatus,
+    ExternalContentArtifactJobCompletion, ExternalContentArtifactRuntimeManifest,
+    KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource, KnowledgeEntityRequest,
+    KnowledgeGraphPathDirection, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgePathRequest, KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest,
+    KnowledgeSubgraphRequest, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -7548,6 +7548,48 @@ fn background_maintenance_candidates_are_empty_without_pending_work() {
 }
 
 #[test]
+fn background_maintenance_kinds_have_stable_string_encodings() {
+    let cases = [
+        (
+            BackgroundMaintenanceKind::SchemaMaintenance,
+            "schema_maintenance",
+        ),
+        (
+            BackgroundMaintenanceKind::PropertyIndexProjection,
+            "property_index_projection",
+        ),
+        (
+            BackgroundMaintenanceKind::SearchProjectionGraphDelta,
+            "search_projection_graph_delta",
+        ),
+        (
+            BackgroundMaintenanceKind::SearchProjectionRebuild,
+            "search_projection_rebuild",
+        ),
+        (
+            BackgroundMaintenanceKind::SearchProjectionMetadataRepair,
+            "search_projection_metadata_repair",
+        ),
+        (
+            BackgroundMaintenanceKind::GraphLightningBootstrapExport,
+            "graph_lightning_bootstrap_export",
+        ),
+        (
+            BackgroundMaintenanceKind::ExternalContentArtifactJob,
+            "external_content_artifact_job",
+        ),
+    ];
+
+    for (kind, name) in cases {
+        assert_eq!(kind.as_str(), name);
+        assert_eq!(name.parse::<BackgroundMaintenanceKind>(), Ok(kind));
+    }
+    assert!("unknown_background_work"
+        .parse::<BackgroundMaintenanceKind>()
+        .is_err());
+}
+
+#[test]
 fn background_maintenance_skips_over_limit_search_projection_graph_delta() {
     let mut db = Database::new();
     db.query("CREATE NODE TABLE Memory").unwrap();
@@ -7610,6 +7652,10 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
         .iter()
         .map(|candidate| candidate.name.as_str())
         .collect::<Vec<_>>();
+    let kinds = candidates
+        .iter()
+        .map(|candidate| candidate.kind)
+        .collect::<Vec<_>>();
 
     assert!(names.contains(&"schema_maintenance"));
     assert!(names.contains(&"property_index_projection"));
@@ -7617,6 +7663,19 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     assert!(names.contains(&"search_projection_rebuild"));
     assert!(names.contains(&"graph_lightning_bootstrap_export"));
     assert!(names.contains(&"external_content_artifact_job"));
+    assert!(kinds.contains(&BackgroundMaintenanceKind::SchemaMaintenance));
+    assert!(kinds.contains(&BackgroundMaintenanceKind::PropertyIndexProjection));
+    assert!(kinds.contains(&BackgroundMaintenanceKind::SearchProjectionGraphDelta));
+    assert!(kinds.contains(&BackgroundMaintenanceKind::SearchProjectionRebuild));
+    assert!(kinds.contains(&BackgroundMaintenanceKind::GraphLightningBootstrapExport));
+    assert!(kinds.contains(&BackgroundMaintenanceKind::ExternalContentArtifactJob));
+    for candidate in &candidates {
+        assert_eq!(candidate.name, candidate.kind.as_str());
+        assert_eq!(
+            candidate.name.parse::<BackgroundMaintenanceKind>(),
+            Ok(candidate.kind)
+        );
+    }
 
     let policy = LocalQosPolicy {
         max_total_background_operations: Some(5),
@@ -7629,6 +7688,15 @@ fn background_maintenance_ranks_mixed_nowledge_background_work() {
     let ranked = db.rank_background_maintenance(Some(&search_index), &policy, &state, options);
 
     assert_eq!(ranked[0].name, "search_projection_graph_delta");
+    assert_eq!(
+        ranked[0].kind,
+        BackgroundMaintenanceKind::SearchProjectionGraphDelta
+    );
+    assert_eq!(ranked[0].kind.as_str(), ranked[0].name);
+    assert_eq!(
+        ranked[0].name.parse::<BackgroundMaintenanceKind>(),
+        Ok(ranked[0].kind)
+    );
     assert_eq!(ranked[0].plan.request.class, WorkClass::Projection);
     assert_eq!(ranked[0].plan.request.class.as_str(), "projection");
     assert_eq!(ranked[0].plan.request.priority.as_str(), "background");

@@ -33,6 +33,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 use std::rc::Rc;
+use std::str::FromStr;
 
 mod artifact_jobs;
 
@@ -457,15 +458,85 @@ impl Default for BackgroundMaintenanceOptions {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BackgroundMaintenanceCandidate {
+    pub kind: BackgroundMaintenanceKind,
     pub name: String,
     pub plan: BackgroundWorkPlan,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RankedBackgroundMaintenance {
+    pub kind: BackgroundMaintenanceKind,
     pub name: String,
     pub plan: BackgroundWorkPlan,
     pub decision: BackgroundWorkDecision,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BackgroundMaintenanceKind {
+    SchemaMaintenance,
+    PropertyIndexProjection,
+    SearchProjectionGraphDelta,
+    SearchProjectionRebuild,
+    SearchProjectionMetadataRepair,
+    GraphLightningBootstrapExport,
+    ExternalContentArtifactJob,
+}
+
+impl BackgroundMaintenanceKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BackgroundMaintenanceKind::SchemaMaintenance => "schema_maintenance",
+            BackgroundMaintenanceKind::PropertyIndexProjection => "property_index_projection",
+            BackgroundMaintenanceKind::SearchProjectionGraphDelta => {
+                "search_projection_graph_delta"
+            }
+            BackgroundMaintenanceKind::SearchProjectionRebuild => "search_projection_rebuild",
+            BackgroundMaintenanceKind::SearchProjectionMetadataRepair => {
+                "search_projection_metadata_repair"
+            }
+            BackgroundMaintenanceKind::GraphLightningBootstrapExport => {
+                "graph_lightning_bootstrap_export"
+            }
+            BackgroundMaintenanceKind::ExternalContentArtifactJob => {
+                "external_content_artifact_job"
+            }
+        }
+    }
+}
+
+impl FromStr for BackgroundMaintenanceKind {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> std::result::Result<Self, Self::Err> {
+        match value {
+            "schema_maintenance" => Ok(BackgroundMaintenanceKind::SchemaMaintenance),
+            "property_index_projection" => Ok(BackgroundMaintenanceKind::PropertyIndexProjection),
+            "search_projection_graph_delta" => {
+                Ok(BackgroundMaintenanceKind::SearchProjectionGraphDelta)
+            }
+            "search_projection_rebuild" => Ok(BackgroundMaintenanceKind::SearchProjectionRebuild),
+            "search_projection_metadata_repair" => {
+                Ok(BackgroundMaintenanceKind::SearchProjectionMetadataRepair)
+            }
+            "graph_lightning_bootstrap_export" => {
+                Ok(BackgroundMaintenanceKind::GraphLightningBootstrapExport)
+            }
+            "external_content_artifact_job" => {
+                Ok(BackgroundMaintenanceKind::ExternalContentArtifactJob)
+            }
+            _ => Err("unknown background maintenance kind"),
+        }
+    }
+}
+
+impl BackgroundMaintenanceCandidate {
+    pub fn new(kind: BackgroundMaintenanceKind, plan: BackgroundWorkPlan) -> Self {
+        Self {
+            kind,
+            name: kind.as_str().to_string(),
+            plan,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1622,10 +1693,10 @@ impl Database {
 
         if options.include_schema_maintenance {
             if let Some(plan) = self.schema_maintenance_background_work_plan(options.hint.clone()) {
-                candidates.push(BackgroundMaintenanceCandidate {
-                    name: "schema_maintenance".to_string(),
+                candidates.push(BackgroundMaintenanceCandidate::new(
+                    BackgroundMaintenanceKind::SchemaMaintenance,
                     plan,
-                });
+                ));
             }
         }
 
@@ -1633,10 +1704,10 @@ impl Database {
             if let Some(plan) =
                 self.property_index_projection_background_work_plan(options.hint.clone())
             {
-                candidates.push(BackgroundMaintenanceCandidate {
-                    name: "property_index_projection".to_string(),
+                candidates.push(BackgroundMaintenanceCandidate::new(
+                    BackgroundMaintenanceKind::PropertyIndexProjection,
                     plan,
-                });
+                ));
             }
         }
 
@@ -1654,10 +1725,10 @@ impl Database {
                 ),
             };
             if let Some(plan) = plan {
-                candidates.push(BackgroundMaintenanceCandidate {
-                    name: "search_projection_graph_delta".to_string(),
+                candidates.push(BackgroundMaintenanceCandidate::new(
+                    BackgroundMaintenanceKind::SearchProjectionGraphDelta,
                     plan,
-                });
+                ));
             }
         }
 
@@ -1671,10 +1742,10 @@ impl Database {
                 if let Some(plan) =
                     self.search_projection_rebuild_background_work_plan(search_index, hint)
                 {
-                    candidates.push(BackgroundMaintenanceCandidate {
-                        name: "search_projection_rebuild".to_string(),
+                    candidates.push(BackgroundMaintenanceCandidate::new(
+                        BackgroundMaintenanceKind::SearchProjectionRebuild,
                         plan,
-                    });
+                    ));
                 }
             }
 
@@ -1683,10 +1754,10 @@ impl Database {
                     search_index,
                     options.hint.clone(),
                 ) {
-                    candidates.push(BackgroundMaintenanceCandidate {
-                        name: "search_projection_metadata_repair".to_string(),
+                    candidates.push(BackgroundMaintenanceCandidate::new(
+                        BackgroundMaintenanceKind::SearchProjectionMetadataRepair,
                         plan,
-                    });
+                    ));
                 }
             }
         }
@@ -1695,10 +1766,10 @@ impl Database {
             if let Some(plan) =
                 self.graph_lightning_bootstrap_export_background_work_plan(options.hint.clone())
             {
-                candidates.push(BackgroundMaintenanceCandidate {
-                    name: "graph_lightning_bootstrap_export".to_string(),
+                candidates.push(BackgroundMaintenanceCandidate::new(
+                    BackgroundMaintenanceKind::GraphLightningBootstrapExport,
                     plan,
-                });
+                ));
             }
         }
 
@@ -1707,10 +1778,10 @@ impl Database {
                 options.hint,
                 options.external_content_artifact_estimated_operations,
             ) {
-                candidates.push(BackgroundMaintenanceCandidate {
-                    name: "external_content_artifact_job".to_string(),
+                candidates.push(BackgroundMaintenanceCandidate::new(
+                    BackgroundMaintenanceKind::ExternalContentArtifactJob,
                     plan,
-                });
+                ));
             }
         }
 
@@ -1735,6 +1806,7 @@ impl Database {
             .map(|ranked| {
                 let candidate = &candidates[ranked.index];
                 RankedBackgroundMaintenance {
+                    kind: candidate.kind,
                     name: candidate.name.clone(),
                     plan: candidate.plan.clone(),
                     decision: ranked.decision,
