@@ -414,8 +414,11 @@ packages the four reports into one result, and
 artifact upload. The `nowledge-cypher-migration-gate [--require-ready]
 [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready]
 [--shadow-trace <path>] [--shadow-timeout-ms <ms>]
-[--require-rollback-evidence] [--rollback-evidence <text>] <root> <shadow-name>
-<program> [args...]` CLI command
+[--require-rollback-evidence] [--rollback-evidence <text>]
+[--require-storage-recovery-evidence] [--storage-recovery-report-json <path>]
+[--require-background-maintenance-evidence]
+[--background-maintenance-report-json <path>] <root> <shadow-name> <program>
+[args...]` CLI command
 scans a Nowledge source tree,
 runs the public Nowledge core fixture through `ExternalShadowCommand`, uses
 normalized Cypher coverage so scanner-generated `file:line:hash` names do not
@@ -427,10 +430,20 @@ suitable as a production cutover gate.
 With `--require-rollback-evidence`, the same gate also requires caller-supplied
 previous-database reopen proof through `--rollback-evidence <text>` before the
 migration decision can be ready.
+With `--require-storage-recovery-evidence`, cutover evidence also requires a
+`skein-storage-recovery-report` artifact from the real database path, including
+durable recovery, checkpoint-boundary, bounded-WAL-replay, and clean-tail
+readiness. With `--require-background-maintenance-evidence`, cutover evidence
+also requires caller-owned maintenance readiness from either the top-level
+fixture summary or a `skein-background-maintenance-report` supplied through
+`--background-maintenance-report-json`; declared report protocols must match,
+but deferred or rejected background work is not a blocker because foreground
+user work is intentionally ungated by local background budgets.
 The bundle also carries `background_maintenance` resource-readiness diagnostics
 from the post-fixture local database, including stable QoS admission strings and
 operation totals for caller-owned maintenance loops. These diagnostics are
-reported for scheduling visibility and do not affect compatibility readiness.
+reported for scheduling visibility and only affect compatibility readiness when
+the corresponding background-maintenance evidence requirement is enabled.
 `skein-shadow-self` is a JSON-lines self-shadow process for protocol and CLI
 smoke testing; it exercises the process boundary but does not replace the
 required previous-wrapper parity run. The CLI bundle includes `shadow_run`

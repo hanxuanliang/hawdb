@@ -94,7 +94,11 @@ This does not by itself complete migration cutover. The remaining evidence gap
 is external shadow comparison against the previous local graph wrapper when a
 specific migration gate needs oracle-backed parity evidence. Required cutover
 evidence now rejects self-shadow protocol smoke runs and requires the shadow
-ready preflight to declare `engine_kind: "previous_wrapper"`.
+ready preflight to declare `engine_kind: "previous_wrapper"`. Production
+cutover runs that require storage or resource evidence must also attach
+`skein-storage-recovery-report` and `skein-background-maintenance-report`
+artifacts from the real database path, with matching protocols and full
+readiness under the fail-closed cutover evidence rules.
 
 The stable way to report "how much of Nowledge can be replaced" is to run
 `skein nowledge-replacement-summary <migration-gate-json>` over a generated
