@@ -6,9 +6,9 @@ use super::{
     KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphPathDirection,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest, KnowledgePathRequest,
     KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeScopedNeighborsRequest,
-    KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode,
-    NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput, RecoveryMode,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeScopedSubgraphRequest, KnowledgeSubgraphRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -4534,6 +4534,74 @@ fn retrieves_bounded_knowledge_subgraph_without_search_projection() {
         .relationships
         .iter()
         .all(|relationship| relationship.direction == KnowledgeGraphPathDirection::Outgoing));
+}
+
+#[test]
+fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'root', title: 'Root', source_id: 'thread_1'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})",
+    )
+    .unwrap();
+
+    let scoped = db.knowledge_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
+        navigation: KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 4,
+            relationship_limit: 4,
+        },
+        metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
+    });
+
+    assert_eq!(scoped.nodes.len(), 2);
+    assert_eq!(scoped.relationships.len(), 1);
+    assert!(scoped.diagnostics.seed_found);
+    assert_eq!(scoped.diagnostics.input_candidate_set.filtered_out_count, 0);
+    assert_eq!(
+        scoped
+            .diagnostics
+            .input_candidate_set
+            .metadata_filters
+            .get("source_id")
+            .map(String::as_str),
+        Some("thread_1")
+    );
+
+    let filtered = db.knowledge_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
+        navigation: KnowledgeSubgraphRequest {
+            label: "Memory".to_string(),
+            external_id: "root".to_string(),
+            relationship_type: Some("LINKS".to_string()),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            max_hops: 1,
+            node_limit: 4,
+            relationship_limit: 4,
+        },
+        metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_2".to_string())]),
+    });
+
+    assert_eq!(filtered.seed_node_id, Some(0));
+    assert!(filtered.nodes.is_empty());
+    assert!(filtered.relationships.is_empty());
+    assert!(!filtered.diagnostics.seed_found);
+    assert_eq!(
+        filtered.diagnostics.input_candidate_set.filtered_out_count,
+        1
+    );
+    assert_eq!(
+        filtered
+            .diagnostics
+            .input_candidate_set
+            .metadata_filters
+            .get("source_id")
+            .map(String::as_str),
+        Some("thread_2")
+    );
+    assert!(filtered.diagnostics.fallback_reasons.is_empty());
 }
 
 #[test]
