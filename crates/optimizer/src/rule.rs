@@ -1,4 +1,5 @@
 use crate::search::{RuleEvent, RuleOutcome};
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuleKind {
@@ -46,6 +47,16 @@ pub trait OptimizerRule<E> {
 }
 
 impl RuleKind {
+    pub fn all() -> &'static [Self] {
+        const ALL: &[RuleKind] = &[
+            RuleKind::Implementation,
+            RuleKind::Exploration,
+            RuleKind::Transformation,
+            RuleKind::Enforcer,
+        ];
+        ALL
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             RuleKind::Implementation => "implementation",
@@ -53,6 +64,18 @@ impl RuleKind {
             RuleKind::Transformation => "transformation",
             RuleKind::Enforcer => "enforcer",
         }
+    }
+}
+
+impl FromStr for RuleKind {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == value)
+            .ok_or("unknown optimizer rule kind")
     }
 }
 
@@ -230,6 +253,14 @@ mod tests {
         assert_eq!(id.name(), "scan_to_seek");
         assert_eq!(id.kind(), RuleKind::Implementation);
         assert_eq!(id.stable_name(), "implementation:scan_to_seek");
+    }
+
+    #[test]
+    fn rule_kind_strings_round_trip_for_diagnostics() {
+        for kind in RuleKind::all() {
+            assert_eq!(kind.as_str().parse::<RuleKind>(), Ok(*kind));
+        }
+        assert!("unknown".parse::<RuleKind>().is_err());
     }
 
     #[test]

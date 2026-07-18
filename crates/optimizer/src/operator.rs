@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum PhysicalPlanKind {
@@ -87,6 +88,65 @@ pub trait PlanNode {
 }
 
 impl PhysicalPlanKind {
+    pub fn all() -> &'static [Self] {
+        const ALL: &[PhysicalPlanKind] = &[
+            PhysicalPlanKind::CreateNodeLabel,
+            PhysicalPlanKind::CreateRelationshipType,
+            PhysicalPlanKind::CreateNodeTable,
+            PhysicalPlanKind::CreateRelationshipTable,
+            PhysicalPlanKind::CreateProperty,
+            PhysicalPlanKind::AlterTableState,
+            PhysicalPlanKind::AlterPropertyState,
+            PhysicalPlanKind::CreateIndex,
+            PhysicalPlanKind::CreateCompositeIndex,
+            PhysicalPlanKind::CreateRangeIndex,
+            PhysicalPlanKind::CreateFullTextIndex,
+            PhysicalPlanKind::CreateUniqueConstraint,
+            PhysicalPlanKind::CreateNodePropertyExistsConstraint,
+            PhysicalPlanKind::CreateRelationshipUniqueConstraint,
+            PhysicalPlanKind::CreateRelationshipPropertyExistsConstraint,
+            PhysicalPlanKind::ProjectGraph,
+            PhysicalPlanKind::GraphAlgorithm,
+            PhysicalPlanKind::CreateNode,
+            PhysicalPlanKind::MergeNode,
+            PhysicalPlanKind::MergeRelationship,
+            PhysicalPlanKind::MergeMatchedRelationship,
+            PhysicalPlanKind::MergeRelationshipFromMatchedRelationship,
+            PhysicalPlanKind::MergeRelationshipToMatchedTarget,
+            PhysicalPlanKind::MergeRelationshipFromMatchedTarget,
+            PhysicalPlanKind::CreateMatchedRelationship,
+            PhysicalPlanKind::SetNodeProperty,
+            PhysicalPlanKind::SetNodeProperties,
+            PhysicalPlanKind::SetNodePropertiesReturn,
+            PhysicalPlanKind::SetRelationshipProperty,
+            PhysicalPlanKind::SetRelationshipProperties,
+            PhysicalPlanKind::DeleteNode,
+            PhysicalPlanKind::DeleteRelationship,
+            PhysicalPlanKind::DeleteRelationshipTargetNodes,
+            PhysicalPlanKind::CreateRelationship,
+            PhysicalPlanKind::SeqNodeScan,
+            PhysicalPlanKind::NodeCartesianProductExec,
+            PhysicalPlanKind::NodeColumnLookupExec,
+            PhysicalPlanKind::IndexNodeSeek,
+            PhysicalPlanKind::IndexNodeMultiSeek,
+            PhysicalPlanKind::IndexNodeCompositeSeek,
+            PhysicalPlanKind::IndexNodeRangeSeek,
+            PhysicalPlanKind::IndexNodeTextSeek,
+            PhysicalPlanKind::AdjacencyExpandExec,
+            PhysicalPlanKind::OptionalDegreeExec,
+            PhysicalPlanKind::OptionalRelationshipCountSumExec,
+            PhysicalPlanKind::ThreadRepairStatsExec,
+            PhysicalPlanKind::ShortestPathExec,
+            PhysicalPlanKind::FilterExec,
+            PhysicalPlanKind::ProjectExec,
+            PhysicalPlanKind::AggregateExec,
+            PhysicalPlanKind::DistinctExec,
+            PhysicalPlanKind::SortExec,
+            PhysicalPlanKind::LimitExec,
+        ];
+        ALL
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             PhysicalPlanKind::CreateNodeLabel => "CreateNodeLabel",
@@ -221,6 +281,18 @@ impl PhysicalPlanKind {
 }
 
 impl PhysicalPlanClass {
+    pub fn all() -> &'static [Self] {
+        const ALL: &[PhysicalPlanClass] = &[
+            PhysicalPlanClass::Schema,
+            PhysicalPlanClass::Mutation,
+            PhysicalPlanClass::Access,
+            PhysicalPlanClass::Traversal,
+            PhysicalPlanClass::Relational,
+            PhysicalPlanClass::Procedure,
+        ];
+        ALL
+    }
+
     pub fn as_str(self) -> &'static str {
         match self {
             PhysicalPlanClass::Schema => "schema",
@@ -230,6 +302,30 @@ impl PhysicalPlanClass {
             PhysicalPlanClass::Relational => "relational",
             PhysicalPlanClass::Procedure => "procedure",
         }
+    }
+}
+
+impl FromStr for PhysicalPlanKind {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|kind| kind.as_str() == value)
+            .ok_or("unknown physical plan kind")
+    }
+}
+
+impl FromStr for PhysicalPlanClass {
+    type Err = &'static str;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::all()
+            .iter()
+            .copied()
+            .find(|class| class.as_str() == value)
+            .ok_or("unknown physical plan class")
     }
 }
 
@@ -309,6 +405,14 @@ mod tests {
     }
 
     #[test]
+    fn physical_plan_kind_strings_round_trip_for_diagnostics() {
+        for kind in PhysicalPlanKind::all() {
+            assert_eq!(kind.as_str().parse::<PhysicalPlanKind>(), Ok(*kind));
+        }
+        assert!("UnknownExec".parse::<PhysicalPlanKind>().is_err());
+    }
+
+    #[test]
     fn physical_plan_class_exposes_stable_strings() {
         assert_eq!(PhysicalPlanClass::Schema.as_str(), "schema");
         assert_eq!(PhysicalPlanClass::Mutation.as_str(), "mutation");
@@ -316,6 +420,14 @@ mod tests {
         assert_eq!(PhysicalPlanClass::Traversal.as_str(), "traversal");
         assert_eq!(PhysicalPlanClass::Relational.as_str(), "relational");
         assert_eq!(PhysicalPlanClass::Procedure.as_str(), "procedure");
+    }
+
+    #[test]
+    fn physical_plan_class_strings_round_trip_for_diagnostics() {
+        for class in PhysicalPlanClass::all() {
+            assert_eq!(class.as_str().parse::<PhysicalPlanClass>(), Ok(*class));
+        }
+        assert!("unknown".parse::<PhysicalPlanClass>().is_err());
     }
 
     #[test]
