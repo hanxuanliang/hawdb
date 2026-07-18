@@ -186,7 +186,7 @@ full migration gate.
 For a command shim that already implements the contract bridge shape, run:
 
 ```text
-skein nowledge-fixture-contract-command-check [--require-full-contract] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]
+skein nowledge-fixture-contract-command-check [--require-full-contract] [--stop-after-first-failure] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]
 ```
 
 This command reads a `skein-nowledge-fixture-contract` file, invokes the command
@@ -208,6 +208,10 @@ small smoke shims. Use `--persistent-command` before the program when validating
 the real wrapper against the full contract; the checker keeps one JSON-lines
 child process open, sends one request per line, expects one response line per
 request, and records `options.command_mode: "persistent"` in the report.
+Use `--stop-after-first-failure` when iterating on a failing wrapper to avoid
+secondary failures after state divergence. Reports include `failure_summary`
+with phase counts, the first failed check index/name, suggested
+`--start-check`/`--check-name` values, and whether the checker stopped early.
 
 ## `execute`
 

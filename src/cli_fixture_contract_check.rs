@@ -16,6 +16,7 @@ pub struct FixtureContractCommandCheckOptions {
     pub allow_primary_only_project_graph: bool,
     pub require_full_contract: bool,
     pub command_mode: FixtureCommandMode,
+    pub stop_after_first_failure: bool,
 }
 
 impl Default for FixtureContractCommandCheckOptions {
@@ -28,12 +29,13 @@ impl Default for FixtureContractCommandCheckOptions {
             allow_primary_only_project_graph: false,
             require_full_contract: false,
             command_mode: FixtureCommandMode::SpawnPerRequest,
+            stop_after_first_failure: false,
         }
     }
 }
 
 pub fn nowledge_fixture_contract_command_check_usage() -> String {
-    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]".to_string()
+    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--stop-after-first-failure] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]".to_string()
 }
 
 pub fn run_nowledge_fixture_contract_command_check(
@@ -72,6 +74,9 @@ pub fn run_nowledge_fixture_contract_command_check(
             }
             "--require-full-contract" => {
                 options.require_full_contract = true;
+            }
+            "--stop-after-first-failure" => {
+                options.stop_after_first_failure = true;
             }
             _ => {
                 positional.push(arg);
@@ -150,9 +155,12 @@ fn check_contract_command(
             return Ok(command_check_report_json(
                 contract,
                 options,
-                0,
-                0,
-                matched_checks,
+                CommandCheckReportStats {
+                    selected_checks: 0,
+                    checked_checks: 0,
+                    matched_checks,
+                    stopped_after_first_failure: false,
+                },
                 &primary_only_project_graph_checks,
                 failures,
             ));
@@ -175,9 +183,12 @@ fn check_contract_command(
         return Ok(command_check_report_json(
             contract,
             options,
-            selected_check_count,
-            0,
-            matched_checks,
+            CommandCheckReportStats {
+                selected_checks: selected_check_count,
+                checked_checks: 0,
+                matched_checks,
+                stopped_after_first_failure: false,
+            },
             &primary_only_project_graph_checks,
             failures,
         ));
@@ -186,11 +197,14 @@ fn check_contract_command(
         .max_checks
         .unwrap_or(selected_check_count)
         .min(selected_check_count);
+    let mut stopped_after_first_failure = false;
+    let mut checked_checks = 0usize;
     for check in selected_checks.iter().take(check_limit) {
+        checked_checks += 1;
         match check.get("kind").and_then(serde_json::Value::as_str) {
             Some("cypher") => match check_cypher_contract_check(&mut command, check) {
                 Ok(()) => matched_checks += 1,
-                Err(error) => failures.push(failure_json("check", check, error.to_string())),
+                Err(error) => push_check_failure(&mut failures, check, error.to_string()),
             },
             Some("projected_graph") => {
                 match check_project_graph_contract_check(&mut command, check) {
@@ -205,35 +219,42 @@ fn check_contract_command(
                             "reason": reason,
                         }));
                         if !options.allow_primary_only_project_graph {
-                            failures.push(failure_json(
-                                "check",
+                            push_check_failure(
+                                &mut failures,
                                 check,
                                 "project_graph returned primary_only".to_string(),
-                            ));
+                            );
                         }
                     }
-                    Err(error) => failures.push(failure_json("check", check, error.to_string())),
+                    Err(error) => push_check_failure(&mut failures, check, error.to_string()),
                 }
             }
-            Some(kind) => failures.push(failure_json(
-                "check",
+            Some(kind) => push_check_failure(
+                &mut failures,
                 check,
                 format!("unsupported fixture contract check kind '{kind}'"),
-            )),
-            None => failures.push(failure_json(
-                "check",
+            ),
+            None => push_check_failure(
+                &mut failures,
                 check,
                 "fixture contract check missing kind".to_string(),
-            )),
+            ),
+        }
+        if options.stop_after_first_failure && !failures.is_empty() {
+            stopped_after_first_failure = true;
+            break;
         }
     }
 
     Ok(command_check_report_json(
         contract,
         options,
-        selected_check_count,
-        check_limit,
-        matched_checks,
+        CommandCheckReportStats {
+            selected_checks: selected_check_count,
+            checked_checks,
+            matched_checks,
+            stopped_after_first_failure,
+        },
         &primary_only_project_graph_checks,
         failures,
     ))
@@ -671,12 +692,18 @@ impl Drop for PersistentFixtureCommand {
     }
 }
 
-fn command_check_report_json(
-    contract: &serde_json::Value,
-    options: &FixtureContractCommandCheckOptions,
+#[derive(Debug, Clone, Copy)]
+struct CommandCheckReportStats {
     selected_checks: usize,
     checked_checks: usize,
     matched_checks: usize,
+    stopped_after_first_failure: bool,
+}
+
+fn command_check_report_json(
+    contract: &serde_json::Value,
+    options: &FixtureContractCommandCheckOptions,
+    stats: CommandCheckReportStats,
     primary_only_project_graph_checks: &[serde_json::Value],
     failures: Vec<serde_json::Value>,
 ) -> serde_json::Value {
@@ -684,21 +711,24 @@ fn command_check_report_json(
         .get("check_count")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
-    let full_contract_checked = selected_checks as u64 == total_checks
-        && checked_checks as u64 == total_checks
+    let full_contract_checked = stats.selected_checks as u64 == total_checks
+        && stats.checked_checks as u64 == total_checks
         && options.start_check == 0
         && options.check_name.is_none()
         && options.max_checks.is_none();
-    let selected_subset_ready =
-        failures.is_empty() && selected_checks > 0 && matched_checks == checked_checks;
+    let selected_subset_ready = failures.is_empty()
+        && stats.selected_checks > 0
+        && stats.matched_checks == stats.checked_checks;
+    let failure_summary = failure_summary_json(&failures, stats.stopped_after_first_failure);
     serde_json::json!({
         "protocol": "skein-nowledge-fixture-contract-command-check",
         "fixture": contract.get("fixture").cloned().unwrap_or(serde_json::Value::Null),
         "total_checks": total_checks,
-        "selected_checks": selected_checks,
-        "checked_checks": checked_checks,
-        "matched_checks": matched_checks,
+        "selected_checks": stats.selected_checks,
+        "checked_checks": stats.checked_checks,
+        "matched_checks": stats.matched_checks,
         "failed_checks": failures.len(),
+        "failure_summary": failure_summary,
         "failures": failures,
         "primary_only_project_graph_checks": primary_only_project_graph_checks,
         "options": {
@@ -709,6 +739,7 @@ fn command_check_report_json(
             "allow_primary_only_project_graph": options.allow_primary_only_project_graph,
             "require_full_contract": options.require_full_contract,
             "command_mode": fixture_command_mode_json(options.command_mode),
+            "stop_after_first_failure": options.stop_after_first_failure,
         },
         "selected_subset_ready": selected_subset_ready,
         "full_contract_checked": full_contract_checked,
@@ -735,6 +766,53 @@ fn failure_json(phase: &str, value: &serde_json::Value, message: String) -> serd
         "name": value.get("name").cloned().unwrap_or(serde_json::Value::Null),
         "index": value.get("index").cloned().unwrap_or(serde_json::Value::Null),
         "message": message,
+    })
+}
+
+fn push_check_failure(
+    failures: &mut Vec<serde_json::Value>,
+    check: &serde_json::Value,
+    message: String,
+) {
+    failures.push(failure_json("check", check, message));
+}
+
+fn failure_summary_json(
+    failures: &[serde_json::Value],
+    stopped_after_first_failure: bool,
+) -> serde_json::Value {
+    let mut phase_counts = std::collections::BTreeMap::<String, usize>::new();
+    for failure in failures {
+        let phase = failure
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown");
+        *phase_counts.entry(phase.to_string()).or_default() += 1;
+    }
+    let first_failure = failures.first();
+    let first_check_failure = failures
+        .iter()
+        .find(|failure| failure.get("phase").and_then(serde_json::Value::as_str) == Some("check"));
+    serde_json::json!({
+        "failed_phase_counts": phase_counts,
+        "first_failure": first_failure.cloned().unwrap_or(serde_json::Value::Null),
+        "first_failed_check_index": first_check_failure
+            .and_then(|failure| failure.get("index"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "first_failed_check_name": first_check_failure
+            .and_then(|failure| failure.get("name"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "suggested_start_check": first_check_failure
+            .and_then(|failure| failure.get("index"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "suggested_check_name": first_check_failure
+            .and_then(|failure| failure.get("name"))
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+        "stopped_after_first_failure": stopped_after_first_failure,
     })
 }
 
@@ -1081,5 +1159,81 @@ mod tests {
         assert_eq!(report["matched_checks"], 2);
         assert_eq!(report["full_contract_ready"], true);
         assert_eq!(report["required_contract_ready"], true);
+    }
+
+    #[test]
+    fn contract_command_check_can_stop_after_first_failure() {
+        let contract = serde_json::json!({
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 2,
+            "setup": [],
+            "checks": [
+                {
+                    "index": 0,
+                    "kind": "cypher",
+                    "name": "first failing check",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 1
+                    }
+                },
+                {
+                    "index": 1,
+                    "kind": "cypher",
+                    "name": "second failing check",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (m) RETURN m",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 1
+                    }
+                }
+            ]
+        });
+        let options = FixtureContractCommandCheckOptions {
+            stop_after_first_failure: true,
+            ..FixtureContractCommandCheckOptions::default()
+        };
+        let report = check_contract_command(
+            &contract,
+            "python3",
+            &[
+                "-c".to_string(),
+                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
+                    .to_string(),
+            ],
+            &options,
+        )
+        .unwrap();
+
+        assert_eq!(report["checked_checks"], 1);
+        assert_eq!(report["failed_checks"], 1);
+        assert_eq!(report["failure_summary"]["failed_phase_counts"]["check"], 1);
+        assert_eq!(report["failure_summary"]["first_failed_check_index"], 0);
+        assert_eq!(
+            report["failure_summary"]["suggested_check_name"],
+            "first failing check"
+        );
+        assert_eq!(
+            report["failure_summary"]["stopped_after_first_failure"],
+            true
+        );
     }
 }
