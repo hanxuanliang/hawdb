@@ -2104,6 +2104,71 @@ pub struct KnowledgeCommunityMembershipCreateBatchOutput {
     pub created_relationship_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeCommunityCreate {
+    pub id: String,
+    pub community_id: i64,
+    pub name: String,
+    pub description: Value,
+    pub ai_summary: Value,
+    pub member_count: i64,
+    pub resolution: f64,
+    pub created_at: Value,
+    pub updated_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunitySummaryUpdate {
+    pub id: String,
+    pub name: String,
+    pub description: Value,
+    pub ai_summary: Value,
+    pub updated_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct KnowledgeCommunityLifecycleBatchRequest {
+    pub creates: Vec<KnowledgeCommunityCreate>,
+    pub summary_updates: Vec<KnowledgeCommunitySummaryUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityCreateBatchRow {
+    pub id: String,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub already_exists: bool,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunitySummaryUpdateBatchRow {
+    pub id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub missing: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityLifecycleBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub create_rows: Vec<KnowledgeCommunityCreateBatchRow>,
+    pub summary_update_rows: Vec<KnowledgeCommunitySummaryUpdateBatchRow>,
+    pub created_count: usize,
+    pub already_exists_count: usize,
+    pub duplicate_count: usize,
+    pub updated_count: usize,
+    pub missing_count: usize,
+    pub non_writable_count: usize,
+    pub created_node_count: usize,
+    pub updated_property_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphMetaStamp {
     pub meta_id: String,
@@ -4056,6 +4121,13 @@ impl Database {
         request: &KnowledgeCommunityMembershipCreateBatchRequest,
     ) -> Result<KnowledgeCommunityMembershipCreateBatchOutput> {
         create_knowledge_community_memberships_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_communities_batch(
+        &mut self,
+        request: &KnowledgeCommunityLifecycleBatchRequest,
+    ) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
+        update_knowledge_communities_batch_for(self, request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(
@@ -8586,6 +8658,281 @@ fn knowledge_community_membership_relationship_create(
             ("properties".to_string(), membership.properties.clone()),
         ]),
     }
+}
+
+fn update_knowledge_communities_batch_for(
+    db: &mut Database,
+    request: &KnowledgeCommunityLifecycleBatchRequest,
+) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
+    db.ensure_writable()?;
+    for create in &request.creates {
+        validate_knowledge_community_create(create)?;
+    }
+    for update in &request.summary_updates {
+        validate_knowledge_community_summary_update(update)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut create_rows = Vec::with_capacity(request.creates.len());
+    let mut summary_update_rows = Vec::with_capacity(request.summary_updates.len());
+    let mut created_count = 0;
+    let mut already_exists_count = 0;
+    let mut duplicate_count = 0;
+    let mut updated_count = 0;
+    let mut missing_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_create_ids = BTreeSet::new();
+    let mut pending_update_node_ids = BTreeSet::new();
+    let mut eligible_creates = Vec::new();
+    let mut eligible_updates = Vec::new();
+
+    for create in &request.creates {
+        if let Some(existing) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Community", &create.id)
+        {
+            already_exists_count += 1;
+            create_rows.push(KnowledgeCommunityCreateBatchRow {
+                id: create.id.clone(),
+                node_id: Some(existing.id.0),
+                created: false,
+                already_exists: true,
+                duplicate: false,
+            });
+            continue;
+        }
+        if !pending_create_ids.insert(create.id.clone()) {
+            duplicate_count += 1;
+            create_rows.push(KnowledgeCommunityCreateBatchRow {
+                id: create.id.clone(),
+                node_id: None,
+                created: false,
+                already_exists: false,
+                duplicate: true,
+            });
+            continue;
+        }
+
+        created_count += 1;
+        eligible_creates.push(knowledge_community_create_entity_request(create));
+        create_rows.push(KnowledgeCommunityCreateBatchRow {
+            id: create.id.clone(),
+            node_id: None,
+            created: true,
+            already_exists: false,
+            duplicate: false,
+        });
+    }
+
+    for update in &request.summary_updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Community", &update.id)
+        else {
+            missing_count += 1;
+            summary_update_rows.push(KnowledgeCommunitySummaryUpdateBatchRow {
+                id: update.id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                missing: true,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        if !node_has_external_id_property(seed, update.id.as_str()) {
+            non_writable_count += 1;
+            summary_update_rows.push(KnowledgeCommunitySummaryUpdateBatchRow {
+                id: update.id.clone(),
+                node_id: Some(seed.id.0),
+                matched: false,
+                updated: false,
+                missing: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_update_node_ids.insert(seed.id) {
+            duplicate_count += 1;
+            summary_update_rows.push(KnowledgeCommunitySummaryUpdateBatchRow {
+                id: update.id.clone(),
+                node_id: Some(seed.id.0),
+                matched: true,
+                updated: false,
+                missing: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let assignments = knowledge_community_summary_assignments(update);
+        let row_updated_property_count = assignments.len();
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((seed.id, assignments));
+        summary_update_rows.push(KnowledgeCommunitySummaryUpdateBatchRow {
+            id: update.id.clone(),
+            node_id: Some(seed.id.0),
+            matched: true,
+            updated: true,
+            missing: false,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_creates.is_empty() && eligible_updates.is_empty() {
+        return Ok(KnowledgeCommunityLifecycleBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            create_rows,
+            summary_update_rows,
+            created_count,
+            already_exists_count,
+            duplicate_count,
+            updated_count,
+            missing_count,
+            non_writable_count,
+            created_node_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for create in &eligible_creates {
+        let (cypher, parameters) = knowledge_entity_create_statement(create);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_community_summary_update_statement(*node_id, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    let output = tx.commit()?;
+    for row in &mut create_rows {
+        if row.created {
+            row.node_id =
+                seed_node_by_label_and_external_id(&db.catalog, &db.store, "Community", &row.id)
+                    .map(|node| node.id.0);
+        }
+    }
+
+    Ok(KnowledgeCommunityLifecycleBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        create_rows,
+        summary_update_rows,
+        created_count,
+        already_exists_count,
+        duplicate_count,
+        updated_count,
+        missing_count,
+        non_writable_count,
+        created_node_count: output.rows.len().saturating_sub(eligible_updates.len()),
+        updated_property_count,
+    })
+}
+
+fn validate_knowledge_community_create(create: &KnowledgeCommunityCreate) -> Result<()> {
+    if create.id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community create requires a non-empty id".to_string(),
+        ));
+    }
+    if create.name.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community create requires a non-empty name".to_string(),
+        ));
+    }
+    if create.community_id < 0 {
+        return Err(SkeinError::Semantic(
+            "knowledge community create requires non-negative community_id".to_string(),
+        ));
+    }
+    if create.member_count < 0 {
+        return Err(SkeinError::Semantic(
+            "knowledge community create requires non-negative member_count".to_string(),
+        ));
+    }
+    if !create.resolution.is_finite() {
+        return Err(SkeinError::Semantic(
+            "knowledge community create resolution must be finite".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_knowledge_community_summary_update(
+    update: &KnowledgeCommunitySummaryUpdate,
+) -> Result<()> {
+    if update.id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community summary update requires a non-empty id".to_string(),
+        ));
+    }
+    if update.name.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community summary update requires a non-empty name".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_community_create_entity_request(
+    create: &KnowledgeCommunityCreate,
+) -> KnowledgeEntityCreateRequest {
+    KnowledgeEntityCreateRequest {
+        label: "Community".to_string(),
+        external_id: create.id.clone(),
+        properties: BTreeMap::from([
+            ("community_id".to_string(), Value::Int(create.community_id)),
+            ("name".to_string(), Value::String(create.name.clone())),
+            ("description".to_string(), create.description.clone()),
+            ("ai_summary".to_string(), create.ai_summary.clone()),
+            ("member_count".to_string(), Value::Int(create.member_count)),
+            (
+                "algorithm".to_string(),
+                Value::String("louvain".to_string()),
+            ),
+            ("resolution".to_string(), Value::Float(create.resolution)),
+            ("created_at".to_string(), create.created_at.clone()),
+            ("updated_at".to_string(), create.updated_at.clone()),
+        ]),
+    }
+}
+
+fn knowledge_community_summary_assignments(
+    update: &KnowledgeCommunitySummaryUpdate,
+) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("name".to_string(), Value::String(update.name.clone())),
+        ("description".to_string(), update.description.clone()),
+        ("ai_summary".to_string(), update.ai_summary.clone()),
+        ("updated_at".to_string(), update.updated_at.clone()),
+    ])
+}
+
+fn knowledge_community_summary_update_statement(
+    node_id: NodeId,
+    assignments: &BTreeMap<String, Value>,
+) -> (String, BTreeMap<String, Value>) {
+    let mut cypher = "MATCH (c:Community) WHERE id(c) = $node_id SET ".to_string();
+    let mut parameters = BTreeMap::from([("node_id".to_string(), Value::Int(node_id.0 as i64))]);
+    for (index, (property, value)) in assignments.iter().enumerate() {
+        if index > 0 {
+            cypher.push_str(", ");
+        }
+        let parameter_name = format!("property_value_{index}");
+        cypher.push_str(&format!("c.{property} = ${parameter_name}"));
+        parameters.insert(parameter_name, value.clone());
+    }
+    (cypher, parameters)
 }
 
 fn stamp_knowledge_graph_meta_batch_for(
@@ -13815,6 +14162,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
     ) -> Result<KnowledgeCommunityMembershipCreateBatchOutput> {
         self.db
             .create_knowledge_community_memberships_batch(request)
+    }
+
+    pub fn update_knowledge_communities_batch(
+        &mut self,
+        request: &KnowledgeCommunityLifecycleBatchRequest,
+    ) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
+        self.db.update_knowledge_communities_batch(request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(

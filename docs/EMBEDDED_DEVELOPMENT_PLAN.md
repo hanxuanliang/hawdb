@@ -393,6 +393,12 @@ The wrapper is fixed to `Entity` -> `Community` `BELONGS_TO` creation, validates
 non-empty ids and finite strengths before WAL, reports missing or non-writable
 endpoints, preserves endpoint nodes, and commits eligible memberships through
 one grouped WAL batch.
+Community detection result creates and scheduler summary refreshes are exposed
+through `Database::update_knowledge_communities_batch`. The wrapper validates
+non-empty Community ids and names, non-negative numeric counters, and finite
+resolutions before WAL, reports existing, missing, duplicate, and non-writable
+rows, fixes detection-result `algorithm` to `louvain`, and commits eligible
+creates plus summary updates through one grouped WAL batch.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.

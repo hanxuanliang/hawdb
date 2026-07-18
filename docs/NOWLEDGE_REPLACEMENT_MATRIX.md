@@ -239,6 +239,13 @@ entity lifecycle `BELONGS_TO` creation shape. The wrapper validates non-empty
 Entity and Community ids plus finite strengths before WAL, reports missing or
 non-writable endpoints, preserves endpoint nodes, and commits eligible
 memberships through one grouped WAL batch.
+Community detection result creation and scheduler summary refresh writes are
+covered by `Database::update_knowledge_communities_batch`. The wrapper validates
+non-empty Community ids and names, non-negative `community_id` and
+`member_count`, and finite `resolution` before WAL, fixes created communities
+to the Nowledge `louvain` algorithm marker, reports existing, missing,
+duplicate, and non-writable rows, and commits eligible creates plus summary
+updates through one grouped WAL batch.
 
 ## Current Direction
 
