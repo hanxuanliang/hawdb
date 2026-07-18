@@ -246,6 +246,12 @@ non-empty Community ids and names, non-negative `community_id` and
 to the Nowledge `louvain` algorithm marker, reports existing, missing,
 duplicate, and non-writable rows, and commits eligible creates plus summary
 updates through one grouped WAL batch.
+Community node cleanup is covered by `Database::delete_knowledge_communities`
+for Nowledge replace-community and undo-community flows. It scans only
+`Community` nodes, supports the two production cleanup modes (`DELETE` and
+`DETACH DELETE`), preserves non-Community endpoint nodes under detach cleanup,
+does not write WAL when no Community nodes exist, and commits eligible deletes
+through one grouped WAL batch.
 
 ## Current Direction
 

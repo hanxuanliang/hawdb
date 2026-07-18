@@ -2170,6 +2170,27 @@ pub struct KnowledgeCommunityLifecycleBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityCleanupRequest {
+    pub detach: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityCleanupRow {
+    pub id: Option<String>,
+    pub node_id: u64,
+    pub deleted: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityCleanupOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeCommunityCleanupRow>,
+    pub candidate_count: usize,
+    pub deleted_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphMetaStamp {
     pub meta_id: String,
     pub assignments: BTreeMap<String, Value>,
@@ -4128,6 +4149,13 @@ impl Database {
         request: &KnowledgeCommunityLifecycleBatchRequest,
     ) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
         update_knowledge_communities_batch_for(self, request)
+    }
+
+    pub fn delete_knowledge_communities(
+        &mut self,
+        request: &KnowledgeCommunityCleanupRequest,
+    ) -> Result<KnowledgeCommunityCleanupOutput> {
+        delete_knowledge_communities_for(self, request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(
@@ -8933,6 +8961,74 @@ fn knowledge_community_summary_update_statement(
         parameters.insert(parameter_name, value.clone());
     }
     (cypher, parameters)
+}
+
+fn delete_knowledge_communities_for(
+    db: &mut Database,
+    request: &KnowledgeCommunityCleanupRequest,
+) -> Result<KnowledgeCommunityCleanupOutput> {
+    db.ensure_writable()?;
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let Some(label_id) = db.catalog.label_id("Community") else {
+        return Ok(KnowledgeCommunityCleanupOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows: Vec::new(),
+            candidate_count: 0,
+            deleted_count: 0,
+        });
+    };
+
+    let mut rows = db
+        .store
+        .scan_nodes(Some(label_id))
+        .map(|node| KnowledgeCommunityCleanupRow {
+            id: node_external_id(node),
+            node_id: node.id.0,
+            deleted: true,
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by_key(|row| row.node_id);
+
+    if rows.is_empty() {
+        return Ok(KnowledgeCommunityCleanupOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            candidate_count: 0,
+            deleted_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for row in &rows {
+        let (cypher, parameters) =
+            knowledge_community_cleanup_statement(NodeId(row.node_id), request.detach)?;
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+    let deleted_count = rows.len();
+
+    Ok(KnowledgeCommunityCleanupOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        candidate_count: rows.len(),
+        rows,
+        deleted_count,
+    })
+}
+
+fn knowledge_community_cleanup_statement(
+    node_id: NodeId,
+    detach: bool,
+) -> Result<(String, BTreeMap<String, Value>)> {
+    let node_id = i64::try_from(node_id.0)
+        .map_err(|_| SkeinError::Semantic("node id does not fit Cypher integer".to_string()))?;
+    let verb = if detach { "DETACH DELETE" } else { "DELETE" };
+    Ok((
+        format!("MATCH (c:Community) WHERE id(c) = $node_id {verb} c"),
+        BTreeMap::from([("node_id".to_string(), Value::Int(node_id))]),
+    ))
 }
 
 fn stamp_knowledge_graph_meta_batch_for(
@@ -14169,6 +14265,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeCommunityLifecycleBatchRequest,
     ) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
         self.db.update_knowledge_communities_batch(request)
+    }
+
+    pub fn delete_knowledge_communities(
+        &mut self,
+        request: &KnowledgeCommunityCleanupRequest,
+    ) -> Result<KnowledgeCommunityCleanupOutput> {
+        self.db.delete_knowledge_communities(request)
     }
 
     pub fn stamp_knowledge_graph_meta_batch(
