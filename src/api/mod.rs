@@ -1752,6 +1752,42 @@ pub struct KnowledgeMemoryLifecycleBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryLatestUpdate {
+    pub memory_id: String,
+    pub is_latest: bool,
+    pub space_id_filter: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryLatestBatchRequest {
+    pub updates: Vec<KnowledgeMemoryLatestUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryLatestBatchRow {
+    pub memory_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub filtered_out: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryLatestBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeMemoryLatestBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub filtered_out_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSkillUsageStatsUpdate {
     pub skill_id: String,
     pub use_count: i64,
@@ -3890,6 +3926,13 @@ impl Database {
         request: &KnowledgeMemoryLifecycleBatchRequest,
     ) -> Result<KnowledgeMemoryLifecycleBatchOutput> {
         update_knowledge_memory_lifecycle_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_memory_latest_batch(
+        &mut self,
+        request: &KnowledgeMemoryLatestBatchRequest,
+    ) -> Result<KnowledgeMemoryLatestBatchOutput> {
+        update_knowledge_memory_latest_batch_for(self, request)
     }
 
     pub fn update_knowledge_skill_usage_stats_batch(
@@ -7099,6 +7142,150 @@ fn update_knowledge_memory_lifecycle_batch_for(
         updated_count,
         updated_property_count,
     })
+}
+
+fn update_knowledge_memory_latest_batch_for(
+    db: &mut Database,
+    request: &KnowledgeMemoryLatestBatchRequest,
+) -> Result<KnowledgeMemoryLatestBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.memory_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge memory latest update requires a non-empty memory id".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeMemoryLatestBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                filtered_out: false,
+                duplicate: false,
+                non_writable: false,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeMemoryLatestBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                filtered_out: false,
+                duplicate: false,
+                non_writable: true,
+            });
+            continue;
+        }
+        if !memory_latest_update_matches_space(seed, update) {
+            filtered_out_count += 1;
+            rows.push(KnowledgeMemoryLatestBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                filtered_out: true,
+                duplicate: false,
+                non_writable: false,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeMemoryLatestBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                filtered_out: false,
+                duplicate: true,
+                non_writable: false,
+            });
+            continue;
+        }
+
+        let assignments =
+            BTreeMap::from([("is_latest".to_string(), Value::Bool(update.is_latest))]);
+        matched_count += 1;
+        updated_count += 1;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeMemoryLatestBatchRow {
+            memory_id: update.memory_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            filtered_out: false,
+            duplicate: false,
+            non_writable: false,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeMemoryLatestBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            filtered_out_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Memory", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeMemoryLatestBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        filtered_out_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+    })
+}
+
+fn memory_latest_update_matches_space(
+    node: &NodeRecord,
+    update: &KnowledgeMemoryLatestUpdate,
+) -> bool {
+    let Some(space_id_filter) = &update.space_id_filter else {
+        return true;
+    };
+    node.properties
+        .get("space_id")
+        .is_some_and(|value| value_to_external_id(value) == *space_id_filter)
 }
 
 fn update_knowledge_skill_usage_stats_batch_for(
@@ -13287,6 +13474,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryLifecycleBatchRequest,
     ) -> Result<KnowledgeMemoryLifecycleBatchOutput> {
         self.db.update_knowledge_memory_lifecycle_batch(request)
+    }
+
+    pub fn update_knowledge_memory_latest_batch(
+        &mut self,
+        request: &KnowledgeMemoryLatestBatchRequest,
+    ) -> Result<KnowledgeMemoryLatestBatchOutput> {
+        self.db.update_knowledge_memory_latest_batch(request)
     }
 
     pub fn update_knowledge_skill_usage_stats_batch(

@@ -58,6 +58,8 @@ pub use api::{
     KnowledgeLabelLifecycleBatchRequest, KnowledgeLabelLifecycleBatchRow,
     KnowledgeLabelLifecycleUpdate, KnowledgeMemoryAccessBatchOutput,
     KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessBatchRow, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryLatestBatchOutput, KnowledgeMemoryLatestBatchRequest,
+    KnowledgeMemoryLatestBatchRow, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
     KnowledgeMemoryLifecycleBatchRow, KnowledgeMemoryLifecycleUpdate, KnowledgeNeighborDirection,
     KnowledgeNeighborsOutput, KnowledgeNeighborsRequest, KnowledgeNormalizedSpaceMoveBatchOutput,

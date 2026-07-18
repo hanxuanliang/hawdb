@@ -100,6 +100,13 @@ cutover runs that require storage or resource evidence must also attach
 artifacts from the real database path, with matching protocols and full
 readiness under the fail-closed cutover evidence rules.
 
+Typed Memory latest updates are exposed through
+`Database::update_knowledge_memory_latest_batch` for Nowledge EVOLVES
+promotion/demotion writes. The wrapper updates only `is_latest`, supports the
+exact `space_id` filter used by in-space demotion, reports missing, filtered,
+duplicate, and non-writable rows before writing, and commits eligible updates
+through one grouped WAL batch.
+
 The stable way to report "how much of Nowledge can be replaced" is to run
 `skein nowledge-replacement-summary <migration-gate-json>` over a generated
 migration-gate bundle, or add `--compact`/`--max-family-items <n>` when the

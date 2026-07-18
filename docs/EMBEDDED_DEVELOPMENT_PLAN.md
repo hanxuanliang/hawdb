@@ -377,6 +377,11 @@ Community assignment cleanup is also exposed through
 scopes or an all-node scan, validates label names before WAL, deduplicates
 overlapping label scopes, clears only non-null `community_id` values, and
 commits eligible clears through one grouped WAL batch.
+Memory latest promotion and demotion writes used by EVOLVES workflows are
+available as `Database::update_knowledge_memory_latest_batch`, which updates
+only `is_latest`, supports the exact `space_id` filter used by in-space
+demotion, reports non-writable and duplicate rows, and commits eligible updates
+through one grouped WAL batch.
 Two exact node patterns without a relationship are supported for Nowledge
 source-provenance endpoint checks, for example
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) RETURN count(m)`.

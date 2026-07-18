@@ -11,6 +11,7 @@ use super::{
     KnowledgeFanoutReasonCode, KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest,
     KnowledgeGraphPathDirection, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankClearRequest,
@@ -5662,6 +5663,193 @@ fn typed_memory_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("metadata"),
             Some(&Some(Value::String("{\"state\":\"active\"}".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_memory_latest_batch_for_nowledge_evolution_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'older', is_latest: true, space_id: 'space_a', metadata: '{}', lifecycle_state: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'newer', is_latest: false, space_id: 'space_a', metadata: '{}', lifecycle_state: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'other_space', is_latest: true, space_id: 'space_b'})")
+        .unwrap();
+
+    let output = db
+        .update_knowledge_memory_latest_batch(&KnowledgeMemoryLatestBatchRequest {
+            updates: vec![
+                KnowledgeMemoryLatestUpdate {
+                    memory_id: "older".to_string(),
+                    is_latest: false,
+                    space_id_filter: Some("space_a".to_string()),
+                },
+                KnowledgeMemoryLatestUpdate {
+                    memory_id: "newer".to_string(),
+                    is_latest: true,
+                    space_id_filter: None,
+                },
+                KnowledgeMemoryLatestUpdate {
+                    memory_id: "other_space".to_string(),
+                    is_latest: false,
+                    space_id_filter: Some("space_a".to_string()),
+                },
+                KnowledgeMemoryLatestUpdate {
+                    memory_id: "older".to_string(),
+                    is_latest: true,
+                    space_id_filter: None,
+                },
+                KnowledgeMemoryLatestUpdate {
+                    memory_id: "missing".to_string(),
+                    is_latest: true,
+                    space_id_filter: None,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.updated_count, 2);
+    assert_eq!(output.filtered_out_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.non_writable_count, 0);
+    assert!(output.rows[0].updated);
+    assert!(output.rows[1].updated);
+    assert!(output.rows[2].filtered_out);
+    assert!(output.rows[3].duplicate);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "older".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "newer".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "other_space".to_string(),
+            },
+        ],
+        property_names: vec![
+            "is_latest".to_string(),
+            "metadata".to_string(),
+            "lifecycle_state".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("is_latest"),
+        Some(&Some(Value::Bool(false)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("is_latest"),
+        Some(&Some(Value::Bool(true)))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("is_latest"),
+        Some(&Some(Value::Bool(true)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("metadata"),
+        Some(&Some(Value::String("{}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("lifecycle_state"),
+        Some(&Some(Value::String("active".to_string())))
+    );
+}
+
+#[test]
+fn memory_latest_batch_rejects_empty_id_before_wal() {
+    let path = unique_test_dir("memory_latest_empty_id");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'memory_1', is_latest: true})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .update_knowledge_memory_latest_batch(&KnowledgeMemoryLatestBatchRequest {
+            updates: vec![KnowledgeMemoryLatestUpdate {
+                memory_id: String::new(),
+                is_latest: false,
+                space_id_filter: None,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty memory id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn typed_memory_latest_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_memory_latest_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'older', is_latest: true, space_id: 'space_a'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'newer', is_latest: false, space_id: 'space_a'})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_memory_latest_batch(&KnowledgeMemoryLatestBatchRequest {
+            updates: vec![
+                KnowledgeMemoryLatestUpdate {
+                    memory_id: "older".to_string(),
+                    is_latest: false,
+                    space_id_filter: Some("space_a".to_string()),
+                },
+                KnowledgeMemoryLatestUpdate {
+                    memory_id: "newer".to_string(),
+                    is_latest: true,
+                    space_id_filter: None,
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "older".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "newer".to_string(),
+                },
+            ],
+            property_names: vec!["is_latest".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("is_latest"),
+            Some(&Some(Value::Bool(false)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("is_latest"),
+            Some(&Some(Value::Bool(true)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
