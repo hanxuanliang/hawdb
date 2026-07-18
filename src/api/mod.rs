@@ -2043,6 +2043,36 @@ pub struct KnowledgeGraphMetaStampBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSchemaMigrationApply {
+    pub migration_id: String,
+    pub applied_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSchemaMigrationApplyBatchRequest {
+    pub migrations: Vec<KnowledgeSchemaMigrationApply>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSchemaMigrationApplyBatchRow {
+    pub migration_id: String,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub already_applied: bool,
+    pub duplicate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSchemaMigrationApplyBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSchemaMigrationApplyBatchRow>,
+    pub created_count: usize,
+    pub already_applied_count: usize,
+    pub duplicate_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityDeleteRequest {
     pub entity: KnowledgeEntityRequest,
 }
@@ -3832,6 +3862,13 @@ impl Database {
         request: &KnowledgeGraphMetaStampBatchRequest,
     ) -> Result<KnowledgeGraphMetaStampBatchOutput> {
         stamp_knowledge_graph_meta_batch_for(self, request)
+    }
+
+    pub fn apply_knowledge_schema_migrations_batch(
+        &mut self,
+        request: &KnowledgeSchemaMigrationApplyBatchRequest,
+    ) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
+        apply_knowledge_schema_migrations_batch_for(self, request)
     }
 
     pub fn delete_knowledge_entity(
@@ -8170,6 +8207,113 @@ fn graph_meta_create_statement(
     }
     cypher.push_str("})");
     (cypher, parameters)
+}
+
+fn apply_knowledge_schema_migrations_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSchemaMigrationApplyBatchRequest,
+) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
+    db.ensure_writable()?;
+    for migration in &request.migrations {
+        if migration.migration_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge schema migration apply requires a non-empty migration id".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.migrations.len());
+    let mut created_count = 0;
+    let mut already_applied_count = 0;
+    let mut duplicate_count = 0;
+    let mut pending_migration_ids = BTreeSet::new();
+    let mut eligible_creates = Vec::new();
+
+    for migration in &request.migrations {
+        let existing = seed_node_by_label_and_external_id(
+            &db.catalog,
+            &db.store,
+            "SchemaMigrationLog",
+            migration.migration_id.as_str(),
+        );
+        if let Some(node) = existing {
+            already_applied_count += 1;
+            rows.push(KnowledgeSchemaMigrationApplyBatchRow {
+                migration_id: migration.migration_id.clone(),
+                node_id: Some(node.id.0),
+                created: false,
+                already_applied: true,
+                duplicate: false,
+            });
+            continue;
+        }
+        if !pending_migration_ids.insert(migration.migration_id.clone()) {
+            duplicate_count += 1;
+            rows.push(KnowledgeSchemaMigrationApplyBatchRow {
+                migration_id: migration.migration_id.clone(),
+                node_id: None,
+                created: false,
+                already_applied: false,
+                duplicate: true,
+            });
+            continue;
+        }
+
+        created_count += 1;
+        let create = KnowledgeEntityCreateRequest {
+            label: "SchemaMigrationLog".to_string(),
+            external_id: migration.migration_id.clone(),
+            properties: BTreeMap::from([("applied_at".to_string(), migration.applied_at.clone())]),
+        };
+        eligible_creates.push(create);
+        rows.push(KnowledgeSchemaMigrationApplyBatchRow {
+            migration_id: migration.migration_id.clone(),
+            node_id: None,
+            created: true,
+            already_applied: false,
+            duplicate: false,
+        });
+    }
+
+    if eligible_creates.is_empty() {
+        return Ok(KnowledgeSchemaMigrationApplyBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            created_count: 0,
+            already_applied_count,
+            duplicate_count,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for create in &eligible_creates {
+        let (cypher, parameters) = knowledge_entity_create_statement(create);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    for row in &mut rows {
+        if row.created {
+            row.node_id = seed_node_by_label_and_external_id(
+                &db.catalog,
+                &db.store,
+                "SchemaMigrationLog",
+                row.migration_id.as_str(),
+            )
+            .map(|node| node.id.0);
+        }
+    }
+
+    Ok(KnowledgeSchemaMigrationApplyBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        created_count,
+        already_applied_count,
+        duplicate_count,
+    })
 }
 
 fn delete_knowledge_entity_for(
@@ -12607,6 +12751,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeGraphMetaStampBatchRequest,
     ) -> Result<KnowledgeGraphMetaStampBatchOutput> {
         self.db.stamp_knowledge_graph_meta_batch(request)
+    }
+
+    pub fn apply_knowledge_schema_migrations_batch(
+        &mut self,
+        request: &KnowledgeSchemaMigrationApplyBatchRequest,
+    ) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
+        self.db.apply_knowledge_schema_migrations_batch(request)
     }
 
     pub fn delete_knowledge_entity(

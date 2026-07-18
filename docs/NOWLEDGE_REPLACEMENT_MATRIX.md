@@ -208,6 +208,12 @@ SET ...`. The wrapper validates non-empty `meta_id` values and property names,
 rejects attempts to mutate `meta_id`, creates missing GraphMeta rows, updates
 existing rows, reports duplicate stamps without writing, and commits eligible
 stamps through one grouped WAL batch.
+Schema migration log writes are covered by a typed create-once batch for
+Nowledge `SchemaMigrationLog` ids shaped as `MERGE ... ON CREATE SET
+applied_at`. The wrapper validates non-empty migration ids before WAL, reports
+already-applied and duplicate rows without writing, preserves existing
+`applied_at` values, and commits eligible new migration rows through one grouped
+WAL batch.
 
 ## Current Direction
 
