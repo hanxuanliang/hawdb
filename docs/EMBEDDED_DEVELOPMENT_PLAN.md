@@ -171,9 +171,13 @@ as a typed `knowledge_skill_memories` API for id-filtered and stage-filtered
 `SYNTHESIZED_FROM` Memory lists with explicit created-at ordering. Skill node
 catalog/detail reads are exposed as a typed `knowledge_skills` API for
 stage-filtered lists, exact id lookup, key prefix/contains lookup, active
-after-id pagination, and updated-at/id ordering without WAL writes. Thread
-metadata updates are exposed as a typed batch for Nowledge `metadata` writes
-with optional `updated_at` stamping. Thread
+after-id pagination, and updated-at/id ordering without WAL writes. Skill
+context thread-source reads are exposed as a typed
+`knowledge_skill_thread_sources` API for the Nowledge business shape
+`(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)<-[:COMPACTS_TO]-(:Thread)`,
+returning Thread title/source rows without treating Skill as a graph-kernel
+builtin. Thread metadata updates are exposed as a typed batch for Nowledge
+`metadata` writes with optional `updated_at` stamping. Thread
 denormalized message-count refreshes are exposed as a typed batch for Nowledge
 `message_count` writes with optional timestamp stamping and preserve-newer
 `updated_at` behavior.

@@ -306,6 +306,13 @@ content/unit type/created-at fields plus Skill and relationship identities,
 supports `created_at` ascending or descending ordering with bounded limits,
 reports matched/missing Skill counts and the graph commit epoch, and does not
 write WAL.
+Skill context thread-source reads are covered by
+`Database::knowledge_skill_thread_sources`. This is a Nowledge `(:Skill)`
+business-node facade, not a graph-kernel builtin: it resolves one Skill id,
+follows `SYNTHESIZED_FROM` evidence Memory nodes and incoming `COMPACTS_TO`
+Thread nodes, de-duplicates repeated Memory/Thread pairs, returns Thread
+title/source rows with stable ordering, supports pinned read snapshots, and
+does not write WAL.
 Thread metadata writes are covered by a typed batch for Nowledge `metadata`
 updates with optional `updated_at` stamping. The wrapper validates Thread ids
 before WAL, reports missing, idless, and duplicate rows without writing, keeps

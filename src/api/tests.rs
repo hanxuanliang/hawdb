@@ -58,12 +58,13 @@ use super::{
     KnowledgeScopedSubgraphRequest, KnowledgeSkillLifecycleBatchRequest,
     KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder, KnowledgeSkillListRequest,
     KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
-    KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
-    KnowledgeSourceIdListRequest, KnowledgeSourceLifecycleBatchRequest,
-    KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
-    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
-    KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
+    KnowledgeSkillThreadSourceListRequest, KnowledgeSkillUsageStatsBatchRequest,
+    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceIdListRequest,
+    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
+    KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
+    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
+    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
+    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
     KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadListOrder,
     KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
@@ -8821,6 +8822,125 @@ fn skill_list_rejects_unbounded_or_empty_filters() {
         })
         .unwrap_err();
     assert!(empty_after.to_string().contains("non-empty after id"));
+}
+
+#[test]
+fn reads_skill_thread_sources_for_context_wiring_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'skill_context', stage: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'skill_other', stage: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_skip'})").unwrap();
+    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', source: 'codex'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'thread_skip', title: 'Not a Thread'})")
+        .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_b'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_context'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM {duplicate: true}]->(m)")
+        .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_context'}), (x:Source {id: 'source_skip'}) CREATE (s)-[:SYNTHESIZED_FROM]->(x)")
+        .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_other'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {duplicate: true}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Memory {id: 'thread_skip'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
+            skill_id: "skill_context".to_string(),
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.skill_id, "skill_context");
+    assert!(output.skill_node_id.is_some());
+    assert!(output.found_skill);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.returned_count, 2);
+    assert_eq!(output.rows[0].skill_id.as_deref(), Some("skill_context"));
+    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_a"));
+    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
+    assert_eq!(
+        output.rows[0].thread_logical_id.as_deref(),
+        Some("logical_a")
+    );
+    assert_eq!(output.rows[0].title.as_deref(), Some("Alpha Thread"));
+    assert_eq!(output.rows[0].source.as_deref(), Some("codex"));
+    assert_ne!(output.rows[0].skill_node_id, output.rows[0].memory_node_id);
+    assert_ne!(output.rows[0].thread_node_id, output.rows[0].memory_node_id);
+    assert!(output.rows[0].skill_memory_relationship_id > 0);
+    assert!(output.rows[0].compacts_to_relationship_id > 0);
+    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_b"));
+    assert_eq!(output.rows[1].thread_id.as_deref(), Some("thread_b"));
+
+    let limited = db
+        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
+            skill_id: "skill_context".to_string(),
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(limited.matched_count, 2);
+    assert_eq!(limited.returned_count, 1);
+    assert_eq!(limited.rows[0].thread_id.as_deref(), Some("thread_a"));
+
+    let missing = db
+        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
+            skill_id: "missing_skill".to_string(),
+            limit: 10,
+        })
+        .unwrap();
+    assert!(!missing.found_skill);
+    assert_eq!(missing.skill_node_id, None);
+    assert_eq!(missing.matched_count, 0);
+    assert!(missing.rows.is_empty());
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let tx = db.begin_read_transaction();
+    db.query("CREATE (:Thread {id: 'thread_after', title: 'After Thread', source: 'after'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_after'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO]->(m)")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
+            skill_id: "skill_context".to_string(),
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.matched_count, 2);
+    assert!(snapshot
+        .rows
+        .iter()
+        .all(|row| row.thread_id.as_deref() != Some("thread_after")));
+}
+
+#[test]
+fn skill_thread_source_read_rejects_empty_skill_id() {
+    let db = Database::new();
+    let error = db
+        .knowledge_skill_thread_sources(&KnowledgeSkillThreadSourceListRequest {
+            skill_id: String::new(),
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("non-empty skill id"));
 }
 
 #[test]

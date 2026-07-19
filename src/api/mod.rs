@@ -2570,6 +2570,38 @@ pub struct KnowledgeSkillMemoryListOutput {
     pub missing_skill_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillThreadSourceListRequest {
+    pub skill_id: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillThreadSourceRow {
+    pub skill_id: Option<String>,
+    pub skill_node_id: u64,
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub skill_memory_relationship_id: u64,
+    pub thread_id: Option<String>,
+    pub thread_node_id: u64,
+    pub thread_logical_id: Option<String>,
+    pub title: Option<String>,
+    pub source: Option<String>,
+    pub compacts_to_relationship_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillThreadSourceListOutput {
+    pub graph_commit_epoch: u64,
+    pub skill_id: String,
+    pub skill_node_id: Option<u64>,
+    pub found_skill: bool,
+    pub rows: Vec<KnowledgeSkillThreadSourceRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KnowledgeSkillListOrder {
     IdAsc,
@@ -5549,6 +5581,13 @@ impl Database {
         request: &KnowledgeSkillMemoryListRequest,
     ) -> Result<KnowledgeSkillMemoryListOutput> {
         knowledge_skill_memories_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_thread_sources(
+        &self,
+        request: &KnowledgeSkillThreadSourceListRequest,
+    ) -> Result<KnowledgeSkillThreadSourceListOutput> {
+        knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skills(
@@ -12531,6 +12570,57 @@ fn validate_knowledge_skill_memory_request(
     Ok(())
 }
 
+fn knowledge_skill_thread_sources_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSkillThreadSourceListRequest,
+) -> Result<KnowledgeSkillThreadSourceListOutput> {
+    validate_knowledge_skill_thread_source_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(skill) =
+        seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id)
+    else {
+        return Ok(KnowledgeSkillThreadSourceListOutput {
+            graph_commit_epoch,
+            skill_id: request.skill_id.clone(),
+            skill_node_id: None,
+            found_skill: false,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = skill_thread_source_rows(catalog, store, skill);
+    sort_skill_thread_source_rows(&mut rows);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeSkillThreadSourceListOutput {
+        graph_commit_epoch,
+        skill_id: request.skill_id.clone(),
+        skill_node_id: Some(skill.id.0),
+        found_skill: true,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_skill_thread_source_request(
+    request: &KnowledgeSkillThreadSourceListRequest,
+) -> Result<()> {
+    if request.skill_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge skill thread source read requires a non-empty skill id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn skill_memory_seed_nodes<'a>(
     catalog: &Catalog,
     store: &'a GraphStore,
@@ -12562,6 +12652,96 @@ fn skill_memory_seed_nodes<'a>(
             .then_with(|| left.id.0.cmp(&right.id.0))
     });
     nodes
+}
+
+fn skill_thread_source_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    skill: &NodeRecord,
+) -> Vec<KnowledgeSkillThreadSourceRow> {
+    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
+        return Vec::new();
+    };
+    let Some(compacts_to_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
+        return Vec::new();
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    let Some(thread_label_id) = catalog.label_id("Thread") else {
+        return Vec::new();
+    };
+
+    let mut seen = BTreeSet::new();
+    let mut rows = Vec::new();
+    for skill_memory_rel in store.outgoing_relationships(skill.id, synthesized_from_type_id) {
+        let Some(memory) = store
+            .node(skill_memory_rel.target)
+            .filter(|memory| memory.labels.contains(&memory_label_id))
+        else {
+            continue;
+        };
+        for compact_rel in store.incoming_relationships(memory.id, compacts_to_type_id) {
+            let Some(thread) = store
+                .node(compact_rel.source)
+                .filter(|thread| thread.labels.contains(&thread_label_id))
+            else {
+                continue;
+            };
+            if !seen.insert((memory.id.0, thread.id.0)) {
+                continue;
+            }
+            rows.push(skill_thread_source_row(
+                skill,
+                memory,
+                skill_memory_rel,
+                thread,
+                compact_rel,
+            ));
+        }
+    }
+    rows
+}
+
+fn skill_thread_source_row(
+    skill: &NodeRecord,
+    memory: &NodeRecord,
+    skill_memory_relationship: &RelRecord,
+    thread: &NodeRecord,
+    compacts_to_relationship: &RelRecord,
+) -> KnowledgeSkillThreadSourceRow {
+    KnowledgeSkillThreadSourceRow {
+        skill_id: node_external_id(skill),
+        skill_node_id: skill.id.0,
+        memory_id: node_external_id(memory),
+        memory_node_id: memory.id.0,
+        skill_memory_relationship_id: skill_memory_relationship.id.0,
+        thread_id: node_external_id(thread),
+        thread_node_id: thread.id.0,
+        thread_logical_id: string_property(thread, "thread_id"),
+        title: string_property(thread, "title"),
+        source: string_property(thread, "source"),
+        compacts_to_relationship_id: compacts_to_relationship.id.0,
+    }
+}
+
+fn sort_skill_thread_source_rows(rows: &mut [KnowledgeSkillThreadSourceRow]) {
+    rows.sort_by(|left, right| {
+        left.title
+            .cmp(&right.title)
+            .then_with(|| left.source.cmp(&right.source))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.thread_logical_id.cmp(&right.thread_logical_id))
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
+            .then_with(|| {
+                left.skill_memory_relationship_id
+                    .cmp(&right.skill_memory_relationship_id)
+            })
+            .then_with(|| {
+                left.compacts_to_relationship_id
+                    .cmp(&right.compacts_to_relationship_id)
+            })
+    });
 }
 
 fn skill_memory_rows(
@@ -20866,6 +21046,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_skill_memories(request)
     }
 
+    pub fn knowledge_skill_thread_sources(
+        &self,
+        request: &KnowledgeSkillThreadSourceListRequest,
+    ) -> Result<KnowledgeSkillThreadSourceListOutput> {
+        self.db.knowledge_skill_thread_sources(request)
+    }
+
     pub fn knowledge_skills(
         &self,
         request: &KnowledgeSkillListRequest,
@@ -21777,6 +21964,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSkillListRequest,
     ) -> Result<KnowledgeSkillListOutput> {
         knowledge_skills_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_thread_sources(
+        &self,
+        request: &KnowledgeSkillThreadSourceListRequest,
+    ) -> Result<KnowledgeSkillThreadSourceListOutput> {
+        knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(
