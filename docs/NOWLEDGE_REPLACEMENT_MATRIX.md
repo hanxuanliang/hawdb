@@ -223,6 +223,14 @@ returning Crystal fields plus source Memory metadata, `COALESCE(is_latest,
 true)` semantics, and lifecycle state for Nowledge wiki community crystal
 rendering; it supports explicit community-id scopes, read-transaction
 snapshots, and no WAL writes.
+MCP crystal source-link writes are covered by
+`Database::merge_knowledge_crystal_source`. The typed write resolves exact
+physical `Memory.id` endpoints for the crystal and source Memory nodes, merges
+the outgoing `SYNTHESIZED_FROM` edge, creates only the Nowledge-used `weight`,
+empty `occasion_key`, and `created_at` relationship properties, reports missing
+endpoints and idless endpoints without writing, preserves existing-edge
+properties for `MERGE ON CREATE SET` semantics, validates numeric finite
+weights before WAL, and uses the WAL-backed relationship write path.
 Synthesized-source coverage lookups are covered by
 `Database::knowledge_synthesized_source_coverage`. The typed read validates an
 explicit non-empty source Memory id set and positive required distinct coverage

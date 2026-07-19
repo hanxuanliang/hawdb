@@ -66,6 +66,7 @@ pub use api::{
     KnowledgeCrystalCommunityListOutput, KnowledgeCrystalCommunityListRequest,
     KnowledgeCrystalCommunityRow, KnowledgeCrystalCommunityScope, KnowledgeCrystalListOrder,
     KnowledgeCrystalListOutput, KnowledgeCrystalListRequest, KnowledgeCrystalRow,
+    KnowledgeCrystalSourceMergeOutput, KnowledgeCrystalSourceMergeRequest,
     KnowledgeCrystalSourceVisibilityOutput, KnowledgeCrystalSourceVisibilityRequest,
     KnowledgeCrystalSourceVisibilityRow, KnowledgeEntity, KnowledgeEntityBatchOutput,
     KnowledgeEntityBatchRequest, KnowledgeEntityCreateBatchOutput,

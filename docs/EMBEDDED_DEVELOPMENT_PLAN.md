@@ -157,6 +157,10 @@ create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
 normalized-space batch moves, memory access/click-dwell touches, ordered batch
 mutation, source memory-count adjustments, source lifecycle updates, source
 detail/count/id-list reads, and grouped WAL commits for eligible lifecycle rows.
+MCP crystal source-link merges are exposed as a typed
+`merge_knowledge_crystal_source` API for
+`(:Memory)-[:SYNTHESIZED_FROM]->(:Memory)` writes with caller-provided `weight`
+and create-only `occasion_key`/`created_at` relationship properties.
 Memory lifecycle metadata updates are
 also exposed as a typed batch for the Nowledge `metadata`/`is_latest`/
 `lifecycle_state`/`updated_at` write shape. Context memory preview reads are

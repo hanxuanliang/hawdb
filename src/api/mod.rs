@@ -1780,6 +1780,31 @@ pub struct KnowledgeCrystalListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalSourceMergeRequest {
+    pub crystal_memory_id: String,
+    pub source_memory_id: String,
+    pub weight: Value,
+    pub created_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalSourceMergeOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub crystal_memory_id: String,
+    pub source_memory_id: String,
+    pub crystal_node_id: Option<u64>,
+    pub source_node_id: Option<u64>,
+    pub relationship_id: Option<u64>,
+    pub matched: bool,
+    pub created: bool,
+    pub already_exists: bool,
+    pub missing_endpoint: bool,
+    pub non_writable: bool,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeCrystalCommunityScope {
     CommunityIds(Vec<Value>),
     NonNullCommunity,
@@ -5622,6 +5647,13 @@ impl Database {
         knowledge_crystals_for(&self.catalog, &self.store, request)
     }
 
+    pub fn merge_knowledge_crystal_source(
+        &mut self,
+        request: &KnowledgeCrystalSourceMergeRequest,
+    ) -> Result<KnowledgeCrystalSourceMergeOutput> {
+        merge_knowledge_crystal_source_for(self, request)
+    }
+
     pub fn knowledge_crystal_communities(
         &self,
         request: &KnowledgeCrystalCommunityListRequest,
@@ -9198,6 +9230,76 @@ fn sort_crystal_rows(rows: &mut [KnowledgeCrystalRow], request: &KnowledgeCrysta
                 }
             })
     });
+}
+
+fn merge_knowledge_crystal_source_for(
+    db: &mut Database,
+    request: &KnowledgeCrystalSourceMergeRequest,
+) -> Result<KnowledgeCrystalSourceMergeOutput> {
+    if request.crystal_memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge crystal source merge requires a non-empty crystal memory id".to_string(),
+        ));
+    }
+    if request.source_memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge crystal source merge requires a non-empty source memory id".to_string(),
+        ));
+    }
+    validate_knowledge_crystal_source_weight(&request.weight)?;
+
+    let upsert = KnowledgeRelationshipUpsertRequest {
+        source: KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: request.crystal_memory_id.clone(),
+        },
+        target: KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: request.source_memory_id.clone(),
+        },
+        relationship_type: "SYNTHESIZED_FROM".to_string(),
+        create_properties: BTreeMap::from([
+            ("weight".to_string(), request.weight.clone()),
+            ("occasion_key".to_string(), Value::String(String::new())),
+            ("created_at".to_string(), request.created_at.clone()),
+        ]),
+    };
+    let output = upsert_knowledge_relationship_for(db, &upsert)?;
+    let missing_endpoint = !output.matched
+        && !output.non_writable
+        && !output.source_filtered_out
+        && !output.target_filtered_out;
+
+    Ok(KnowledgeCrystalSourceMergeOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        crystal_memory_id: request.crystal_memory_id.clone(),
+        source_memory_id: request.source_memory_id.clone(),
+        crystal_node_id: output.source_node_id,
+        source_node_id: output.target_node_id,
+        relationship_id: output.relationship_id,
+        matched: output.matched,
+        created: output.created,
+        already_exists: output.already_exists,
+        missing_endpoint,
+        non_writable: output.non_writable,
+        created_relationship_count: output.created_relationship_count,
+    })
+}
+
+fn validate_knowledge_crystal_source_weight(weight: &Value) -> Result<()> {
+    let valid = match weight {
+        Value::Float(value) => value.is_finite(),
+        Value::Int(_) => true,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SkeinError::Semantic(
+            "knowledge crystal source merge requires a numeric finite weight".to_string(),
+        ))
+    }
 }
 
 fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalListRequest) -> u8 {
@@ -21949,6 +22051,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeCrystalListRequest,
     ) -> Result<KnowledgeCrystalListOutput> {
         self.db.knowledge_crystals(request)
+    }
+
+    pub fn merge_knowledge_crystal_source(
+        &mut self,
+        request: &KnowledgeCrystalSourceMergeRequest,
+    ) -> Result<KnowledgeCrystalSourceMergeOutput> {
+        self.db.merge_knowledge_crystal_source(request)
     }
 
     pub fn knowledge_crystal_communities(
