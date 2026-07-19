@@ -1695,6 +1695,28 @@ pub struct KnowledgeMemoryListOutput {
     pub missing_external_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesLatestRequest {
+    pub old_memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesLatestRow {
+    pub new_memory_id: Option<String>,
+    pub new_node_id: u64,
+    pub new_is_latest: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesLatestOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryEvolvesLatestRow>,
+    pub matched_old_memory_count: usize,
+    pub missing_old_memory_ids: Vec<String>,
+    pub matched_relationship_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,
@@ -5508,6 +5530,13 @@ impl Database {
         knowledge_memories_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_evolves_latest(
+        &self,
+        request: &KnowledgeMemoryEvolvesLatestRequest,
+    ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
+        knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_crystals(
         &self,
         request: &KnowledgeCrystalListRequest,
@@ -8699,6 +8728,136 @@ fn knowledge_memory_list_row(memory: &NodeRecord) -> KnowledgeMemoryListRow {
         event_start: memory.properties.get("event_start").cloned(),
         event_end: memory.properties.get("event_end").cloned(),
     }
+}
+
+fn knowledge_memory_evolves_latest_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryEvolvesLatestRequest,
+) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
+    validate_knowledge_memory_evolves_latest_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    if request.old_memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryEvolvesLatestOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_old_memory_count: 0,
+            missing_old_memory_ids: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    }
+
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryEvolvesLatestOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_old_memory_count: 0,
+            missing_old_memory_ids: deduplicated_strings_in_order(&request.old_memory_ids),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let requested_ids = request
+        .old_memory_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut matched_old_ids = BTreeSet::new();
+    let old_memories = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| {
+            node_external_id(memory).is_some_and(|memory_id| {
+                let matched = requested_ids.contains(&memory_id);
+                if matched {
+                    matched_old_ids.insert(memory_id);
+                }
+                matched
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut seen_missing = BTreeSet::new();
+    let missing_old_memory_ids = request
+        .old_memory_ids
+        .iter()
+        .filter(|memory_id| !matched_old_ids.contains(*memory_id))
+        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let Some(evolves_type_id) = catalog.rel_type_id("EVOLVES") else {
+        return Ok(KnowledgeMemoryEvolvesLatestOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_old_memory_count: matched_old_ids.len(),
+            missing_old_memory_ids,
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut distinct_rows = BTreeMap::new();
+    let mut matched_relationship_count = 0;
+    for old_memory in old_memories {
+        for relationship in store.outgoing_relationships(old_memory.id, evolves_type_id) {
+            let Some(new_memory) = store.node(relationship.target) else {
+                continue;
+            };
+            if !new_memory.labels.contains(&memory_label_id) {
+                continue;
+            }
+            matched_relationship_count += 1;
+            let new_memory_id = node_external_id(new_memory);
+            let new_is_latest = boolean_property(new_memory, "is_latest");
+            distinct_rows
+                .entry((new_memory_id.clone(), new_is_latest))
+                .or_insert_with(|| KnowledgeMemoryEvolvesLatestRow {
+                    new_memory_id,
+                    new_node_id: new_memory.id.0,
+                    new_is_latest,
+                });
+        }
+    }
+
+    let mut rows = distinct_rows.into_values().collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.new_memory_id
+            .cmp(&right.new_memory_id)
+            .then_with(|| left.new_is_latest.cmp(&right.new_is_latest))
+            .then_with(|| left.new_node_id.cmp(&right.new_node_id))
+    });
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryEvolvesLatestOutput {
+        graph_commit_epoch,
+        rows,
+        matched_old_memory_count: matched_old_ids.len(),
+        missing_old_memory_ids,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_memory_evolves_latest_request(
+    request: &KnowledgeMemoryEvolvesLatestRequest,
+) -> Result<()> {
+    if request.old_memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves latest read requires non-empty memory ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn deduplicated_strings_in_order(values: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    values
+        .iter()
+        .filter(|value| seen.insert((*value).clone()))
+        .cloned()
+        .collect()
 }
 
 fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
@@ -21493,6 +21652,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memories(request)
     }
 
+    pub fn knowledge_memory_evolves_latest(
+        &self,
+        request: &KnowledgeMemoryEvolvesLatestRequest,
+    ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
+        self.db.knowledge_memory_evolves_latest(request)
+    }
+
     pub fn knowledge_crystals(
         &self,
         request: &KnowledgeCrystalListRequest,
@@ -22646,6 +22812,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
         knowledge_related_entity_names_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_evolves_latest(
+        &self,
+        request: &KnowledgeMemoryEvolvesLatestRequest,
+    ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
+        knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_crystals(

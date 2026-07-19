@@ -440,6 +440,10 @@ Memory bulk detail and filtered list reads are available as
 `Database::knowledge_memories`, covering id-bounded metadata/space/detail
 reads, normalized-space inclusion and exclusion, learning latest lists, and
 ranked overview lists with bounded limits and no WAL writes.
+Memory EVOLVES latest reads are available as
+`Database::knowledge_memory_evolves_latest`, covering REST Skills successor
+checks over old Memory id lists with distinct latest-state rows and no WAL
+writes.
 Crystal Memory reads are available as `Database::knowledge_crystals`, covering
 Nowledge wiki crystal detail key lookup, crystal page `id > after` pagination,
 and OKF crystal list rows with `crystal_title`, display-title fallback,
