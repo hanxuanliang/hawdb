@@ -204,6 +204,11 @@ Memory lifecycle metadata writes are covered by a typed batch for the Nowledge
 wrapper validates Memory ids and non-empty lifecycle states before WAL, reports
 missing/idless/duplicate rows without writing, and commits eligible Memory rows
 through one grouped WAL batch.
+Crystal Memory reads are covered by `Database::knowledge_crystals`. The typed
+read scans only `Memory` nodes with `is_crystal = true`, supports wiki key
+lookup by exact/prefix/contains id matching, crystal page `id > after`
+pagination, OKF importance/created-at ordering, display-title fallback from
+`crystal_title` to `title`, read-transaction snapshots, and no WAL writes.
 Memory entity mention reads are covered by
 `Database::knowledge_memory_entities`. The typed read validates a non-empty
 Memory id list, resolves each Memory in caller order, scans outgoing `MENTIONS`

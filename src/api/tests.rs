@@ -11,8 +11,8 @@ use super::{
     KnowledgeCommunityListRequest, KnowledgeCommunityLookupKey, KnowledgeCommunityMembershipCreate,
     KnowledgeCommunityMembershipCreateBatchRequest, KnowledgeCommunityRequest,
     KnowledgeCommunitySummaryUpdate, KnowledgeContextMemoryLatestFilter,
-    KnowledgeContextMemoryPreviewRequest, KnowledgeEntityBatchRequest,
-    KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
+    KnowledgeContextMemoryPreviewRequest, KnowledgeCrystalListOrder, KnowledgeCrystalListRequest,
+    KnowledgeEntityBatchRequest, KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
     KnowledgeEntityLabelListRequest, KnowledgeEntityMentionCountCursor,
     KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
@@ -4456,6 +4456,124 @@ fn memory_list_rejects_unbounded_or_empty_filters() {
     assert!(unbounded_error
         .to_string()
         .contains("filter or bounded limit"));
+}
+
+#[test]
+fn reads_crystals_for_wiki_and_okf_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'crystal-alpha', is_crystal: true, crystal_title: 'Alpha Crystal', title: 'Alpha Title', content: 'Alpha content', importance: 0.8, unit_type: 'fact', created_at: 10, updated_at: 20, metadata: '{\"a\":1}', is_latest: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'crystal-beta', is_crystal: true, title: 'Beta Title', content: 'Beta content', importance: 0.9, unit_type: 'decision', created_at: 5, updated_at: 25, metadata: '{\"b\":1}', is_latest: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'archive-crystal', is_crystal: true, crystal_title: 'Archive Crystal', content: 'Archive content', importance: 0.1, unit_type: 'note', created_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'crystal-non', is_crystal: false, crystal_title: 'Non Crystal', importance: 5.0, created_at: 99})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let wiki_detail = db
+        .knowledge_crystals(&KnowledgeCrystalListRequest {
+            key_match: Some("crystal-a".to_string()),
+            after_id: None,
+            limit: 1,
+            order: KnowledgeCrystalListOrder::ExternalIdAsc,
+        })
+        .unwrap();
+    assert_eq!(wiki_detail.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(wiki_detail.matched_count, 1);
+    assert_eq!(wiki_detail.returned_count, 1);
+    assert_eq!(
+        wiki_detail.rows[0].memory_id.as_deref(),
+        Some("crystal-alpha")
+    );
+    assert_eq!(
+        wiki_detail.rows[0].crystal_title.as_deref(),
+        Some("Alpha Crystal")
+    );
+    assert_eq!(wiki_detail.rows[0].title.as_deref(), Some("Alpha Title"));
+    assert_eq!(wiki_detail.rows[0].display_title, "Alpha Crystal");
+    assert_eq!(
+        wiki_detail.rows[0].content.as_deref(),
+        Some("Alpha content")
+    );
+    assert_eq!(wiki_detail.rows[0].importance, Some(Value::Float(0.8)));
+    assert_eq!(wiki_detail.rows[0].unit_type.as_deref(), Some("fact"));
+    assert_eq!(wiki_detail.rows[0].created_at, Some(Value::Int(10)));
+
+    let page = db
+        .knowledge_crystals(&KnowledgeCrystalListRequest {
+            key_match: None,
+            after_id: Some("crystal-alpha".to_string()),
+            limit: 10,
+            order: KnowledgeCrystalListOrder::ExternalIdAsc,
+        })
+        .unwrap();
+    assert_eq!(page.matched_count, 1);
+    assert_eq!(page.returned_count, 1);
+    assert_eq!(page.rows[0].memory_id.as_deref(), Some("crystal-beta"));
+    assert_eq!(page.rows[0].display_title, "Beta Title");
+    assert_eq!(page.rows[0].is_crystal, Some(true));
+    assert_eq!(page.rows[0].is_latest, Some(false));
+    assert_eq!(
+        page.rows[0].metadata,
+        Some(Value::String("{\"b\":1}".to_string()))
+    );
+
+    let tx = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'crystal-top', is_crystal: true, crystal_title: 'Top Crystal', importance: 9.0, created_at: 100})")
+        .unwrap();
+    let okf = tx
+        .knowledge_crystals(&KnowledgeCrystalListRequest {
+            key_match: None,
+            after_id: None,
+            limit: 0,
+            order: KnowledgeCrystalListOrder::ImportanceDescCreatedAtDesc,
+        })
+        .unwrap();
+    assert_eq!(okf.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(okf.matched_count, 3);
+    assert_eq!(okf.returned_count, 3);
+    assert_eq!(okf.rows[0].memory_id.as_deref(), Some("crystal-beta"));
+    assert_eq!(okf.rows[1].memory_id.as_deref(), Some("crystal-alpha"));
+    assert_eq!(okf.rows[2].memory_id.as_deref(), Some("archive-crystal"));
+}
+
+#[test]
+fn crystal_read_rejects_invalid_filters() {
+    let db = Database::new();
+
+    let empty_key_error = db
+        .knowledge_crystals(&KnowledgeCrystalListRequest {
+            key_match: Some(String::new()),
+            after_id: None,
+            limit: 1,
+            order: KnowledgeCrystalListOrder::ExternalIdAsc,
+        })
+        .unwrap_err();
+    assert!(empty_key_error.to_string().contains("non-empty key match"));
+
+    let empty_after_error = db
+        .knowledge_crystals(&KnowledgeCrystalListRequest {
+            key_match: None,
+            after_id: Some(String::new()),
+            limit: 1,
+            order: KnowledgeCrystalListOrder::ExternalIdAsc,
+        })
+        .unwrap_err();
+    assert!(empty_after_error.to_string().contains("non-empty after id"));
+
+    let mixed_filter_error = db
+        .knowledge_crystals(&KnowledgeCrystalListRequest {
+            key_match: Some("crystal".to_string()),
+            after_id: Some("crystal-alpha".to_string()),
+            limit: 1,
+            order: KnowledgeCrystalListOrder::ExternalIdAsc,
+        })
+        .unwrap_err();
+    assert!(mixed_filter_error
+        .to_string()
+        .contains("key_match or after_id"));
 }
 
 #[test]

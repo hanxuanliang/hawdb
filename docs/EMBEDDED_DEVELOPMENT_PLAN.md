@@ -412,6 +412,11 @@ Memory bulk detail and filtered list reads are available as
 `Database::knowledge_memories`, covering id-bounded metadata/space/detail
 reads, normalized-space inclusion and exclusion, learning latest lists, and
 ranked overview lists with bounded limits and no WAL writes.
+Crystal Memory reads are available as `Database::knowledge_crystals`, covering
+Nowledge wiki crystal detail key lookup, crystal page `id > after` pagination,
+and OKF crystal list rows with `crystal_title`, display-title fallback,
+importance/created-at ordering, pinned read-transaction snapshots, and no WAL
+writes.
 Memory entity mention reads are available as
 `Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
 `MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,

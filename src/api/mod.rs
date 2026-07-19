@@ -1599,6 +1599,45 @@ pub struct KnowledgeMemoryListOutput {
     pub missing_external_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCrystalListOrder {
+    ExternalIdAsc,
+    ImportanceDescCreatedAtDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalListRequest {
+    pub key_match: Option<String>,
+    pub after_id: Option<String>,
+    pub limit: usize,
+    pub order: KnowledgeCrystalListOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalRow {
+    pub memory_id: Option<String>,
+    pub node_id: u64,
+    pub crystal_title: Option<String>,
+    pub title: Option<String>,
+    pub display_title: String,
+    pub content: Option<String>,
+    pub importance: Option<Value>,
+    pub unit_type: Option<String>,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub metadata: Option<Value>,
+    pub is_latest: Option<bool>,
+    pub is_crystal: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeCrystalRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityCreateRequest {
     pub label: String,
@@ -4950,6 +4989,13 @@ impl Database {
         knowledge_memories_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_crystals(
+        &self,
+        request: &KnowledgeCrystalListRequest,
+    ) -> Result<KnowledgeCrystalListOutput> {
+        knowledge_crystals_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -7578,6 +7624,150 @@ fn memory_score(row: &KnowledgeMemoryListRow) -> Value {
         .clone()
         .or_else(|| row.importance.clone())
         .unwrap_or(Value::Float(0.5))
+}
+
+fn knowledge_crystals_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeCrystalListRequest,
+) -> Result<KnowledgeCrystalListOutput> {
+    validate_knowledge_crystal_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeCrystalListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| boolean_property(memory, "is_crystal") == Some(true))
+        .filter(|memory| memory_matches_crystal_list(memory, request))
+        .map(knowledge_crystal_row)
+        .collect::<Vec<_>>();
+    sort_crystal_rows(&mut rows, request);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCrystalListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest) -> Result<()> {
+    if request.key_match.as_ref().is_some_and(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge crystal list requires a non-empty key match".to_string(),
+        ));
+    }
+    if request.after_id.as_ref().is_some_and(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge crystal list requires a non-empty after id".to_string(),
+        ));
+    }
+    if request.key_match.is_some() && request.after_id.is_some() {
+        return Err(SkeinError::Semantic(
+            "knowledge crystal list accepts key_match or after_id, not both".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn memory_matches_crystal_list(memory: &NodeRecord, request: &KnowledgeCrystalListRequest) -> bool {
+    let memory_id = node_external_id(memory).unwrap_or_default();
+    request.key_match.as_ref().is_none_or(|key| {
+        memory_id == *key || memory_id.starts_with(key) || memory_id.contains(key)
+    }) && request
+        .after_id
+        .as_ref()
+        .is_none_or(|after_id| memory_id > *after_id)
+}
+
+fn knowledge_crystal_row(memory: &NodeRecord) -> KnowledgeCrystalRow {
+    let crystal_title = string_property(memory, "crystal_title");
+    let title = string_property(memory, "title");
+    let display_title = crystal_title
+        .clone()
+        .or_else(|| title.clone())
+        .unwrap_or_default();
+    KnowledgeCrystalRow {
+        memory_id: node_external_id(memory),
+        node_id: memory.id.0,
+        crystal_title,
+        title,
+        display_title,
+        content: string_property(memory, "content"),
+        importance: memory.properties.get("importance").cloned(),
+        unit_type: string_property(memory, "unit_type"),
+        created_at: memory.properties.get("created_at").cloned(),
+        updated_at: memory.properties.get("updated_at").cloned(),
+        metadata: memory.properties.get("metadata").cloned(),
+        is_latest: boolean_property(memory, "is_latest"),
+        is_crystal: boolean_property(memory, "is_crystal"),
+    }
+}
+
+fn sort_crystal_rows(rows: &mut [KnowledgeCrystalRow], request: &KnowledgeCrystalListRequest) {
+    rows.sort_by(|left, right| {
+        crystal_key_match_rank(left, request)
+            .cmp(&crystal_key_match_rank(right, request))
+            .then_with(|| match request.order {
+                KnowledgeCrystalListOrder::ExternalIdAsc => compare_crystal_ids(left, right),
+                KnowledgeCrystalListOrder::ImportanceDescCreatedAtDesc => {
+                    compare_crystal_importance_created_at(left, right)
+                        .then_with(|| compare_crystal_ids(left, right))
+                }
+            })
+    });
+}
+
+fn crystal_key_match_rank(row: &KnowledgeCrystalRow, request: &KnowledgeCrystalListRequest) -> u8 {
+    let Some(key) = &request.key_match else {
+        return 0;
+    };
+    let Some(memory_id) = &row.memory_id else {
+        return 3;
+    };
+    if memory_id == key {
+        0
+    } else if memory_id.starts_with(key) {
+        1
+    } else {
+        2
+    }
+}
+
+fn compare_crystal_ids(
+    left: &KnowledgeCrystalRow,
+    right: &KnowledgeCrystalRow,
+) -> std::cmp::Ordering {
+    left.memory_id
+        .cmp(&right.memory_id)
+        .then_with(|| left.node_id.cmp(&right.node_id))
+}
+
+fn compare_crystal_importance_created_at(
+    left: &KnowledgeCrystalRow,
+    right: &KnowledgeCrystalRow,
+) -> std::cmp::Ordering {
+    compare_optional_values_desc(left.importance.as_ref(), right.importance.as_ref()).then_with(
+        || {
+            compare_skill_memory_created_at(
+                &left.created_at,
+                &right.created_at,
+                KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+            )
+        },
+    )
 }
 
 enum KnowledgeScopedEntityMatch {
@@ -18652,6 +18842,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memories(request)
     }
 
+    pub fn knowledge_crystals(
+        &self,
+        request: &KnowledgeCrystalListRequest,
+    ) -> Result<KnowledgeCrystalListOutput> {
+        self.db.knowledge_crystals(request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -19672,6 +19869,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
         knowledge_related_entity_names_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_crystals(
+        &self,
+        request: &KnowledgeCrystalListRequest,
+    ) -> Result<KnowledgeCrystalListOutput> {
+        knowledge_crystals_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(
