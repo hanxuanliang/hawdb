@@ -101,6 +101,7 @@ pub use api::{
     KnowledgeMemoryEntityGroup, KnowledgeMemoryEntityListOutput, KnowledgeMemoryEntityListRequest,
     KnowledgeMemoryEntityRow, KnowledgeMemoryEvolvesLatestOutput,
     KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryEvolvesLatestRow,
+    KnowledgeMemoryLabelDeleteOutput, KnowledgeMemoryLabelDeleteRequest,
     KnowledgeMemoryLatestBatchOutput, KnowledgeMemoryLatestBatchRequest,
     KnowledgeMemoryLatestBatchRow, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,

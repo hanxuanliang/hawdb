@@ -462,7 +462,10 @@ any source node type. Label Memory distribution reads are available as
 `Database::knowledge_label_memory_distribution`, covering Nowledge
 `COUNT(DISTINCT m)` label stats and OKF label row shapes with Memory-only
 counts, duplicate edge de-duplication, offset/limit pagination, and no WAL
-writes.
+writes. Memory label cleanup writes are available as
+`Database::delete_knowledge_memory_labels`, covering exact
+`(:Memory)-[:HAS_LABEL]->(:Label)` edge removal and all-label edge cleanup for
+one Memory through grouped WAL-backed relationship deletes.
 Endpoint-known label assignment reads are also available as
 `Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
 bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher

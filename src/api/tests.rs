@@ -32,10 +32,10 @@ use super::{
     KnowledgeMemoryAccessTouch, KnowledgeMemoryCompactingThreadListRequest,
     KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
     KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEntityListRequest,
-    KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryLatestBatchRequest,
-    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
-    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
-    KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataUpdate,
+    KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryLabelDeleteRequest,
+    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
+    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
+    KnowledgeMemoryListRequest, KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataUpdate,
     KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
@@ -13967,6 +13967,214 @@ fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
     assert_eq!(page.rows[0].label_id.as_deref(), Some("beta"));
     assert_eq!(page.rows[0].label_name.as_deref(), Some("Beta"));
     assert_eq!(page.rows[0].memory_count, 1);
+}
+
+#[test]
+fn deletes_memory_labels_for_nowledge_label_cleanup_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2'})").unwrap();
+    db.query("CREATE (:Memory {title: 'Idless memory'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'alpha'})").unwrap();
+    db.query("CREATE (:Label {id: 'beta'})").unwrap();
+    db.query("CREATE (:Label {id: 'gamma'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'gamma'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_2'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    let idless = db
+        .query("MATCH (m:Memory) WHERE m.title = 'Idless memory' RETURN id(m) AS id")
+        .unwrap();
+    let idless_memory_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let exact = db
+        .delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: "memory_1".to_string(),
+            label_id: Some("alpha".to_string()),
+        })
+        .unwrap();
+    assert_eq!(exact.graph_commit_epoch_before, graph_commit_epoch_before);
+    assert_eq!(
+        exact.graph_commit_epoch_after,
+        graph_commit_epoch_before + 1
+    );
+    assert!(exact.found_memory);
+    assert!(exact.found_label);
+    assert!(!exact.non_writable);
+    assert_eq!(exact.matched_relationship_count, 1);
+    assert_eq!(exact.deleted_relationship_count, 1);
+    assert_eq!(exact.deleted_relationship_ids.len(), 1);
+
+    let all = db
+        .delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: "memory_1".to_string(),
+            label_id: None,
+        })
+        .unwrap();
+    assert_eq!(
+        all.graph_commit_epoch_before,
+        exact.graph_commit_epoch_after
+    );
+    assert_eq!(
+        all.graph_commit_epoch_after,
+        exact.graph_commit_epoch_after + 1
+    );
+    assert!(all.found_memory);
+    assert!(all.found_label);
+    assert_eq!(all.matched_relationship_count, 2);
+    assert_eq!(all.deleted_relationship_count, 2);
+    assert_eq!(all.deleted_relationship_ids.len(), 2);
+
+    assert_eq!(
+        db.query("MATCH (m:Memory {id: 'memory_1'})-[r:HAS_LABEL]->(:Label) RETURN COUNT(r)")
+            .unwrap()
+            .rows[0]
+            .values()
+            .next(),
+        Some(&Value::Int(0))
+    );
+    assert_eq!(
+        db.query("MATCH (m:Memory {id: 'memory_2'})-[r:HAS_LABEL]->(:Label) RETURN COUNT(r)")
+            .unwrap()
+            .rows[0]
+            .values()
+            .next(),
+        Some(&Value::Int(1))
+    );
+
+    let missing_label = db
+        .delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: "memory_2".to_string(),
+            label_id: Some("missing".to_string()),
+        })
+        .unwrap();
+    assert!(missing_label.found_memory);
+    assert!(!missing_label.found_label);
+    assert_eq!(missing_label.deleted_relationship_count, 0);
+    assert_eq!(
+        missing_label.graph_commit_epoch_after,
+        all.graph_commit_epoch_after
+    );
+
+    let non_writable = db
+        .delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: idless_memory_id,
+            label_id: None,
+        })
+        .unwrap();
+    assert!(non_writable.found_memory);
+    assert!(non_writable.non_writable);
+    assert_eq!(non_writable.deleted_relationship_count, 0);
+    assert_eq!(
+        non_writable.graph_commit_epoch_after,
+        all.graph_commit_epoch_after
+    );
+
+    let empty_all = db
+        .delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: "memory_1".to_string(),
+            label_id: None,
+        })
+        .unwrap();
+    assert!(empty_all.found_memory);
+    assert_eq!(empty_all.matched_relationship_count, 0);
+    assert_eq!(
+        empty_all.graph_commit_epoch_after,
+        all.graph_commit_epoch_after
+    );
+}
+
+#[test]
+fn memory_label_delete_rejects_empty_ids_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    db.query("CREATE (:Label {id: 'label_1'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'label_1'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let empty_memory = db
+        .delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: String::new(),
+            label_id: None,
+        })
+        .unwrap_err();
+    assert!(empty_memory.to_string().contains("non-empty memory id"));
+
+    let empty_label = db
+        .delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: "memory_1".to_string(),
+            label_id: Some(String::new()),
+        })
+        .unwrap_err();
+    assert!(empty_label.to_string().contains("non-empty label id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_memory_label_delete_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_memory_label_delete_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+        db.query("CREATE (:Label {id: 'alpha'})").unwrap();
+        db.query("CREATE (:Label {id: 'beta'})").unwrap();
+        db.query(
+            "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+        )
+        .unwrap();
+        db.query(
+            "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
+        )
+        .unwrap();
+        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.delete_knowledge_memory_labels(&KnowledgeMemoryLabelDeleteRequest {
+            memory_id: "memory_1".to_string(),
+            label_id: None,
+        })
+        .unwrap();
+        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("delete_rel"));
+    {
+        let mut db = Database::open(&path).unwrap();
+        assert_eq!(
+            db.query("MATCH (m:Memory {id: 'memory_1'})-[r:HAS_LABEL]->(:Label) RETURN COUNT(r)")
+                .unwrap()
+                .rows[0]
+                .values()
+                .next(),
+            Some(&Value::Int(0))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

@@ -533,6 +533,13 @@ updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names
 before WAL, reports missing, idless, and duplicate rows without writing, and
 commits eligible Label rows through one grouped WAL batch.
+Memory label cleanup writes are covered by
+`Database::delete_knowledge_memory_labels`. The typed facade fixes the Nowledge
+`(:Memory)-[:HAS_LABEL]->(:Label)` cleanup shape, supports exact Memory/Label
+edge deletes and all-label deletes for one Memory, validates ids before WAL,
+reports missing or projected-idless endpoints without writing, keeps empty
+cleanup read-only, and commits eligible relationship deletes through one
+grouped WAL batch.
 Label canonical and usage reads are covered by typed APIs for Nowledge label
 merge and list surfaces. `Database::lookup_knowledge_labels_by_canonical_name`
 handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_canonical_name`

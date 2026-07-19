@@ -3741,6 +3741,28 @@ pub struct KnowledgeLabelMemoryDistributionOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryLabelDeleteRequest {
+    pub memory_id: String,
+    pub label_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryLabelDeleteOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub memory_id: String,
+    pub label_id: Option<String>,
+    pub memory_node_id: Option<u64>,
+    pub label_node_id: Option<u64>,
+    pub found_memory: bool,
+    pub found_label: bool,
+    pub non_writable: bool,
+    pub matched_relationship_count: usize,
+    pub deleted_relationship_count: usize,
+    pub deleted_relationship_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelListRequest {
     pub entity_label: String,
     pub external_ids: Vec<String>,
@@ -6559,6 +6581,13 @@ impl Database {
         request: &KnowledgeLabelMemoryDistributionRequest,
     ) -> KnowledgeLabelMemoryDistributionOutput {
         knowledge_label_memory_distribution_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn delete_knowledge_memory_labels(
+        &mut self,
+        request: &KnowledgeMemoryLabelDeleteRequest,
+    ) -> Result<KnowledgeMemoryLabelDeleteOutput> {
+        delete_knowledge_memory_labels_for(self, request)
     }
 
     pub fn knowledge_entity_labels(
@@ -17070,6 +17099,193 @@ fn knowledge_label_memory_distribution_for(
     }
 }
 
+fn delete_knowledge_memory_labels_for(
+    db: &mut Database,
+    request: &KnowledgeMemoryLabelDeleteRequest,
+) -> Result<KnowledgeMemoryLabelDeleteOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_memory_label_delete_request(request)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let memory = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        "Memory",
+        request.memory_id.as_str(),
+    );
+    let memory_node_id = memory.map(|node| node.id.0);
+    let Some(memory) = memory else {
+        return Ok(knowledge_memory_label_delete_empty_output(
+            request,
+            graph_commit_epoch_before,
+            memory_node_id,
+            None,
+            false,
+            request.label_id.is_none(),
+            false,
+        ));
+    };
+    if !node_has_external_id_property(memory, request.memory_id.as_str()) {
+        return Ok(knowledge_memory_label_delete_empty_output(
+            request,
+            graph_commit_epoch_before,
+            memory_node_id,
+            None,
+            true,
+            request.label_id.is_none(),
+            true,
+        ));
+    }
+
+    let (label_node_id, found_label, relationship_ids) = match request.label_id.as_ref() {
+        Some(label_id) => {
+            let label =
+                seed_node_by_label_and_external_id(&db.catalog, &db.store, "Label", label_id);
+            let label_node_id = label.map(|node| node.id.0);
+            let Some(label) = label else {
+                return Ok(knowledge_memory_label_delete_empty_output(
+                    request,
+                    graph_commit_epoch_before,
+                    memory_node_id,
+                    label_node_id,
+                    true,
+                    false,
+                    false,
+                ));
+            };
+            if !node_has_external_id_property(label, label_id.as_str()) {
+                return Ok(knowledge_memory_label_delete_empty_output(
+                    request,
+                    graph_commit_epoch_before,
+                    memory_node_id,
+                    label_node_id,
+                    true,
+                    true,
+                    true,
+                ));
+            }
+            (
+                label_node_id,
+                true,
+                memory_label_relationship_ids(&db.catalog, &db.store, memory.id, Some(label.id)),
+            )
+        }
+        None => (
+            None,
+            true,
+            memory_label_relationship_ids(&db.catalog, &db.store, memory.id, None),
+        ),
+    };
+
+    if relationship_ids.is_empty() {
+        return Ok(knowledge_memory_label_delete_empty_output(
+            request,
+            graph_commit_epoch_before,
+            memory_node_id,
+            label_node_id,
+            true,
+            found_label,
+            false,
+        ));
+    }
+
+    let mut tx = db.begin_transaction();
+    for relationship_id in &relationship_ids {
+        tx.query_with_params(
+            "MATCH (:Memory)-[r:HAS_LABEL]->(:Label) WHERE id(r) = $relationship_id DELETE r",
+            &BTreeMap::from([(
+                "relationship_id".to_string(),
+                Value::Int(*relationship_id as i64),
+            )]),
+        )?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeMemoryLabelDeleteOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        memory_id: request.memory_id.clone(),
+        label_id: request.label_id.clone(),
+        memory_node_id,
+        label_node_id,
+        found_memory: true,
+        found_label,
+        non_writable: false,
+        matched_relationship_count: relationship_ids.len(),
+        deleted_relationship_count: relationship_ids.len(),
+        deleted_relationship_ids: relationship_ids,
+    })
+}
+
+fn validate_knowledge_memory_label_delete_request(
+    request: &KnowledgeMemoryLabelDeleteRequest,
+) -> Result<()> {
+    if request.memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory label delete requires a non-empty memory id".to_string(),
+        ));
+    }
+    if request.label_id.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory label delete requires a non-empty label id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_memory_label_delete_empty_output(
+    request: &KnowledgeMemoryLabelDeleteRequest,
+    graph_commit_epoch: u64,
+    memory_node_id: Option<u64>,
+    label_node_id: Option<u64>,
+    found_memory: bool,
+    found_label: bool,
+    non_writable: bool,
+) -> KnowledgeMemoryLabelDeleteOutput {
+    KnowledgeMemoryLabelDeleteOutput {
+        graph_commit_epoch_before: graph_commit_epoch,
+        graph_commit_epoch_after: graph_commit_epoch,
+        memory_id: request.memory_id.clone(),
+        label_id: request.label_id.clone(),
+        memory_node_id,
+        label_node_id,
+        found_memory,
+        found_label,
+        non_writable,
+        matched_relationship_count: 0,
+        deleted_relationship_count: 0,
+        deleted_relationship_ids: Vec::new(),
+    }
+}
+
+fn memory_label_relationship_ids(
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory_node_id: NodeId,
+    label_node_id: Option<NodeId>,
+) -> Vec<u64> {
+    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return Vec::new();
+    };
+    let Some(label_type_id) = catalog.label_id("Label") else {
+        return Vec::new();
+    };
+    let mut relationship_ids = store
+        .outgoing_relationships(memory_node_id, has_label_type_id)
+        .filter(|relationship| {
+            label_node_id.is_none_or(|label_node_id| relationship.target == label_node_id)
+        })
+        .filter(|relationship| {
+            store
+                .node(relationship.target)
+                .is_some_and(|node| node.labels.contains(&label_type_id))
+        })
+        .map(|relationship| relationship.id.0)
+        .collect::<Vec<_>>();
+    relationship_ids.sort_unstable();
+    relationship_ids
+}
+
 fn empty_label_memory_distribution_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeLabelMemoryDistributionOutput {
@@ -24519,6 +24735,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeLabelMemoryDistributionRequest,
     ) -> KnowledgeLabelMemoryDistributionOutput {
         self.db.knowledge_label_memory_distribution(request)
+    }
+
+    pub fn delete_knowledge_memory_labels(
+        &mut self,
+        request: &KnowledgeMemoryLabelDeleteRequest,
+    ) -> Result<KnowledgeMemoryLabelDeleteOutput> {
+        self.db.delete_knowledge_memory_labels(request)
     }
 
     pub fn knowledge_entity_labels(
