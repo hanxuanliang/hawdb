@@ -1,8 +1,8 @@
 use crate::analytics::ProjectedGraph;
 use crate::error::{Result, SkeinError};
 use crate::schema::{
-    Catalog, ConstraintId, GraphStatistics, IndexId, IndexKind, LabelId, PropertyId, PropertyType,
-    RelTypeId, SchemaObjectState, TableDescriptor, TableId, TableKind,
+    BasicGraphStatistics, Catalog, ConstraintId, GraphStatistics, IndexId, IndexKind, LabelId,
+    PropertyId, PropertyType, RelTypeId, SchemaObjectState, TableDescriptor, TableId, TableKind,
 };
 use crate::search::{
     search_projection_document_id_for_label_and_properties, search_projection_document_id_for_node,
@@ -563,6 +563,7 @@ pub struct GraphStore {
     commit_epoch: u64,
     nodes: BTreeMap<NodeId, NodeRecord>,
     relationships: BTreeMap<RelId, RelRecord>,
+    basic_statistics: BasicGraphStatistics,
     outgoing: BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
     incoming: BTreeMap<(NodeId, RelTypeId), BTreeSet<RelId>>,
     property_index: BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
@@ -686,6 +687,7 @@ impl GraphStore {
             commit_epoch: 0,
             nodes: BTreeMap::new(),
             relationships: BTreeMap::new(),
+            basic_statistics: BasicGraphStatistics::default(),
             outgoing: BTreeMap::new(),
             incoming: BTreeMap::new(),
             property_index: BTreeMap::new(),
@@ -703,6 +705,7 @@ impl GraphStore {
         store.load_checkpoint(catalog)?;
         store.storage_recovery_report = store.replay_wal(catalog, replay_config)?;
         store.validate_relationship_endpoints()?;
+        store.refresh_basic_statistics_epoch();
         store.load_projected_graph_artifacts()?;
         store.load_stable_id_mapping()?;
         Ok(store)
@@ -4332,7 +4335,13 @@ impl GraphStore {
     }
 
     pub fn statistics(&self) -> GraphStatistics {
-        compute_statistics(&self.nodes, &self.relationships, self.commit_epoch)
+        compute_statistics_with_basic(&self.nodes, &self.relationships, self.basic_statistics())
+    }
+
+    pub fn basic_statistics(&self) -> BasicGraphStatistics {
+        let mut statistics = self.basic_statistics.clone();
+        statistics.computed_at_commit_epoch = self.commit_epoch;
+        statistics
     }
 
     pub fn snapshot(&self) -> Self {
@@ -4342,6 +4351,7 @@ impl GraphStore {
             commit_epoch: self.commit_epoch,
             nodes: self.nodes.clone(),
             relationships: self.relationships.clone(),
+            basic_statistics: self.basic_statistics.clone(),
             outgoing: self.outgoing.clone(),
             incoming: self.incoming.clone(),
             property_index: self.property_index.clone(),
@@ -4400,6 +4410,50 @@ impl GraphStore {
             }
             self.search_projection_graph_changes.drain(0..remove_count);
         }
+    }
+
+    fn refresh_basic_statistics_epoch(&mut self) {
+        self.basic_statistics.computed_at_commit_epoch = self.commit_epoch;
+    }
+
+    fn add_node_to_basic_statistics(&mut self, node: &NodeRecord) {
+        self.basic_statistics.node_count += 1;
+        for label_id in &node.labels {
+            *self
+                .basic_statistics
+                .label_counts
+                .entry(*label_id)
+                .or_default() += 1;
+        }
+        self.refresh_basic_statistics_epoch();
+    }
+
+    fn remove_node_from_basic_statistics(&mut self, node: &NodeRecord) {
+        self.basic_statistics.node_count = self.basic_statistics.node_count.saturating_sub(1);
+        for label_id in &node.labels {
+            decrement_counter(&mut self.basic_statistics.label_counts, label_id);
+        }
+        self.refresh_basic_statistics_epoch();
+    }
+
+    fn add_relationship_to_basic_statistics(&mut self, relationship: &RelRecord) {
+        self.basic_statistics.relationship_count += 1;
+        *self
+            .basic_statistics
+            .rel_type_counts
+            .entry(relationship.rel_type)
+            .or_default() += 1;
+        self.refresh_basic_statistics_epoch();
+    }
+
+    fn remove_relationship_from_basic_statistics(&mut self, relationship: &RelRecord) {
+        self.basic_statistics.relationship_count =
+            self.basic_statistics.relationship_count.saturating_sub(1);
+        decrement_counter(
+            &mut self.basic_statistics.rel_type_counts,
+            &relationship.rel_type,
+        );
+        self.refresh_basic_statistics_epoch();
     }
 
     fn collect_search_projection_graph_changes_for_ops(
@@ -4494,6 +4548,9 @@ impl GraphStore {
         properties: BTreeMap<String, Value>,
     ) {
         self.next_node_id = self.next_node_id.max(id.0 + 1);
+        if let Some(old_node) = self.nodes.remove(&id) {
+            self.remove_node_from_basic_statistics(&old_node);
+        }
         self.nodes.insert(
             id,
             NodeRecord {
@@ -4502,7 +4559,8 @@ impl GraphStore {
                 properties,
             },
         );
-        if let Some(node) = self.nodes.get(&id) {
+        if let Some(node) = self.nodes.get(&id).cloned() {
+            self.add_node_to_basic_statistics(&node);
             for label_id in &node.labels {
                 for (property, value) in &node.properties {
                     self.property_index
@@ -4511,7 +4569,6 @@ impl GraphStore {
                         .insert(id);
                 }
             }
-            let node = node.clone();
             self.add_node_to_composite_property_indexes(catalog, &node);
             self.add_node_to_full_text_property_indexes(catalog, &node);
         }
@@ -4723,6 +4780,9 @@ impl GraphStore {
         properties: BTreeMap<String, Value>,
     ) {
         self.next_rel_id = self.next_rel_id.max(id.0 + 1);
+        if let Some(old_relationship) = self.relationships.remove(&id) {
+            self.remove_relationship_from_basic_statistics(&old_relationship);
+        }
         self.relationships.insert(
             id,
             RelRecord {
@@ -4733,6 +4793,9 @@ impl GraphStore {
                 properties,
             },
         );
+        if let Some(relationship) = self.relationships.get(&id).cloned() {
+            self.add_relationship_to_basic_statistics(&relationship);
+        }
         self.outgoing
             .entry((source, rel_type))
             .or_default()
@@ -5338,6 +5401,7 @@ impl GraphStore {
         let Some(relationship) = self.relationships.remove(&id) else {
             return;
         };
+        self.remove_relationship_from_basic_statistics(&relationship);
         let outgoing_key = (relationship.source, relationship.rel_type);
         if let Some(ids) = self.outgoing.get_mut(&outgoing_key) {
             ids.remove(&id);
@@ -5358,6 +5422,7 @@ impl GraphStore {
         let Some(node) = self.nodes.remove(&id) else {
             return;
         };
+        self.remove_node_from_basic_statistics(&node);
         self.remove_node_from_composite_property_indexes(catalog, &node);
         self.remove_node_from_full_text_property_indexes(catalog, &node);
         for label_id in node.labels {
@@ -8167,11 +8232,25 @@ fn compute_statistics(
     relationships: &BTreeMap<RelId, RelRecord>,
     computed_at_commit_epoch: u64,
 ) -> GraphStatistics {
+    compute_statistics_with_basic(
+        nodes,
+        relationships,
+        compute_basic_statistics(nodes, relationships, computed_at_commit_epoch),
+    )
+}
+
+fn compute_statistics_with_basic(
+    nodes: &BTreeMap<NodeId, NodeRecord>,
+    relationships: &BTreeMap<RelId, RelRecord>,
+    basic_statistics: BasicGraphStatistics,
+) -> GraphStatistics {
     let mut statistics = GraphStatistics {
-        computed_at_commit_epoch,
+        computed_at_commit_epoch: basic_statistics.computed_at_commit_epoch,
         histogram_sample_limit: MAX_PROPERTY_HISTOGRAM_VALUES,
-        node_count: nodes.len() as u64,
-        relationship_count: relationships.len() as u64,
+        node_count: basic_statistics.node_count,
+        relationship_count: basic_statistics.relationship_count,
+        label_counts: basic_statistics.label_counts,
+        rel_type_counts: basic_statistics.rel_type_counts,
         ..GraphStatistics::default()
     };
     let mut property_values = BTreeMap::<(LabelId, String), BTreeSet<Value>>::new();
@@ -8184,7 +8263,6 @@ fn compute_statistics(
 
     for node in nodes.values() {
         for label_id in &node.labels {
-            *statistics.label_counts.entry(*label_id).or_default() += 1;
             for (property, value) in &node.properties {
                 property_values
                     .entry((*label_id, property.clone()))
@@ -8194,10 +8272,6 @@ fn compute_statistics(
         }
     }
     for relationship in relationships.values() {
-        *statistics
-            .rel_type_counts
-            .entry(relationship.rel_type)
-            .or_default() += 1;
         rel_type_sources
             .entry(relationship.rel_type)
             .or_default()
@@ -8287,6 +8361,44 @@ fn compute_statistics(
     statistics.bounded_path_source_distinct_counts = bounded_path_statistics.source_distinct_counts;
     statistics.bounded_path_target_distinct_counts = bounded_path_statistics.target_distinct_counts;
     statistics
+}
+
+fn compute_basic_statistics(
+    nodes: &BTreeMap<NodeId, NodeRecord>,
+    relationships: &BTreeMap<RelId, RelRecord>,
+    computed_at_commit_epoch: u64,
+) -> BasicGraphStatistics {
+    let mut statistics = BasicGraphStatistics {
+        computed_at_commit_epoch,
+        node_count: nodes.len() as u64,
+        relationship_count: relationships.len() as u64,
+        ..BasicGraphStatistics::default()
+    };
+    for node in nodes.values() {
+        for label_id in &node.labels {
+            *statistics.label_counts.entry(*label_id).or_default() += 1;
+        }
+    }
+    for relationship in relationships.values() {
+        *statistics
+            .rel_type_counts
+            .entry(relationship.rel_type)
+            .or_default() += 1;
+    }
+    statistics
+}
+
+fn decrement_counter<K>(counts: &mut BTreeMap<K, u64>, key: &K)
+where
+    K: Ord,
+{
+    let Some(count) = counts.get_mut(key) else {
+        return;
+    };
+    *count = count.saturating_sub(1);
+    if *count == 0 {
+        counts.remove(key);
+    }
 }
 
 #[derive(Debug, Default)]

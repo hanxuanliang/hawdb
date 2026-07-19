@@ -30229,10 +30229,19 @@ fn exposes_property_index_descriptors_and_statistics() {
         .any(|index| index.property == "kind" && index.label_id.0 == 0));
 
     let statistics = db.statistics();
+    let basic_statistics = db.basic_statistics();
     assert_eq!(statistics.node_count, 4);
     assert_eq!(statistics.relationship_count, 1);
     assert_eq!(statistics.label_counts.values().sum::<u64>(), 4);
     assert_eq!(statistics.rel_type_counts.values().sum::<u64>(), 1);
+    assert_eq!(basic_statistics.computed_at_commit_epoch, 3);
+    assert_eq!(basic_statistics.node_count, statistics.node_count);
+    assert_eq!(
+        basic_statistics.relationship_count,
+        statistics.relationship_count
+    );
+    assert_eq!(basic_statistics.label_counts, statistics.label_counts);
+    assert_eq!(basic_statistics.rel_type_counts, statistics.rel_type_counts);
     assert_eq!(statistics.rel_type_source_counts.values().sum::<u64>(), 1);
     assert_eq!(statistics.rel_type_target_counts.values().sum::<u64>(), 1);
     assert_eq!(statistics.path_counts.values().sum::<u64>(), 1);
@@ -30248,7 +30257,52 @@ fn exposes_property_index_descriptors_and_statistics() {
     let read_tx = db.begin_read_transaction();
     db.query("CREATE (:Memory {id: 4, kind: 'note'})").unwrap();
     assert_eq!(read_tx.statistics().node_count, 4);
+    assert_eq!(read_tx.basic_statistics().node_count, 4);
     assert_eq!(db.statistics().node_count, 5);
+    assert_eq!(db.basic_statistics().node_count, 5);
+    assert_eq!(db.basic_statistics().computed_at_commit_epoch, 4);
+}
+
+#[test]
+fn basic_statistics_are_incremental_across_deletes_and_replay() {
+    let path = unique_test_dir("basic_statistics_incremental");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 1})-[:MENTIONS]->(:Entity {id: 10})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 2})").unwrap();
+        let read_tx = db.begin_read_transaction();
+
+        db.query("MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id = 1 DELETE r")
+            .unwrap();
+        db.query("MATCH (m:Memory) WHERE m.id = 2 DETACH DELETE m")
+            .unwrap();
+
+        let basic_statistics = db.basic_statistics();
+        assert_eq!(basic_statistics.computed_at_commit_epoch, 4);
+        assert_eq!(basic_statistics.node_count, 2);
+        assert_eq!(basic_statistics.relationship_count, 0);
+        assert_eq!(basic_statistics.label_counts.values().sum::<u64>(), 2);
+        assert_eq!(basic_statistics.rel_type_counts.values().sum::<u64>(), 0);
+
+        assert_eq!(read_tx.basic_statistics().computed_at_commit_epoch, 2);
+        assert_eq!(read_tx.basic_statistics().node_count, 3);
+        assert_eq!(read_tx.basic_statistics().relationship_count, 1);
+    }
+
+    {
+        let db = Database::open(&path).unwrap();
+        let basic_statistics = db.basic_statistics();
+        assert_eq!(basic_statistics.computed_at_commit_epoch, 4);
+        assert_eq!(basic_statistics.node_count, 2);
+        assert_eq!(basic_statistics.relationship_count, 0);
+        assert_eq!(db.statistics().node_count, basic_statistics.node_count);
+        assert_eq!(
+            db.statistics().relationship_count,
+            basic_statistics.relationship_count
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

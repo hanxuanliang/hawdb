@@ -313,9 +313,10 @@ pub use qos::{
     QosAdmissionCode, RankedBackgroundWork, WorkClass, WorkPriority, WorkRequest, WORK_CLASS_COUNT,
 };
 pub use schema::{
-    CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId, ConstraintKind,
-    ConstraintSubject, GraphStatistics, IndexDescriptor, IndexId, IndexKind, PropertyDescriptor,
-    PropertyId, PropertyType, SchemaObjectState, TableDescriptor, TableId, TableKind,
+    BasicGraphStatistics, CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId,
+    ConstraintKind, ConstraintSubject, GraphStatistics, IndexDescriptor, IndexId, IndexKind,
+    PropertyDescriptor, PropertyId, PropertyType, SchemaObjectState, TableDescriptor, TableId,
+    TableKind,
 };
 pub use search::{
     MetadataRepairOptions, MetadataRepairSummary, SearchAnalyzerLexicon,

@@ -120,6 +120,15 @@ pub struct PropertyDescriptor {
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct BasicGraphStatistics {
+    pub computed_at_commit_epoch: u64,
+    pub node_count: u64,
+    pub relationship_count: u64,
+    pub label_counts: BTreeMap<LabelId, u64>,
+    pub rel_type_counts: BTreeMap<RelTypeId, u64>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GraphStatistics {
     pub computed_at_commit_epoch: u64,
     pub histogram_sample_limit: usize,

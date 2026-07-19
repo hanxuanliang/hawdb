@@ -13,8 +13,9 @@ use crate::qos::{
     WorkRequest,
 };
 use crate::schema::{
-    Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics, IndexDescriptor,
-    IndexKind, LabelId, PropertyDescriptor, RelTypeId, SchemaObjectState, TableDescriptor,
+    BasicGraphStatistics, Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics,
+    IndexDescriptor, IndexKind, LabelId, PropertyDescriptor, RelTypeId, SchemaObjectState,
+    TableDescriptor,
 };
 use crate::search::{
     projection_row_from_node, MetadataRepairOptions, MetadataRepairSummary,
@@ -5837,6 +5838,10 @@ impl Database {
 
     pub fn statistics(&self) -> GraphStatistics {
         self.store.statistics()
+    }
+
+    pub fn basic_statistics(&self) -> BasicGraphStatistics {
+        self.store.basic_statistics()
     }
 
     pub fn property_indexes(&self) -> Vec<IndexDescriptor> {
@@ -30352,6 +30357,10 @@ impl DatabaseReadTransaction {
 
     pub fn statistics(&self) -> GraphStatistics {
         self.store.statistics()
+    }
+
+    pub fn basic_statistics(&self) -> BasicGraphStatistics {
+        self.store.basic_statistics()
     }
 
     pub fn property_indexes(&self) -> Vec<IndexDescriptor> {

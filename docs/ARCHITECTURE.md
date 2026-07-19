@@ -285,7 +285,9 @@ Skein should use a Cascades model similar to Chryso:
 - `ImplementationRule`: maps logical expressions to physical alternatives.
 - `CostModel`: scores physical alternatives using graph statistics. The current
   slice applies this to scan-vs-index-seek choices and records a recursive
-  selected-plan row/cost summary that includes bounded expand estimates.
+  selected-plan row/cost summary that includes bounded expand estimates. Basic
+  graph counters are maintained incrementally in the store; richer histogram
+  and path statistics are still derived from canonical records.
 - `PhysicalProperties`: required and delivered ordering, distinctness, and
   binding properties.
 - `PlanNode`: a graph-payload-independent trait for walking selected plans and

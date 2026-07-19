@@ -292,8 +292,11 @@ markers. Histograms use deterministic adaptive samples:
 small distinct sets remain exact, medium sets keep up to 256 values, and large
 sets keep up to 512 values while always retaining the minimum and maximum
 sampled bounds. Range costing uses these histograms for selectivity estimates.
-Statistics are rebuildable derived data and are written to checkpoints for
-observability and future costing.
+Basic graph counters are maintained incrementally in the store for low-cost
+optimizer and monitoring reads: total nodes, total relationships, per-label
+counts, and per-relationship-type counts. The wider histogram, property
+distinct, and path-cardinality statistics remain rebuildable derived data and
+are written to checkpoints for observability and future costing.
 
 The catalog also stores persistent property constraint descriptors.
 Node unique constraints use
@@ -370,8 +373,9 @@ per-relationship-type/property distinct-value counts. The statistics snapshot
 also records the commit epoch at which it was computed, the histogram sample
 limit, and whether each node or relationship property histogram is an exact
 value set or a bounded deterministic sample. These statistics are derived data;
-the store recomputes the live API view from canonical records and accepts old
-checkpoints that do not contain statistics lines.
+the store maintains the basic counter subset incrementally, recomputes the
+wider live API view from canonical records, and accepts old checkpoints that do
+not contain statistics lines.
 
 Checkpoint also writes `projected_graphs.skein` for every persisted projected
 graph definition. The artifact records its format version, projection epoch,
