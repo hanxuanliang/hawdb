@@ -14,7 +14,7 @@ use crate::qos::{
 };
 use crate::schema::{
     Catalog, CompositeIndexDescriptor, ConstraintDescriptor, GraphStatistics, IndexDescriptor,
-    IndexKind, LabelId, PropertyDescriptor, SchemaObjectState, TableDescriptor,
+    IndexKind, LabelId, PropertyDescriptor, RelTypeId, SchemaObjectState, TableDescriptor,
 };
 use crate::search::{
     projection_row_from_node, MetadataRepairOptions, MetadataRepairSummary,
@@ -1484,6 +1484,35 @@ pub struct KnowledgeEntityMentionCountListOutput {
     pub graph_commit_epoch: u64,
     pub rows: Vec<KnowledgeEntityMentionCountRow>,
     pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityEntityVisibilityRequest {
+    pub community_ids: Vec<Value>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityEntityVisibilityRow {
+    pub community_id: Value,
+    pub entity_id: Option<String>,
+    pub entity_node_id: u64,
+    pub entity_name: Option<String>,
+    pub entity_type: Option<String>,
+    pub memory_id: Option<String>,
+    pub memory_node_id: Option<u64>,
+    pub memory_metadata: Option<Value>,
+    pub memory_is_latest: bool,
+    pub memory_lifecycle_state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityEntityVisibilityOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeCommunityEntityVisibilityRow>,
+    pub matched_entity_count: usize,
+    pub matched_row_count: usize,
     pub returned_count: usize,
 }
 
@@ -5049,6 +5078,13 @@ impl Database {
         knowledge_entity_mention_counts_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_community_entity_visibility(
+        &self,
+        request: &KnowledgeCommunityEntityVisibilityRequest,
+    ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
+        knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_related_entity_names(
         &self,
         request: &KnowledgeRelatedEntityNameListRequest,
@@ -7231,6 +7267,160 @@ fn compare_entity_mention_count_rows(
         .then_with(|| left.name.cmp(&right.name))
         .then_with(|| left.entity_id.cmp(&right.entity_id))
         .then_with(|| left.node_id.cmp(&right.node_id))
+}
+
+fn knowledge_community_entity_visibility_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeCommunityEntityVisibilityRequest,
+) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
+    validate_knowledge_community_entity_visibility_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return Ok(empty_community_entity_visibility_output(graph_commit_epoch));
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(empty_community_entity_visibility_output(graph_commit_epoch));
+    };
+    let mentions_type_id = catalog.rel_type_id("MENTIONS");
+    let community_ids = request
+        .community_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut matched_entity_count = 0;
+    let mut rows = Vec::new();
+
+    for entity in store.scan_nodes(Some(entity_label_id)).filter(|entity| {
+        entity
+            .properties
+            .get("community_id")
+            .is_some_and(|community_id| community_ids.contains(community_id))
+    }) {
+        matched_entity_count += 1;
+        let community_id = entity
+            .properties
+            .get("community_id")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let memory_rows = mentions_type_id
+            .map(|rel_type_id| {
+                community_entity_visibility_memory_rows(
+                    store,
+                    memory_label_id,
+                    entity,
+                    rel_type_id,
+                    &community_id,
+                )
+            })
+            .unwrap_or_default();
+        if memory_rows.is_empty() {
+            rows.push(community_entity_visibility_row(entity, None, community_id));
+        } else {
+            rows.extend(memory_rows);
+        }
+    }
+
+    sort_community_entity_visibility_rows(&mut rows);
+    let matched_row_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCommunityEntityVisibilityOutput {
+        graph_commit_epoch,
+        rows,
+        matched_entity_count,
+        matched_row_count,
+        returned_count,
+    })
+}
+
+fn empty_community_entity_visibility_output(
+    graph_commit_epoch: u64,
+) -> KnowledgeCommunityEntityVisibilityOutput {
+    KnowledgeCommunityEntityVisibilityOutput {
+        graph_commit_epoch,
+        rows: Vec::new(),
+        matched_entity_count: 0,
+        matched_row_count: 0,
+        returned_count: 0,
+    }
+}
+
+fn validate_knowledge_community_entity_visibility_request(
+    request: &KnowledgeCommunityEntityVisibilityRequest,
+) -> Result<()> {
+    if request.community_ids.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community entity visibility requires non-empty community ids".to_string(),
+        ));
+    }
+    if request
+        .community_ids
+        .iter()
+        .any(|community_id| community_id == &Value::Null)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge community entity visibility requires non-null community ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn community_entity_visibility_memory_rows(
+    store: &GraphStore,
+    memory_label_id: LabelId,
+    entity: &NodeRecord,
+    rel_type_id: RelTypeId,
+    community_id: &Value,
+) -> Vec<KnowledgeCommunityEntityVisibilityRow> {
+    store
+        .incoming_relationships(entity.id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.source)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .map(|memory| {
+                    community_entity_visibility_row(entity, Some(memory), community_id.clone())
+                })
+        })
+        .collect()
+}
+
+fn community_entity_visibility_row(
+    entity: &NodeRecord,
+    memory: Option<&NodeRecord>,
+    community_id: Value,
+) -> KnowledgeCommunityEntityVisibilityRow {
+    KnowledgeCommunityEntityVisibilityRow {
+        community_id,
+        entity_id: node_external_id(entity),
+        entity_node_id: entity.id.0,
+        entity_name: string_property(entity, "name"),
+        entity_type: string_property(entity, "entity_type"),
+        memory_id: memory.and_then(node_external_id),
+        memory_node_id: memory.map(|memory| memory.id.0),
+        memory_metadata: memory.and_then(|memory| memory.properties.get("metadata").cloned()),
+        memory_is_latest: memory
+            .and_then(|memory| boolean_property(memory, "is_latest"))
+            .unwrap_or(true),
+        memory_lifecycle_state: memory
+            .and_then(|memory| string_property(memory, "lifecycle_state")),
+    }
+}
+
+fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVisibilityRow]) {
+    rows.sort_by(|left, right| {
+        left.community_id
+            .cmp(&right.community_id)
+            .then_with(|| left.entity_name.cmp(&right.entity_name))
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.entity_node_id.cmp(&right.entity_node_id))
+            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
+    });
 }
 
 fn knowledge_related_entity_names_for(
@@ -19265,6 +19455,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_entity_mention_counts(request)
     }
 
+    pub fn knowledge_community_entity_visibility(
+        &self,
+        request: &KnowledgeCommunityEntityVisibilityRequest,
+    ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
+        self.db.knowledge_community_entity_visibility(request)
+    }
+
     pub fn knowledge_related_entity_names(
         &self,
         request: &KnowledgeRelatedEntityNameListRequest,
@@ -20320,6 +20517,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeEntityMentionCountListRequest,
     ) -> Result<KnowledgeEntityMentionCountListOutput> {
         knowledge_entity_mention_counts_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_community_entity_visibility(
+        &self,
+        request: &KnowledgeCommunityEntityVisibilityRequest,
+    ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
+        knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_related_entity_names(

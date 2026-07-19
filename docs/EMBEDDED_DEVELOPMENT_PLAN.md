@@ -439,6 +439,12 @@ listing and cursor shapes with non-empty Entity id/name filtering, incoming
 `Memory` `MENTIONS` counts including zero-mention Entities, mention-count/name
 ordering, cursor pagination, pinned read-transaction snapshots, and no WAL
 writes.
+Community Entity visibility reads are available as
+`Database::knowledge_community_entity_visibility`, covering the Nowledge wiki
+community anchor row shape for Entity nodes in explicit communities plus
+row-preserving optional incoming `Memory` `MENTIONS` metadata, latest-state
+fallback, and lifecycle fields with pinned read-transaction snapshots and no
+WAL writes.
 Related Entity name reads are available as
 `Database::knowledge_related_entity_names`, covering Nowledge REST list
 `Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`
