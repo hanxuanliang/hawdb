@@ -305,6 +305,14 @@ write origin, and `updated_at` stamping. The wrapper validates Skill ids,
 non-empty stages, and non-empty write origins before WAL, reports missing,
 idless, and duplicate rows without writing, and commits eligible Skill rows
 through one grouped WAL batch.
+REST Skills source merges are covered by
+`Database::merge_knowledge_skill_source`. The typed write resolves exact
+physical `Skill.id` and `Memory.id` endpoints, merges the outgoing
+`SYNTHESIZED_FROM` edge, creates only the Nowledge-used `weight`,
+`occasion_key`, and `created_at` relationship properties, reports missing
+endpoints and idless endpoints without writing, preserves existing-edge
+properties for `MERGE ON CREATE SET` semantics, and uses the WAL-backed
+relationship write path.
 Skill catalog/detail reads are covered by `Database::knowledge_skills`.
 The typed read supports exact id lists, key lookup using exact/prefix/contains
 matching, stage-filtered catalog and active lists, active after-id pagination,

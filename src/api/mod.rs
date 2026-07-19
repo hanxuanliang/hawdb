@@ -2531,6 +2531,31 @@ pub struct KnowledgeSkillUsageStatsBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillSourceMergeRequest {
+    pub skill_id: String,
+    pub memory_id: String,
+    pub occasion_key: String,
+    pub created_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillSourceMergeOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub skill_id: String,
+    pub memory_id: String,
+    pub skill_node_id: Option<u64>,
+    pub memory_node_id: Option<u64>,
+    pub relationship_id: Option<u64>,
+    pub matched: bool,
+    pub created: bool,
+    pub already_exists: bool,
+    pub missing_endpoint: bool,
+    pub non_writable: bool,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSkillLifecycleUpdate {
     pub skill_id: String,
     pub stage: Option<String>,
@@ -5798,6 +5823,13 @@ impl Database {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         update_knowledge_skill_usage_stats_batch_for(self, request)
+    }
+
+    pub fn merge_knowledge_skill_source(
+        &mut self,
+        request: &KnowledgeSkillSourceMergeRequest,
+    ) -> Result<KnowledgeSkillSourceMergeOutput> {
+        merge_knowledge_skill_source_for(self, request)
     }
 
     pub fn update_knowledge_skill_lifecycle_batch(
@@ -12388,6 +12420,63 @@ fn validate_skill_success_rate(value: &Value) -> Result<()> {
             "knowledge skill usage stats update requires success rate between 0 and 1".to_string(),
         ))
     }
+}
+
+fn merge_knowledge_skill_source_for(
+    db: &mut Database,
+    request: &KnowledgeSkillSourceMergeRequest,
+) -> Result<KnowledgeSkillSourceMergeOutput> {
+    if request.skill_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge skill source merge requires a non-empty skill id".to_string(),
+        ));
+    }
+    if request.memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge skill source merge requires a non-empty memory id".to_string(),
+        ));
+    }
+
+    let upsert = KnowledgeRelationshipUpsertRequest {
+        source: KnowledgeEntityRequest {
+            label: "Skill".to_string(),
+            external_id: request.skill_id.clone(),
+        },
+        target: KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: request.memory_id.clone(),
+        },
+        relationship_type: "SYNTHESIZED_FROM".to_string(),
+        create_properties: BTreeMap::from([
+            ("weight".to_string(), Value::Float(1.0)),
+            (
+                "occasion_key".to_string(),
+                Value::String(request.occasion_key.clone()),
+            ),
+            ("created_at".to_string(), request.created_at.clone()),
+        ]),
+    };
+    let output = upsert_knowledge_relationship_for(db, &upsert)?;
+    let missing_endpoint = !output.matched
+        && !output.non_writable
+        && !output.source_filtered_out
+        && !output.target_filtered_out;
+
+    Ok(KnowledgeSkillSourceMergeOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        skill_id: request.skill_id.clone(),
+        memory_id: request.memory_id.clone(),
+        skill_node_id: output.source_node_id,
+        memory_node_id: output.target_node_id,
+        relationship_id: output.relationship_id,
+        matched: output.matched,
+        created: output.created,
+        already_exists: output.already_exists,
+        missing_endpoint,
+        non_writable: output.non_writable,
+        created_relationship_count: output.created_relationship_count,
+    })
 }
 
 fn update_knowledge_skill_lifecycle_batch_for(
@@ -22060,6 +22149,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         self.db.update_knowledge_skill_usage_stats_batch(request)
+    }
+
+    pub fn merge_knowledge_skill_source(
+        &mut self,
+        request: &KnowledgeSkillSourceMergeRequest,
+    ) -> Result<KnowledgeSkillSourceMergeOutput> {
+        self.db.merge_knowledge_skill_source(request)
     }
 
     pub fn update_knowledge_skill_lifecycle_batch(

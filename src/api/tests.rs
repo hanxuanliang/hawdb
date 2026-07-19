@@ -59,13 +59,14 @@ use super::{
     KnowledgeScopedSubgraphRequest, KnowledgeSkillDetailLookupRequest,
     KnowledgeSkillLifecycleBatchRequest, KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder,
     KnowledgeSkillListRequest, KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
-    KnowledgeSkillStateRequest, KnowledgeSkillThreadSourceListRequest,
-    KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
-    KnowledgeSourceIdListRequest, KnowledgeSourceLifecycleBatchRequest,
-    KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
-    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
-    KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
+    KnowledgeSkillSourceMergeRequest, KnowledgeSkillStateRequest,
+    KnowledgeSkillThreadSourceListRequest, KnowledgeSkillUsageStatsBatchRequest,
+    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceIdListRequest,
+    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
+    KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
+    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
+    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
+    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
     KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityRequest,
     KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
@@ -9246,6 +9247,148 @@ fn skill_thread_source_read_rejects_empty_skill_id() {
         })
         .unwrap_err();
     assert!(error.to_string().contains("non-empty skill id"));
+}
+
+#[test]
+fn merges_skill_source_for_rest_skills_write_shape() {
+    let path = unique_test_dir("skill_source_merge_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Skill {id: 'skill-source-1', stage: 'active'})")
+            .unwrap();
+        db.query(
+            "CREATE (:Memory {id: 'memory-source-1', title: 'Memory Source', created_at: 10})",
+        )
+        .unwrap();
+
+        let output = db
+            .merge_knowledge_skill_source(&KnowledgeSkillSourceMergeRequest {
+                skill_id: "skill-source-1".to_string(),
+                memory_id: "memory-source-1".to_string(),
+                occasion_key: String::new(),
+                created_at: Value::Int(100),
+            })
+            .unwrap();
+        assert_eq!(output.skill_id, "skill-source-1");
+        assert_eq!(output.memory_id, "memory-source-1");
+        assert!(output.matched);
+        assert!(output.created);
+        assert!(!output.already_exists);
+        assert!(!output.missing_endpoint);
+        assert!(!output.non_writable);
+        assert!(output.skill_node_id.is_some());
+        assert!(output.memory_node_id.is_some());
+        assert!(output.relationship_id.is_some());
+        assert_eq!(output.created_relationship_count, 1);
+        assert!(output.graph_commit_epoch_after > output.graph_commit_epoch_before);
+
+        let count = db
+            .query("MATCH (:Skill {id: 'skill-source-1'})-[r:SYNTHESIZED_FROM]->(:Memory {id: 'memory-source-1'}) RETURN count(r) AS total")
+            .unwrap();
+        assert_eq!(count.rows[0].get("total"), Some(&Value::Int(1)));
+        let properties = db
+            .query("MATCH (:Skill {id: 'skill-source-1'})-[r:SYNTHESIZED_FROM]->(:Memory {id: 'memory-source-1'}) RETURN r.weight AS weight, r.occasion_key AS occasion_key, r.created_at AS created_at")
+            .unwrap();
+        assert_eq!(properties.rows[0].get("weight"), Some(&Value::Float(1.0)));
+        assert_eq!(
+            properties.rows[0].get("occasion_key"),
+            Some(&Value::String(String::new()))
+        );
+        assert_eq!(properties.rows[0].get("created_at"), Some(&Value::Int(100)));
+
+        let commit_epoch_after_create = db.store.commit_epoch();
+        let second = db
+            .merge_knowledge_skill_source(&KnowledgeSkillSourceMergeRequest {
+                skill_id: "skill-source-1".to_string(),
+                memory_id: "memory-source-1".to_string(),
+                occasion_key: "later".to_string(),
+                created_at: Value::Int(200),
+            })
+            .unwrap();
+        assert!(second.matched);
+        assert!(!second.created);
+        assert!(second.already_exists);
+        assert_eq!(second.relationship_id, output.relationship_id);
+        assert_eq!(second.created_relationship_count, 0);
+        assert_eq!(second.graph_commit_epoch_after, commit_epoch_after_create);
+        assert_eq!(db.store.commit_epoch(), commit_epoch_after_create);
+        let unchanged = db
+            .query("MATCH (:Skill {id: 'skill-source-1'})-[r:SYNTHESIZED_FROM]->(:Memory {id: 'memory-source-1'}) RETURN r.weight AS weight, r.occasion_key AS occasion_key, r.created_at AS created_at")
+            .unwrap();
+        assert_eq!(unchanged.rows[0].get("weight"), Some(&Value::Float(1.0)));
+        assert_eq!(
+            unchanged.rows[0].get("occasion_key"),
+            Some(&Value::String(String::new()))
+        );
+        assert_eq!(unchanged.rows[0].get("created_at"), Some(&Value::Int(100)));
+    }
+    {
+        let mut db = Database::open(&path).unwrap();
+        let count = db
+            .query("MATCH (:Skill {id: 'skill-source-1'})-[r:SYNTHESIZED_FROM]->(:Memory {id: 'memory-source-1'}) RETURN count(r) AS total")
+            .unwrap();
+        assert_eq!(count.rows[0].get("total"), Some(&Value::Int(1)));
+        let properties = db
+            .query("MATCH (:Skill {id: 'skill-source-1'})-[r:SYNTHESIZED_FROM]->(:Memory {id: 'memory-source-1'}) RETURN r.weight AS weight, r.occasion_key AS occasion_key, r.created_at AS created_at")
+            .unwrap();
+        assert_eq!(properties.rows[0].get("weight"), Some(&Value::Float(1.0)));
+        assert_eq!(
+            properties.rows[0].get("occasion_key"),
+            Some(&Value::String(String::new()))
+        );
+        assert_eq!(properties.rows[0].get("created_at"), Some(&Value::Int(100)));
+    }
+
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn skill_source_merge_reports_missing_endpoint_and_rejects_empty_ids() {
+    let mut db = Database::new();
+
+    let empty_skill = db
+        .merge_knowledge_skill_source(&KnowledgeSkillSourceMergeRequest {
+            skill_id: String::new(),
+            memory_id: "memory-source-1".to_string(),
+            occasion_key: String::new(),
+            created_at: Value::Int(100),
+        })
+        .unwrap_err();
+    assert!(empty_skill.to_string().contains("non-empty skill id"));
+
+    let empty_memory = db
+        .merge_knowledge_skill_source(&KnowledgeSkillSourceMergeRequest {
+            skill_id: "skill-source-1".to_string(),
+            memory_id: String::new(),
+            occasion_key: String::new(),
+            created_at: Value::Int(100),
+        })
+        .unwrap_err();
+    assert!(empty_memory.to_string().contains("non-empty memory id"));
+
+    db.query("CREATE (:Skill {id: 'skill-source-1', stage: 'active'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let missing = db
+        .merge_knowledge_skill_source(&KnowledgeSkillSourceMergeRequest {
+            skill_id: "skill-source-1".to_string(),
+            memory_id: "missing-memory".to_string(),
+            occasion_key: String::new(),
+            created_at: Value::Int(100),
+        })
+        .unwrap();
+    assert!(!missing.matched);
+    assert!(!missing.created);
+    assert!(!missing.already_exists);
+    assert!(missing.missing_endpoint);
+    assert!(!missing.non_writable);
+    assert!(missing.skill_node_id.is_some());
+    assert_eq!(missing.memory_node_id, None);
+    assert_eq!(missing.relationship_id, None);
+    assert_eq!(missing.created_relationship_count, 0);
+    assert_eq!(missing.graph_commit_epoch_before, graph_commit_epoch);
+    assert_eq!(missing.graph_commit_epoch_after, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
 }
 
 #[test]

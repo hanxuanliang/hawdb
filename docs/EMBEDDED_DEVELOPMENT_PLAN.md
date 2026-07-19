@@ -166,7 +166,11 @@ exposed as a typed batch for Nowledge `use_count`, optional `success_rate`,
 `last_activity_at`, `updated_at`, and `metadata` writes. Skill lifecycle and
 write-state updates are exposed as a typed batch for Nowledge stage changes,
 rejections, promotions, compiled metadata, draft bundle writes, content hashes,
-and `updated_at` stamping. Skill synthesized-memory evidence reads are exposed
+and `updated_at` stamping. REST Skills source merges are exposed as a typed
+`merge_knowledge_skill_source` API for
+`(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)` writes with create-only `weight`,
+`occasion_key`, and `created_at` relationship properties. Skill
+synthesized-memory evidence reads are exposed
 as a typed `knowledge_skill_memories` API for id-filtered and stage-filtered
 `SYNTHESIZED_FROM` Memory lists with explicit created-at ordering. Skill node
 catalog/detail reads are exposed as a typed `knowledge_skills` API for
