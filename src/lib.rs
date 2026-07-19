@@ -174,6 +174,7 @@ pub use api::{
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListOutput,
     KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupOutput,
     KnowledgeThreadMessageLookupRequest, KnowledgeThreadMessageRow,
+    KnowledgeThreadMetaLookupOutput, KnowledgeThreadMetaLookupRequest,
     KnowledgeThreadMetadataBatchOutput, KnowledgeThreadMetadataBatchRequest,
     KnowledgeThreadMetadataBatchRow, KnowledgeThreadMetadataUpdate,
     KnowledgeThreadSourceListOutput, KnowledgeThreadSourceListRequest,

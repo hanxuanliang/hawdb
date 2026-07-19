@@ -376,6 +376,14 @@ against Thread physical ids, keeps the exact source filter, returns the first
 stable node-id ordered id/message-count/raw-space projection, preserves raw
 empty `space_id`, reports total matched Thread rows for ambiguity diagnostics,
 supports pinned read snapshots, and does not write WAL.
+Thread metadata-render lookup is covered by
+`Database::knowledge_thread_meta_lookup`. The typed read applies the same
+Thread physical-id exact/prefix/contains plus exact-source REST FS lookup,
+returns the first stable node-id ordered id/thread-id/title/summary/
+message-count/source/created-at/updated-at/raw-space/project/workspace
+projection, preserves raw empty `space_id`, reports total matched Thread rows
+for ambiguity diagnostics, supports pinned read snapshots, and does not write
+WAL.
 ThreadIdentity exact resolution is covered by
 `Database::knowledge_thread_identity`. The typed read resolves one
 `ThreadIdentity` by external id, returns the Nowledge repo fields
