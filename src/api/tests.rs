@@ -13,18 +13,20 @@ use super::{
     KnowledgeContextMemoryLatestFilter, KnowledgeContextMemoryPreviewRequest,
     KnowledgeEntityBatchRequest, KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
-    KnowledgeEntityLabelListRequest, KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest,
-    KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode,
-    KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest,
-    KnowledgeGraphPathDirection, KnowledgeInducedEdgeListRequest,
-    KnowledgeLabelBackfillScanRequest, KnowledgeLabelCanonicalLookupRequest,
-    KnowledgeLabelLifecycleBatchRequest, KnowledgeLabelLifecycleUpdate,
-    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryCompactingThreadListRequest,
-    KnowledgeMemoryEntityListRequest, KnowledgeMemoryLatestBatchRequest,
-    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
-    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
-    KnowledgeMemorySourceAttributionRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeEntityLabelListRequest, KnowledgeEntityMentionCountCursor,
+    KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
+    KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
+    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
+    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
+    KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
+    KnowledgeLabelLifecycleUpdate, KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest,
+    KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryCompactingThreadListRequest, KnowledgeMemoryEntityListRequest,
+    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
+    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
+    KnowledgeMemoryListRequest, KnowledgeMemorySourceAttributionRequest,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -3882,6 +3884,95 @@ fn memory_entity_read_rejects_empty_memory_ids() {
         })
         .unwrap_err();
     assert!(empty_id_error.to_string().contains("non-empty memory ids"));
+}
+
+#[test]
+fn reads_entity_mention_counts_for_wiki_listing_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_alpha', name: 'Alpha', updated_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_beta', name: 'Beta', updated_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_gamma', name: 'Gamma', updated_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_noname', updated_at: 40})")
+        .unwrap();
+    db.query("CREATE (:Entity {name: 'No Id', updated_at: 50})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (e:Entity {id: 'entity_beta'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_b'}), (e:Entity {id: 'entity_beta'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (e:Entity {id: 'entity_alpha'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (e1:Entity {id: 'entity_alpha'}), (e2:Entity {id: 'entity_gamma'}) CREATE (e1)-[:MENTIONS]->(e2)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_entity_mention_counts(&KnowledgeEntityMentionCountListRequest {
+            cursor: None,
+            limit: 0,
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.matched_count, 3);
+    assert_eq!(output.returned_count, 3);
+    assert_eq!(output.rows[0].entity_id, "entity_beta");
+    assert_eq!(output.rows[0].name, "Beta");
+    assert_eq!(output.rows[0].updated_at, Some(Value::Int(20)));
+    assert_eq!(output.rows[0].mention_count, 2);
+    assert_eq!(output.rows[1].entity_id, "entity_alpha");
+    assert_eq!(output.rows[1].mention_count, 1);
+    assert_eq!(output.rows[2].entity_id, "entity_gamma");
+    assert_eq!(output.rows[2].mention_count, 0);
+
+    let cursor_output = db
+        .knowledge_entity_mention_counts(&KnowledgeEntityMentionCountListRequest {
+            cursor: Some(KnowledgeEntityMentionCountCursor {
+                after_count: 1,
+                after_name: "Alpha".to_string(),
+            }),
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(cursor_output.matched_count, 1);
+    assert_eq!(cursor_output.returned_count, 1);
+    assert_eq!(cursor_output.rows[0].entity_id, "entity_gamma");
+
+    let snapshot = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'memory_c'})").unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_c'}), (e:Entity {id: 'entity_alpha'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    let snapshot_output = snapshot
+        .knowledge_entity_mention_counts(&KnowledgeEntityMentionCountListRequest {
+            cursor: None,
+            limit: 2,
+        })
+        .unwrap();
+    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_output.rows[0].entity_id, "entity_beta");
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch + 2);
+}
+
+#[test]
+fn entity_mention_count_read_rejects_empty_cursor_name() {
+    let db = Database::new();
+
+    let error = db
+        .knowledge_entity_mention_counts(&KnowledgeEntityMentionCountListRequest {
+            cursor: Some(KnowledgeEntityMentionCountCursor {
+                after_count: 1,
+                after_name: String::new(),
+            }),
+            limit: 10,
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty after_name"));
 }
 
 #[test]

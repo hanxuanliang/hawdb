@@ -416,6 +416,12 @@ Memory entity mention reads are available as
 `Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
 `MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
 bounded limits, and no WAL writes.
+Entity mention-count list reads are available as
+`Database::knowledge_entity_mention_counts`, covering Nowledge wiki Entity
+listing and cursor shapes with non-empty Entity id/name filtering, incoming
+`Memory` `MENTIONS` counts including zero-mention Entities, mention-count/name
+ordering, cursor pagination, pinned read-transaction snapshots, and no WAL
+writes.
 Related Entity name reads are available as
 `Database::knowledge_related_entity_names`, covering Nowledge REST list
 `Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`

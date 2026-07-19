@@ -1459,6 +1459,35 @@ pub struct KnowledgeMemoryEntityListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityMentionCountCursor {
+    pub after_count: usize,
+    pub after_name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityMentionCountListRequest {
+    pub cursor: Option<KnowledgeEntityMentionCountCursor>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityMentionCountRow {
+    pub entity_id: String,
+    pub node_id: u64,
+    pub name: String,
+    pub updated_at: Option<Value>,
+    pub mention_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityMentionCountListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeEntityMentionCountRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeRelatedEntityNameScope {
     MemoryIds(Vec<String>),
     Thread {
@@ -4875,6 +4904,13 @@ impl Database {
         knowledge_memory_entities_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_entity_mention_counts(
+        &self,
+        request: &KnowledgeEntityMentionCountListRequest,
+    ) -> Result<KnowledgeEntityMentionCountListOutput> {
+        knowledge_entity_mention_counts_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_related_entity_names(
         &self,
         request: &KnowledgeRelatedEntityNameListRequest,
@@ -6926,6 +6962,109 @@ fn memory_entity_row(entity: &NodeRecord, relationship: &RelRecord) -> Knowledge
         relationship_confidence: relationship.properties.get("confidence").cloned(),
         mention_count: relationship_integer_property(relationship, "mention_count"),
     }
+}
+
+fn knowledge_entity_mention_counts_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeEntityMentionCountListRequest,
+) -> Result<KnowledgeEntityMentionCountListOutput> {
+    validate_entity_mention_count_request(request)?;
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return Ok(KnowledgeEntityMentionCountListOutput {
+            graph_commit_epoch: store.commit_epoch(),
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = store
+        .scan_nodes(Some(entity_label_id))
+        .filter_map(|entity| entity_mention_count_row(catalog, store, entity))
+        .collect::<Vec<_>>();
+    rows.sort_by(compare_entity_mention_count_rows);
+    if let Some(cursor) = &request.cursor {
+        rows.retain(|row| {
+            row.mention_count < cursor.after_count
+                || (row.mention_count == cursor.after_count
+                    && row.name.as_str() > cursor.after_name.as_str())
+        });
+    }
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeEntityMentionCountListOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_entity_mention_count_request(
+    request: &KnowledgeEntityMentionCountListRequest,
+) -> Result<()> {
+    if let Some(cursor) = &request.cursor {
+        if cursor.after_name.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge entity mention count cursor requires a non-empty after_name".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn entity_mention_count_row(
+    catalog: &Catalog,
+    store: &GraphStore,
+    entity: &NodeRecord,
+) -> Option<KnowledgeEntityMentionCountRow> {
+    let entity_id = node_external_id(entity)?;
+    let name = string_property(entity, "name")?;
+    Some(KnowledgeEntityMentionCountRow {
+        entity_id,
+        node_id: entity.id.0,
+        name,
+        updated_at: entity.properties.get("updated_at").cloned(),
+        mention_count: memory_mention_count_for_entity(catalog, store, entity.id),
+    })
+}
+
+fn memory_mention_count_for_entity(
+    catalog: &Catalog,
+    store: &GraphStore,
+    entity_node_id: NodeId,
+) -> usize {
+    let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
+        return 0;
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return 0;
+    };
+    store
+        .incoming_relationships(entity_node_id, rel_type_id)
+        .filter(|relationship| {
+            store
+                .node(relationship.source)
+                .is_some_and(|memory| memory.labels.contains(&memory_label_id))
+        })
+        .count()
+}
+
+fn compare_entity_mention_count_rows(
+    left: &KnowledgeEntityMentionCountRow,
+    right: &KnowledgeEntityMentionCountRow,
+) -> std::cmp::Ordering {
+    right
+        .mention_count
+        .cmp(&left.mention_count)
+        .then_with(|| left.name.cmp(&right.name))
+        .then_with(|| left.entity_id.cmp(&right.entity_id))
+        .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
 fn knowledge_related_entity_names_for(
@@ -18412,6 +18551,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_entities(request)
     }
 
+    pub fn knowledge_entity_mention_counts(
+        &self,
+        request: &KnowledgeEntityMentionCountListRequest,
+    ) -> Result<KnowledgeEntityMentionCountListOutput> {
+        self.db.knowledge_entity_mention_counts(request)
+    }
+
     pub fn knowledge_related_entity_names(
         &self,
         request: &KnowledgeRelatedEntityNameListRequest,
@@ -19432,6 +19578,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEntityListRequest,
     ) -> Result<KnowledgeMemoryEntityListOutput> {
         knowledge_memory_entities_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_entity_mention_counts(
+        &self,
+        request: &KnowledgeEntityMentionCountListRequest,
+    ) -> Result<KnowledgeEntityMentionCountListOutput> {
+        knowledge_entity_mention_counts_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_related_entity_names(

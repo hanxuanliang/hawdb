@@ -211,6 +211,13 @@ edges to Entity nodes, returns Entity id/name/type/confidence plus relationship
 confidence and mention count rows sorted by Entity name/id/relationship id,
 supports per-Memory limits and distinct Entity name limits, reports
 found/missing Memory counts and the graph commit epoch, and does not write WAL.
+Entity mention-count list reads are covered by
+`Database::knowledge_entity_mention_counts`. The typed read scans only `Entity`
+nodes with non-empty `id` and `name`, counts incoming `MENTIONS` relationships
+from `Memory` nodes while preserving zero-mention Entities, returns
+id/name/updated_at/mention_count rows ordered by mention count descending then
+name ascending, supports the Nowledge cursor predicate over count/name,
+bounded limits, read-transaction snapshots, and no WAL writes.
 Related Entity name reads are covered by
 `Database::knowledge_related_entity_names`. The typed read validates either a
 non-empty Memory id list or one Thread id with physical `id` or logical
