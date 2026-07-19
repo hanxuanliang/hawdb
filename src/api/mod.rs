@@ -2280,6 +2280,60 @@ pub struct KnowledgeThreadMessageCountBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KnowledgeThreadListOrder {
+    #[default]
+    ThreadIdAsc,
+    IdAsc,
+    MessageCountDesc,
+    UpdatedAtDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeThreadListRequest {
+    pub ids: Vec<String>,
+    pub thread_ids: Vec<String>,
+    pub lookup_key: Option<String>,
+    pub source: Option<String>,
+    pub normalized_space_id: Option<String>,
+    pub metadata_contains: Option<String>,
+    pub require_thread_id: bool,
+    pub after_id: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+    pub order: KnowledgeThreadListOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadListRow {
+    pub id: Option<String>,
+    pub thread_id: Option<String>,
+    pub node_id: u64,
+    pub display_title: String,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub source: Option<String>,
+    pub project: Option<String>,
+    pub workspace: Option<String>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: String,
+    pub metadata: Option<Value>,
+    pub message_count: i64,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub import_date: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeThreadListRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_ids: Vec<String>,
+    pub missing_thread_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMessageListRequest {
     pub thread_id: String,
@@ -4820,6 +4874,13 @@ impl Database {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         update_knowledge_thread_message_count_batch_for(self, request)
+    }
+
+    pub fn knowledge_threads(
+        &self,
+        request: &KnowledgeThreadListRequest,
+    ) -> Result<KnowledgeThreadListOutput> {
+        knowledge_threads_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_messages(
@@ -10063,6 +10124,282 @@ fn compare_skill_memory_values(left: &Value, right: &Value) -> std::cmp::Orderin
         (Value::String(left), Value::String(right)) => left.cmp(right),
         _ => value_to_external_id(left).cmp(&value_to_external_id(right)),
     }
+}
+
+fn knowledge_threads_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadListRequest,
+) -> Result<KnowledgeThreadListOutput> {
+    validate_knowledge_thread_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Thread") else {
+        return Ok(KnowledgeThreadListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_ids: request.ids.clone(),
+            missing_thread_ids: request.thread_ids.clone(),
+        });
+    };
+
+    let requested_ids = request.ids.iter().cloned().collect::<BTreeSet<_>>();
+    let requested_thread_ids = request.thread_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut matched_ids = BTreeSet::new();
+    let mut matched_thread_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| {
+            thread_matches_list_request(node, request, &requested_ids, &requested_thread_ids)
+        })
+        .map(|node| {
+            if let Some(id) = node_external_id(node) {
+                matched_ids.insert(id);
+            }
+            if let Some(thread_id) = string_property(node, "thread_id") {
+                matched_thread_ids.insert(thread_id);
+            }
+            knowledge_thread_list_row(node)
+        })
+        .collect::<Vec<_>>();
+
+    sort_thread_list_rows(&mut rows, request.order);
+    let matched_count = rows.len();
+    if request.offset > 0 {
+        rows = rows.into_iter().skip(request.offset).collect();
+    }
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    let missing_ids = request
+        .ids
+        .iter()
+        .filter(|id| !matched_ids.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_thread_ids = request
+        .thread_ids
+        .iter()
+        .filter(|thread_id| !matched_thread_ids.contains(*thread_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeThreadListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_ids,
+        missing_thread_ids,
+    })
+}
+
+fn validate_knowledge_thread_list_request(request: &KnowledgeThreadListRequest) -> Result<()> {
+    if request.ids.iter().any(|id| id.is_empty()) {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires non-empty ids".to_string(),
+        ));
+    }
+    if request
+        .thread_ids
+        .iter()
+        .any(|thread_id| thread_id.is_empty())
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires non-empty thread ids".to_string(),
+        ));
+    }
+    if request.lookup_key.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires a non-empty lookup key".to_string(),
+        ));
+    }
+    if request.source.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires a non-empty source".to_string(),
+        ));
+    }
+    if request
+        .normalized_space_id
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires a non-empty normalized space id".to_string(),
+        ));
+    }
+    if request
+        .metadata_contains
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires a non-empty metadata marker".to_string(),
+        ));
+    }
+    if request.after_id.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires a non-empty after id".to_string(),
+        ));
+    }
+    if request.ids.is_empty()
+        && request.thread_ids.is_empty()
+        && request.lookup_key.is_none()
+        && request.source.is_none()
+        && request.normalized_space_id.is_none()
+        && request.metadata_contains.is_none()
+        && !request.require_thread_id
+        && request.after_id.is_none()
+        && request.limit == 0
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge thread list requires a bounded limit or a filter".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn thread_matches_list_request(
+    node: &NodeRecord,
+    request: &KnowledgeThreadListRequest,
+    requested_ids: &BTreeSet<String>,
+    requested_thread_ids: &BTreeSet<String>,
+) -> bool {
+    let id = node_external_id(node);
+    let thread_id = string_property(node, "thread_id");
+    if !requested_ids.is_empty() && !id.as_ref().is_some_and(|id| requested_ids.contains(id)) {
+        return false;
+    }
+    if !requested_thread_ids.is_empty()
+        && !thread_id
+            .as_ref()
+            .is_some_and(|thread_id| requested_thread_ids.contains(thread_id))
+    {
+        return false;
+    }
+    if request.lookup_key.as_ref().is_some_and(|key| {
+        !id.as_ref()
+            .is_some_and(|id| id == key || id.starts_with(key) || id.contains(key))
+            && thread_id.as_ref().is_none_or(|thread_id| thread_id != key)
+    }) {
+        return false;
+    }
+    if request
+        .source
+        .as_ref()
+        .is_some_and(|source| string_property(node, "source").as_ref() != Some(source))
+    {
+        return false;
+    }
+    if request
+        .normalized_space_id
+        .as_ref()
+        .is_some_and(|space_id| normalized_node_space_id(node) != *space_id)
+    {
+        return false;
+    }
+    if request.require_thread_id && thread_id.is_none() {
+        return false;
+    }
+    if request
+        .after_id
+        .as_ref()
+        .is_some_and(|after| id.as_ref().is_none_or(|id| id.as_str() <= after.as_str()))
+    {
+        return false;
+    }
+    if request
+        .metadata_contains
+        .as_ref()
+        .is_some_and(|marker| !thread_metadata_contains(node, marker))
+    {
+        return false;
+    }
+    true
+}
+
+fn thread_metadata_contains(node: &NodeRecord, marker: &str) -> bool {
+    node.properties
+        .get("metadata")
+        .map(value_to_external_id)
+        .is_some_and(|metadata| metadata.contains(marker))
+}
+
+fn knowledge_thread_list_row(node: &NodeRecord) -> KnowledgeThreadListRow {
+    let title = string_property(node, "title");
+    let source = string_property(node, "source");
+    let display_title = title
+        .clone()
+        .or_else(|| source.clone())
+        .unwrap_or_else(|| "Thread".to_string());
+    KnowledgeThreadListRow {
+        id: node_external_id(node),
+        thread_id: string_property(node, "thread_id"),
+        node_id: node.id.0,
+        display_title,
+        title,
+        summary: string_property(node, "summary"),
+        source,
+        project: string_property(node, "project"),
+        workspace: string_property(node, "workspace"),
+        raw_space_id: string_property(node, "space_id"),
+        normalized_space_id: normalized_node_space_id(node),
+        metadata: node.properties.get("metadata").cloned(),
+        message_count: integer_property(node, "message_count").unwrap_or(0),
+        created_at: node.properties.get("created_at").cloned(),
+        updated_at: node.properties.get("updated_at").cloned(),
+        import_date: node.properties.get("import_date").cloned(),
+    }
+}
+
+fn sort_thread_list_rows(rows: &mut [KnowledgeThreadListRow], order: KnowledgeThreadListOrder) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeThreadListOrder::ThreadIdAsc => compare_thread_list_thread_ids(left, right),
+        KnowledgeThreadListOrder::IdAsc => compare_thread_list_ids(left, right),
+        KnowledgeThreadListOrder::MessageCountDesc => right
+            .message_count
+            .cmp(&left.message_count)
+            .then_with(|| compare_thread_list_ids(left, right)),
+        KnowledgeThreadListOrder::UpdatedAtDesc => compare_thread_recent_values(left, right)
+            .then_with(|| compare_thread_list_thread_ids(left, right)),
+    });
+}
+
+fn compare_thread_list_ids(
+    left: &KnowledgeThreadListRow,
+    right: &KnowledgeThreadListRow,
+) -> std::cmp::Ordering {
+    left.id
+        .cmp(&right.id)
+        .then_with(|| left.node_id.cmp(&right.node_id))
+}
+
+fn compare_thread_list_thread_ids(
+    left: &KnowledgeThreadListRow,
+    right: &KnowledgeThreadListRow,
+) -> std::cmp::Ordering {
+    left.thread_id
+        .cmp(&right.thread_id)
+        .then_with(|| compare_thread_list_ids(left, right))
+}
+
+fn compare_thread_recent_values(
+    left: &KnowledgeThreadListRow,
+    right: &KnowledgeThreadListRow,
+) -> std::cmp::Ordering {
+    compare_optional_values_desc(
+        left.updated_at
+            .as_ref()
+            .or(left.import_date.as_ref())
+            .or(left.created_at.as_ref()),
+        right
+            .updated_at
+            .as_ref()
+            .or(right.import_date.as_ref())
+            .or(right.created_at.as_ref()),
+    )
 }
 
 fn knowledge_thread_messages_for(
@@ -17338,6 +17675,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         self.db.update_knowledge_thread_message_count_batch(request)
+    }
+
+    pub fn knowledge_threads(
+        &self,
+        request: &KnowledgeThreadListRequest,
+    ) -> Result<KnowledgeThreadListOutput> {
+        self.db.knowledge_threads(request)
     }
 
     pub fn knowledge_thread_messages(

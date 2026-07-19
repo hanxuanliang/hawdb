@@ -420,6 +420,11 @@ Thread ordered message reads are available as
 `Database::knowledge_thread_messages`, covering Nowledge `Thread` outgoing
 `CONTAINS` transcript/list shapes with `COALESCE(c.order_index, m.order_index)`
 ordering and no WAL writes.
+Bounded Thread list and source reads are available as
+`Database::knowledge_threads`, covering Nowledge Thread page, source lookup,
+source page, normalized-space count/list, favorite metadata, id/thread-id bulk
+lookup, and message-count ranking shapes with explicit filters, ordering,
+missing-id reporting, display-title fallbacks, and no WAL writes.
 Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with

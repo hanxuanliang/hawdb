@@ -257,6 +257,15 @@ index/timestamps/token count/metadata plus relationship id and relationship
 order index, orders by `COALESCE(c.order_index, m.order_index)`, supports
 bounded limits, reports found/matched/returned counts and the graph commit
 epoch, and does not write WAL.
+Thread list and source reads are covered by `Database::knowledge_threads` for
+Nowledge bounded Thread page, source lookup, source page, normalized-space
+count/list, favorite metadata page, id/thread-id bulk lookup, and
+message-count ranking shapes. The typed read supports physical `id` and
+logical `thread_id` filters, lookup-key matching, source filters,
+normalized-space filters, metadata substring markers, after-id pagination,
+thread-id presence filtering, offset/limit, id, thread-id, message-count, and
+recent-update ordering, display-title and message-count fallbacks, missing-id
+reporting, and no WAL writes.
 Label lifecycle writes are covered by a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names

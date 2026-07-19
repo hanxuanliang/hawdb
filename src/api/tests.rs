@@ -51,7 +51,8 @@ use super::{
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
     KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadListOrder,
+    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -7760,6 +7761,153 @@ fn thread_message_read_rejects_empty_thread_id() {
         })
         .unwrap_err();
     assert!(error.to_string().contains("non-empty thread id"));
+}
+
+#[test]
+fn lists_threads_for_nowledge_source_page_space_and_lookup_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', summary: 'Alpha summary', source: 'slack', project: 'graph', workspace: 'local', space_id: '', metadata: 'is_favorite:true', message_count: 5, created_at: 10, updated_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack', space_id: 'archive', message_count: 2, created_at: 20, updated_at: 40})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_c', source: 'email', space_id: 'default', message_count: 9, created_at: 30, import_date: 50})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_d', source: '', space_id: 'default', created_at: 1})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let bulk = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            ids: vec![
+                "thread_b".to_string(),
+                "missing".to_string(),
+                "thread_a".to_string(),
+            ],
+            limit: 0,
+            order: KnowledgeThreadListOrder::IdAsc,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(bulk.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(bulk.matched_count, 2);
+    assert_eq!(bulk.returned_count, 2);
+    assert_eq!(bulk.missing_ids, vec!["missing".to_string()]);
+    assert_eq!(bulk.rows[0].id.as_deref(), Some("thread_a"));
+    assert_eq!(bulk.rows[0].thread_id.as_deref(), Some("logical_a"));
+    assert_eq!(bulk.rows[0].display_title, "Alpha Thread");
+    assert_eq!(bulk.rows[0].summary.as_deref(), Some("Alpha summary"));
+    assert_eq!(bulk.rows[0].source.as_deref(), Some("slack"));
+    assert_eq!(bulk.rows[0].project.as_deref(), Some("graph"));
+    assert_eq!(bulk.rows[0].workspace.as_deref(), Some("local"));
+    assert_eq!(bulk.rows[0].raw_space_id, None);
+    assert_eq!(bulk.rows[0].normalized_space_id, "default");
+    assert_eq!(bulk.rows[0].message_count, 5);
+    assert_eq!(
+        bulk.rows[0].metadata,
+        Some(Value::String("is_favorite:true".to_string()))
+    );
+
+    let lookup = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            lookup_key: Some("logical_b".to_string()),
+            limit: 1,
+            order: KnowledgeThreadListOrder::IdAsc,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(lookup.matched_count, 1);
+    assert_eq!(lookup.rows[0].id.as_deref(), Some("thread_b"));
+
+    let source_page = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            source: Some("slack".to_string()),
+            after_id: Some("thread_a".to_string()),
+            limit: 10,
+            order: KnowledgeThreadListOrder::IdAsc,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(source_page.matched_count, 1);
+    assert_eq!(source_page.rows[0].id.as_deref(), Some("thread_b"));
+
+    let default_space = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            normalized_space_id: Some("default".to_string()),
+            require_thread_id: true,
+            limit: 10,
+            order: KnowledgeThreadListOrder::UpdatedAtDesc,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(default_space.matched_count, 2);
+    assert_eq!(
+        default_space
+            .rows
+            .iter()
+            .map(|row| row.thread_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["logical_c", "logical_a"]
+    );
+
+    let favorite = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            metadata_contains: Some("is_favorite".to_string()),
+            limit: 10,
+            order: KnowledgeThreadListOrder::UpdatedAtDesc,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(favorite.matched_count, 1);
+    assert_eq!(favorite.rows[0].thread_id.as_deref(), Some("logical_a"));
+
+    let ranked = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            limit: 1,
+            order: KnowledgeThreadListOrder::MessageCountDesc,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(ranked.matched_count, 4);
+    assert_eq!(ranked.rows[0].thread_id.as_deref(), Some("logical_c"));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn thread_list_rejects_unbounded_or_empty_filters() {
+    let db = Database::new();
+
+    let unbounded = db
+        .knowledge_threads(&KnowledgeThreadListRequest::default())
+        .unwrap_err();
+    assert!(unbounded.to_string().contains("bounded limit or a filter"));
+
+    let empty_id = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            ids: vec![String::new()],
+            limit: 10,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_id.to_string().contains("non-empty ids"));
+
+    let empty_thread_id = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            thread_ids: vec![String::new()],
+            limit: 10,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_thread_id.to_string().contains("non-empty thread ids"));
+
+    let empty_source = db
+        .knowledge_threads(&KnowledgeThreadListRequest {
+            source: Some(String::new()),
+            limit: 10,
+            ..KnowledgeThreadListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_source.to_string().contains("non-empty source"));
 }
 
 #[test]
