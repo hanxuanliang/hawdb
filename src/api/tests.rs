@@ -55,9 +55,9 @@ use super::{
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
-    KnowledgeScopedSubgraphRequest, KnowledgeSkillLifecycleBatchRequest,
-    KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder, KnowledgeSkillListRequest,
-    KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
+    KnowledgeScopedSubgraphRequest, KnowledgeSkillDetailLookupRequest,
+    KnowledgeSkillLifecycleBatchRequest, KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder,
+    KnowledgeSkillListRequest, KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
     KnowledgeSkillThreadSourceListRequest, KnowledgeSkillUsageStatsBatchRequest,
     KnowledgeSkillUsageStatsUpdate, KnowledgeSourceIdListRequest,
     KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
@@ -8825,6 +8825,82 @@ fn skill_list_rejects_unbounded_or_empty_filters() {
         })
         .unwrap_err();
     assert!(empty_after.to_string().contains("non-empty after id"));
+}
+
+#[test]
+fn reads_skill_detail_lookup_for_rest_fs_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-1', name: 'rest-fs-detail', title: 'REST FS Detail Skill', stage: 'active', version: 3, created_at: 1700000102, updated_at: 1700000103})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-2', name: 'rest-fs-detail-two', title: 'REST FS Detail Two', stage: 'draft', version: 4, created_at: 1700000202, updated_at: 1700000203})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'rest-fs-skill-detail-1', name: 'memory-match'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let exact = db
+        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
+            key: "rest-fs-skill-detail-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(exact.key, "rest-fs-skill-detail-1");
+    assert!(exact.skill_node_id.is_some());
+    assert!(exact.found_skill);
+    assert_eq!(exact.id.as_deref(), Some("rest-fs-skill-detail-1"));
+    assert_eq!(exact.name.as_deref(), Some("rest-fs-detail"));
+    assert_eq!(exact.title.as_deref(), Some("REST FS Detail Skill"));
+    assert_eq!(exact.stage.as_deref(), Some("active"));
+    assert_eq!(exact.version, Some(Value::Int(3)));
+    assert_eq!(exact.created_at, Some(Value::Int(1700000102)));
+    assert_eq!(exact.updated_at, Some(Value::Int(1700000103)));
+    assert_eq!(exact.matched_count, 1);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let prefix = db
+        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
+            key: "rest-fs-skill-detail".to_string(),
+        })
+        .unwrap();
+    assert_eq!(prefix.id.as_deref(), Some("rest-fs-skill-detail-1"));
+    assert_eq!(prefix.matched_count, 2);
+
+    let contains = db
+        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
+            key: "skill-detail-2".to_string(),
+        })
+        .unwrap();
+    assert_eq!(contains.id.as_deref(), Some("rest-fs-skill-detail-2"));
+    assert_eq!(contains.matched_count, 1);
+
+    let missing = db
+        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
+            key: "missing".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found_skill);
+    assert_eq!(missing.skill_node_id, None);
+    assert_eq!(missing.matched_count, 0);
+
+    let tx = db.begin_read_transaction();
+    db.query("MATCH (s:Skill {id: 'rest-fs-skill-detail-1'}) SET s.title = 'Changed'")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest {
+            key: "rest-fs-skill-detail-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.title.as_deref(), Some("REST FS Detail Skill"));
+}
+
+#[test]
+fn skill_detail_lookup_rejects_empty_key() {
+    let db = Database::new();
+    let empty_key = db
+        .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest { key: String::new() })
+        .unwrap_err();
+    assert!(empty_key.to_string().contains("non-empty key"));
 }
 
 #[test]

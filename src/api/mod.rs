@@ -2602,6 +2602,27 @@ pub struct KnowledgeSkillThreadSourceListOutput {
     pub returned_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillDetailLookupRequest {
+    pub key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillDetailLookupOutput {
+    pub graph_commit_epoch: u64,
+    pub key: String,
+    pub skill_node_id: Option<u64>,
+    pub found_skill: bool,
+    pub id: Option<String>,
+    pub name: Option<String>,
+    pub title: Option<String>,
+    pub stage: Option<String>,
+    pub version: Option<Value>,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub matched_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KnowledgeSkillListOrder {
     IdAsc,
@@ -5716,6 +5737,13 @@ impl Database {
         request: &KnowledgeSkillThreadSourceListRequest,
     ) -> Result<KnowledgeSkillThreadSourceListOutput> {
         knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_detail_lookup(
+        &self,
+        request: &KnowledgeSkillDetailLookupRequest,
+    ) -> Result<KnowledgeSkillDetailLookupOutput> {
+        knowledge_skill_detail_lookup_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skills(
@@ -12807,6 +12835,77 @@ fn validate_knowledge_skill_thread_source_request(
         ));
     }
     Ok(())
+}
+
+fn knowledge_skill_detail_lookup_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSkillDetailLookupRequest,
+) -> Result<KnowledgeSkillDetailLookupOutput> {
+    validate_knowledge_skill_detail_lookup_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Skill") else {
+        return Ok(KnowledgeSkillDetailLookupOutput {
+            graph_commit_epoch,
+            key: request.key.clone(),
+            skill_node_id: None,
+            found_skill: false,
+            id: None,
+            name: None,
+            title: None,
+            stage: None,
+            version: None,
+            created_at: None,
+            updated_at: None,
+            matched_count: 0,
+        });
+    };
+
+    let matched = skill_detail_lookup_candidates(store, label_id, &request.key);
+    let matched_count = matched.len();
+    let first = matched.into_iter().next();
+
+    Ok(KnowledgeSkillDetailLookupOutput {
+        graph_commit_epoch,
+        key: request.key.clone(),
+        skill_node_id: first.map(|node| node.id.0),
+        found_skill: first.is_some(),
+        id: first.and_then(node_external_id),
+        name: first.and_then(|node| string_property(node, "name")),
+        title: first.and_then(|node| string_property(node, "title")),
+        stage: first.and_then(|node| string_property(node, "stage")),
+        version: first.and_then(|node| node.properties.get("version").cloned()),
+        created_at: first.and_then(|node| node.properties.get("created_at").cloned()),
+        updated_at: first.and_then(|node| node.properties.get("updated_at").cloned()),
+        matched_count,
+    })
+}
+
+fn validate_knowledge_skill_detail_lookup_request(
+    request: &KnowledgeSkillDetailLookupRequest,
+) -> Result<()> {
+    if request.key.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge skill detail lookup requires a non-empty key".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn skill_detail_lookup_candidates<'a>(
+    store: &'a GraphStore,
+    label_id: LabelId,
+    key: &str,
+) -> Vec<&'a NodeRecord> {
+    let mut nodes = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| {
+            node_external_id(node)
+                .is_some_and(|id| id.as_str() == key || id.starts_with(key) || id.contains(key))
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by_key(|node| node.id.0);
+    nodes
 }
 
 fn skill_memory_seed_nodes<'a>(
@@ -21622,6 +21721,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_skill_thread_sources(request)
     }
 
+    pub fn knowledge_skill_detail_lookup(
+        &self,
+        request: &KnowledgeSkillDetailLookupRequest,
+    ) -> Result<KnowledgeSkillDetailLookupOutput> {
+        self.db.knowledge_skill_detail_lookup(request)
+    }
+
     pub fn knowledge_skills(
         &self,
         request: &KnowledgeSkillListRequest,
@@ -22589,6 +22695,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSkillThreadSourceListRequest,
     ) -> Result<KnowledgeSkillThreadSourceListOutput> {
         knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_detail_lookup(
+        &self,
+        request: &KnowledgeSkillDetailLookupRequest,
+    ) -> Result<KnowledgeSkillDetailLookupOutput> {
+        knowledge_skill_detail_lookup_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_identity(

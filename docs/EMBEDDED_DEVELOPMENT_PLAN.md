@@ -195,6 +195,9 @@ without WAL writes. Thread message-render lookup is exposed as a typed
 without WAL writes. Thread metadata-render lookup is exposed as a typed
 `knowledge_thread_meta_lookup` API for REST FS id lookup plus source filters
 without WAL writes.
+REST FS Skill detail lookup is exposed as a typed
+`knowledge_skill_detail_lookup` API for physical Skill id lookup without WAL
+writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches

@@ -299,6 +299,12 @@ The typed read supports exact id lists, key lookup using exact/prefix/contains
 matching, stage-filtered catalog and active lists, active after-id pagination,
 updated-at or id ordering, missing-id reporting, and pinned read snapshots
 without WAL writes.
+REST FS Skill detail lookup is covered by
+`Database::knowledge_skill_detail_lookup`. The typed read applies the
+Nowledge REST FS physical `Skill.id` exact/prefix/contains lookup, returns the
+first stable node-id ordered id/name/title/stage/version/created-at/updated-at
+projection, reports total matched Skill rows for ambiguity diagnostics,
+supports pinned read snapshots, and does not write WAL.
 Skill evidence-memory reads are covered by `Database::knowledge_skill_memories`.
 The typed read requires either one Skill id or a non-empty stage filter, scans
 outgoing `SYNTHESIZED_FROM` edges to Memory nodes, returns Memory id/title/
