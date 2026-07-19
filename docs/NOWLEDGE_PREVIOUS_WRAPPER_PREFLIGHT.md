@@ -251,10 +251,7 @@ cargo run --quiet --bin skein -- \
   nowledge-previous-wrapper-preflight-check \
   --require-ready \
   --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
-  --contract-evidence-json "$NMEM_PREFLIGHT_ROOT/contract-evidence.json" \
-  --adapter-smoke-json "$NMEM_PREFLIGHT_ROOT/adapter-smoke.json" \
-  --migration-gate-json "$NMEM_PREFLIGHT_ROOT/migration-gate.json" \
-  --replacement-summary-json "$NMEM_PREFLIGHT_ROOT/replacement-summary.json" \
+  --bundle-dir "$NMEM_PREFLIGHT_ROOT" \
   > "$NMEM_PREFLIGHT_ROOT/preflight-check.json"
 ```
 
@@ -272,3 +269,7 @@ requires `dual_engine_evidence.ready == true` so side-by-side cutover evidence
 cannot silently degrade into a primary-only smoke run.
 Each per-stage check includes `failed_evidence_fields`, so release automation
 can report the exact missing or mismatched field without parsing blocker text.
+For targeted debugging, the same command still accepts explicit
+`--contract-evidence-json`, `--adapter-smoke-json`, `--migration-gate-json`,
+and `--replacement-summary-json` paths; explicit files override the standard
+names loaded from `--bundle-dir`.

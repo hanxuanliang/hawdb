@@ -2,12 +2,13 @@ use skein::{Result, SkeinError};
 use std::path::Path;
 
 pub fn nowledge_previous_wrapper_preflight_check_usage() -> String {
-    "nowledge-previous-wrapper-preflight-check requires [--require-ready] --wrapper-identity <id> --contract-evidence-json <path> --adapter-smoke-json <path> --migration-gate-json <path> --replacement-summary-json <path>".to_string()
+    "nowledge-previous-wrapper-preflight-check requires [--require-ready] --wrapper-identity <id> (--bundle-dir <dir> | --contract-evidence-json <path> --adapter-smoke-json <path> --migration-gate-json <path> --replacement-summary-json <path>)".to_string()
 }
 
 #[derive(Debug, Clone, Default)]
 struct PreviousWrapperPreflightCheckInputs {
     wrapper_identity: Option<String>,
+    bundle_dir: Option<String>,
     contract_evidence: Option<serde_json::Value>,
     adapter_smoke: Option<serde_json::Value>,
     migration_gate: Option<serde_json::Value>,
@@ -35,6 +36,17 @@ pub fn run_nowledge_previous_wrapper_preflight_check(
                 }
                 inputs.wrapper_identity = Some(value);
             }
+            "--bundle-dir" => {
+                let value = args.next().ok_or_else(|| {
+                    SkeinError::Semantic(nowledge_previous_wrapper_preflight_check_usage())
+                })?;
+                if value.trim().is_empty() {
+                    return Err(SkeinError::Semantic(
+                        "--bundle-dir must not be empty".to_string(),
+                    ));
+                }
+                inputs.bundle_dir = Some(value);
+            }
             "--contract-evidence-json" => {
                 inputs.contract_evidence = Some(read_json_arg(&mut args)?);
             }
@@ -54,8 +66,32 @@ pub fn run_nowledge_previous_wrapper_preflight_check(
             }
         }
     }
+    fill_bundle_dir_inputs(&mut inputs)?;
     let report = nowledge_previous_wrapper_preflight_check_json(inputs)?;
     Ok((report, require_ready))
+}
+
+fn fill_bundle_dir_inputs(inputs: &mut PreviousWrapperPreflightCheckInputs) -> Result<()> {
+    let Some(bundle_dir) = inputs.bundle_dir.as_deref() else {
+        return Ok(());
+    };
+    let bundle_dir = Path::new(bundle_dir);
+    if inputs.contract_evidence.is_none() {
+        inputs.contract_evidence =
+            Some(read_json_file(&bundle_dir.join("contract-evidence.json"))?);
+    }
+    if inputs.adapter_smoke.is_none() {
+        inputs.adapter_smoke = Some(read_json_file(&bundle_dir.join("adapter-smoke.json"))?);
+    }
+    if inputs.migration_gate.is_none() {
+        inputs.migration_gate = Some(read_json_file(&bundle_dir.join("migration-gate.json"))?);
+    }
+    if inputs.replacement_summary.is_none() {
+        inputs.replacement_summary = Some(read_json_file(
+            &bundle_dir.join("replacement-summary.json"),
+        )?);
+    }
+    Ok(())
 }
 
 fn read_json_arg(args: &mut impl Iterator<Item = String>) -> Result<serde_json::Value> {
@@ -393,8 +429,10 @@ fn check_by_name<'a>(report: &'a serde_json::Value, name: &str) -> &'a serde_jso
 mod tests {
     use super::{
         check_by_name, nowledge_previous_wrapper_preflight_check_json,
-        PreviousWrapperPreflightCheckInputs,
+        run_nowledge_previous_wrapper_preflight_check, PreviousWrapperPreflightCheckInputs,
     };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn preflight_check_reports_ready_when_all_artifacts_are_ready() {
@@ -585,9 +623,62 @@ mod tests {
         );
     }
 
+    #[test]
+    fn preflight_check_can_load_standard_bundle_dir() {
+        let inputs = ready_inputs();
+        let bundle_dir = unique_test_dir("previous-wrapper-preflight-bundle");
+        std::fs::create_dir_all(&bundle_dir).unwrap();
+        write_json(
+            bundle_dir.join("contract-evidence.json"),
+            inputs.contract_evidence.as_ref().unwrap(),
+        );
+        write_json(
+            bundle_dir.join("adapter-smoke.json"),
+            inputs.adapter_smoke.as_ref().unwrap(),
+        );
+        write_json(
+            bundle_dir.join("migration-gate.json"),
+            inputs.migration_gate.as_ref().unwrap(),
+        );
+        write_json(
+            bundle_dir.join("replacement-summary.json"),
+            inputs.replacement_summary.as_ref().unwrap(),
+        );
+
+        let (report, require_ready) = run_nowledge_previous_wrapper_preflight_check(
+            vec![
+                "--require-ready".to_string(),
+                "--wrapper-identity".to_string(),
+                "nowledge-previous-wrapper:test".to_string(),
+                "--bundle-dir".to_string(),
+                bundle_dir.to_string_lossy().into_owned(),
+            ]
+            .into_iter(),
+        )
+        .unwrap();
+
+        assert!(require_ready);
+        assert_eq!(report["ready"], true);
+        assert_eq!(report["failed_checks"], serde_json::json!([]));
+        std::fs::remove_dir_all(bundle_dir).unwrap();
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein-{name}-{nanos}"))
+    }
+
+    fn write_json(path: PathBuf, value: &serde_json::Value) {
+        std::fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+
     fn ready_inputs() -> PreviousWrapperPreflightCheckInputs {
         PreviousWrapperPreflightCheckInputs {
             wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
+            bundle_dir: None,
             contract_evidence: Some(serde_json::json!({
                 "required_contract_ready": true,
                 "previous_wrapper_contract_evidence": {

@@ -166,10 +166,7 @@ run_skein nowledge-replacement-summary \
 run_skein nowledge-previous-wrapper-preflight-check \
   --require-ready \
   --wrapper-identity "$wrapper_identity" \
-  --contract-evidence-json "$preflight_root/contract-evidence.json" \
-  --adapter-smoke-json "$preflight_root/adapter-smoke.json" \
-  --migration-gate-json "$preflight_root/migration-gate.json" \
-  --replacement-summary-json "$preflight_root/replacement-summary.json" \
+  --bundle-dir "$preflight_root" \
   > "$preflight_root/preflight-check.json"
 
 cat "$preflight_root/preflight-check.json"
