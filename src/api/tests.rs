@@ -76,18 +76,18 @@ use super::{
     KnowledgeSourceRevisionCreateBatchRequest, KnowledgeSourceVersionLookupRequest,
     KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
-    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
-    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
-    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
-    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
+    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
+    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder,
+    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
+    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
+    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
+    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
+    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -11908,6 +11908,195 @@ fn typed_thread_message_delete_persists_as_one_wal_batch_and_replays() {
                 .rows[0]
                 .get("messages"),
             Some(&Value::Int(0))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn creates_thread_compaction_link_for_nowledge_distill_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1', thread_id: 'logical_1'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_1', title: 'Memory One', importance: 1.0})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2'})").unwrap();
+    db.query("CREATE (:Thread {title: 'Idless Thread'})")
+        .unwrap();
+    let idless = db
+        .query("MATCH (t:Thread) WHERE t.title = 'Idless Thread' RETURN id(t) AS id")
+        .unwrap();
+    let idless_thread_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let created = db
+        .create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
+            thread_id: "thread_1".to_string(),
+            memory_id: "memory_1".to_string(),
+            compaction_method: "manual_distillation".to_string(),
+            created_at: Value::Int(1_700_000_070),
+            properties: Value::String("{\"mode\":\"manual\"}".to_string()),
+        })
+        .unwrap();
+    assert_eq!(created.graph_commit_epoch_before, graph_commit_epoch_before);
+    assert_eq!(
+        created.graph_commit_epoch_after,
+        graph_commit_epoch_before + 1
+    );
+    assert!(created.matched);
+    assert!(!created.missing_endpoint);
+    assert!(!created.non_writable);
+    assert!(created.thread_node_id.is_some());
+    assert!(created.memory_node_id.is_some());
+    assert_eq!(created.created_relationship_count, 1);
+
+    let compacted = db
+        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: "thread_1".to_string(),
+            identity_property: "id".to_string(),
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(compacted.matched_count, 1);
+    assert_eq!(compacted.rows[0].memory_id.as_deref(), Some("memory_1"));
+    assert_eq!(
+        compacted.rows[0].compaction_method.as_deref(),
+        Some("manual_distillation")
+    );
+    assert_eq!(
+        compacted.rows[0].relationship_created_at,
+        Some(Value::Int(1_700_000_070))
+    );
+    assert_eq!(
+        compacted.rows[0].relationship_properties,
+        Some(Value::String("{\"mode\":\"manual\"}".to_string()))
+    );
+
+    let missing = db
+        .create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
+            thread_id: "thread_1".to_string(),
+            memory_id: "missing".to_string(),
+            compaction_method: "manual_distillation".to_string(),
+            created_at: Value::Int(1),
+            properties: Value::String("{}".to_string()),
+        })
+        .unwrap();
+    assert!(!missing.matched);
+    assert!(missing.missing_endpoint);
+    assert!(!missing.non_writable);
+    assert_eq!(missing.created_relationship_count, 0);
+    assert_eq!(
+        missing.graph_commit_epoch_after,
+        created.graph_commit_epoch_after
+    );
+
+    let non_writable = db
+        .create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
+            thread_id: idless_thread_id,
+            memory_id: "memory_2".to_string(),
+            compaction_method: "manual_distillation".to_string(),
+            created_at: Value::Int(2),
+            properties: Value::String("{}".to_string()),
+        })
+        .unwrap();
+    assert!(!non_writable.matched);
+    assert!(!non_writable.missing_endpoint);
+    assert!(non_writable.non_writable);
+    assert_eq!(non_writable.created_relationship_count, 0);
+    assert_eq!(
+        non_writable.graph_commit_epoch_after,
+        created.graph_commit_epoch_after
+    );
+}
+
+#[test]
+fn thread_compaction_link_rejects_empty_fields_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let empty_thread = db
+        .create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
+            thread_id: String::new(),
+            memory_id: "memory_1".to_string(),
+            compaction_method: "manual_distillation".to_string(),
+            created_at: Value::Int(1),
+            properties: Value::String("{}".to_string()),
+        })
+        .unwrap_err();
+    assert!(empty_thread.to_string().contains("non-empty thread id"));
+
+    let empty_memory = db
+        .create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
+            thread_id: "thread_1".to_string(),
+            memory_id: String::new(),
+            compaction_method: "manual_distillation".to_string(),
+            created_at: Value::Int(1),
+            properties: Value::String("{}".to_string()),
+        })
+        .unwrap_err();
+    assert!(empty_memory.to_string().contains("non-empty memory id"));
+
+    let empty_method = db
+        .create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
+            thread_id: "thread_1".to_string(),
+            memory_id: "memory_1".to_string(),
+            compaction_method: String::new(),
+            created_at: Value::Int(1),
+            properties: Value::String("{}".to_string()),
+        })
+        .unwrap_err();
+    assert!(empty_method
+        .to_string()
+        .contains("non-empty compaction method"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_thread_compaction_link_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Thread {id: 'thread_1'})").unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+        let batch_count_before_link = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.create_knowledge_thread_compaction_link(&KnowledgeThreadCompactionLinkRequest {
+            thread_id: "thread_1".to_string(),
+            memory_id: "memory_1".to_string(),
+            compaction_method: "manual_distillation".to_string(),
+            created_at: Value::Int(10),
+            properties: Value::String("{\"mode\":\"manual\"}".to_string()),
+        })
+        .unwrap();
+        let batch_count_after_link = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_link, batch_count_before_link + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("create_rel"));
+    {
+        let db = Database::open(&path).unwrap();
+        let output = db
+            .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+                thread_id: "thread_1".to_string(),
+                identity_property: "id".to_string(),
+                limit: 10,
+            })
+            .unwrap();
+        assert_eq!(output.matched_count, 1);
+        assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_1"));
+        assert_eq!(
+            output.rows[0].compaction_method.as_deref(),
+            Some("manual_distillation")
         );
     }
     std::fs::remove_dir_all(path).unwrap();

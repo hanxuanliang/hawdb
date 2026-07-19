@@ -219,9 +219,12 @@ without WAL writes. Thread message-render lookup is exposed as a typed
 `knowledge_thread_message_lookup` API for REST FS id lookup plus source filters
 without WAL writes. Thread metadata-render lookup is exposed as a typed
 `knowledge_thread_meta_lookup` API for REST FS id lookup plus source filters
-without WAL writes. Thread-owned Message cleanup is exposed as a typed
-`delete_knowledge_thread_messages` API for exact Thread `CONTAINS` Message
-target-node detach deletes while preserving the Thread node.
+without WAL writes. Thread distilled-memory links are exposed as a typed
+`create_knowledge_thread_compaction_link` API for the Nowledge
+`(:Thread)-[:COMPACTS_TO]->(:Memory)` write shape with compaction metadata.
+Thread-owned Message cleanup is exposed as a typed `delete_knowledge_thread_messages`
+API for exact Thread `CONTAINS` Message target-node detach deletes while
+preserving the Thread node.
 REST FS Skill detail lookup is exposed as a typed
 `knowledge_skill_detail_lookup` API for physical Skill id lookup without WAL
 writes.
@@ -660,6 +663,11 @@ available as the typed `Database::knowledge_thread_distillation_candidates`
 read, which combines the exact matched count with an optional bounded candidate
 page ordered by the production recency expression and does not write WAL;
 `limit = 0` is count-only.
+The companion distilled-memory link write is available as
+`Database::create_knowledge_thread_compaction_link`, which fixes the
+`Thread`/`Memory`/`COMPACTS_TO` shape, validates endpoint ids and compaction
+method before WAL, preserves missing or projected-idless endpoints as no-write
+rows, and routes eligible creates through the WAL-backed relationship path.
 Nowledge source revision history supports the bounded outgoing path read
 `MATCH p = (s:Source {id: $source_id})-[:REVISED_AS*1..10]->(older:Source) RETURN older...`
 by accepting an unused path binding prefix and reusing the existing finite

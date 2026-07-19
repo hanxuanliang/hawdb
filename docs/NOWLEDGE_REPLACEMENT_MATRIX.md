@@ -458,6 +458,14 @@ Memory edges, returns Memory id/title/content previews, rank/time/space/
 review/reindex/temporal/access fields, relationship metadata, count/id-list/
 summary/full-row compatible fallbacks, importance/created-at ordering, bounded
 limits, and no WAL writes.
+Thread distilled-memory link writes are covered by
+`Database::create_knowledge_thread_compaction_link`. This typed facade fixes
+the Nowledge `(:Thread)-[:COMPACTS_TO]->(:Memory)` write shape, validates
+Thread ids, Memory ids, and compaction methods before WAL, writes only the
+Nowledge-used `compaction_method`, `created_at`, and `properties`
+relationship fields, reports missing or projected-idless endpoints without
+writing, and routes eligible links through the WAL-backed relationship create
+path.
 Memory compacting-Thread reads are covered by
 `Database::knowledge_memory_compacting_threads`. The typed read resolves
 bounded Memory ids, scans incoming `COMPACTS_TO` Thread edges, returns Thread

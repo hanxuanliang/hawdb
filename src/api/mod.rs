@@ -3489,6 +3489,29 @@ pub struct KnowledgeThreadCompactedMemoryListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactionLinkRequest {
+    pub thread_id: String,
+    pub memory_id: String,
+    pub compaction_method: String,
+    pub created_at: Value,
+    pub properties: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactionLinkOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub thread_id: String,
+    pub memory_id: String,
+    pub thread_node_id: Option<u64>,
+    pub memory_node_id: Option<u64>,
+    pub matched: bool,
+    pub missing_endpoint: bool,
+    pub non_writable: bool,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryCompactingThreadListRequest {
     pub memory_ids: Vec<String>,
     pub limit_per_memory: usize,
@@ -6423,6 +6446,13 @@ impl Database {
         request: &KnowledgeThreadCompactedMemoryListRequest,
     ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
         knowledge_thread_compacted_memories_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn create_knowledge_thread_compaction_link(
+        &mut self,
+        request: &KnowledgeThreadCompactionLinkRequest,
+    ) -> Result<KnowledgeThreadCompactionLinkOutput> {
+        create_knowledge_thread_compaction_link_for(self, request)
     }
 
     pub fn knowledge_memory_compacting_threads(
@@ -16062,6 +16092,115 @@ fn knowledge_thread_compacted_memories_for(
     })
 }
 
+fn create_knowledge_thread_compaction_link_for(
+    db: &mut Database,
+    request: &KnowledgeThreadCompactionLinkRequest,
+) -> Result<KnowledgeThreadCompactionLinkOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_thread_compaction_link_request(request)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let thread = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        "Thread",
+        request.thread_id.as_str(),
+    );
+    let memory = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        "Memory",
+        request.memory_id.as_str(),
+    );
+    let thread_node_id = thread.map(|node| node.id.0);
+    let memory_node_id = memory.map(|node| node.id.0);
+    let (Some(thread), Some(memory)) = (thread, memory) else {
+        return Ok(KnowledgeThreadCompactionLinkOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            thread_id: request.thread_id.clone(),
+            memory_id: request.memory_id.clone(),
+            thread_node_id,
+            memory_node_id,
+            matched: false,
+            missing_endpoint: true,
+            non_writable: false,
+            created_relationship_count: 0,
+        });
+    };
+    if !node_has_external_id_property(thread, request.thread_id.as_str())
+        || !node_has_external_id_property(memory, request.memory_id.as_str())
+    {
+        return Ok(KnowledgeThreadCompactionLinkOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            thread_id: request.thread_id.clone(),
+            memory_id: request.memory_id.clone(),
+            thread_node_id,
+            memory_node_id,
+            matched: false,
+            missing_endpoint: false,
+            non_writable: true,
+            created_relationship_count: 0,
+        });
+    }
+
+    let create = KnowledgeRelationshipCreateRequest {
+        source: KnowledgeEntityRequest {
+            label: "Thread".to_string(),
+            external_id: request.thread_id.clone(),
+        },
+        target: KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: request.memory_id.clone(),
+        },
+        relationship_type: "COMPACTS_TO".to_string(),
+        properties: BTreeMap::from([
+            (
+                "compaction_method".to_string(),
+                Value::String(request.compaction_method.clone()),
+            ),
+            ("created_at".to_string(), request.created_at.clone()),
+            ("properties".to_string(), request.properties.clone()),
+        ]),
+    };
+    let output = create_knowledge_relationship_for(db, &create)?;
+    Ok(KnowledgeThreadCompactionLinkOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        thread_id: request.thread_id.clone(),
+        memory_id: request.memory_id.clone(),
+        thread_node_id,
+        memory_node_id,
+        matched: output.matched,
+        missing_endpoint: false,
+        non_writable: false,
+        created_relationship_count: output.created_relationship_count,
+    })
+}
+
+fn validate_knowledge_thread_compaction_link_request(
+    request: &KnowledgeThreadCompactionLinkRequest,
+) -> Result<()> {
+    if request.thread_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread compaction link create requires a non-empty thread id".to_string(),
+        ));
+    }
+    if request.memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread compaction link create requires a non-empty memory id".to_string(),
+        ));
+    }
+    if request.compaction_method.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread compaction link create requires a non-empty compaction method"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_thread_compacted_memory_request(
     request: &KnowledgeThreadCompactedMemoryListRequest,
 ) -> Result<()> {
@@ -24136,6 +24275,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadCompactedMemoryListRequest,
     ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
         self.db.knowledge_thread_compacted_memories(request)
+    }
+
+    pub fn create_knowledge_thread_compaction_link(
+        &mut self,
+        request: &KnowledgeThreadCompactionLinkRequest,
+    ) -> Result<KnowledgeThreadCompactionLinkOutput> {
+        self.db.create_knowledge_thread_compaction_link(request)
     }
 
     pub fn knowledge_memory_compacting_threads(
