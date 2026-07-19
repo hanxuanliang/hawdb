@@ -1696,6 +1696,29 @@ pub struct KnowledgeMemoryListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryPrefixOwnershipRequest {
+    pub prefix: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryPrefixOwnershipRow {
+    pub memory_id: String,
+    pub memory_node_id: u64,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryPrefixOwnershipOutput {
+    pub graph_commit_epoch: u64,
+    pub prefix: String,
+    pub rows: Vec<KnowledgeMemoryPrefixOwnershipRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryTitleContentRequest {
     pub memory_ids: Vec<String>,
 }
@@ -6358,6 +6381,13 @@ impl Database {
         knowledge_memories_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_prefix_ownership(
+        &self,
+        request: &KnowledgeMemoryPrefixOwnershipRequest,
+    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
+        knowledge_memory_prefix_ownership_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_memory_title_contents(
         &self,
         request: &KnowledgeMemoryTitleContentRequest,
@@ -9861,6 +9891,62 @@ fn knowledge_memory_list_row(memory: &NodeRecord) -> KnowledgeMemoryListRow {
         event_start: memory.properties.get("event_start").cloned(),
         event_end: memory.properties.get("event_end").cloned(),
     }
+}
+
+fn knowledge_memory_prefix_ownership_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryPrefixOwnershipRequest,
+) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
+    if request.prefix.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory prefix ownership requires a non-empty prefix".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryPrefixOwnershipOutput {
+            graph_commit_epoch,
+            prefix: request.prefix.clone(),
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = store
+        .scan_nodes(Some(memory_label_id))
+        .filter_map(|memory| {
+            let memory_id = node_external_id(memory)?;
+            memory_id
+                .starts_with(&request.prefix)
+                .then(|| KnowledgeMemoryPrefixOwnershipRow {
+                    memory_id,
+                    memory_node_id: memory.id.0,
+                    raw_space_id: memory.properties.get("space_id").map(value_to_external_id),
+                    normalized_space_id: normalized_node_space_id(memory),
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.memory_id
+            .cmp(&right.memory_id)
+            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
+    });
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryPrefixOwnershipOutput {
+        graph_commit_epoch,
+        prefix: request.prefix.clone(),
+        rows,
+        matched_count,
+        returned_count,
+    })
 }
 
 fn knowledge_memory_title_contents_for(
@@ -25795,6 +25881,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memories(request)
     }
 
+    pub fn knowledge_memory_prefix_ownership(
+        &self,
+        request: &KnowledgeMemoryPrefixOwnershipRequest,
+    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
+        self.db.knowledge_memory_prefix_ownership(request)
+    }
+
     pub fn knowledge_memory_title_contents(
         &self,
         request: &KnowledgeMemoryTitleContentRequest,
@@ -27161,6 +27254,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
         knowledge_related_entity_names_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_prefix_ownership(
+        &self,
+        request: &KnowledgeMemoryPrefixOwnershipRequest,
+    ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
+        knowledge_memory_prefix_ownership_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_memory_title_contents(

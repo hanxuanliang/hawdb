@@ -368,6 +368,12 @@ rule, unit-type/latest/crystal filters, created-at or score ordering, and
 bounded limits. It returns Memory title/content/metadata/lifecycle/review/
 space/timestamp/source/rank fields, reports missing ids and the graph commit
 epoch, rejects unbounded scans without filters, and does not write WAL.
+Memory prefix ownership guard reads are covered by
+`Database::knowledge_memory_prefix_ownership`. The typed read covers the MCP
+skill-memory guard shape `MATCH (m:Memory) WHERE m.id STARTS WITH $p RETURN
+m.id, m.space_id LIMIT n`, requires a non-empty prefix, returns raw and
+normalized `space_id` values, supports pinned read snapshots, and does not write
+WAL.
 Memory title/content id-list reads are covered by
 `Database::knowledge_memory_title_contents`. The typed read accepts Memory ids,
 returns title/content rows ordered by `created_at` ascending for the REST Skills
