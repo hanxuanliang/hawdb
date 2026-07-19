@@ -204,7 +204,10 @@ stamping. Thread denormalized message-count refreshes are exposed as a typed
 batch for Nowledge `message_count` writes with optional timestamp stamping and
 preserve-newer `updated_at` behavior. ThreadIdentity exact-id resolution is exposed as a typed
 `knowledge_thread_identity` API for Nowledge legacy identity lookup without
-WAL writes. Thread sync metadata reads are exposed as a typed
+WAL writes. ThreadIdentity compensation and cascade cleanup are exposed as a
+typed `delete_knowledge_thread_identities` API for exact identity-key deletes
+and the Nowledge `public_thread_id`/`input_thread_id`/`thread_uuid` cascade
+shape. Thread sync metadata reads are exposed as a typed
 `knowledge_thread_sync_metadata` API for exact physical Thread ids and
 Cypher-compatible `COALESCE` fallbacks without WAL writes. Distinct Thread
 source listing is exposed as a typed `knowledge_thread_sources` API for REST FS

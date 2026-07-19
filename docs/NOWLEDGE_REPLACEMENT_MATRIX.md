@@ -428,6 +428,14 @@ Nowledge `message_count` refreshes with optional `updated_at` stamping and
 ids and non-negative counts before WAL, keeps newer existing timestamps when
 requested, reports missing, idless, and duplicate rows without writing, and
 commits eligible Thread rows through one grouped WAL batch.
+ThreadIdentity compensation and cascade deletes are covered by
+`Database::delete_knowledge_thread_identities`. The typed facade validates
+exactly one delete mode before WAL, supports the exact
+`MATCH (ti:ThreadIdentity {id}) DETACH DELETE ti` compensation shape and the
+Nowledge cascade predicate over `public_thread_id`, `input_thread_id`, and
+`thread_uuid`, reports matched/deleted identity counts plus deleted node ids,
+deduplicates overlapping cascade matches, keeps missing cleanup read-only, and
+routes eligible deletes through the WAL-backed Cypher mutation path.
 Thread ordered message reads are covered by
 `Database::knowledge_thread_messages`. The typed read resolves one Thread id,
 scans outgoing `CONTAINS` Message edges, returns Message id/role/content/order

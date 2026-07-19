@@ -3353,6 +3353,28 @@ pub struct KnowledgeThreadIdentityOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadIdentityCascadeDeleteKeys {
+    pub public_thread_id: String,
+    pub input_thread_id: String,
+    pub thread_uuid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadIdentityDeleteRequest {
+    pub identity_key: Option<String>,
+    pub cascade_keys: Option<KnowledgeThreadIdentityCascadeDeleteKeys>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadIdentityDeleteOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub matched_identity_count: usize,
+    pub deleted_identity_count: usize,
+    pub deleted_node_ids: Vec<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadSyncMetadataRequest {
     pub id: String,
 }
@@ -6373,6 +6395,13 @@ impl Database {
         request: &KnowledgeThreadIdentityRequest,
     ) -> Result<KnowledgeThreadIdentityOutput> {
         knowledge_thread_identity_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn delete_knowledge_thread_identities(
+        &mut self,
+        request: &KnowledgeThreadIdentityDeleteRequest,
+    ) -> Result<KnowledgeThreadIdentityDeleteOutput> {
+        delete_knowledge_thread_identities_for(self, request)
     }
 
     pub fn knowledge_thread_sync_metadata(
@@ -15716,6 +15745,128 @@ fn validate_knowledge_thread_identity_request(
     Ok(())
 }
 
+fn delete_knowledge_thread_identities_for(
+    db: &mut Database,
+    request: &KnowledgeThreadIdentityDeleteRequest,
+) -> Result<KnowledgeThreadIdentityDeleteOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_thread_identity_delete_request(request)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let deleted_node_ids = thread_identity_delete_candidates(&db.catalog, &db.store, request)
+        .into_iter()
+        .map(|node| node.id.0)
+        .collect::<Vec<_>>();
+    let matched_identity_count = deleted_node_ids.len();
+
+    if deleted_node_ids.is_empty() {
+        return Ok(KnowledgeThreadIdentityDeleteOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            matched_identity_count: 0,
+            deleted_identity_count: 0,
+            deleted_node_ids,
+        });
+    }
+
+    match (&request.identity_key, &request.cascade_keys) {
+        (Some(identity_key), None) => {
+            db.query_with_params(
+                "MATCH (ti:ThreadIdentity {id: $identity_key}) DETACH DELETE ti",
+                &BTreeMap::from([(
+                    "identity_key".to_string(),
+                    Value::String(identity_key.clone()),
+                )]),
+            )?;
+        }
+        (None, Some(keys)) => {
+            db.query_with_params(
+                "MATCH (ti:ThreadIdentity) WHERE ti.id = $public_thread_id OR ti.id = $input_thread_id OR ti.thread_node_id = $thread_uuid DETACH DELETE ti",
+                &BTreeMap::from([
+                    (
+                        "public_thread_id".to_string(),
+                        Value::String(keys.public_thread_id.clone()),
+                    ),
+                    (
+                        "input_thread_id".to_string(),
+                        Value::String(keys.input_thread_id.clone()),
+                    ),
+                    (
+                        "thread_uuid".to_string(),
+                        Value::String(keys.thread_uuid.clone()),
+                    ),
+                ]),
+            )?;
+        }
+        _ => unreachable!("thread identity delete request was validated"),
+    }
+
+    Ok(KnowledgeThreadIdentityDeleteOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        matched_identity_count,
+        deleted_identity_count: deleted_node_ids.len(),
+        deleted_node_ids,
+    })
+}
+
+fn validate_knowledge_thread_identity_delete_request(
+    request: &KnowledgeThreadIdentityDeleteRequest,
+) -> Result<()> {
+    match (&request.identity_key, &request.cascade_keys) {
+        (Some(identity_key), None) if !identity_key.is_empty() => Ok(()),
+        (Some(_), None) => Err(SkeinError::Semantic(
+            "knowledge thread identity delete requires a non-empty identity key".to_string(),
+        )),
+        (None, Some(keys))
+            if !keys.public_thread_id.is_empty()
+                && !keys.input_thread_id.is_empty()
+                && !keys.thread_uuid.is_empty() =>
+        {
+            Ok(())
+        }
+        (None, Some(_)) => Err(SkeinError::Semantic(
+            "knowledge thread identity cascade delete requires non-empty cascade keys".to_string(),
+        )),
+        _ => Err(SkeinError::Semantic(
+            "knowledge thread identity delete requires exactly one delete mode".to_string(),
+        )),
+    }
+}
+
+fn thread_identity_delete_candidates<'a>(
+    catalog: &'a Catalog,
+    store: &'a GraphStore,
+    request: &KnowledgeThreadIdentityDeleteRequest,
+) -> Vec<&'a NodeRecord> {
+    match (&request.identity_key, &request.cascade_keys) {
+        (Some(identity_key), None) => {
+            seed_node_by_label_and_external_id(catalog, store, "ThreadIdentity", identity_key)
+                .into_iter()
+                .collect()
+        }
+        (None, Some(keys)) => {
+            let Some(label_id) = catalog.label_id("ThreadIdentity") else {
+                return Vec::new();
+            };
+            let mut seen = BTreeSet::new();
+            let mut matched = store
+                .scan_nodes(Some(label_id))
+                .filter(|node| {
+                    node_external_id(node).as_deref() == Some(keys.public_thread_id.as_str())
+                        || node_external_id(node).as_deref() == Some(keys.input_thread_id.as_str())
+                        || string_property(node, "thread_node_id").as_deref()
+                            == Some(keys.thread_uuid.as_str())
+                })
+                .filter(|node| seen.insert(node.id))
+                .collect::<Vec<_>>();
+            matched.sort_by_key(|node| node.id.0);
+            matched
+        }
+        _ => Vec::new(),
+    }
+}
+
 fn knowledge_thread_sync_metadata_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -23957,6 +24108,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadIdentityRequest,
     ) -> Result<KnowledgeThreadIdentityOutput> {
         self.db.knowledge_thread_identity(request)
+    }
+
+    pub fn delete_knowledge_thread_identities(
+        &mut self,
+        request: &KnowledgeThreadIdentityDeleteRequest,
+    ) -> Result<KnowledgeThreadIdentityDeleteOutput> {
+        self.db.delete_knowledge_thread_identities(request)
     }
 
     pub fn knowledge_thread_sync_metadata(

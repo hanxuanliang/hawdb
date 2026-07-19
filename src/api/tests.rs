@@ -77,6 +77,7 @@ use super::{
     KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
     KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
+    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
     KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
     KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
     KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
@@ -12843,6 +12844,196 @@ fn thread_identity_read_rejects_empty_key() {
         })
         .unwrap_err();
     assert!(error.to_string().contains("non-empty identity key"));
+}
+
+#[test]
+fn deletes_thread_identities_for_nowledge_compensation_and_cascade_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_compensation', thread_node_id: 'thread_a', thread_id: 'logical_a'})")
+        .unwrap();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_public', thread_node_id: 'thread_other_1', thread_id: 'logical_public'})")
+        .unwrap();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_input', thread_node_id: 'thread_other_2', thread_id: 'logical_input'})")
+        .unwrap();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_by_node', thread_node_id: 'thread_uuid', thread_id: 'logical_node'})")
+        .unwrap();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_duplicate', thread_node_id: 'thread_uuid', thread_id: 'logical_duplicate'})")
+        .unwrap();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_survivor', thread_node_id: 'survivor_uuid', thread_id: 'logical_survivor'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let compensation = db
+        .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: Some("identity_compensation".to_string()),
+            cascade_keys: None,
+        })
+        .unwrap();
+    assert_eq!(
+        compensation.graph_commit_epoch_before,
+        graph_commit_epoch_before
+    );
+    assert_eq!(
+        compensation.graph_commit_epoch_after,
+        graph_commit_epoch_before + 1
+    );
+    assert_eq!(compensation.matched_identity_count, 1);
+    assert_eq!(compensation.deleted_identity_count, 1);
+    assert_eq!(compensation.deleted_node_ids.len(), 1);
+
+    let cascade = db
+        .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: None,
+            cascade_keys: Some(KnowledgeThreadIdentityCascadeDeleteKeys {
+                public_thread_id: "identity_public".to_string(),
+                input_thread_id: "identity_input".to_string(),
+                thread_uuid: "thread_uuid".to_string(),
+            }),
+        })
+        .unwrap();
+    assert_eq!(
+        cascade.graph_commit_epoch_before,
+        compensation.graph_commit_epoch_after
+    );
+    assert_eq!(
+        cascade.graph_commit_epoch_after,
+        compensation.graph_commit_epoch_after + 1
+    );
+    assert_eq!(cascade.matched_identity_count, 4);
+    assert_eq!(cascade.deleted_identity_count, 4);
+    assert_eq!(cascade.deleted_node_ids.len(), 4);
+
+    for identity_key in [
+        "identity_compensation",
+        "identity_public",
+        "identity_input",
+        "identity_by_node",
+        "identity_duplicate",
+    ] {
+        assert!(
+            !db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+                identity_key: identity_key.to_string(),
+            })
+            .unwrap()
+            .found_identity
+        );
+    }
+    assert!(
+        db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+            identity_key: "identity_survivor".to_string(),
+        })
+        .unwrap()
+        .found_identity
+    );
+
+    let missing = db
+        .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: Some("missing".to_string()),
+            cascade_keys: None,
+        })
+        .unwrap();
+    assert_eq!(missing.matched_identity_count, 0);
+    assert_eq!(missing.deleted_identity_count, 0);
+    assert_eq!(
+        missing.graph_commit_epoch_after,
+        cascade.graph_commit_epoch_after
+    );
+}
+
+#[test]
+fn thread_identity_delete_rejects_invalid_modes_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_1'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let empty_identity = db
+        .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: Some(String::new()),
+            cascade_keys: None,
+        })
+        .unwrap_err();
+    assert!(empty_identity
+        .to_string()
+        .contains("non-empty identity key"));
+
+    let empty_cascade = db
+        .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: None,
+            cascade_keys: Some(KnowledgeThreadIdentityCascadeDeleteKeys {
+                public_thread_id: "public".to_string(),
+                input_thread_id: String::new(),
+                thread_uuid: "thread".to_string(),
+            }),
+        })
+        .unwrap_err();
+    assert!(empty_cascade.to_string().contains("non-empty cascade keys"));
+
+    let no_mode = db
+        .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: None,
+            cascade_keys: None,
+        })
+        .unwrap_err();
+    assert!(no_mode.to_string().contains("exactly one delete mode"));
+
+    let both_modes = db
+        .delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: Some("identity_1".to_string()),
+            cascade_keys: Some(KnowledgeThreadIdentityCascadeDeleteKeys {
+                public_thread_id: "public".to_string(),
+                input_thread_id: "input".to_string(),
+                thread_uuid: "thread".to_string(),
+            }),
+        })
+        .unwrap_err();
+    assert!(both_modes.to_string().contains("exactly one delete mode"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_thread_identity_delete_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_thread_identity_delete_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:ThreadIdentity {id: 'identity_public', thread_node_id: 'thread_other', thread_id: 'logical_public'})")
+            .unwrap();
+        db.query("CREATE (:ThreadIdentity {id: 'identity_by_node', thread_node_id: 'thread_uuid', thread_id: 'logical_node'})")
+            .unwrap();
+        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.delete_knowledge_thread_identities(&KnowledgeThreadIdentityDeleteRequest {
+            identity_key: None,
+            cascade_keys: Some(KnowledgeThreadIdentityCascadeDeleteKeys {
+                public_thread_id: "identity_public".to_string(),
+                input_thread_id: "missing_input".to_string(),
+                thread_uuid: "thread_uuid".to_string(),
+            }),
+        })
+        .unwrap();
+        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("delete_node"));
+    {
+        let db = Database::open(&path).unwrap();
+        for identity_key in ["identity_public", "identity_by_node"] {
+            assert!(
+                !db.knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+                    identity_key: identity_key.to_string(),
+                })
+                .unwrap()
+                .found_identity
+            );
+        }
+    }
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]
