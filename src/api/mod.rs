@@ -2225,6 +2225,34 @@ pub struct KnowledgeMemoryContentBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDedupReviewedBatchRequest {
+    pub memory_ids: Vec<String>,
+    pub reviewed_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDedupReviewedBatchRow {
+    pub memory_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDedupReviewedBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeMemoryDedupReviewedBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceMemoryCountAdjustment {
     pub source_id: String,
     pub delta: i64,
@@ -5832,6 +5860,13 @@ impl Database {
         request: &KnowledgeMemoryContentBatchRequest,
     ) -> Result<KnowledgeMemoryContentBatchOutput> {
         update_knowledge_memory_content_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_memory_dedup_reviewed_batch(
+        &mut self,
+        request: &KnowledgeMemoryDedupReviewedBatchRequest,
+    ) -> Result<KnowledgeMemoryDedupReviewedBatchOutput> {
+        update_knowledge_memory_dedup_reviewed_batch_for(self, request)
     }
 
     pub fn adjust_knowledge_source_memory_count_batch(
@@ -11289,6 +11324,115 @@ fn memory_content_assignments(update: &KnowledgeMemoryContentUpdate) -> BTreeMap
             Value::String(update.extraction_method.clone()),
         ),
     ])
+}
+
+fn update_knowledge_memory_dedup_reviewed_batch_for(
+    db: &mut Database,
+    request: &KnowledgeMemoryDedupReviewedBatchRequest,
+) -> Result<KnowledgeMemoryDedupReviewedBatchOutput> {
+    db.ensure_writable()?;
+    if request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory dedup reviewed update requires non-empty memory ids".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.memory_ids.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for memory_id in &request.memory_ids {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", memory_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeMemoryDedupReviewedBatchRow {
+                memory_id: memory_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, memory_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeMemoryDedupReviewedBatchRow {
+                memory_id: memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeMemoryDedupReviewedBatchRow {
+                memory_id: memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+            });
+            continue;
+        }
+
+        matched_count += 1;
+        eligible_updates.push((
+            node_id,
+            BTreeMap::from([("dedup_reviewed_at".to_string(), request.reviewed_at.clone())]),
+        ));
+        rows.push(KnowledgeMemoryDedupReviewedBatchRow {
+            memory_id: memory_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeMemoryDedupReviewedBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Memory", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeMemoryDedupReviewedBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count: eligible_updates.len(),
+    })
 }
 
 fn adjust_knowledge_source_memory_count_batch_for(
@@ -22437,6 +22581,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryContentBatchRequest,
     ) -> Result<KnowledgeMemoryContentBatchOutput> {
         self.db.update_knowledge_memory_content_batch(request)
+    }
+
+    pub fn update_knowledge_memory_dedup_reviewed_batch(
+        &mut self,
+        request: &KnowledgeMemoryDedupReviewedBatchRequest,
+    ) -> Result<KnowledgeMemoryDedupReviewedBatchOutput> {
+        self.db
+            .update_knowledge_memory_dedup_reviewed_batch(request)
     }
 
     pub fn adjust_knowledge_source_memory_count_batch(

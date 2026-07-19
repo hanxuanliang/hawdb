@@ -160,6 +160,8 @@ detail/count/id-list reads, and grouped WAL commits for eligible lifecycle rows.
 Memory content/edit updates are exposed as a typed batch for Nowledge content,
 title, semantic field, scoring, source, normalized-space, review status,
 extraction method, and `reindex_needed` writes.
+Scheduler dedup-reviewed updates are exposed as a typed Memory id-list batch
+for `dedup_reviewed_at` stamping.
 MCP crystal source-link merges are exposed as a typed
 `merge_knowledge_crystal_source` API for
 `(:Memory)-[:SYNTHESIZED_FROM]->(:Memory)` writes with caller-provided `weight`

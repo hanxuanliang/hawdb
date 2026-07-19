@@ -164,6 +164,12 @@ confidence, unit type, source, source range, space, `updated_at`,
 non-empty Memory ids plus numeric finite scoring fields before WAL, reports
 missing/idless/duplicate rows without writing those rows, and commits eligible
 Memory updates through one grouped WAL batch.
+Scheduler dedup-reviewed writes are covered by
+`Database::update_knowledge_memory_dedup_reviewed_batch` for the Nowledge
+`MATCH (m:Memory) WHERE m.id IN $ids SET m.dedup_reviewed_at = $reviewed_at`
+shape. The wrapper validates non-empty Memory ids before WAL, reports
+missing/idless/duplicate rows without writing those rows, and commits eligible
+Memory timestamp stamps through one grouped WAL batch.
 Source provenance count writes are covered by a typed Source memory-count
 adjustment batch for Nowledge `memory_count + 1` and floor-to-zero decrement
 paths. The wrapper validates non-empty Source ids and non-zero deltas before
