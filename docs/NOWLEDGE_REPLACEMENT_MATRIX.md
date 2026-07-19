@@ -871,5 +871,6 @@ reasons.
    background-maintenance evidence.
 7. Continue the chryso-style crate split beyond the current `core`, `cypher`,
    `optimizer`, `plan-cache`, `qos`, and `api-types` crates. `api-types`
-   should keep DTO-only contracts that depend on `skein-core`; execution logic
+   should keep DTO-only contracts that depend on `skein-core`, including the
+   scheduler Memory and Memory evolution/crystal contracts; execution logic
    should move only when the dependency direction is acyclic and stable.
