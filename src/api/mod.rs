@@ -2900,6 +2900,30 @@ pub struct KnowledgeSkillLifecycleBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillDeleteBatchRequest {
+    pub skill_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillDeleteBatchRow {
+    pub skill_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillDeleteBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSkillDeleteBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub non_writable_count: usize,
+    pub deleted_node_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeSkillMemoryListOrder {
     CreatedAtAsc,
@@ -6197,6 +6221,13 @@ impl Database {
         request: &KnowledgeSkillLifecycleBatchRequest,
     ) -> Result<KnowledgeSkillLifecycleBatchOutput> {
         update_knowledge_skill_lifecycle_batch_for(self, request)
+    }
+
+    pub fn delete_knowledge_skills(
+        &mut self,
+        request: &KnowledgeSkillDeleteBatchRequest,
+    ) -> Result<KnowledgeSkillDeleteBatchOutput> {
+        delete_knowledge_skills_for(self, request)
     }
 
     pub fn knowledge_skill_memories(
@@ -12666,6 +12697,46 @@ fn delete_knowledge_sources_for(
             .into_iter()
             .map(|row| KnowledgeSourceDeleteBatchRow {
                 source_id: row.external_id,
+                node_id: row.node_id,
+                matched: row.matched,
+                non_writable: row.non_writable,
+            })
+            .collect(),
+        matched_count: output.matched_count,
+        missing_count: output.missing_count,
+        non_writable_count: output.non_writable_count,
+        deleted_node_count: output.deleted_node_count,
+    })
+}
+
+fn delete_knowledge_skills_for(
+    db: &mut Database,
+    request: &KnowledgeSkillDeleteBatchRequest,
+) -> Result<KnowledgeSkillDeleteBatchOutput> {
+    for skill_id in &request.skill_ids {
+        if skill_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge skill delete requires a non-empty skill id".to_string(),
+            ));
+        }
+    }
+
+    let output = delete_knowledge_entity_batch_for(
+        db,
+        &KnowledgeEntityDeleteBatchRequest {
+            label: "Skill".to_string(),
+            external_ids: request.skill_ids.clone(),
+        },
+    )?;
+
+    Ok(KnowledgeSkillDeleteBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeSkillDeleteBatchRow {
+                skill_id: row.external_id,
                 node_id: row.node_id,
                 matched: row.matched,
                 non_writable: row.non_writable,
@@ -23614,6 +23685,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSkillLifecycleBatchRequest,
     ) -> Result<KnowledgeSkillLifecycleBatchOutput> {
         self.db.update_knowledge_skill_lifecycle_batch(request)
+    }
+
+    pub fn delete_knowledge_skills(
+        &mut self,
+        request: &KnowledgeSkillDeleteBatchRequest,
+    ) -> Result<KnowledgeSkillDeleteBatchOutput> {
+        self.db.delete_knowledge_skills(request)
     }
 
     pub fn knowledge_skill_memories(

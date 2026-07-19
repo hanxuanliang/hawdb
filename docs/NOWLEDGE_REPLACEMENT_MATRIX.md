@@ -403,6 +403,12 @@ follows `SYNTHESIZED_FROM` evidence Memory nodes and incoming `COMPACTS_TO`
 Thread nodes, de-duplicates repeated Memory/Thread pairs, returns Thread
 title/source rows with stable ordering, supports pinned read snapshots, and
 does not write WAL.
+Skill detach deletes are covered by `Database::delete_knowledge_skills` for
+Nowledge Skill rollback and cleanup paths. This Skill-specific business facade
+validates Skill ids before WAL, reuses the typed entity `DETACH DELETE` path
+with the fixed `Skill` label, reports missing and idless rows without writing,
+cascades `SYNTHESIZED_FROM` evidence relationships through storage/WAL, and
+commits eligible Skill node deletes through one grouped WAL batch.
 Thread metadata writes are covered by a typed batch for Nowledge `metadata`
 updates with optional `updated_at` stamping. The wrapper validates Thread ids
 before WAL, reports missing, idless, and duplicate rows without writing, keeps
