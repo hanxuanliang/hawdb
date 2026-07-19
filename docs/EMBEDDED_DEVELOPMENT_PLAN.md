@@ -555,6 +555,12 @@ cached decay score, metadata, latest flag, and lifecycle state. The read keeps
 the default projection to this production field set, accepts explicit
 additional property names for future field growth, supports pinned read
 snapshots, and does not write WAL.
+Memory decay refresh writes are available as
+`Database::update_knowledge_memory_decay_refresh_batch`, covering the decay
+scheduler's exact-id score-only and score-plus-confidence update shapes. The
+typed write validates Memory ids and finite numeric decay/confidence values
+before WAL, reports missing, idless, and duplicate rows without writing those
+rows, and commits eligible updates through one grouped WAL batch.
 Memory cleanup fingerprint reads are available as
 `Database::knowledge_memory_cleanup_fingerprints`, covering the cleanup
 scheduler's bounded `m.id IN $ids` row fetch for metadata, lifecycle,

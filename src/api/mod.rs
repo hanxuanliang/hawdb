@@ -2523,6 +2523,42 @@ pub struct KnowledgeMemoryDedupReviewedBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDecayRefreshUpdate {
+    pub memory_id: String,
+    pub decay_score_cached: Value,
+    pub confidence: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDecayRefreshBatchRequest {
+    pub updates: Vec<KnowledgeMemoryDecayRefreshUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDecayRefreshBatchRow {
+    pub memory_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDecayRefreshBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeMemoryDecayRefreshBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceMemoryCountAdjustment {
     pub source_id: String,
     pub delta: i64,
@@ -7055,6 +7091,13 @@ impl Database {
         request: &KnowledgeMemoryDedupReviewedBatchRequest,
     ) -> Result<KnowledgeMemoryDedupReviewedBatchOutput> {
         update_knowledge_memory_dedup_reviewed_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_memory_decay_refresh_batch(
+        &mut self,
+        request: &KnowledgeMemoryDecayRefreshBatchRequest,
+    ) -> Result<KnowledgeMemoryDecayRefreshBatchOutput> {
+        update_knowledge_memory_decay_refresh_batch_for(self, request)
     }
 
     pub fn adjust_knowledge_source_memory_count_batch(
@@ -14181,6 +14224,156 @@ fn update_knowledge_memory_dedup_reviewed_batch_for(
         non_writable_count,
         updated_count: eligible_updates.len(),
     })
+}
+
+fn update_knowledge_memory_decay_refresh_batch_for(
+    db: &mut Database,
+    request: &KnowledgeMemoryDecayRefreshBatchRequest,
+) -> Result<KnowledgeMemoryDecayRefreshBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        validate_knowledge_memory_decay_refresh_update(update)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeMemoryDecayRefreshBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeMemoryDecayRefreshBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeMemoryDecayRefreshBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let assignments = memory_decay_refresh_assignments(update);
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeMemoryDecayRefreshBatchRow {
+            memory_id: update.memory_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeMemoryDecayRefreshBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Memory", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeMemoryDecayRefreshBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
+}
+
+fn validate_knowledge_memory_decay_refresh_update(
+    update: &KnowledgeMemoryDecayRefreshUpdate,
+) -> Result<()> {
+    if update.memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory decay refresh update requires a non-empty memory id".to_string(),
+        ));
+    }
+    validate_finite_numeric_value(
+        &update.decay_score_cached,
+        "knowledge memory decay refresh update requires numeric finite decay score",
+    )?;
+    if let Some(confidence) = &update.confidence {
+        validate_finite_numeric_value(
+            confidence,
+            "knowledge memory decay refresh update requires numeric finite confidence",
+        )?;
+    }
+    Ok(())
+}
+
+fn memory_decay_refresh_assignments(
+    update: &KnowledgeMemoryDecayRefreshUpdate,
+) -> BTreeMap<String, Value> {
+    let mut assignments = BTreeMap::from([(
+        "decay_score_cached".to_string(),
+        update.decay_score_cached.clone(),
+    )]);
+    if let Some(confidence) = &update.confidence {
+        assignments.insert("confidence".to_string(), confidence.clone());
+    }
+    assignments
 }
 
 fn adjust_knowledge_source_memory_count_batch_for(
@@ -28662,6 +28855,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
     ) -> Result<KnowledgeMemoryDedupReviewedBatchOutput> {
         self.db
             .update_knowledge_memory_dedup_reviewed_batch(request)
+    }
+
+    pub fn update_knowledge_memory_decay_refresh_batch(
+        &mut self,
+        request: &KnowledgeMemoryDecayRefreshBatchRequest,
+    ) -> Result<KnowledgeMemoryDecayRefreshBatchOutput> {
+        self.db.update_knowledge_memory_decay_refresh_batch(request)
     }
 
     pub fn adjust_knowledge_source_memory_count_batch(

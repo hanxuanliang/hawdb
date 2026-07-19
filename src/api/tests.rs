@@ -34,7 +34,8 @@ use super::{
     KnowledgeMemoryCleanupFingerprintRequest, KnowledgeMemoryCompactingThreadListRequest,
     KnowledgeMemoryCompactingThreadProjectedListRequest, KnowledgeMemoryContentBatchRequest,
     KnowledgeMemoryContentUpdate, KnowledgeMemoryCrystalSynthesisCountRequest,
-    KnowledgeMemoryDecayDetailRequest, KnowledgeMemoryDedupReviewedBatchRequest,
+    KnowledgeMemoryDecayDetailRequest, KnowledgeMemoryDecayRefreshBatchRequest,
+    KnowledgeMemoryDecayRefreshUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
     KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
     KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
@@ -8781,6 +8782,225 @@ fn typed_memory_dedup_reviewed_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("dedup_reviewed_at"),
             Some(&Some(Value::String("2026-07-19T18:00:00Z".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn updates_memory_decay_refresh_batch_for_scheduler_shapes() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'decay-refresh-memory-1', decay_score_cached: 1.0, confidence: 0.1})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'decay-refresh-memory-2', decay_score_cached: 1.0})")
+        .unwrap();
+    db.query("CREATE (:Memory {title: 'Idless memory'})")
+        .unwrap();
+    let idless = db
+        .query("MATCH (m:Memory) WHERE m.title = 'Idless memory' RETURN id(m) AS id")
+        .unwrap();
+    let idless_memory_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let output = db
+        .update_knowledge_memory_decay_refresh_batch(&KnowledgeMemoryDecayRefreshBatchRequest {
+            updates: vec![
+                KnowledgeMemoryDecayRefreshUpdate {
+                    memory_id: "decay-refresh-memory-1".to_string(),
+                    decay_score_cached: Value::Float(0.42),
+                    confidence: Some(Value::Float(0.77)),
+                },
+                KnowledgeMemoryDecayRefreshUpdate {
+                    memory_id: "decay-refresh-memory-2".to_string(),
+                    decay_score_cached: Value::Float(0.31),
+                    confidence: None,
+                },
+                KnowledgeMemoryDecayRefreshUpdate {
+                    memory_id: "missing".to_string(),
+                    decay_score_cached: Value::Float(0.5),
+                    confidence: None,
+                },
+                KnowledgeMemoryDecayRefreshUpdate {
+                    memory_id: idless_memory_id,
+                    decay_score_cached: Value::Float(0.6),
+                    confidence: Some(Value::Float(0.6)),
+                },
+                KnowledgeMemoryDecayRefreshUpdate {
+                    memory_id: "decay-refresh-memory-1".to_string(),
+                    decay_score_cached: Value::Float(0.9),
+                    confidence: None,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, graph_commit_epoch_before);
+    assert_eq!(
+        output.graph_commit_epoch_after,
+        graph_commit_epoch_before + 1
+    );
+    assert_eq!(output.rows.len(), 5);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.non_writable_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.updated_count, 2);
+    assert_eq!(output.updated_property_count, 3);
+    assert_eq!(output.rows[0].updated_property_count, 2);
+    assert_eq!(output.rows[1].updated_property_count, 1);
+    assert!(!output.rows[2].matched);
+    assert!(output.rows[3].non_writable);
+    assert!(output.rows[4].duplicate);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "decay-refresh-memory-1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "decay-refresh-memory-2".to_string(),
+            },
+        ],
+        property_names: vec!["decay_score_cached".to_string(), "confidence".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("decay_score_cached"),
+        Some(&Some(Value::Float(0.42)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("confidence"),
+        Some(&Some(Value::Float(0.77)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("decay_score_cached"),
+        Some(&Some(Value::Float(0.31)))
+    );
+    assert_eq!(rows.rows[1].properties.get("confidence"), Some(&None));
+}
+
+#[test]
+fn memory_decay_refresh_rejects_invalid_rows_before_wal() {
+    let path = unique_test_dir("memory_decay_refresh_rejects_invalid_rows_before_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'decay-refresh-memory-1', decay_score_cached: 1.0})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let empty_id = db
+        .update_knowledge_memory_decay_refresh_batch(&KnowledgeMemoryDecayRefreshBatchRequest {
+            updates: vec![KnowledgeMemoryDecayRefreshUpdate {
+                memory_id: String::new(),
+                decay_score_cached: Value::Float(0.42),
+                confidence: None,
+            }],
+        })
+        .unwrap_err();
+    assert!(empty_id.to_string().contains("non-empty memory id"));
+
+    let invalid_decay = db
+        .update_knowledge_memory_decay_refresh_batch(&KnowledgeMemoryDecayRefreshBatchRequest {
+            updates: vec![KnowledgeMemoryDecayRefreshUpdate {
+                memory_id: "decay-refresh-memory-1".to_string(),
+                decay_score_cached: Value::String("stale".to_string()),
+                confidence: None,
+            }],
+        })
+        .unwrap_err();
+    assert!(invalid_decay
+        .to_string()
+        .contains("numeric finite decay score"));
+
+    let invalid_confidence = db
+        .update_knowledge_memory_decay_refresh_batch(&KnowledgeMemoryDecayRefreshBatchRequest {
+            updates: vec![KnowledgeMemoryDecayRefreshUpdate {
+                memory_id: "decay-refresh-memory-1".to_string(),
+                decay_score_cached: Value::Float(0.42),
+                confidence: Some(Value::String("high".to_string())),
+            }],
+        })
+        .unwrap_err();
+    assert!(invalid_confidence
+        .to_string()
+        .contains("numeric finite confidence"));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn typed_memory_decay_refresh_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_memory_decay_refresh_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'decay-refresh-memory-1', decay_score_cached: 1.0, confidence: 0.1})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'decay-refresh-memory-2', decay_score_cached: 1.0})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_memory_decay_refresh_batch(&KnowledgeMemoryDecayRefreshBatchRequest {
+            updates: vec![
+                KnowledgeMemoryDecayRefreshUpdate {
+                    memory_id: "decay-refresh-memory-1".to_string(),
+                    decay_score_cached: Value::Float(0.42),
+                    confidence: Some(Value::Float(0.77)),
+                },
+                KnowledgeMemoryDecayRefreshUpdate {
+                    memory_id: "decay-refresh-memory-2".to_string(),
+                    decay_score_cached: Value::Float(0.31),
+                    confidence: None,
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "decay-refresh-memory-1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "decay-refresh-memory-2".to_string(),
+                },
+            ],
+            property_names: vec!["decay_score_cached".to_string(), "confidence".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("decay_score_cached"),
+            Some(&Some(Value::Float(0.42)))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("confidence"),
+            Some(&Some(Value::Float(0.77)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("decay_score_cached"),
+            Some(&Some(Value::Float(0.31)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();

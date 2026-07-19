@@ -431,6 +431,12 @@ exact-id `Memory` detail shape, returns typed core fields plus a bounded
 property projection, defaults that projection to the current production columns,
 accepts explicit future property names without widening default payloads,
 supports pinned read snapshots, and does not write WAL.
+Memory decay refresh writes are covered by
+`Database::update_knowledge_memory_decay_refresh_batch`. The typed write covers
+the decay scheduler's exact-id score-only and score-plus-confidence update
+shapes, validates Memory ids and finite numeric decay/confidence values before
+WAL, reports missing, idless, and duplicate rows without writing those rows, and
+commits eligible updates through one grouped WAL batch.
 Memory cleanup fingerprint reads are covered by
 `Database::knowledge_memory_cleanup_fingerprints`. The typed read covers the
 cleanup scheduler's bounded `m.id IN $ids` row fetch for metadata, lifecycle,

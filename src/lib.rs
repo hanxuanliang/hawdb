@@ -110,6 +110,8 @@ pub use api::{
     KnowledgeMemoryCrystalSynthesisCountOutput, KnowledgeMemoryCrystalSynthesisCountRequest,
     KnowledgeMemoryCrystalSynthesisCountRow, KnowledgeMemoryDecayDetail,
     KnowledgeMemoryDecayDetailOutput, KnowledgeMemoryDecayDetailRequest,
+    KnowledgeMemoryDecayRefreshBatchOutput, KnowledgeMemoryDecayRefreshBatchRequest,
+    KnowledgeMemoryDecayRefreshBatchRow, KnowledgeMemoryDecayRefreshUpdate,
     KnowledgeMemoryDedupReviewedBatchOutput, KnowledgeMemoryDedupReviewedBatchRequest,
     KnowledgeMemoryDedupReviewedBatchRow, KnowledgeMemoryEntityGroup,
     KnowledgeMemoryEntityListOutput, KnowledgeMemoryEntityListRequest, KnowledgeMemoryEntityRow,
