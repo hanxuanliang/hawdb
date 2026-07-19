@@ -1719,6 +1719,42 @@ pub struct KnowledgeMemoryProjectedListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCleanupFingerprintRequest {
+    pub memory_ids: Vec<String>,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCleanupFingerprintRow {
+    pub memory_id: Option<String>,
+    pub node_id: u64,
+    pub title: Option<String>,
+    pub metadata: Option<Value>,
+    pub is_latest: Option<bool>,
+    pub decay_score_cached: Option<Value>,
+    pub created_at: Option<Value>,
+    pub last_accessed_at: Option<Value>,
+    pub last_clicked_at: Option<Value>,
+    pub access_count: Option<Value>,
+    pub appearances: Option<Value>,
+    pub clicks: Option<Value>,
+    pub total_dwell_time_ms: Option<Value>,
+    pub importance: Option<Value>,
+    pub unit_type: Option<String>,
+    pub semantic_field: Option<String>,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCleanupFingerprintOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryCleanupFingerprintRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryMetadataRelatedProjectedListRequest {
     pub normalized_space_id: String,
     pub source_id: String,
@@ -6783,6 +6819,13 @@ impl Database {
         knowledge_memory_projected_list_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_cleanup_fingerprints(
+        &self,
+        request: &KnowledgeMemoryCleanupFingerprintRequest,
+    ) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
+        knowledge_memory_cleanup_fingerprints_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_memory_metadata_related_projected_list(
         &self,
         request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
@@ -10381,6 +10424,129 @@ fn validate_knowledge_memory_projected_list_request(
         ));
     }
     Ok(())
+}
+
+const KNOWLEDGE_MEMORY_CLEANUP_FINGERPRINT_DEFAULT_PROPERTIES: &[&str] = &[
+    "id",
+    "title",
+    "metadata",
+    "is_latest",
+    "decay_score_cached",
+    "created_at",
+    "last_accessed_at",
+    "last_clicked_at",
+    "access_count",
+    "appearances",
+    "clicks",
+    "total_dwell_time_ms",
+    "importance",
+    "unit_type",
+    "semantic_field",
+];
+
+fn knowledge_memory_cleanup_fingerprints_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryCleanupFingerprintRequest,
+) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
+    validate_knowledge_memory_cleanup_fingerprint_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    if request.memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryCleanupFingerprintOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: Vec::new(),
+        });
+    }
+    let ordered_memory_ids = deduplicated_strings_in_order(&request.memory_ids);
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryCleanupFingerprintOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: ordered_memory_ids,
+        });
+    };
+    let requested_ids = ordered_memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let matched_memories = store
+        .scan_nodes(Some(memory_label_id))
+        .filter_map(|memory| node_external_id(memory).map(|memory_id| (memory_id, memory)))
+        .filter(|(memory_id, _memory)| requested_ids.contains(memory_id))
+        .collect::<BTreeMap<_, _>>();
+    let mut rows = Vec::with_capacity(matched_memories.len());
+    let mut missing_memory_ids = Vec::new();
+    for memory_id in ordered_memory_ids {
+        match matched_memories.get(&memory_id) {
+            Some(memory) => rows.push(knowledge_memory_cleanup_fingerprint_row(memory, request)),
+            None => missing_memory_ids.push(memory_id),
+        }
+    }
+    let matched_count = rows.len();
+    Ok(KnowledgeMemoryCleanupFingerprintOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count: matched_count,
+        missing_memory_ids,
+    })
+}
+
+fn validate_knowledge_memory_cleanup_fingerprint_request(
+    request: &KnowledgeMemoryCleanupFingerprintRequest,
+) -> Result<()> {
+    if request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory cleanup fingerprint read requires non-empty memory ids".to_string(),
+        ));
+    }
+    if request.property_names.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory cleanup fingerprint read requires non-empty property names"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_memory_cleanup_fingerprint_row(
+    memory: &NodeRecord,
+    request: &KnowledgeMemoryCleanupFingerprintRequest,
+) -> KnowledgeMemoryCleanupFingerprintRow {
+    let property_names = knowledge_memory_cleanup_fingerprint_property_names(request);
+    KnowledgeMemoryCleanupFingerprintRow {
+        memory_id: node_external_id(memory),
+        node_id: memory.id.0,
+        title: string_property(memory, "title"),
+        metadata: memory.properties.get("metadata").cloned(),
+        is_latest: boolean_property(memory, "is_latest"),
+        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
+        created_at: memory.properties.get("created_at").cloned(),
+        last_accessed_at: memory.properties.get("last_accessed_at").cloned(),
+        last_clicked_at: memory.properties.get("last_clicked_at").cloned(),
+        access_count: memory.properties.get("access_count").cloned(),
+        appearances: memory.properties.get("appearances").cloned(),
+        clicks: memory.properties.get("clicks").cloned(),
+        total_dwell_time_ms: memory.properties.get("total_dwell_time_ms").cloned(),
+        importance: memory.properties.get("importance").cloned(),
+        unit_type: string_property(memory, "unit_type"),
+        semantic_field: string_property(memory, "semantic_field"),
+        properties: projected_properties(&memory.properties, &property_names),
+    }
+}
+
+fn knowledge_memory_cleanup_fingerprint_property_names(
+    request: &KnowledgeMemoryCleanupFingerprintRequest,
+) -> Vec<String> {
+    if request.property_names.is_empty() {
+        return KNOWLEDGE_MEMORY_CLEANUP_FINGERPRINT_DEFAULT_PROPERTIES
+            .iter()
+            .map(|property_name| (*property_name).to_string())
+            .collect();
+    }
+    deduplicated_strings_in_order(&request.property_names)
 }
 
 fn knowledge_memory_metadata_related_projected_list_for(
@@ -28256,6 +28422,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_projected_list(request)
     }
 
+    pub fn knowledge_memory_cleanup_fingerprints(
+        &self,
+        request: &KnowledgeMemoryCleanupFingerprintRequest,
+    ) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
+        self.db.knowledge_memory_cleanup_fingerprints(request)
+    }
+
     pub fn knowledge_memory_metadata_related_projected_list(
         &self,
         request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
@@ -29738,6 +29911,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
     ) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
         knowledge_memory_metadata_related_projected_list_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_cleanup_fingerprints(
+        &self,
+        request: &KnowledgeMemoryCleanupFingerprintRequest,
+    ) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
+        knowledge_memory_cleanup_fingerprints_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_memory_title_contents(

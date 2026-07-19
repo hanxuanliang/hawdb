@@ -555,6 +555,14 @@ cached decay score, metadata, latest flag, and lifecycle state. The read keeps
 the default projection to this production field set, accepts explicit
 additional property names for future field growth, supports pinned read
 snapshots, and does not write WAL.
+Memory cleanup fingerprint reads are available as
+`Database::knowledge_memory_cleanup_fingerprints`, covering the cleanup
+scheduler's bounded `m.id IN $ids` row fetch for metadata, lifecycle,
+engagement, decay, importance, type, and semantic fields. The read performs one
+Memory-label scan for the requested id set, returns rows in deduplicated request
+order, keeps default projection to the production field set, accepts explicit
+additional property names for future field growth, supports pinned read
+snapshots, and does not write WAL.
 Memory EVOLVES neighbor reads are available as
 `Database::knowledge_memory_evolves_neighbors`, covering MCP outgoing/incoming
 EVOLVES adjacency reads over one anchor Memory with explicit node and

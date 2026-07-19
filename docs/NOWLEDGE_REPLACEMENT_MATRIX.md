@@ -431,6 +431,14 @@ exact-id `Memory` detail shape, returns typed core fields plus a bounded
 property projection, defaults that projection to the current production columns,
 accepts explicit future property names without widening default payloads,
 supports pinned read snapshots, and does not write WAL.
+Memory cleanup fingerprint reads are covered by
+`Database::knowledge_memory_cleanup_fingerprints`. The typed read covers the
+cleanup scheduler's bounded `m.id IN $ids` row fetch for metadata, lifecycle,
+engagement, decay, importance, type, and semantic fields, resolves requested
+ids with one Memory-label scan, returns rows in deduplicated request order,
+reports missing ids, defaults property projection to the current production
+columns, accepts explicit future property names without widening default
+payloads, supports pinned read snapshots, and does not write WAL.
 Memory EVOLVES neighbor reads are covered by
 `Database::knowledge_memory_evolves_neighbors`. The typed read covers the MCP
 outgoing and incoming `Memory-[:EVOLVES]-Memory` shapes, anchors by one physical
