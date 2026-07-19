@@ -374,6 +374,13 @@ rule, unit-type/latest/crystal filters, created-at or score ordering, and
 bounded limits. It returns Memory title/content/metadata/lifecycle/review/
 space/timestamp/source/rank fields, reports missing ids and the graph commit
 epoch, rejects unbounded scans without filters, and does not write WAL.
+Field-extensible Memory list reads are covered by
+`Database::knowledge_memory_projected_list`. The typed read reuses the same
+bounded Memory filters and ordering, but returns only caller-allowlisted Memory
+properties plus stable Memory id, node id, and normalized space id. Ordering can
+still use internal `created_at`, `pagerank_score`, or `importance` keys even
+when those fields are not projected, allowing Nowledge to add Memory fields
+without broadening the default row shape or writing WAL.
 Memory prefix ownership guard reads are covered by
 `Database::knowledge_memory_prefix_ownership`. The typed read covers the MCP
 skill-memory guard shape `MATCH (m:Memory) WHERE m.id STARTS WITH $p RETURN

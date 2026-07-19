@@ -1696,6 +1696,29 @@ pub struct KnowledgeMemoryListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryProjectedListRequest {
+    pub list: KnowledgeMemoryListRequest,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryProjectedRow {
+    pub memory_id: Option<String>,
+    pub node_id: u64,
+    pub properties: BTreeMap<String, Value>,
+    pub normalized_space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryProjectedListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryProjectedRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_external_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryPrefixOwnershipRequest {
     pub prefix: String,
     pub limit: usize,
@@ -6457,6 +6480,13 @@ impl Database {
         knowledge_memories_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_projected_list(
+        &self,
+        request: &KnowledgeMemoryProjectedListRequest,
+    ) -> Result<KnowledgeMemoryProjectedListOutput> {
+        knowledge_memory_projected_list_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_memory_prefix_ownership(
         &self,
         request: &KnowledgeMemoryPrefixOwnershipRequest,
@@ -9902,6 +9932,91 @@ fn knowledge_memories_for(
     })
 }
 
+fn knowledge_memory_projected_list_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryProjectedListRequest,
+) -> Result<KnowledgeMemoryProjectedListOutput> {
+    validate_knowledge_memory_projected_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryProjectedListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_external_ids: request.list.external_ids.clone(),
+        });
+    };
+
+    let requested_ids = request
+        .list
+        .external_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut matched_external_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| {
+            if requested_ids.is_empty() {
+                true
+            } else {
+                node_external_id(memory).is_some_and(|memory_id| requested_ids.contains(&memory_id))
+            }
+        })
+        .filter(|memory| memory_matches_memory_list(memory, &request.list))
+        .map(|memory| {
+            if let Some(memory_id) = node_external_id(memory) {
+                matched_external_ids.insert(memory_id);
+            }
+            (
+                knowledge_memory_projected_row(memory, &request.property_names),
+                memory.properties.get("created_at").cloned(),
+                memory_score_from_node(memory),
+            )
+        })
+        .collect::<Vec<_>>();
+    sort_memory_projected_rows(&mut rows, request.list.order);
+    let matched_count = rows.len();
+    if request.list.limit > 0 {
+        rows.truncate(request.list.limit);
+    }
+    let returned_count = rows.len();
+    let rows = rows
+        .into_iter()
+        .map(|(row, _created_at, _score)| row)
+        .collect::<Vec<_>>();
+
+    let mut missing_external_ids = Vec::new();
+    let mut seen_missing = BTreeSet::new();
+    for external_id in &request.list.external_ids {
+        if !matched_external_ids.contains(external_id) && seen_missing.insert(external_id.clone()) {
+            missing_external_ids.push(external_id.clone());
+        }
+    }
+
+    Ok(KnowledgeMemoryProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_external_ids,
+    })
+}
+
+fn validate_knowledge_memory_projected_list_request(
+    request: &KnowledgeMemoryProjectedListRequest,
+) -> Result<()> {
+    validate_knowledge_memory_list_request(&request.list)?;
+    if request.property_names.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory projected list requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_knowledge_memory_list_request(request: &KnowledgeMemoryListRequest) -> Result<()> {
     if request.external_ids.iter().any(String::is_empty) {
         return Err(SkeinError::Semantic(
@@ -9964,6 +10079,18 @@ fn memory_matches_memory_list(memory: &NodeRecord, request: &KnowledgeMemoryList
         && request.is_crystal.is_none_or(|is_crystal| {
             memory.properties.get("is_crystal") == Some(&Value::Bool(is_crystal))
         })
+}
+
+fn knowledge_memory_projected_row(
+    memory: &NodeRecord,
+    property_names: &[String],
+) -> KnowledgeMemoryProjectedRow {
+    KnowledgeMemoryProjectedRow {
+        memory_id: node_external_id(memory),
+        node_id: memory.id.0,
+        properties: projected_properties(&memory.properties, property_names),
+        normalized_space_id: normalized_node_space_id(memory),
+    }
 }
 
 fn knowledge_memory_list_row(memory: &NodeRecord) -> KnowledgeMemoryListRow {
@@ -10473,6 +10600,39 @@ fn compare_memory_ids(
         .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
+fn sort_memory_projected_rows(
+    rows: &mut [(KnowledgeMemoryProjectedRow, Option<Value>, Value)],
+    order: KnowledgeMemoryListOrder,
+) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeMemoryListOrder::ExternalIdAsc => compare_memory_projected_ids(&left.0, &right.0),
+        KnowledgeMemoryListOrder::CreatedAtDesc => compare_skill_memory_created_at(
+            &left.1,
+            &right.1,
+            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        )
+        .then_with(|| compare_memory_projected_ids(&left.0, &right.0)),
+        KnowledgeMemoryListOrder::ScoreDesc => compare_skill_memory_values(&right.2, &left.2)
+            .then_with(|| {
+                compare_skill_memory_created_at(
+                    &left.1,
+                    &right.1,
+                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                )
+            })
+            .then_with(|| compare_memory_projected_ids(&left.0, &right.0)),
+    });
+}
+
+fn compare_memory_projected_ids(
+    left: &KnowledgeMemoryProjectedRow,
+    right: &KnowledgeMemoryProjectedRow,
+) -> std::cmp::Ordering {
+    left.memory_id
+        .cmp(&right.memory_id)
+        .then_with(|| left.node_id.cmp(&right.node_id))
+}
+
 fn compare_memory_scores(
     left: &KnowledgeMemoryListRow,
     right: &KnowledgeMemoryListRow,
@@ -10484,6 +10644,15 @@ fn memory_score(row: &KnowledgeMemoryListRow) -> Value {
     row.pagerank_score
         .clone()
         .or_else(|| row.importance.clone())
+        .unwrap_or(Value::Float(0.5))
+}
+
+fn memory_score_from_node(memory: &NodeRecord) -> Value {
+    memory
+        .properties
+        .get("pagerank_score")
+        .cloned()
+        .or_else(|| memory.properties.get("importance").cloned())
         .unwrap_or(Value::Float(0.5))
 }
 
@@ -26370,6 +26539,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryListRequest,
     ) -> Result<KnowledgeMemoryListOutput> {
         self.db.knowledge_memories(request)
+    }
+
+    pub fn knowledge_memory_projected_list(
+        &self,
+        request: &KnowledgeMemoryProjectedListRequest,
+    ) -> Result<KnowledgeMemoryProjectedListOutput> {
+        self.db.knowledge_memory_projected_list(request)
     }
 
     pub fn knowledge_memory_prefix_ownership(

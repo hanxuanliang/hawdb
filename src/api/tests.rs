@@ -39,8 +39,9 @@ use super::{
     KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
     KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
     KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataUpdate,
-    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeMemorySourceAttributionRequest,
-    KnowledgeMemoryTitleContentRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeMemoryProjectedListRequest,
+    KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -4820,6 +4821,127 @@ fn lists_memories_for_learning_latest_and_ranked_overview_shapes() {
     assert_eq!(ranked.returned_count, 2);
     assert_eq!(ranked.rows[0].memory_id.as_deref(), Some("overview_high"));
     assert_eq!(ranked.rows[1].memory_id.as_deref(), Some("overview_mid"));
+}
+
+#[test]
+fn projects_memory_list_fields_for_nowledge_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_projected_a', title: 'Projected A', content: 'body a', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: '', created_at: 10, importance: 0.4, metadata: '{\"rank\":1}', future_field: 'future-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_projected_b', title: 'Projected B', content: 'body b', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: 'team', created_at: 20, pagerank_score: 0.9, importance: 0.1, metadata: '{\"rank\":2}', future_field: 'future-b'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_projected_crystal', title: 'Crystal', unit_type: 'fact', is_latest: true, is_crystal: true, created_at: 30, pagerank_score: 2.0})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let projected = db
+        .knowledge_memory_projected_list(&KnowledgeMemoryProjectedListRequest {
+            list: KnowledgeMemoryListRequest {
+                external_ids: Vec::new(),
+                normalized_space_id: None,
+                exclude_normalized_space_id: None,
+                unit_type: Some("fact".to_string()),
+                is_latest: Some(true),
+                is_crystal: Some(false),
+                limit: 10,
+                order: KnowledgeMemoryListOrder::ScoreDesc,
+            },
+            property_names: vec![
+                "title".to_string(),
+                "content".to_string(),
+                "metadata".to_string(),
+                "space_id".to_string(),
+                "future_field".to_string(),
+                "title".to_string(),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(projected.matched_count, 2);
+    assert_eq!(projected.returned_count, 2);
+    assert_eq!(
+        projected
+            .rows
+            .iter()
+            .map(|row| row.memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("memory_projected_b"), Some("memory_projected_a")]
+    );
+    assert_eq!(projected.rows[0].normalized_space_id, "team");
+    assert_eq!(projected.rows[1].normalized_space_id, "default");
+    assert_eq!(
+        projected.rows[0].properties.get("future_field"),
+        Some(&Value::String("future-b".to_string()))
+    );
+    assert_eq!(
+        projected.rows[0].properties.get("title"),
+        Some(&Value::String("Projected B".to_string()))
+    );
+    assert_eq!(projected.rows[0].properties.get("pagerank_score"), None);
+    assert_eq!(
+        projected.rows[1].properties.get("space_id"),
+        Some(&Value::String(String::new()))
+    );
+
+    let created_at_order = db
+        .knowledge_memory_projected_list(&KnowledgeMemoryProjectedListRequest {
+            list: KnowledgeMemoryListRequest {
+                external_ids: Vec::new(),
+                normalized_space_id: None,
+                exclude_normalized_space_id: None,
+                unit_type: Some("fact".to_string()),
+                is_latest: Some(true),
+                is_crystal: Some(false),
+                limit: 10,
+                order: KnowledgeMemoryListOrder::CreatedAtDesc,
+            },
+            property_names: vec!["title".to_string()],
+        })
+        .unwrap();
+    assert_eq!(
+        created_at_order
+            .rows
+            .iter()
+            .map(|row| row.memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("memory_projected_b"), Some("memory_projected_a")]
+    );
+    assert_eq!(created_at_order.rows[0].properties.get("created_at"), None);
+}
+
+#[test]
+fn projected_memory_list_rejects_empty_property_names_without_wal() {
+    let path = unique_test_dir("projected_memory_list_empty_property_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'memory_projected_wal', unit_type: 'fact'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .knowledge_memory_projected_list(&KnowledgeMemoryProjectedListRequest {
+            list: KnowledgeMemoryListRequest {
+                external_ids: vec!["memory_projected_wal".to_string()],
+                normalized_space_id: None,
+                exclude_normalized_space_id: None,
+                unit_type: None,
+                is_latest: None,
+                is_crystal: None,
+                limit: 10,
+                order: KnowledgeMemoryListOrder::ExternalIdAsc,
+            },
+            property_names: vec![String::new()],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
 }
 
 #[test]

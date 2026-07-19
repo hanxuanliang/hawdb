@@ -504,6 +504,11 @@ Memory bulk detail and filtered list reads are available as
 `Database::knowledge_memories`, covering id-bounded metadata/space/detail
 reads, normalized-space inclusion and exclusion, learning latest lists, and
 ranked overview lists with bounded limits and no WAL writes.
+Field-extensible Memory list reads are available as
+`Database::knowledge_memory_projected_list`, covering the same bounded Memory
+filters and ordering while projecting only caller-allowlisted Memory fields.
+Sort keys remain internal, so Nowledge can request newly added Memory fields
+without widening the default typed row or emitting WAL entries.
 Memory prefix ownership guard reads are available as
 `Database::knowledge_memory_prefix_ownership`, covering MCP skill-memory prefix
 ownership checks with raw and normalized `space_id` projection and no WAL
