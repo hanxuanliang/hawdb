@@ -315,6 +315,19 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 empty_array_path(&replacement_summary, &["blocking_categories"]),
                 empty_array_path(&replacement_summary, &["missing_evidence"]),
                 empty_array_path(&replacement_summary, &["next_actions"]),
+                bool_path(&replacement_summary, &["shadow_evidence", "ready"]) == Some(true),
+                str_path(
+                    &replacement_summary,
+                    &["shadow_evidence", "ready_wrapper_identity"],
+                ) == Some(wrapper_identity.as_str()),
+                str_path(
+                    &replacement_summary,
+                    &["shadow_evidence", "contract_wrapper_identity"],
+                ) == Some(wrapper_identity.as_str()),
+                str_path(
+                    &replacement_summary,
+                    &["shadow_evidence", "cutover_ready_wrapper_identity"],
+                ) == Some(wrapper_identity.as_str()),
                 bool_path(&replacement_summary, &["dual_engine_evidence", "present"]) == Some(true),
                 bool_path(&replacement_summary, &["dual_engine_evidence", "ready"]) == Some(true),
                 bool_path(
@@ -341,6 +354,10 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "blocking_categories",
                 "missing_evidence",
                 "next_actions",
+                "shadow_evidence.ready",
+                "shadow_evidence.ready_wrapper_identity",
+                "shadow_evidence.contract_wrapper_identity",
+                "shadow_evidence.cutover_ready_wrapper_identity",
                 "dual_engine_evidence.present",
                 "dual_engine_evidence.ready",
                 "dual_engine_evidence.consistent",
@@ -396,50 +413,257 @@ fn previous_wrapper_preflight_release_summary(
     migration_gate: &serde_json::Value,
     replacement_summary: &serde_json::Value,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "wrapper_identity": wrapper_identity,
-        "required_contract_ready": bool_path(contract_evidence, &["required_contract_ready"]),
-        "full_contract_checked": bool_path(contract_evidence, &["full_contract_checked"]),
-        "full_contract_ready": bool_path(contract_evidence, &["full_contract_ready"]),
-        "selected_checks": u64_path(contract_evidence, &["selected_checks"]),
-        "check_count": u64_path(contract_evidence, &["check_count"]),
-        "adapter_smoke_ready": bool_path(adapter_smoke, &["adapter_smoke_ready"]),
-        "adapter_request_count": u64_path(adapter_smoke, &["request_count"]),
-        "adapter_primary_only_checks": u64_path(adapter_smoke, &["primary_only_checks"]),
-        "adapter_dual_engine_ready": bool_path(adapter_smoke, &["dual_engine_evidence", "ready"]),
-        "adapter_dual_engine_counts_consistent": dual_engine_count_evidence_consistent(adapter_smoke, &["dual_engine_evidence"]),
-        "adapter_dual_engine_primary_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "primary_check_count"]),
-        "adapter_dual_engine_shadow_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "shadow_check_count"]),
-        "adapter_dual_engine_matched_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "matched_check_count"]),
-        "adapter_dual_engine_primary_only_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "primary_only_check_count"]),
-        "migration_gate_decision": str_path(migration_gate, &["migration_gate", "decision"]),
-        "cutover_decision": str_path(migration_gate, &["cutover", "decision"]),
-        "cutover_eligible": bool_path(migration_gate, &["cutover_evidence", "eligible"]),
-        "ready_engine_kind": str_path(migration_gate, &["cutover_evidence", "ready_engine_kind"]),
-        "ready_wrapper_identity": str_path(migration_gate, &["cutover_evidence", "ready_wrapper_identity"]),
-        "replacement_readiness_per_million": u64_path(migration_gate, &["replacement_readiness_per_million"])
+    let mut summary = serde_json::Map::new();
+    insert_json_value(&mut summary, "wrapper_identity", wrapper_identity);
+    insert_json_value(
+        &mut summary,
+        "required_contract_ready",
+        bool_path(contract_evidence, &["required_contract_ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "full_contract_checked",
+        bool_path(contract_evidence, &["full_contract_checked"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "full_contract_ready",
+        bool_path(contract_evidence, &["full_contract_ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "selected_checks",
+        u64_path(contract_evidence, &["selected_checks"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "check_count",
+        u64_path(contract_evidence, &["check_count"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_smoke_ready",
+        bool_path(adapter_smoke, &["adapter_smoke_ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_request_count",
+        u64_path(adapter_smoke, &["request_count"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_primary_only_checks",
+        u64_path(adapter_smoke, &["primary_only_checks"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_dual_engine_ready",
+        bool_path(adapter_smoke, &["dual_engine_evidence", "ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_dual_engine_counts_consistent",
+        dual_engine_count_evidence_consistent(adapter_smoke, &["dual_engine_evidence"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_dual_engine_primary_check_count",
+        u64_path(
+            adapter_smoke,
+            &["dual_engine_evidence", "primary_check_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_dual_engine_shadow_check_count",
+        u64_path(
+            adapter_smoke,
+            &["dual_engine_evidence", "shadow_check_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_dual_engine_matched_check_count",
+        u64_path(
+            adapter_smoke,
+            &["dual_engine_evidence", "matched_check_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "adapter_dual_engine_primary_only_check_count",
+        u64_path(
+            adapter_smoke,
+            &["dual_engine_evidence", "primary_only_check_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "migration_gate_decision",
+        str_path(migration_gate, &["migration_gate", "decision"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_decision",
+        str_path(migration_gate, &["cutover", "decision"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "cutover_eligible",
+        bool_path(migration_gate, &["cutover_evidence", "eligible"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "ready_engine_kind",
+        str_path(migration_gate, &["cutover_evidence", "ready_engine_kind"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "ready_wrapper_identity",
+        str_path(
+            migration_gate,
+            &["cutover_evidence", "ready_wrapper_identity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "replacement_readiness_per_million",
+        u64_path(migration_gate, &["replacement_readiness_per_million"])
             .or_else(|| u64_path(replacement_summary, &["replacement_readiness_per_million"])),
-        "production_cutover_ready": bool_path(replacement_summary, &["production_cutover_ready"]),
-        "production_replacement_per_million": u64_path(replacement_summary, &["production_replacement_per_million"]),
-        "storage_recovery_ready": bool_path(migration_gate, &["cutover_evidence", "storage_recovery_ready"]),
-        "background_maintenance_ready": bool_path(migration_gate, &["cutover_evidence", "background_maintenance_ready"]),
-        "background_maintenance_executable_search_projection_graph_delta_count": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_executable_search_projection_graph_delta_count"]),
-        "background_maintenance_admitted_search_projection_graph_delta_count": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_admitted_search_projection_graph_delta_count"]),
-        "background_maintenance_deferred_search_projection_graph_delta_count": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_deferred_search_projection_graph_delta_count"]),
-        "background_maintenance_rejected_search_projection_graph_delta_count": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_rejected_search_projection_graph_delta_count"]),
-        "background_maintenance_executable_search_projection_graph_delta_operations": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_executable_search_projection_graph_delta_operations"]),
-        "background_maintenance_admitted_search_projection_graph_delta_operations": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_admitted_search_projection_graph_delta_operations"]),
-        "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"]),
-        "dual_engine_evidence_present": bool_path(replacement_summary, &["dual_engine_evidence", "present"]),
-        "dual_engine_evidence_ready": bool_path(replacement_summary, &["dual_engine_evidence", "ready"]),
-        "dual_engine_evidence_consistent": bool_path(replacement_summary, &["dual_engine_evidence", "consistent"])
-            .or(Some(dual_engine_count_evidence_consistent(replacement_summary, &["dual_engine_evidence"]))),
-        "dual_engine_primary_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "primary_check_count"]),
-        "dual_engine_shadow_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "shadow_check_count"]),
-        "dual_engine_matched_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "matched_check_count"]),
-        "dual_engine_primary_only_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "primary_only_check_count"]),
-        "dual_engine_matched_per_million": u64_path(replacement_summary, &["dual_engine_evidence", "matched_per_million"]),
-    })
+    );
+    insert_json_value(
+        &mut summary,
+        "production_cutover_ready",
+        bool_path(replacement_summary, &["production_cutover_ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "production_replacement_per_million",
+        u64_path(replacement_summary, &["production_replacement_per_million"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "shadow_evidence_ready",
+        bool_path(replacement_summary, &["shadow_evidence", "ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "shadow_evidence_ready_wrapper_identity",
+        str_path(
+            replacement_summary,
+            &["shadow_evidence", "ready_wrapper_identity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "shadow_evidence_contract_wrapper_identity",
+        str_path(
+            replacement_summary,
+            &["shadow_evidence", "contract_wrapper_identity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "shadow_evidence_cutover_ready_wrapper_identity",
+        str_path(
+            replacement_summary,
+            &["shadow_evidence", "cutover_ready_wrapper_identity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "storage_recovery_ready",
+        bool_path(
+            migration_gate,
+            &["cutover_evidence", "storage_recovery_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "background_maintenance_ready",
+        bool_path(
+            migration_gate,
+            &["cutover_evidence", "background_maintenance_ready"],
+        ),
+    );
+    for (field, path) in [
+        (
+            "background_maintenance_executable_search_projection_graph_delta_count",
+            "background_maintenance_executable_search_projection_graph_delta_count",
+        ),
+        (
+            "background_maintenance_admitted_search_projection_graph_delta_count",
+            "background_maintenance_admitted_search_projection_graph_delta_count",
+        ),
+        (
+            "background_maintenance_deferred_search_projection_graph_delta_count",
+            "background_maintenance_deferred_search_projection_graph_delta_count",
+        ),
+        (
+            "background_maintenance_rejected_search_projection_graph_delta_count",
+            "background_maintenance_rejected_search_projection_graph_delta_count",
+        ),
+        (
+            "background_maintenance_executable_search_projection_graph_delta_operations",
+            "background_maintenance_executable_search_projection_graph_delta_operations",
+        ),
+        (
+            "background_maintenance_admitted_search_projection_graph_delta_operations",
+            "background_maintenance_admitted_search_projection_graph_delta_operations",
+        ),
+        (
+            "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+            "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+        ),
+    ] {
+        insert_json_value(
+            &mut summary,
+            field,
+            u64_path(replacement_summary, &["cutover_evidence", path]),
+        );
+    }
+    insert_json_value(
+        &mut summary,
+        "dual_engine_evidence_present",
+        bool_path(replacement_summary, &["dual_engine_evidence", "present"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "dual_engine_evidence_ready",
+        bool_path(replacement_summary, &["dual_engine_evidence", "ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "dual_engine_evidence_consistent",
+        bool_path(replacement_summary, &["dual_engine_evidence", "consistent"]).or(Some(
+            dual_engine_count_evidence_consistent(replacement_summary, &["dual_engine_evidence"]),
+        )),
+    );
+    for (field, path) in [
+        ("dual_engine_primary_check_count", "primary_check_count"),
+        ("dual_engine_shadow_check_count", "shadow_check_count"),
+        ("dual_engine_matched_check_count", "matched_check_count"),
+        (
+            "dual_engine_primary_only_check_count",
+            "primary_only_check_count",
+        ),
+        ("dual_engine_matched_per_million", "matched_per_million"),
+    ] {
+        insert_json_value(
+            &mut summary,
+            field,
+            u64_path(replacement_summary, &["dual_engine_evidence", path]),
+        );
+    }
+    serde_json::Value::Object(summary)
+}
+
+fn insert_json_value<T: serde::Serialize>(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    value: T,
+) {
+    object.insert(key.to_string(), serde_json::json!(value));
 }
 
 fn preflight_check(
@@ -593,51 +817,65 @@ mod tests {
         assert_eq!(report["ready"], true);
         assert_eq!(report["failed_checks"], serde_json::json!([]));
         assert_eq!(report["wrapper_identity"], "nowledge-previous-wrapper:test");
-        assert_eq!(
-            report["release_summary"],
-            serde_json::json!({
-                "wrapper_identity": "nowledge-previous-wrapper:test",
-                "required_contract_ready": true,
-                "full_contract_checked": true,
-                "full_contract_ready": true,
-                "selected_checks": 2,
-                "check_count": 2,
-                "adapter_smoke_ready": true,
-                "adapter_request_count": 4,
-                "adapter_primary_only_checks": 0,
-                "adapter_dual_engine_ready": true,
-                "adapter_dual_engine_counts_consistent": true,
-                "adapter_dual_engine_primary_check_count": 2,
-                "adapter_dual_engine_shadow_check_count": 2,
-                "adapter_dual_engine_matched_check_count": 2,
-                "adapter_dual_engine_primary_only_check_count": 0,
-                "migration_gate_decision": "ready",
-                "cutover_decision": "ready",
-                "cutover_eligible": true,
-                "ready_engine_kind": "previous_wrapper",
-                "ready_wrapper_identity": "nowledge-previous-wrapper:test",
-                "replacement_readiness_per_million": 1_000_000,
-                "production_cutover_ready": true,
-                "production_replacement_per_million": 1_000_000,
-                "storage_recovery_ready": true,
-                "background_maintenance_ready": true,
-                "background_maintenance_executable_search_projection_graph_delta_count": 2,
-                "background_maintenance_admitted_search_projection_graph_delta_count": 1,
-                "background_maintenance_deferred_search_projection_graph_delta_count": 1,
-                "background_maintenance_rejected_search_projection_graph_delta_count": 0,
-                "background_maintenance_executable_search_projection_graph_delta_operations": 8,
-                "background_maintenance_admitted_search_projection_graph_delta_operations": 3,
-                "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 42,
-                "dual_engine_evidence_present": true,
-                "dual_engine_evidence_ready": true,
-                "dual_engine_evidence_consistent": true,
-                "dual_engine_primary_check_count": 2,
-                "dual_engine_shadow_check_count": 2,
-                "dual_engine_matched_check_count": 2,
-                "dual_engine_primary_only_check_count": 0,
-                "dual_engine_matched_per_million": 1_000_000
-            })
+        let summary = &report["release_summary"];
+        assert_release_summary_field(
+            summary,
+            "wrapper_identity",
+            "nowledge-previous-wrapper:test",
         );
+        assert_release_summary_field(summary, "required_contract_ready", true);
+        assert_release_summary_field(summary, "full_contract_checked", true);
+        assert_release_summary_field(summary, "full_contract_ready", true);
+        assert_release_summary_field(summary, "selected_checks", 2);
+        assert_release_summary_field(summary, "check_count", 2);
+        assert_release_summary_field(summary, "adapter_smoke_ready", true);
+        assert_release_summary_field(summary, "adapter_dual_engine_counts_consistent", true);
+        assert_release_summary_field(summary, "migration_gate_decision", "ready");
+        assert_release_summary_field(summary, "cutover_decision", "ready");
+        assert_release_summary_field(summary, "ready_engine_kind", "previous_wrapper");
+        assert_release_summary_field(
+            summary,
+            "ready_wrapper_identity",
+            "nowledge-previous-wrapper:test",
+        );
+        assert_release_summary_field(summary, "production_cutover_ready", true);
+        assert_release_summary_field(summary, "production_replacement_per_million", 1_000_000);
+        assert_release_summary_field(summary, "shadow_evidence_ready", true);
+        assert_release_summary_field(
+            summary,
+            "shadow_evidence_ready_wrapper_identity",
+            "nowledge-previous-wrapper:test",
+        );
+        assert_release_summary_field(
+            summary,
+            "shadow_evidence_contract_wrapper_identity",
+            "nowledge-previous-wrapper:test",
+        );
+        assert_release_summary_field(
+            summary,
+            "shadow_evidence_cutover_ready_wrapper_identity",
+            "nowledge-previous-wrapper:test",
+        );
+        assert_release_summary_field(summary, "storage_recovery_ready", true);
+        assert_release_summary_field(summary, "background_maintenance_ready", true);
+        assert_release_summary_field(
+            summary,
+            "background_maintenance_executable_search_projection_graph_delta_count",
+            2,
+        );
+        assert_release_summary_field(
+            summary,
+            "background_maintenance_admitted_search_projection_graph_delta_count",
+            1,
+        );
+        assert_release_summary_field(summary, "dual_engine_evidence_present", true);
+        assert_release_summary_field(summary, "dual_engine_evidence_ready", true);
+        assert_release_summary_field(summary, "dual_engine_evidence_consistent", true);
+        assert_release_summary_field(summary, "dual_engine_primary_check_count", 2);
+        assert_release_summary_field(summary, "dual_engine_shadow_check_count", 2);
+        assert_release_summary_field(summary, "dual_engine_matched_check_count", 2);
+        assert_release_summary_field(summary, "dual_engine_primary_only_check_count", 0);
+        assert_release_summary_field(summary, "dual_engine_matched_per_million", 1_000_000);
         assert!(report["checks"]
             .as_array()
             .unwrap()
@@ -684,6 +922,10 @@ mod tests {
                 "production_replacement_per_million",
                 "blocking_categories",
                 "next_actions",
+                "shadow_evidence.ready",
+                "shadow_evidence.ready_wrapper_identity",
+                "shadow_evidence.contract_wrapper_identity",
+                "shadow_evidence.cutover_ready_wrapper_identity",
                 "dual_engine_evidence.present",
                 "dual_engine_evidence.ready",
                 "dual_engine_evidence.consistent",
@@ -729,6 +971,12 @@ mod tests {
             "blocking_categories": [],
             "missing_evidence": [],
             "next_actions": [],
+            "shadow_evidence": {
+                "ready": true,
+                "ready_wrapper_identity": "nowledge-previous-wrapper:test",
+                "contract_wrapper_identity": "nowledge-previous-wrapper:test",
+                "cutover_ready_wrapper_identity": "nowledge-previous-wrapper:test"
+            },
             "dual_engine_evidence": {
                 "present": true,
                 "ready": false,
@@ -820,7 +1068,12 @@ mod tests {
         assert_eq!(report["ready"], false);
         assert_eq!(
             report["failed_checks"],
-            serde_json::json!(["full_contract", "adapter_smoke", "migration_gate"])
+            serde_json::json!([
+                "full_contract",
+                "adapter_smoke",
+                "migration_gate",
+                "replacement_summary"
+            ])
         );
         assert_eq!(
             check_by_name(&report, "full_contract")["failed_evidence_fields"],
@@ -833,6 +1086,14 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "migration_gate")["failed_evidence_fields"],
             serde_json::json!(["cutover_evidence.ready_wrapper_identity"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "shadow_evidence.ready_wrapper_identity",
+                "shadow_evidence.contract_wrapper_identity",
+                "shadow_evidence.cutover_ready_wrapper_identity"
+            ])
         );
     }
 
@@ -937,6 +1198,30 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_requires_replacement_shadow_provenance() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["shadow_evidence"]["ready"] = serde_json::json!(false);
+        replacement_summary["shadow_evidence"]["ready_wrapper_identity"] =
+            serde_json::json!(serde_json::Value::Null);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "shadow_evidence.ready",
+                "shadow_evidence.ready_wrapper_identity"
+            ])
+        );
+    }
+
+    #[test]
     fn preflight_check_can_load_standard_bundle_dir() {
         let inputs = ready_inputs();
         let bundle_dir = unique_test_dir("previous-wrapper-preflight-bundle");
@@ -986,6 +1271,14 @@ mod tests {
 
     fn write_json(path: PathBuf, value: &serde_json::Value) {
         std::fs::write(path, serde_json::to_vec_pretty(value).unwrap()).unwrap();
+    }
+
+    fn assert_release_summary_field<T: serde::Serialize>(
+        summary: &serde_json::Value,
+        field: &str,
+        expected: T,
+    ) {
+        assert_eq!(summary[field], serde_json::json!(expected));
     }
 
     fn ready_inputs() -> PreviousWrapperPreflightCheckInputs {
@@ -1056,6 +1349,12 @@ mod tests {
                 "blocking_categories": [],
                 "missing_evidence": [],
                 "next_actions": [],
+                "shadow_evidence": {
+                    "ready": true,
+                    "ready_wrapper_identity": "nowledge-previous-wrapper:test",
+                    "contract_wrapper_identity": "nowledge-previous-wrapper:test",
+                    "cutover_ready_wrapper_identity": "nowledge-previous-wrapper:test"
+                },
                 "cutover_evidence": {
                     "background_maintenance_executable_search_projection_graph_delta_count": 2,
                     "background_maintenance_admitted_search_projection_graph_delta_count": 1,
