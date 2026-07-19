@@ -2645,6 +2645,29 @@ pub struct KnowledgeSkillDetailLookupOutput {
     pub matched_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillStateRequest {
+    pub skill_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillStateOutput {
+    pub graph_commit_epoch: u64,
+    pub skill_id: String,
+    pub skill_node_id: Option<u64>,
+    pub found_skill: bool,
+    pub id: Option<String>,
+    pub stage: Option<String>,
+    pub metadata: Option<Value>,
+    pub version: Option<Value>,
+    pub use_count: Option<Value>,
+    pub bundle_path: Option<String>,
+    pub content_hash: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub title: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KnowledgeSkillListOrder {
     IdAsc,
@@ -5773,6 +5796,13 @@ impl Database {
         request: &KnowledgeSkillDetailLookupRequest,
     ) -> Result<KnowledgeSkillDetailLookupOutput> {
         knowledge_skill_detail_lookup_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_state(
+        &self,
+        request: &KnowledgeSkillStateRequest,
+    ) -> Result<KnowledgeSkillStateOutput> {
+        knowledge_skill_state_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skills(
@@ -13065,6 +13095,42 @@ fn skill_detail_lookup_candidates<'a>(
         .collect::<Vec<_>>();
     nodes.sort_by_key(|node| node.id.0);
     nodes
+}
+
+fn knowledge_skill_state_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSkillStateRequest,
+) -> Result<KnowledgeSkillStateOutput> {
+    validate_knowledge_skill_state_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let skill = seed_node_by_label_and_external_id(catalog, store, "Skill", &request.skill_id);
+
+    Ok(KnowledgeSkillStateOutput {
+        graph_commit_epoch,
+        skill_id: request.skill_id.clone(),
+        skill_node_id: skill.map(|node| node.id.0),
+        found_skill: skill.is_some(),
+        id: skill.and_then(node_external_id),
+        stage: skill.and_then(|node| string_property(node, "stage")),
+        metadata: skill.and_then(|node| node.properties.get("metadata").cloned()),
+        version: skill.and_then(|node| node.properties.get("version").cloned()),
+        use_count: skill.and_then(|node| node.properties.get("use_count").cloned()),
+        bundle_path: skill.and_then(|node| string_property(node, "bundle_path")),
+        content_hash: skill.and_then(|node| string_property(node, "content_hash")),
+        name: skill.and_then(|node| string_property(node, "name")),
+        description: skill.and_then(|node| string_property(node, "description")),
+        title: skill.and_then(|node| string_property(node, "title")),
+    })
+}
+
+fn validate_knowledge_skill_state_request(request: &KnowledgeSkillStateRequest) -> Result<()> {
+    if request.skill_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge skill state read requires a non-empty skill id".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn skill_memory_seed_nodes<'a>(
@@ -21894,6 +21960,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_skill_detail_lookup(request)
     }
 
+    pub fn knowledge_skill_state(
+        &self,
+        request: &KnowledgeSkillStateRequest,
+    ) -> Result<KnowledgeSkillStateOutput> {
+        self.db.knowledge_skill_state(request)
+    }
+
     pub fn knowledge_skills(
         &self,
         request: &KnowledgeSkillListRequest,
@@ -22875,6 +22948,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSkillDetailLookupRequest,
     ) -> Result<KnowledgeSkillDetailLookupOutput> {
         knowledge_skill_detail_lookup_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_state(
+        &self,
+        request: &KnowledgeSkillStateRequest,
+    ) -> Result<KnowledgeSkillStateOutput> {
+        knowledge_skill_state_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_identity(

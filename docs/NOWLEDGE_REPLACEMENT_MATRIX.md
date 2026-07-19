@@ -311,6 +311,12 @@ Nowledge REST FS physical `Skill.id` exact/prefix/contains lookup, returns the
 first stable node-id ordered id/name/title/stage/version/created-at/updated-at
 projection, reports total matched Skill rows for ambiguity diagnostics,
 supports pinned read snapshots, and does not write WAL.
+REST Skills exact write-state reads are covered by
+`Database::knowledge_skill_state`. The typed read resolves one physical
+`Skill.id` without prefix/contains fallback, returns stage/metadata/version/
+use-count/bundle-path/content-hash/name/description/title fields for metadata,
+version, title, and full write-state call sites, supports pinned read snapshots,
+and does not write WAL.
 Skill evidence-memory reads are covered by `Database::knowledge_skill_memories`.
 The typed read requires either one Skill id or a non-empty stage filter, scans
 outgoing `SYNTHESIZED_FROM` edges to Memory nodes, returns Memory id/title/

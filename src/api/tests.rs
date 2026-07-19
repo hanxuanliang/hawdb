@@ -59,13 +59,13 @@ use super::{
     KnowledgeScopedSubgraphRequest, KnowledgeSkillDetailLookupRequest,
     KnowledgeSkillLifecycleBatchRequest, KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder,
     KnowledgeSkillListRequest, KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
-    KnowledgeSkillThreadSourceListRequest, KnowledgeSkillUsageStatsBatchRequest,
-    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceIdListRequest,
-    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
-    KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
-    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
-    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
-    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
+    KnowledgeSkillStateRequest, KnowledgeSkillThreadSourceListRequest,
+    KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
+    KnowledgeSourceIdListRequest, KnowledgeSourceLifecycleBatchRequest,
+    KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
+    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
+    KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
     KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityRequest,
     KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
@@ -8981,6 +8981,75 @@ fn skill_detail_lookup_rejects_empty_key() {
         .knowledge_skill_detail_lookup(&KnowledgeSkillDetailLookupRequest { key: String::new() })
         .unwrap_err();
     assert!(empty_key.to_string().contains("non-empty key"));
+}
+
+#[test]
+fn reads_skill_state_for_rest_skills_write_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'skill-state-1', stage: 'candidate', metadata: '{\"phase\":\"candidate\"}', version: 3, use_count: 7, bundle_path: '/tmp/skill', content_hash: 'hash-1', name: 'state-skill', description: 'state desc', title: 'State Skill'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'skill-state-1', stage: 'memory-stage'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let state = db
+        .knowledge_skill_state(&KnowledgeSkillStateRequest {
+            skill_id: "skill-state-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(state.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert!(state.found_skill);
+    assert!(state.skill_node_id.is_some());
+    assert_eq!(state.skill_id, "skill-state-1");
+    assert_eq!(state.id.as_deref(), Some("skill-state-1"));
+    assert_eq!(state.stage.as_deref(), Some("candidate"));
+    assert_eq!(
+        state.metadata,
+        Some(Value::String("{\"phase\":\"candidate\"}".to_string()))
+    );
+    assert_eq!(state.version, Some(Value::Int(3)));
+    assert_eq!(state.use_count, Some(Value::Int(7)));
+    assert_eq!(state.bundle_path.as_deref(), Some("/tmp/skill"));
+    assert_eq!(state.content_hash.as_deref(), Some("hash-1"));
+    assert_eq!(state.name.as_deref(), Some("state-skill"));
+    assert_eq!(state.description.as_deref(), Some("state desc"));
+    assert_eq!(state.title.as_deref(), Some("State Skill"));
+
+    let missing = db
+        .knowledge_skill_state(&KnowledgeSkillStateRequest {
+            skill_id: "missing".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found_skill);
+    assert_eq!(missing.skill_node_id, None);
+    assert_eq!(missing.id, None);
+
+    let tx = db.begin_read_transaction();
+    db.query("MATCH (s:Skill {id: 'skill-state-1'}) SET s.stage = 'draft', s.metadata = '{\"phase\":\"draft\"}'")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_skill_state(&KnowledgeSkillStateRequest {
+            skill_id: "skill-state-1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.stage.as_deref(), Some("candidate"));
+    assert_eq!(
+        snapshot.metadata,
+        Some(Value::String("{\"phase\":\"candidate\"}".to_string()))
+    );
+}
+
+#[test]
+fn skill_state_rejects_empty_id() {
+    let db = Database::new();
+    let empty_id = db
+        .knowledge_skill_state(&KnowledgeSkillStateRequest {
+            skill_id: String::new(),
+        })
+        .unwrap_err();
+    assert!(empty_id.to_string().contains("non-empty skill id"));
 }
 
 #[test]

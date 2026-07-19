@@ -198,6 +198,8 @@ without WAL writes.
 REST FS Skill detail lookup is exposed as a typed
 `knowledge_skill_detail_lookup` API for physical Skill id lookup without WAL
 writes.
+REST Skills exact state reads are exposed as a typed `knowledge_skill_state`
+API for write-path metadata/version/title/stage checks without WAL writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches
