@@ -1127,9 +1127,9 @@ without partial index mutation on budget or embedding-dimension errors;
 projection boundary beside graph operations without moving search state into
 the graph WAL.
 Caller-owned search projections can inject `SearchAnalyzerLexicon` rules for
-Nowledge lifecycle and schema vocabulary; normalized alias rules accept readable
-phrases or identifiers and keep application vocabulary out of the default graph
-kernel lexicon.
+Nowledge lifecycle and schema vocabulary; normalized alias and stopword rules
+accept readable phrases or identifiers and keep application vocabulary and
+high-frequency application noise terms out of the default graph kernel lexicon.
 Internal background callers can use `SearchIndex::apply_background_projection_delta`
 or `Database::apply_background_search_projection_delta` to pass the same delta
 through `LocalQosPolicy` admission before applying it; callers that need

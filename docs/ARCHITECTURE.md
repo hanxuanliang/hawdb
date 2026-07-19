@@ -537,9 +537,11 @@ terms for text fallback, while matched projection-text spans remain limited to
 title and content fields. This keeps text fallback useful while the projection
 remains rebuildable.
 Application-owned analyzer lexicons can register readable phrase or identifier
-aliases through normalized alias rules. The graph/search kernel keeps only the
-small cross-domain default alias set, while Nowledge-specific lifecycle and
-schema relationship vocabulary stays in the caller-owned lexicon.
+aliases through normalized alias rules and can add domain stopword rules for
+high-frequency application terms. The graph/search kernel keeps only the small
+cross-domain default alias and stopword set, while Nowledge-specific lifecycle,
+schema relationship vocabulary, and application noise terms stay in the
+caller-owned lexicon.
 
 Search hits expose the information needed by a knowledge retrieval surface:
 fused RRF score, per-child RRF components, vector score, text score, vector

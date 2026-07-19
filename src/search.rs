@@ -339,12 +339,14 @@ pub struct SearchQueryOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchAnalyzerLexicon {
     alias_rules: Vec<SearchAnalyzerAliasRule>,
+    stopwords: BTreeSet<String>,
 }
 
 impl SearchAnalyzerLexicon {
     pub fn empty() -> Self {
         Self {
             alias_rules: Vec::new(),
+            stopwords: BTreeSet::new(),
         }
     }
 
@@ -387,6 +389,23 @@ impl SearchAnalyzerLexicon {
                 .into_iter()
                 .flat_map(|alias| normalized_alias_rule_terms(alias.as_ref())),
         )
+    }
+
+    pub fn with_stopwords<I, S>(mut self, stopwords: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.stopwords.extend(
+            stopwords
+                .into_iter()
+                .flat_map(|stopword| normalized_stopword_terms(stopword.as_ref())),
+        );
+        self
+    }
+
+    fn is_stopword(&self, token: &str) -> bool {
+        is_core_search_stopword(token) || self.stopwords.contains(token)
     }
 
     fn semantic_aliases(&self, token: &str) -> Vec<String> {
@@ -2055,15 +2074,19 @@ fn normalized_alias_rule_terms(text: &str) -> Vec<String> {
     tokenize_list(text, &SearchAnalyzerLexicon::empty())
 }
 
+fn normalized_stopword_terms(text: &str) -> Vec<String> {
+    tokenize_list(text, &SearchAnalyzerLexicon::empty())
+}
+
 fn identifier_tokens(raw: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec<String> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Vec::new();
     }
     let mut tokens = Vec::new();
-    push_unique_token(&mut tokens, raw.to_lowercase());
-    for token in cjk_ngram_tokens(raw) {
-        push_unique_token(&mut tokens, token);
+    push_unique_token(&mut tokens, raw.to_lowercase(), analyzer_lexicon);
+    for token in cjk_ngram_tokens(raw, analyzer_lexicon) {
+        push_unique_token(&mut tokens, token, analyzer_lexicon);
     }
     let parts = identifier_parts(raw);
     for part in &parts {
@@ -2075,28 +2098,32 @@ fn identifier_tokens(raw: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec
     tokens
 }
 
-fn cjk_ngram_tokens(raw: &str) -> Vec<String> {
+fn cjk_ngram_tokens(raw: &str, analyzer_lexicon: &SearchAnalyzerLexicon) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut run = Vec::new();
     for ch in raw.chars() {
         if is_cjk_search_char(ch) {
             run.push(ch);
         } else {
-            push_cjk_ngram_tokens(&mut tokens, &run);
+            push_cjk_ngram_tokens(&mut tokens, &run, analyzer_lexicon);
             run.clear();
         }
     }
-    push_cjk_ngram_tokens(&mut tokens, &run);
+    push_cjk_ngram_tokens(&mut tokens, &run, analyzer_lexicon);
     tokens
 }
 
-fn push_cjk_ngram_tokens(tokens: &mut Vec<String>, run: &[char]) {
+fn push_cjk_ngram_tokens(
+    tokens: &mut Vec<String>,
+    run: &[char],
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+) {
     for width in [2_usize, 3] {
         if run.len() < width {
             continue;
         }
         for window in run.windows(width) {
-            push_unique_token(tokens, window.iter().collect());
+            push_unique_token(tokens, window.iter().collect(), analyzer_lexicon);
         }
     }
 }
@@ -2154,9 +2181,13 @@ fn push_identifier_part(parts: &mut Vec<String>, current: &mut String) {
     }
 }
 
-fn push_unique_token(tokens: &mut Vec<String>, token: String) {
+fn push_unique_token(
+    tokens: &mut Vec<String>,
+    token: String,
+    analyzer_lexicon: &SearchAnalyzerLexicon,
+) {
     if !token.is_empty()
-        && !is_search_stopword(&token)
+        && !analyzer_lexicon.is_stopword(&token)
         && !tokens.iter().any(|existing| existing == &token)
     {
         tokens.push(token);
@@ -2168,12 +2199,12 @@ fn push_analyzed_token(
     token: String,
     analyzer_lexicon: &SearchAnalyzerLexicon,
 ) {
-    push_unique_token(tokens, token.clone());
+    push_unique_token(tokens, token.clone(), analyzer_lexicon);
     for normalized in normalize_english_suffixes(&token) {
-        push_unique_token(tokens, normalized);
+        push_unique_token(tokens, normalized, analyzer_lexicon);
     }
     for alias in analyzer_lexicon.semantic_aliases(&token) {
-        push_unique_token(tokens, alias);
+        push_unique_token(tokens, alias, analyzer_lexicon);
     }
 }
 
@@ -2204,7 +2235,7 @@ fn normalize_english_suffixes(token: &str) -> Vec<String> {
     Vec::new()
 }
 
-fn is_search_stopword(token: &str) -> bool {
+fn is_core_search_stopword(token: &str) -> bool {
     matches!(
         token,
         "a" | "an"
@@ -3590,6 +3621,47 @@ mod tests {
             .matched_terms
             .iter()
             .any(|term| term == "ai_summary"));
+    }
+
+    #[test]
+    fn tokenizer_applies_application_stopword_rules() {
+        let mut index = SearchIndex::in_memory().with_analyzer_lexicon(
+            SearchAnalyzerLexicon::default().with_stopwords(["memory lifecycle", "thread"]),
+        );
+        index
+            .upsert(SearchDocument {
+                id: "specific".to_string(),
+                title: "MemoryLifecycle WAL checkpoint".to_string(),
+                content: "Thread compaction evidence remains auditable".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let hits =
+            index.search_with_report("memory lifecycle checkpoint", None, SearchMode::Text, 10);
+        let thread_hits = index.search_with_report("thread evidence", None, SearchMode::Text, 10);
+        let noisy_hits = index.search("memory lifecycle thread", None, SearchMode::Text, 10);
+
+        assert_eq!(hits.hits[0].id, "specific");
+        assert!(hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "checkpoint"));
+        assert!(!hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "memory" || term == "lifecycle" || term == "memory_lifecycle"));
+        assert_eq!(thread_hits.hits[0].id, "specific");
+        assert!(thread_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "evidence"));
+        assert!(!thread_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "thread"));
+        assert!(noisy_hits.is_empty());
     }
 
     fn nowledge_example_analyzer_lexicon() -> SearchAnalyzerLexicon {
