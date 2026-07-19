@@ -546,7 +546,9 @@ id batches with caller-order groups, missing-old rows, per-old limits, and
 caller-allowlisted successor Memory and `EVOLVES` relationship properties. This
 keeps evolution workflows bounded per parent while allowing future successor
 payload fields without cloning whole Memory nodes or scanning outside requested
-old Memories.
+old Memories. Successors support stable id ordering and Nowledge's
+`updated_at DESC` ordering; `updated_at` is kept as an internal sort key unless
+the caller explicitly requests it in the projection allowlist.
 Memory EVOLVES creates are available as
 `Database::create_knowledge_memory_evolves_batch`, covering Nowledge
 `add_evolves_edge` and replacement-relation create shapes with caller-supplied

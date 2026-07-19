@@ -424,7 +424,9 @@ accepts old Memory id batches, preserves caller-order groups including missing
 old Memory rows, scans only each found old Memory's outgoing `EVOLVES`
 adjacency to Memory targets, supports per-old limits, projects caller-selected
 successor Memory and relationship properties, supports pinned read snapshots,
-and does not write WAL.
+supports stable id ordering plus Nowledge's `updated_at DESC` successor
+ordering without forcing `updated_at` into the response projection, and does
+not write WAL.
 Memory EVOLVES edge creation writes are covered by
 `Database::create_knowledge_memory_evolves_batch`. The typed write covers
 Nowledge `add_evolves_edge` and replacement-relation create shapes, fixes both

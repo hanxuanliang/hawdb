@@ -1832,10 +1832,18 @@ pub struct KnowledgeMemoryEvolvesNeighborOutput {
     pub returned_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KnowledgeMemoryEvolvesProjectedSuccessorOrder {
+    #[default]
+    StableMemoryIdAsc,
+    UpdatedAtDesc,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryEvolvesProjectedSuccessorRequest {
     pub old_memory_ids: Vec<String>,
     pub limit_per_old_memory: usize,
+    pub order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
     pub new_memory_property_names: Vec<String>,
     pub relationship_property_names: Vec<String>,
 }
@@ -10880,6 +10888,7 @@ fn knowledge_memory_evolves_projected_successors_for(
                     old_memory,
                     memory_label_id,
                     rel_type_id,
+                    request.order,
                     &request.new_memory_property_names,
                     &request.relationship_property_names,
                 )
@@ -11016,6 +11025,7 @@ fn memory_evolves_projected_successor_rows(
     old_memory: &NodeRecord,
     memory_label_id: LabelId,
     evolves_type_id: RelTypeId,
+    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
     new_memory_property_names: &[String],
     relationship_property_names: &[String],
 ) -> Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow> {
@@ -11026,22 +11036,46 @@ fn memory_evolves_projected_successor_rows(
                 .node(relationship.target)
                 .filter(|new_memory| new_memory.labels.contains(&memory_label_id))
                 .map(|new_memory| {
-                    memory_evolves_projected_successor_row(
-                        new_memory,
-                        relationship,
-                        new_memory_property_names,
-                        relationship_property_names,
+                    (
+                        memory_evolves_projected_successor_row(
+                            new_memory,
+                            relationship,
+                            new_memory_property_names,
+                            relationship_property_names,
+                        ),
+                        new_memory.properties.get("updated_at").cloned(),
                     )
                 })
         })
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.new_memory_id
-            .cmp(&right.new_memory_id)
-            .then_with(|| left.new_node_id.cmp(&right.new_node_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    rows
+    rows.sort_by(|left, right| compare_memory_evolves_projected_successor_rows(left, right, order));
+    rows.into_iter().map(|(row, _)| row).collect()
+}
+
+fn compare_memory_evolves_projected_successor_rows(
+    left: &(KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>),
+    right: &(KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>),
+    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+) -> std::cmp::Ordering {
+    match order {
+        KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc => {
+            compare_memory_evolves_projected_successor_ids(&left.0, &right.0)
+        }
+        KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc => {
+            compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
+                .then_with(|| compare_memory_evolves_projected_successor_ids(&left.0, &right.0))
+        }
+    }
+}
+
+fn compare_memory_evolves_projected_successor_ids(
+    left: &KnowledgeMemoryEvolvesProjectedSuccessorRow,
+    right: &KnowledgeMemoryEvolvesProjectedSuccessorRow,
+) -> std::cmp::Ordering {
+    left.new_memory_id
+        .cmp(&right.new_memory_id)
+        .then_with(|| left.new_node_id.cmp(&right.new_node_id))
+        .then_with(|| left.relationship_id.cmp(&right.relationship_id))
 }
 
 fn memory_evolves_projected_successor_row(

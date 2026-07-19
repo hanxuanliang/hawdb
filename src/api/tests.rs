@@ -36,15 +36,15 @@ use super::{
     KnowledgeMemoryContentUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
     KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
-    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorRequest,
-    KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLabelTransferRequest,
-    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
-    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
-    KnowledgeMemoryListRequest, KnowledgeMemoryMetadataBatchRequest,
-    KnowledgeMemoryMetadataRelatedProjectedListRequest, KnowledgeMemoryMetadataUpdate,
-    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeMemoryProjectedListRequest,
-    KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryLabelDeleteRequest,
+    KnowledgeMemoryLabelTransferRequest, KnowledgeMemoryLatestBatchRequest,
+    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
+    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
+    KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataRelatedProjectedListRequest,
+    KnowledgeMemoryMetadataUpdate, KnowledgeMemoryPrefixOwnershipRequest,
+    KnowledgeMemoryProjectedListRequest, KnowledgeMemorySourceAttributionRequest,
+    KnowledgeMemoryTitleContentRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -5558,6 +5558,7 @@ fn projects_memory_evolves_successors_for_nowledge_growth() {
                     "evolves_old_b".to_string(),
                 ],
                 limit_per_old_memory: 2,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
                 new_memory_property_names: vec![
                     "title".to_string(),
                     "future_memory_field".to_string(),
@@ -5625,6 +5626,7 @@ fn projects_memory_evolves_successors_for_nowledge_growth() {
             &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
                 old_memory_ids: vec!["evolves_old_b".to_string()],
                 limit_per_old_memory: 0,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
                 new_memory_property_names: vec!["title".to_string()],
                 relationship_property_names: vec!["future_edge_field".to_string()],
             },
@@ -5641,6 +5643,50 @@ fn projects_memory_evolves_successors_for_nowledge_growth() {
 }
 
 #[test]
+fn orders_memory_evolves_successors_by_updated_at_without_forcing_projection() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'evolves_order_old'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_order_new_a', title: 'A', updated_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_order_new_b', title: 'B', updated_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_order_new_c', title: 'C', updated_at: 20})")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_order_old'}), (new:Memory {id: 'evolves_order_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'a'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_order_old'}), (new:Memory {id: 'evolves_order_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'b'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_order_old'}), (new:Memory {id: 'evolves_order_new_c'}) CREATE (old)-[:EVOLVES {content_relation: 'c'}]->(new)")
+        .unwrap();
+
+    let projected = db
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec!["evolves_order_old".to_string()],
+                limit_per_old_memory: 2,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
+                new_memory_property_names: vec!["title".to_string()],
+                relationship_property_names: vec!["content_relation".to_string()],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(projected.matched_relationship_count, 3);
+    assert_eq!(projected.returned_count, 2);
+    let rows = &projected.groups[0].rows;
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.new_memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("evolves_order_new_b"), Some("evolves_order_new_c")]
+    );
+    assert!(rows
+        .iter()
+        .all(|row| !row.new_memory_properties.contains_key("updated_at")));
+}
+
+#[test]
 fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
     let path = unique_test_dir("memory_evolves_projected_successors_empty_without_wal");
     let mut db = Database::open(&path).unwrap();
@@ -5654,6 +5700,7 @@ fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
             &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
                 old_memory_ids: vec![String::new()],
                 limit_per_old_memory: 10,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
                 new_memory_property_names: Vec::new(),
                 relationship_property_names: Vec::new(),
             },
@@ -5666,6 +5713,7 @@ fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
             &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
                 old_memory_ids: vec!["evolves_old_wal".to_string()],
                 limit_per_old_memory: 10,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
                 new_memory_property_names: vec![String::new()],
                 relationship_property_names: Vec::new(),
             },
