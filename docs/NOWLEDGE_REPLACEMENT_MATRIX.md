@@ -385,6 +385,13 @@ ids, follows outgoing `EVOLVES` edges to Memory targets, returns distinct
 new-memory id/latest-state rows for the REST Skills successor check, reports
 matched/missing old Memory ids and relationship counts, supports pinned read
 snapshots, and does not write WAL.
+Memory EVOLVES neighbor reads are covered by
+`Database::knowledge_memory_evolves_neighbors`. The typed read covers the MCP
+outgoing and incoming `Memory-[:EVOLVES]-Memory` shapes, anchors by one physical
+Memory id, scans only that node's EVOLVES adjacency, projects caller-selected
+neighbor and relationship properties through explicit allowlists for future
+field growth, supports bounded limits and pinned read snapshots, and does not
+write WAL.
 Memory EVOLVES edge creation writes are covered by
 `Database::create_knowledge_memory_evolves_batch`. The typed write covers
 Nowledge `add_evolves_edge` and replacement-relation create shapes, fixes both

@@ -512,6 +512,12 @@ Memory EVOLVES latest reads are available as
 `Database::knowledge_memory_evolves_latest`, covering REST Skills successor
 checks over old Memory id lists with distinct latest-state rows and no WAL
 writes.
+Memory EVOLVES neighbor reads are available as
+`Database::knowledge_memory_evolves_neighbors`, covering MCP outgoing/incoming
+EVOLVES adjacency reads over one anchor Memory with explicit node and
+relationship property allowlists so future fields can be projected without
+adding another raw-Cypher path. The read scans only the anchor adjacency and
+does not write WAL.
 Memory EVOLVES creates are available as
 `Database::create_knowledge_memory_evolves_batch`, covering Nowledge
 `add_evolves_edge` and replacement-relation create shapes with caller-supplied

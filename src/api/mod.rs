@@ -1763,6 +1763,36 @@ pub struct KnowledgeMemoryEvolvesLatestOutput {
     pub returned_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesNeighborRequest {
+    pub memory_id: String,
+    pub direction: KnowledgeNeighborDirection,
+    pub neighbor_property_names: Vec<String>,
+    pub relationship_property_names: Vec<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesNeighborRow {
+    pub anchor_memory_id: String,
+    pub anchor_node_id: u64,
+    pub neighbor_memory_id: Option<String>,
+    pub neighbor_node_id: u64,
+    pub neighbor_properties: BTreeMap<String, Value>,
+    pub relationship_id: u64,
+    pub relationship_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesNeighborOutput {
+    pub graph_commit_epoch: u64,
+    pub anchor_found: bool,
+    pub anchor_node_id: Option<u64>,
+    pub rows: Vec<KnowledgeMemoryEvolvesNeighborRow>,
+    pub matched_relationship_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,
@@ -6402,6 +6432,13 @@ impl Database {
         knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_evolves_neighbors(
+        &self,
+        request: &KnowledgeMemoryEvolvesNeighborRequest,
+    ) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
+        knowledge_memory_evolves_neighbors_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_source_reference_entities(
         &self,
         request: &KnowledgeSourceReferenceEntityListRequest,
@@ -10161,6 +10198,173 @@ fn validate_knowledge_memory_evolves_latest_request(
         ));
     }
     Ok(())
+}
+
+fn knowledge_memory_evolves_neighbors_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryEvolvesNeighborRequest,
+) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
+    validate_knowledge_memory_evolves_neighbor_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
+            graph_commit_epoch,
+            anchor_found: false,
+            anchor_node_id: None,
+            rows: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+    let Some(anchor) = store
+        .scan_nodes(Some(memory_label_id))
+        .find(|memory| node_external_id(memory).as_deref() == Some(request.memory_id.as_str()))
+    else {
+        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
+            graph_commit_epoch,
+            anchor_found: false,
+            anchor_node_id: None,
+            rows: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+    let Some(evolves_type_id) = catalog.rel_type_id("EVOLVES") else {
+        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
+            graph_commit_epoch,
+            anchor_found: true,
+            anchor_node_id: Some(anchor.id.0),
+            rows: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = Vec::new();
+    if matches!(
+        request.direction,
+        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
+    ) {
+        rows.extend(
+            store
+                .outgoing_relationships(anchor.id, evolves_type_id)
+                .filter_map(|relationship| {
+                    knowledge_memory_evolves_neighbor_row(
+                        anchor,
+                        relationship,
+                        relationship.target,
+                        memory_label_id,
+                        store,
+                        request,
+                    )
+                }),
+        );
+    }
+    if matches!(
+        request.direction,
+        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
+    ) {
+        rows.extend(
+            store
+                .incoming_relationships(anchor.id, evolves_type_id)
+                .filter_map(|relationship| {
+                    knowledge_memory_evolves_neighbor_row(
+                        anchor,
+                        relationship,
+                        relationship.source,
+                        memory_label_id,
+                        store,
+                        request,
+                    )
+                }),
+        );
+    }
+    rows.sort_by(|left, right| {
+        left.neighbor_memory_id
+            .cmp(&right.neighbor_memory_id)
+            .then_with(|| left.neighbor_node_id.cmp(&right.neighbor_node_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    let matched_relationship_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryEvolvesNeighborOutput {
+        graph_commit_epoch,
+        anchor_found: true,
+        anchor_node_id: Some(anchor.id.0),
+        rows,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_memory_evolves_neighbor_request(
+    request: &KnowledgeMemoryEvolvesNeighborRequest,
+) -> Result<()> {
+    if request.memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves neighbor read requires a non-empty memory id".to_string(),
+        ));
+    }
+    if request
+        .neighbor_property_names
+        .iter()
+        .chain(request.relationship_property_names.iter())
+        .any(String::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves neighbor read requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_memory_evolves_neighbor_row(
+    anchor: &NodeRecord,
+    relationship: &RelRecord,
+    neighbor_id: NodeId,
+    memory_label_id: LabelId,
+    store: &GraphStore,
+    request: &KnowledgeMemoryEvolvesNeighborRequest,
+) -> Option<KnowledgeMemoryEvolvesNeighborRow> {
+    let neighbor = store
+        .node(neighbor_id)
+        .filter(|node| node.labels.contains(&memory_label_id))?;
+    Some(KnowledgeMemoryEvolvesNeighborRow {
+        anchor_memory_id: node_external_id(anchor)?,
+        anchor_node_id: anchor.id.0,
+        neighbor_memory_id: node_external_id(neighbor),
+        neighbor_node_id: neighbor.id.0,
+        neighbor_properties: projected_properties(
+            &neighbor.properties,
+            &request.neighbor_property_names,
+        ),
+        relationship_id: relationship.id.0,
+        relationship_properties: projected_properties(
+            &relationship.properties,
+            &request.relationship_property_names,
+        ),
+    })
+}
+
+fn projected_properties(
+    properties: &BTreeMap<String, Value>,
+    property_names: &[String],
+) -> BTreeMap<String, Value> {
+    let mut projected = BTreeMap::new();
+    let mut seen = BTreeSet::new();
+    for property_name in property_names {
+        if seen.insert(property_name) {
+            if let Some(value) = properties.get(property_name) {
+                projected.insert(property_name.clone(), value.clone());
+            }
+        }
+    }
+    projected
 }
 
 fn deduplicated_strings_in_order(values: &[String]) -> Vec<String> {
@@ -25902,6 +26106,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_evolves_latest(request)
     }
 
+    pub fn knowledge_memory_evolves_neighbors(
+        &self,
+        request: &KnowledgeMemoryEvolvesNeighborRequest,
+    ) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
+        self.db.knowledge_memory_evolves_neighbors(request)
+    }
+
     pub fn knowledge_source_reference_entities(
         &self,
         request: &KnowledgeSourceReferenceEntityListRequest,
@@ -27275,6 +27486,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEvolvesLatestRequest,
     ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
         knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_evolves_neighbors(
+        &self,
+        request: &KnowledgeMemoryEvolvesNeighborRequest,
+    ) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
+        knowledge_memory_evolves_neighbors_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_source_sourced_memory_count(
