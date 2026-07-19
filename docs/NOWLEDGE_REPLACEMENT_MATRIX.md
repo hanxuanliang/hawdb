@@ -364,6 +364,16 @@ ids, follows outgoing `EVOLVES` edges to Memory targets, returns distinct
 new-memory id/latest-state rows for the REST Skills successor check, reports
 matched/missing old Memory ids and relationship counts, supports pinned read
 snapshots, and does not write WAL.
+Memory EVOLVES edge creation writes are covered by
+`Database::create_knowledge_memory_evolves_batch`. The typed write covers
+Nowledge `add_evolves_edge` and replacement-relation create shapes, fixes both
+endpoints to physical `Memory.id` nodes and the relationship type to
+`EVOLVES`, accepts Nowledge-used relation metadata, validates non-empty ids,
+non-empty content relations, finite numeric confidence, and non-empty detector
+names before WAL, reports missing or idless endpoints without writing, and
+commits eligible relationship creates through one grouped WAL batch. Latest
+promotion and demotion remains covered by
+`Database::update_knowledge_memory_latest_batch`.
 Skill usage-stat writes are covered by a typed batch for Nowledge
 `use_count`, optional `success_rate`, `last_activity_at`, `updated_at`, and
 `metadata` update shapes. The wrapper validates Skill ids, non-negative use

@@ -2897,6 +2897,45 @@ pub struct KnowledgeMemoryLatestBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesCreate {
+    pub older_memory_id: String,
+    pub newer_memory_id: String,
+    pub content_relation: String,
+    pub created_at: Value,
+    pub is_progression: Option<bool>,
+    pub confidence: Option<Value>,
+    pub detected_by: Option<String>,
+    pub reviewed: Option<bool>,
+    pub reason: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesCreateBatchRequest {
+    pub creates: Vec<KnowledgeMemoryEvolvesCreate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesCreateBatchRow {
+    pub older_memory_id: String,
+    pub newer_memory_id: String,
+    pub older_node_id: Option<u64>,
+    pub newer_node_id: Option<u64>,
+    pub matched: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesCreateBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeMemoryEvolvesCreateBatchRow>,
+    pub matched_count: usize,
+    pub missing_endpoint_count: usize,
+    pub non_writable_count: usize,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSkillUsageStatsUpdate {
     pub skill_id: String,
     pub use_count: i64,
@@ -6506,6 +6545,13 @@ impl Database {
         request: &KnowledgeMemoryLatestBatchRequest,
     ) -> Result<KnowledgeMemoryLatestBatchOutput> {
         update_knowledge_memory_latest_batch_for(self, request)
+    }
+
+    pub fn create_knowledge_memory_evolves_batch(
+        &mut self,
+        request: &KnowledgeMemoryEvolvesCreateBatchRequest,
+    ) -> Result<KnowledgeMemoryEvolvesCreateBatchOutput> {
+        create_knowledge_memory_evolves_batch_for(self, request)
     }
 
     pub fn update_knowledge_skill_usage_stats_batch(
@@ -14350,6 +14396,118 @@ fn memory_latest_update_matches_space(
     node.properties
         .get("space_id")
         .is_some_and(|value| value_to_external_id(value) == *space_id_filter)
+}
+
+fn create_knowledge_memory_evolves_batch_for(
+    db: &mut Database,
+    request: &KnowledgeMemoryEvolvesCreateBatchRequest,
+) -> Result<KnowledgeMemoryEvolvesCreateBatchOutput> {
+    for create in &request.creates {
+        validate_knowledge_memory_evolves_create(create)?;
+    }
+
+    let creates = request
+        .creates
+        .iter()
+        .map(|create| KnowledgeRelationshipCreateRequest {
+            source: KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: create.older_memory_id.clone(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: create.newer_memory_id.clone(),
+            },
+            relationship_type: "EVOLVES".to_string(),
+            properties: memory_evolves_create_properties(create),
+        })
+        .collect::<Vec<_>>();
+    let output = create_knowledge_relationship_batch_for(
+        db,
+        &KnowledgeRelationshipCreateBatchRequest { creates },
+    )?;
+
+    Ok(KnowledgeMemoryEvolvesCreateBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeMemoryEvolvesCreateBatchRow {
+                older_memory_id: row.source.external_id,
+                newer_memory_id: row.target.external_id,
+                older_node_id: row.source_node_id,
+                newer_node_id: row.target_node_id,
+                matched: row.matched,
+                non_writable: row.non_writable,
+            })
+            .collect(),
+        matched_count: output.matched_count,
+        missing_endpoint_count: output.missing_endpoint_count,
+        non_writable_count: output.non_writable_count,
+        created_relationship_count: output.created_relationship_count,
+    })
+}
+
+fn validate_knowledge_memory_evolves_create(create: &KnowledgeMemoryEvolvesCreate) -> Result<()> {
+    if create.older_memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves create requires a non-empty older memory id".to_string(),
+        ));
+    }
+    if create.newer_memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves create requires a non-empty newer memory id".to_string(),
+        ));
+    }
+    if create.content_relation.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves create requires a non-empty content relation".to_string(),
+        ));
+    }
+    if let Some(confidence) = &create.confidence {
+        validate_finite_numeric_value(
+            confidence,
+            "knowledge memory evolves create requires numeric finite confidence",
+        )?;
+    }
+    if create.detected_by.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves create requires a non-empty detected_by".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn memory_evolves_create_properties(
+    create: &KnowledgeMemoryEvolvesCreate,
+) -> BTreeMap<String, Value> {
+    let mut properties = BTreeMap::from([
+        (
+            "content_relation".to_string(),
+            Value::String(create.content_relation.clone()),
+        ),
+        ("created_at".to_string(), create.created_at.clone()),
+    ]);
+    if let Some(is_progression) = create.is_progression {
+        properties.insert("is_progression".to_string(), Value::Bool(is_progression));
+    }
+    if let Some(confidence) = &create.confidence {
+        properties.insert("confidence".to_string(), confidence.clone());
+    }
+    if let Some(detected_by) = &create.detected_by {
+        properties.insert(
+            "detected_by".to_string(),
+            Value::String(detected_by.clone()),
+        );
+    }
+    if let Some(reviewed) = create.reviewed {
+        properties.insert("reviewed".to_string(), Value::Bool(reviewed));
+    }
+    if let Some(reason) = &create.reason {
+        properties.insert("reason".to_string(), reason.clone());
+    }
+    properties
 }
 
 fn update_knowledge_skill_usage_stats_batch_for(
@@ -25185,6 +25343,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryLatestBatchRequest,
     ) -> Result<KnowledgeMemoryLatestBatchOutput> {
         self.db.update_knowledge_memory_latest_batch(request)
+    }
+
+    pub fn create_knowledge_memory_evolves_batch(
+        &mut self,
+        request: &KnowledgeMemoryEvolvesCreateBatchRequest,
+    ) -> Result<KnowledgeMemoryEvolvesCreateBatchOutput> {
+        self.db.create_knowledge_memory_evolves_batch(request)
     }
 
     pub fn update_knowledge_skill_usage_stats_batch(

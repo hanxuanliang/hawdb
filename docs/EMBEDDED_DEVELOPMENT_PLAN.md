@@ -174,8 +174,12 @@ also exposed as a typed batch for the Nowledge `metadata`/`is_latest`/
 `lifecycle_state`/`updated_at` write shape. Lightweight Memory metadata
 replacement writes are exposed as a typed `update_knowledge_memory_metadata_batch`
 API for Nowledge `metadata` and optional `updated_at` updates without changing
-lifecycle state. Context memory preview reads are
-exposed as a typed API for Nowledge semantic-unit title, typed, and label
+lifecycle state. Memory EVOLVES edge creation is exposed as a typed
+`create_knowledge_memory_evolves_batch` API for Nowledge `add_evolves_edge`
+and replacement-relation create shapes with fixed
+`(:Memory)-[:EVOLVES]->(:Memory)` endpoints and grouped WAL relationship
+creates. Context memory preview reads are exposed as a typed API for Nowledge
+semantic-unit title, typed, and label
 preview rows with latest/non-crystal filtering. Skill usage-stat updates are
 exposed as a typed batch for Nowledge `use_count`, optional `success_rate`,
 `last_activity_at`, `updated_at`, and `metadata` writes. Skill metadata-only
@@ -491,6 +495,10 @@ Memory EVOLVES latest reads are available as
 `Database::knowledge_memory_evolves_latest`, covering REST Skills successor
 checks over old Memory id lists with distinct latest-state rows and no WAL
 writes.
+Memory EVOLVES creates are available as
+`Database::create_knowledge_memory_evolves_batch`, covering Nowledge
+`add_evolves_edge` and replacement-relation create shapes with caller-supplied
+relationship metadata, fixed Memory endpoints, and grouped WAL writes.
 Crystal Memory reads are available as `Database::knowledge_crystals`, covering
 Nowledge wiki crystal detail key lookup, crystal page `id > after` pagination,
 and OKF crystal list rows with `crystal_title`, display-title fallback,
@@ -859,8 +867,10 @@ two-endpoint form
 `MATCH (m:Memory {id: $memory_id}), (s:Source {id: $source_id}) CREATE (m)-[:SOURCED_FROM {...}]->(s)`.
 Nowledge EVOLVES writes also support the endpoint-equality form
 `MATCH (a:Memory), (b:Memory) WHERE a.id = $older_id AND b.id = $newer_id CREATE (a)-[:EVOLVES {...}]->(b)`.
-These forms match existing endpoint nodes, create only the relationship records,
-and persist all relationships from the statement through one grouped WAL append.
+The typed `Database::create_knowledge_memory_evolves_batch` facade fixes this
+Nowledge shape to Memory endpoints and EVOLVES edges, validates ids and
+replacement metadata before WAL, reports missing or idless endpoints without
+writing, and persists eligible relationships through one grouped WAL append.
 Nowledge relationship update paths support multiple assignments on the same
 one-hop relationship variable, such as memory-relation review updates filtered
 by `r.id`. All matched relationship property writes are emitted as one WAL

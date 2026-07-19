@@ -32,7 +32,8 @@ use super::{
     KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
     KnowledgeMemoryCompactingThreadListRequest, KnowledgeMemoryContentBatchRequest,
     KnowledgeMemoryContentUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
-    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesLatestRequest,
+    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
+    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
     KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLatestBatchRequest,
     KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
     KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
@@ -10405,6 +10406,285 @@ fn typed_memory_latest_batch_persists_as_one_wal_batch_and_replays() {
             rows.rows[1].properties.get("is_latest"),
             Some(&Some(Value::Bool(true)))
         );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn creates_memory_evolves_batch_for_nowledge_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'older_basic'})").unwrap();
+    db.query("CREATE (:Memory {id: 'newer_basic'})").unwrap();
+    db.query("CREATE (:Memory {id: 'older_progression'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'newer_progression'})")
+        .unwrap();
+    db.query("CREATE (:Memory {title: 'Idless Memory'})")
+        .unwrap();
+    let idless = db
+        .query("MATCH (m:Memory) WHERE m.title = 'Idless Memory' RETURN id(m) AS id")
+        .unwrap();
+    let idless_memory_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+
+    let output = db
+        .create_knowledge_memory_evolves_batch(&KnowledgeMemoryEvolvesCreateBatchRequest {
+            creates: vec![
+                KnowledgeMemoryEvolvesCreate {
+                    older_memory_id: "older_basic".to_string(),
+                    newer_memory_id: "newer_basic".to_string(),
+                    content_relation: "confirms".to_string(),
+                    created_at: Value::Int(100),
+                    is_progression: None,
+                    confidence: None,
+                    detected_by: None,
+                    reviewed: None,
+                    reason: None,
+                },
+                KnowledgeMemoryEvolvesCreate {
+                    older_memory_id: "older_progression".to_string(),
+                    newer_memory_id: "newer_progression".to_string(),
+                    content_relation: "replaces".to_string(),
+                    created_at: Value::Int(200),
+                    is_progression: Some(true),
+                    confidence: Some(Value::Float(0.87)),
+                    detected_by: Some("scheduler".to_string()),
+                    reviewed: Some(false),
+                    reason: Some(Value::String("replacement".to_string())),
+                },
+                KnowledgeMemoryEvolvesCreate {
+                    older_memory_id: "older_basic".to_string(),
+                    newer_memory_id: "missing".to_string(),
+                    content_relation: "supersedes".to_string(),
+                    created_at: Value::Int(300),
+                    is_progression: None,
+                    confidence: None,
+                    detected_by: None,
+                    reviewed: None,
+                    reason: None,
+                },
+                KnowledgeMemoryEvolvesCreate {
+                    older_memory_id: idless_memory_id,
+                    newer_memory_id: "newer_basic".to_string(),
+                    content_relation: "projected".to_string(),
+                    created_at: Value::Int(400),
+                    is_progression: None,
+                    confidence: None,
+                    detected_by: None,
+                    reviewed: None,
+                    reason: None,
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 5);
+    assert_eq!(output.graph_commit_epoch_after, 6);
+    assert_eq!(output.rows.len(), 4);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_endpoint_count, 1);
+    assert_eq!(output.non_writable_count, 1);
+    assert_eq!(output.created_relationship_count, 2);
+    assert!(output.rows[0].matched);
+    assert!(output.rows[1].matched);
+    assert!(!output.rows[2].matched);
+    assert!(output.rows[3].non_writable);
+
+    let basic = db
+        .query("MATCH (:Memory {id: 'older_basic'})-[r:EVOLVES]->(:Memory {id: 'newer_basic'}) RETURN r.content_relation AS relation, r.created_at AS created_at")
+        .unwrap();
+    assert_eq!(basic.rows.len(), 1);
+    assert_eq!(
+        basic.rows[0].get("relation"),
+        Some(&Value::String("confirms".to_string()))
+    );
+    assert_eq!(basic.rows[0].get("created_at"), Some(&Value::Int(100)));
+
+    let progression = db
+        .query("MATCH (:Memory {id: 'older_progression'})-[r:EVOLVES]->(:Memory {id: 'newer_progression'}) RETURN r.content_relation AS relation, r.created_at AS created_at, r.is_progression AS is_progression, r.confidence AS confidence, r.detected_by AS detected_by, r.reviewed AS reviewed, r.reason AS reason")
+        .unwrap();
+    assert_eq!(progression.rows.len(), 1);
+    assert_eq!(
+        progression.rows[0].get("relation"),
+        Some(&Value::String("replaces".to_string()))
+    );
+    assert_eq!(
+        progression.rows[0].get("created_at"),
+        Some(&Value::Int(200))
+    );
+    assert_eq!(
+        progression.rows[0].get("is_progression"),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        progression.rows[0].get("confidence"),
+        Some(&Value::Float(0.87))
+    );
+    assert_eq!(
+        progression.rows[0].get("detected_by"),
+        Some(&Value::String("scheduler".to_string()))
+    );
+    assert_eq!(
+        progression.rows[0].get("reviewed"),
+        Some(&Value::Bool(false))
+    );
+    assert_eq!(
+        progression.rows[0].get("reason"),
+        Some(&Value::String("replacement".to_string()))
+    );
+}
+
+#[test]
+fn memory_evolves_create_rejects_empty_fields_before_wal() {
+    let path = unique_test_dir("memory_evolves_empty_fields");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'older'})").unwrap();
+    db.query("CREATE (:Memory {id: 'newer'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .create_knowledge_memory_evolves_batch(&KnowledgeMemoryEvolvesCreateBatchRequest {
+            creates: vec![KnowledgeMemoryEvolvesCreate {
+                older_memory_id: "older".to_string(),
+                newer_memory_id: "newer".to_string(),
+                content_relation: String::new(),
+                created_at: Value::Int(100),
+                is_progression: None,
+                confidence: None,
+                detected_by: None,
+                reviewed: None,
+                reason: None,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("content relation"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn memory_evolves_create_rejects_non_numeric_confidence_before_wal() {
+    let path = unique_test_dir("memory_evolves_non_numeric_confidence");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'older'})").unwrap();
+    db.query("CREATE (:Memory {id: 'newer'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .create_knowledge_memory_evolves_batch(&KnowledgeMemoryEvolvesCreateBatchRequest {
+            creates: vec![KnowledgeMemoryEvolvesCreate {
+                older_memory_id: "older".to_string(),
+                newer_memory_id: "newer".to_string(),
+                content_relation: "replaces".to_string(),
+                created_at: Value::Int(100),
+                is_progression: Some(true),
+                confidence: Some(Value::String("high".to_string())),
+                detected_by: Some("scheduler".to_string()),
+                reviewed: None,
+                reason: None,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("numeric finite confidence"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn typed_memory_evolves_create_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_memory_evolves_create_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'older_1'})").unwrap();
+        db.query("CREATE (:Memory {id: 'newer_1'})").unwrap();
+        db.query("CREATE (:Memory {id: 'older_2'})").unwrap();
+        db.query("CREATE (:Memory {id: 'newer_2'})").unwrap();
+        let batch_count_before_create = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.create_knowledge_memory_evolves_batch(&KnowledgeMemoryEvolvesCreateBatchRequest {
+            creates: vec![
+                KnowledgeMemoryEvolvesCreate {
+                    older_memory_id: "older_1".to_string(),
+                    newer_memory_id: "newer_1".to_string(),
+                    content_relation: "confirms".to_string(),
+                    created_at: Value::Int(100),
+                    is_progression: None,
+                    confidence: None,
+                    detected_by: None,
+                    reviewed: None,
+                    reason: None,
+                },
+                KnowledgeMemoryEvolvesCreate {
+                    older_memory_id: "older_2".to_string(),
+                    newer_memory_id: "newer_2".to_string(),
+                    content_relation: "replaces".to_string(),
+                    created_at: Value::Int(200),
+                    is_progression: Some(true),
+                    confidence: Some(Value::Float(0.9)),
+                    detected_by: Some("scheduler".to_string()),
+                    reviewed: Some(false),
+                    reason: Some(Value::String("new evidence".to_string())),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_create = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_create, batch_count_before_create + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("\tbatch\t"));
+    {
+        let mut db = Database::open(&path).unwrap();
+        let rows = db
+            .query("MATCH (older:Memory)-[r:EVOLVES]->(newer:Memory) RETURN older.id, newer.id, r.content_relation, r.created_at, r.confidence ORDER BY older.id")
+            .unwrap();
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(
+            rows.rows[0].get("older.id"),
+            Some(&Value::String("older_1".to_string()))
+        );
+        assert_eq!(
+            rows.rows[0].get("newer.id"),
+            Some(&Value::String("newer_1".to_string()))
+        );
+        assert_eq!(
+            rows.rows[0].get("r.content_relation"),
+            Some(&Value::String("confirms".to_string()))
+        );
+        assert_eq!(rows.rows[0].get("r.created_at"), Some(&Value::Int(100)));
+        assert_eq!(
+            rows.rows[1].get("older.id"),
+            Some(&Value::String("older_2".to_string()))
+        );
+        assert_eq!(
+            rows.rows[1].get("newer.id"),
+            Some(&Value::String("newer_2".to_string()))
+        );
+        assert_eq!(
+            rows.rows[1].get("r.content_relation"),
+            Some(&Value::String("replaces".to_string()))
+        );
+        assert_eq!(rows.rows[1].get("r.created_at"), Some(&Value::Int(200)));
+        assert_eq!(rows.rows[1].get("r.confidence"), Some(&Value::Float(0.9)));
     }
     std::fs::remove_dir_all(path).unwrap();
 }
