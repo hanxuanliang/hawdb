@@ -106,6 +106,8 @@ pub use api::{
     KnowledgeMemoryLifecycleBatchOutput, KnowledgeMemoryLifecycleBatchRequest,
     KnowledgeMemoryLifecycleBatchRow, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
     KnowledgeMemoryListOutput, KnowledgeMemoryListRequest, KnowledgeMemoryListRow,
+    KnowledgeMemoryMetadataBatchOutput, KnowledgeMemoryMetadataBatchRequest,
+    KnowledgeMemoryMetadataBatchRow, KnowledgeMemoryMetadataUpdate,
     KnowledgeMemorySourceAttributionOutput, KnowledgeMemorySourceAttributionRequest,
     KnowledgeMemorySourceAttributionRow, KnowledgeMemoryTitleContentOutput,
     KnowledgeMemoryTitleContentRequest, KnowledgeMemoryTitleContentRow, KnowledgeNeighborDirection,

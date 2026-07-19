@@ -35,6 +35,7 @@ use super::{
     KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryLatestBatchRequest,
     KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
     KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
+    KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataUpdate,
     KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
@@ -7353,6 +7354,199 @@ fn updates_memory_content_batch_for_nowledge_full_update_shape() {
         properties.get("extraction_method"),
         Some(&Some(Value::String("manual".to_string())))
     );
+}
+
+#[test]
+fn updates_memory_metadata_batch_for_nowledge_replace_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1', metadata: '{}', updated_at: 1})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2', metadata: '{}', updated_at: 2})")
+        .unwrap();
+    db.query("CREATE (:Memory {title: 'Idless memory'})")
+        .unwrap();
+    let idless = db
+        .query("MATCH (m:Memory) WHERE m.title = 'Idless memory' RETURN id(m) AS id")
+        .unwrap();
+    let idless_memory_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let output = db
+        .update_knowledge_memory_metadata_batch(&KnowledgeMemoryMetadataBatchRequest {
+            updates: vec![
+                KnowledgeMemoryMetadataUpdate {
+                    memory_id: "memory_1".to_string(),
+                    metadata: Value::String("{\"replace\":true}".to_string()),
+                    updated_at: None,
+                },
+                KnowledgeMemoryMetadataUpdate {
+                    memory_id: "memory_2".to_string(),
+                    metadata: Value::String("{\"replace\":\"with-ts\"}".to_string()),
+                    updated_at: Some(Value::Int(100)),
+                },
+                KnowledgeMemoryMetadataUpdate {
+                    memory_id: "missing".to_string(),
+                    metadata: Value::String("{}".to_string()),
+                    updated_at: None,
+                },
+                KnowledgeMemoryMetadataUpdate {
+                    memory_id: idless_memory_id,
+                    metadata: Value::String("{}".to_string()),
+                    updated_at: None,
+                },
+                KnowledgeMemoryMetadataUpdate {
+                    memory_id: "memory_1".to_string(),
+                    metadata: Value::String("{\"duplicate\":true}".to_string()),
+                    updated_at: Some(Value::Int(200)),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, graph_commit_epoch_before);
+    assert_eq!(
+        output.graph_commit_epoch_after,
+        graph_commit_epoch_before + 1
+    );
+    assert_eq!(output.rows.len(), 5);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.non_writable_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.updated_count, 2);
+    assert_eq!(output.updated_property_count, 3);
+    assert_eq!(output.rows[0].updated_property_count, 1);
+    assert_eq!(output.rows[1].updated_property_count, 2);
+    assert!(!output.rows[2].matched);
+    assert!(output.rows[3].non_writable);
+    assert!(output.rows[4].duplicate);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_2".to_string(),
+            },
+        ],
+        property_names: vec!["metadata".to_string(), "updated_at".to_string()],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("metadata"),
+        Some(&Some(Value::String("{\"replace\":true}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("updated_at"),
+        Some(&Some(Value::Int(1)))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("metadata"),
+        Some(&Some(Value::String(
+            "{\"replace\":\"with-ts\"}".to_string()
+        )))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("updated_at"),
+        Some(&Some(Value::Int(100)))
+    );
+}
+
+#[test]
+fn memory_metadata_update_rejects_empty_id_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1', metadata: '{}'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .update_knowledge_memory_metadata_batch(&KnowledgeMemoryMetadataBatchRequest {
+            updates: vec![KnowledgeMemoryMetadataUpdate {
+                memory_id: String::new(),
+                metadata: Value::String("{}".to_string()),
+                updated_at: None,
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty memory id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_memory_metadata_update_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_memory_metadata_update_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1', metadata: '{}', updated_at: 1})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'memory_2', metadata: '{}', updated_at: 2})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_memory_metadata_batch(&KnowledgeMemoryMetadataBatchRequest {
+            updates: vec![
+                KnowledgeMemoryMetadataUpdate {
+                    memory_id: "memory_1".to_string(),
+                    metadata: Value::String("{\"one\":true}".to_string()),
+                    updated_at: None,
+                },
+                KnowledgeMemoryMetadataUpdate {
+                    memory_id: "memory_2".to_string(),
+                    metadata: Value::String("{\"two\":true}".to_string()),
+                    updated_at: Some(Value::Int(20)),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            property_names: vec!["metadata".to_string(), "updated_at".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("metadata"),
+            Some(&Some(Value::String("{\"one\":true}".to_string())))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("updated_at"),
+            Some(&Some(Value::Int(1)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("metadata"),
+            Some(&Some(Value::String("{\"two\":true}".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("updated_at"),
+            Some(&Some(Value::Int(20)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

@@ -171,7 +171,10 @@ MCP crystal source-link merges are exposed as a typed
 and create-only `occasion_key`/`created_at` relationship properties.
 Memory lifecycle metadata updates are
 also exposed as a typed batch for the Nowledge `metadata`/`is_latest`/
-`lifecycle_state`/`updated_at` write shape. Context memory preview reads are
+`lifecycle_state`/`updated_at` write shape. Lightweight Memory metadata
+replacement writes are exposed as a typed `update_knowledge_memory_metadata_batch`
+API for Nowledge `metadata` and optional `updated_at` updates without changing
+lifecycle state. Context memory preview reads are
 exposed as a typed API for Nowledge semantic-unit title, typed, and label
 preview rows with latest/non-crystal filtering. Skill usage-stat updates are
 exposed as a typed batch for Nowledge `use_count`, optional `success_rate`,
