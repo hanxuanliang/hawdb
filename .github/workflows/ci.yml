@@ -355,6 +355,7 @@ jobs:
           grep -q '"production_cutover_ready": false' "$root/replacement.json"
           grep -q '"production_replacement_per_million": 0' "$root/replacement.json"
           grep -q '"cutover_evidence"' "$root/replacement.json"
+          grep -q '"shadow_evidence"' "$root/replacement.json"
           grep -q '"previous_wrapper_contract_evidence"' "$root/replacement.json"
           grep -q '"wrapper_identity": "nowledge-previous-wrapper:ci-smoke"' "$root/replacement.json"
           grep -q "nowledge replacement summary is not production cutover ready" "$root/replacement.err"
@@ -380,11 +381,17 @@ jobs:
           assert checks["storage_recovery"]["ready"] is True
           assert checks["background_maintenance"]["ready"] is True
           assert report["failed_checks"] == ["adapter_smoke", "migration_gate", "replacement_summary"]
-          assert checks["adapter_smoke"]["failed_evidence_fields"] == ["dual_engine_evidence.ready"]
+          assert checks["adapter_smoke"]["failed_evidence_fields"] == [
+              "dual_engine_evidence.ready",
+              "dual_engine_evidence.matched_check_count",
+              "dual_engine_evidence.primary_only_check_count",
+          ]
           assert report["release_summary"]["wrapper_identity"] == "nowledge-previous-wrapper:ci-smoke"
           assert report["release_summary"]["adapter_dual_engine_ready"] is False
+          assert report["release_summary"]["adapter_dual_engine_counts_consistent"] is False
           assert report["release_summary"]["adapter_dual_engine_primary_only_check_count"] == 1
           assert report["release_summary"]["production_replacement_per_million"] == 0
+          assert report["release_summary"]["shadow_evidence_ready"] is False
           assert report["release_summary"]["background_maintenance_executable_search_projection_graph_delta_count"] >= 1
           assert report["release_summary"]["background_maintenance_admitted_search_projection_graph_delta_count"] >= 1
           PY
