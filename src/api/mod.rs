@@ -2783,6 +2783,19 @@ pub struct KnowledgeThreadListOutput {
     pub missing_thread_ids: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeThreadSourceListRequest {
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadSourceListOutput {
+    pub graph_commit_epoch: u64,
+    pub sources: Vec<String>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadIdentityRequest {
     pub identity_key: String,
@@ -5652,6 +5665,13 @@ impl Database {
         request: &KnowledgeThreadListRequest,
     ) -> Result<KnowledgeThreadListOutput> {
         knowledge_threads_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_sources(
+        &self,
+        request: &KnowledgeThreadSourceListRequest,
+    ) -> KnowledgeThreadSourceListOutput {
+        knowledge_thread_sources_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_identity(
@@ -13161,6 +13181,41 @@ fn compare_thread_recent_values(
             .or(right.import_date.as_ref())
             .or(right.created_at.as_ref()),
     )
+}
+
+fn knowledge_thread_sources_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadSourceListRequest,
+) -> KnowledgeThreadSourceListOutput {
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Thread") else {
+        return KnowledgeThreadSourceListOutput {
+            graph_commit_epoch,
+            sources: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        };
+    };
+
+    let mut sources = store
+        .scan_nodes(Some(label_id))
+        .filter_map(|node| string_property(node, "source"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let matched_count = sources.len();
+    if request.limit > 0 {
+        sources.truncate(request.limit);
+    }
+    let returned_count = sources.len();
+
+    KnowledgeThreadSourceListOutput {
+        graph_commit_epoch,
+        sources,
+        matched_count,
+        returned_count,
+    }
 }
 
 fn knowledge_thread_identity_for(
@@ -21231,6 +21286,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_threads(request)
     }
 
+    pub fn knowledge_thread_sources(
+        &self,
+        request: &KnowledgeThreadSourceListRequest,
+    ) -> KnowledgeThreadSourceListOutput {
+        self.db.knowledge_thread_sources(request)
+    }
+
     pub fn knowledge_thread_identity(
         &self,
         request: &KnowledgeThreadIdentityRequest,
@@ -22149,6 +22211,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeThreadSyncMetadataRequest,
     ) -> Result<KnowledgeThreadSyncMetadataOutput> {
         knowledge_thread_sync_metadata_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_sources(
+        &self,
+        request: &KnowledgeThreadSourceListRequest,
+    ) -> KnowledgeThreadSourceListOutput {
+        knowledge_thread_sources_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

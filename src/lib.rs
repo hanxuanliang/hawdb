@@ -175,6 +175,7 @@ pub use api::{
     KnowledgeThreadMessageListRequest, KnowledgeThreadMessageRow,
     KnowledgeThreadMetadataBatchOutput, KnowledgeThreadMetadataBatchRequest,
     KnowledgeThreadMetadataBatchRow, KnowledgeThreadMetadataUpdate,
+    KnowledgeThreadSourceListOutput, KnowledgeThreadSourceListRequest,
     KnowledgeThreadSyncMetadataOutput, KnowledgeThreadSyncMetadataRequest,
     KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,

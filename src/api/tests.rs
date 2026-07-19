@@ -70,9 +70,10 @@ use super::{
     KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeThreadSourceListRequest, KnowledgeThreadSyncMetadataRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -9952,6 +9953,48 @@ fn thread_list_rejects_unbounded_or_empty_filters() {
         })
         .unwrap_err();
     assert!(empty_source.to_string().contains("non-empty source"));
+}
+
+#[test]
+fn lists_distinct_thread_sources_for_rest_fs_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_a', source: 'slack'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b', source: 'codex'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_c', source: 'slack'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_d', source: ''})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_e'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_source', source: 'ignored'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 });
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.returned_count, 2);
+    assert_eq!(
+        output.sources,
+        vec!["codex".to_string(), "slack".to_string()]
+    );
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let limited = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 1 });
+    assert_eq!(limited.matched_count, 2);
+    assert_eq!(limited.returned_count, 1);
+    assert_eq!(limited.sources, vec!["codex".to_string()]);
+
+    let tx = db.begin_read_transaction();
+    db.query("CREATE (:Thread {id: 'thread_after', source: 'after'})")
+        .unwrap();
+    let snapshot = tx.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 });
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(
+        snapshot.sources,
+        vec!["codex".to_string(), "slack".to_string()]
+    );
 }
 
 #[test]

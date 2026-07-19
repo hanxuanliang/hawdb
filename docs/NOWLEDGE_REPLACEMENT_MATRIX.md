@@ -352,6 +352,11 @@ normalized-space filters, metadata substring markers, after-id pagination,
 thread-id presence filtering, offset/limit, id, thread-id, message-count, and
 recent-update ordering, display-title and message-count fallbacks, missing-id
 reporting, and no WAL writes.
+Distinct Thread source listing is covered by
+`Database::knowledge_thread_sources`. The typed read scans Thread nodes,
+filters missing and empty `source` values, returns sorted distinct source
+strings with optional bounded truncation, supports pinned read snapshots, and
+does not write WAL.
 ThreadIdentity exact resolution is covered by
 `Database::knowledge_thread_identity`. The typed read resolves one
 `ThreadIdentity` by external id, returns the Nowledge repo fields
