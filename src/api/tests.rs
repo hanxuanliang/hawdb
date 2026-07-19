@@ -8,10 +8,11 @@ use super::{
     KnowledgeAugmentationJobRequest, KnowledgeCandidateScoringPolicy, KnowledgeCandidateSource,
     KnowledgeCommunityAssignmentClearRequest, KnowledgeCommunityCleanupRequest,
     KnowledgeCommunityCreate, KnowledgeCommunityLifecycleBatchRequest, KnowledgeCommunityListOrder,
-    KnowledgeCommunityListRequest, KnowledgeCommunityMembershipCreate,
-    KnowledgeCommunityMembershipCreateBatchRequest, KnowledgeCommunitySummaryUpdate,
-    KnowledgeContextMemoryLatestFilter, KnowledgeContextMemoryPreviewRequest,
-    KnowledgeEntityBatchRequest, KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
+    KnowledgeCommunityListRequest, KnowledgeCommunityLookupKey, KnowledgeCommunityMembershipCreate,
+    KnowledgeCommunityMembershipCreateBatchRequest, KnowledgeCommunityRequest,
+    KnowledgeCommunitySummaryUpdate, KnowledgeContextMemoryLatestFilter,
+    KnowledgeContextMemoryPreviewRequest, KnowledgeEntityBatchRequest,
+    KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
     KnowledgeEntityLabelListRequest, KnowledgeEntityMentionCountCursor,
     KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
@@ -9865,6 +9866,82 @@ fn community_list_read_returns_empty_without_community_label() {
     assert_eq!(output.matched_count, 0);
     assert_eq!(output.returned_count, 0);
     assert!(output.rows.is_empty());
+}
+
+#[test]
+fn reads_community_detail_for_wiki_and_mcp_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Community {id: 'community_a', community_id: 7, name: 'Alpha', description: 'alpha description', ai_summary: 'alpha summary', member_count: 5, updated_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Community {id: 'community_b', community_id: 8, name: 'Beta', description: 'beta description', ai_summary: '', member_count: 3})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let by_community_id = db
+        .knowledge_community(&KnowledgeCommunityRequest {
+            key: KnowledgeCommunityLookupKey::CommunityId(7),
+        })
+        .unwrap();
+    assert_eq!(by_community_id.graph_commit_epoch, graph_commit_epoch);
+    assert!(by_community_id.found);
+    let row = by_community_id.row.unwrap();
+    assert_eq!(row.id.as_deref(), Some("community_a"));
+    assert_eq!(row.community_id, Some(7));
+    assert_eq!(row.name.as_deref(), Some("Alpha"));
+    assert_eq!(
+        row.description,
+        Some(Value::String("alpha description".to_string()))
+    );
+    assert_eq!(
+        row.ai_summary,
+        Some(Value::String("alpha summary".to_string()))
+    );
+    assert_eq!(row.member_count, Some(5));
+    assert_eq!(row.updated_at, Some(Value::Int(10)));
+    assert!(row.has_summary);
+
+    let by_id = db
+        .knowledge_community(&KnowledgeCommunityRequest {
+            key: KnowledgeCommunityLookupKey::Id("community_b".to_string()),
+        })
+        .unwrap();
+    assert!(by_id.found);
+    let by_id_row = by_id.row.unwrap();
+    assert_eq!(by_id_row.community_id, Some(8));
+    assert!(!by_id_row.has_summary);
+
+    let snapshot = db.begin_read_transaction();
+    db.query("CREATE (:Community {id: 'community_later', community_id: 9, name: 'Later'})")
+        .unwrap();
+    let missing_in_snapshot = snapshot
+        .knowledge_community(&KnowledgeCommunityRequest {
+            key: KnowledgeCommunityLookupKey::CommunityId(9),
+        })
+        .unwrap();
+    assert_eq!(missing_in_snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert!(!missing_in_snapshot.found);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch + 1);
+
+    let missing = db
+        .knowledge_community(&KnowledgeCommunityRequest {
+            key: KnowledgeCommunityLookupKey::CommunityId(99),
+        })
+        .unwrap();
+    assert!(!missing.found);
+    assert_eq!(missing.row, None);
+}
+
+#[test]
+fn community_detail_read_rejects_empty_id() {
+    let db = Database::new();
+
+    let error = db
+        .knowledge_community(&KnowledgeCommunityRequest {
+            key: KnowledgeCommunityLookupKey::Id(String::new()),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty id"));
 }
 
 #[test]

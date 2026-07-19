@@ -2970,6 +2970,17 @@ pub struct KnowledgeCommunityListRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeCommunityLookupKey {
+    Id(String),
+    CommunityId(i64),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityRequest {
+    pub key: KnowledgeCommunityLookupKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityRow {
     pub id: Option<String>,
     pub node_id: u64,
@@ -2988,6 +2999,13 @@ pub struct KnowledgeCommunityListOutput {
     pub rows: Vec<KnowledgeCommunityRow>,
     pub matched_count: usize,
     pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityOutput {
+    pub graph_commit_epoch: u64,
+    pub row: Option<KnowledgeCommunityRow>,
+    pub found: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5273,6 +5291,13 @@ impl Database {
         request: &KnowledgeCommunityListRequest,
     ) -> Result<KnowledgeCommunityListOutput> {
         knowledge_communities_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_community(
+        &self,
+        request: &KnowledgeCommunityRequest,
+    ) -> Result<KnowledgeCommunityOutput> {
+        knowledge_community_for(&self.catalog, &self.store, request)
     }
 
     pub fn delete_knowledge_communities(
@@ -12650,6 +12675,54 @@ fn knowledge_communities_for(
     })
 }
 
+fn knowledge_community_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeCommunityRequest,
+) -> Result<KnowledgeCommunityOutput> {
+    validate_knowledge_community_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Community") else {
+        return Ok(KnowledgeCommunityOutput {
+            graph_commit_epoch,
+            row: None,
+            found: false,
+        });
+    };
+
+    let row = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| community_matches_lookup_key(node, &request.key))
+        .min_by_key(|node| node.id.0)
+        .map(knowledge_community_row);
+    let found = row.is_some();
+    Ok(KnowledgeCommunityOutput {
+        graph_commit_epoch,
+        row,
+        found,
+    })
+}
+
+fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> Result<()> {
+    if let KnowledgeCommunityLookupKey::Id(id) = &request.key {
+        if id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge community read requires a non-empty id".to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn community_matches_lookup_key(node: &NodeRecord, key: &KnowledgeCommunityLookupKey) -> bool {
+    match key {
+        KnowledgeCommunityLookupKey::Id(id) => node_external_id(node).as_deref() == Some(id),
+        KnowledgeCommunityLookupKey::CommunityId(community_id) => {
+            integer_property(node, "community_id") == Some(*community_id)
+        }
+    }
+}
+
 fn knowledge_community_row(node: &NodeRecord) -> KnowledgeCommunityRow {
     let ai_summary = node.properties.get("ai_summary").cloned();
     KnowledgeCommunityRow {
@@ -18921,6 +18994,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_communities(request)
     }
 
+    pub fn knowledge_community(
+        &self,
+        request: &KnowledgeCommunityRequest,
+    ) -> Result<KnowledgeCommunityOutput> {
+        self.db.knowledge_community(request)
+    }
+
     pub fn delete_knowledge_communities(
         &mut self,
         request: &KnowledgeCommunityCleanupRequest,
@@ -19599,6 +19679,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeCommunityListRequest,
     ) -> Result<KnowledgeCommunityListOutput> {
         knowledge_communities_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_community(
+        &self,
+        request: &KnowledgeCommunityRequest,
+    ) -> Result<KnowledgeCommunityOutput> {
+        knowledge_community_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_entity(

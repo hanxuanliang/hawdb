@@ -403,6 +403,12 @@ non-negative `community_id`, orders by member count or summary presence then
 member count, returns id/community_id/name/description/ai_summary/member_count/
 updated_at fields, supports bounded limits and read-transaction snapshots, and
 does not write WAL.
+Community detail reads are covered by `Database::knowledge_community`. The
+typed read scans only `Community` nodes, supports the Nowledge wiki/MCP single
+row lookup shapes by numeric `community_id` or external `id`, returns the same
+Community row fields as the list facade plus summary-presence metadata,
+reports found/missing state, supports read-transaction snapshots, and does not
+write WAL.
 Community node cleanup is covered by `Database::delete_knowledge_communities`
 for Nowledge replace-community and undo-community flows. It scans only
 `Community` nodes, supports the two production cleanup modes (`DELETE` and

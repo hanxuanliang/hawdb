@@ -482,6 +482,11 @@ Community summary list reads are available as
 library summary-ranked shapes with `ai_summary` presence filtering, optional
 non-negative `community_id` filtering, member-count and summary-presence
 ordering, bounded limits, pinned read-transaction snapshots, and no WAL writes.
+Community detail reads are available as `Database::knowledge_community`,
+covering Nowledge wiki/MCP single Community lookups by numeric `community_id`
+or external `id`, returning id, community_id, name, description, ai_summary,
+member_count, updated_at, summary-presence metadata, pinned read-transaction
+snapshots, and no WAL writes.
 GraphMeta state reads and cleanup deletes used by PageRank, community
 detection, and fixture reset paths are available as
 `Database::knowledge_graph_meta` and `Database::delete_knowledge_graph_meta`.
