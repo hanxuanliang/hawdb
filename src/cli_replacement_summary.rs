@@ -49,6 +49,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let previous_wrapper_contract_ready =
         json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "ready"])
             .unwrap_or(false);
+    let full_contract_evidence = full_contract_evidence_summary(bundle);
+    let full_contract_evidence_ready = full_contract_evidence.ready;
     let dual_engine_evidence = dual_engine_evidence_summary(bundle);
     let dual_engine_evidence_present = dual_engine_evidence.present;
     let dual_engine_evidence_ready = dual_engine_evidence.ready;
@@ -58,6 +60,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && cutover_decision == Some("ready")
         && cutover_evidence_eligible
         && previous_wrapper_contract_ready
+        && full_contract_evidence_ready
         && dual_engine_evidence_present
         && dual_engine_evidence_ready == Some(true)
         && !background_graph_delta_evidence_missing
@@ -77,6 +80,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_decision,
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
+            full_contract_evidence_ready,
             dual_engine_evidence_present,
             dual_engine_evidence_ready,
             background_graph_delta_evidence_missing,
@@ -97,6 +101,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_decision,
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
+            full_contract_evidence_ready,
             dual_engine_evidence_present,
             dual_engine_evidence_ready,
             background_graph_delta_evidence_missing,
@@ -159,6 +164,14 @@ pub fn nowledge_replacement_summary_json_with_options(
             "requires_full_contract_ready": json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "requires_full_contract_ready"]),
             "requires_wrapper_identity": json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "requires_wrapper_identity"]),
             "blocker_codes": json_get_array_path(bundle, &["previous_wrapper_contract_evidence", "blocker_codes"]),
+        },
+        "full_contract_evidence": {
+            "ready": full_contract_evidence.ready,
+            "required_contract_ready": full_contract_evidence.required_contract_ready,
+            "full_contract_checked": full_contract_evidence.full_contract_checked,
+            "full_contract_ready": full_contract_evidence.full_contract_ready,
+            "selected_checks": full_contract_evidence.selected_checks,
+            "check_count": full_contract_evidence.check_count,
         },
         "blocking_categories": blocking_categories,
         "blocker_summary": {
@@ -284,6 +297,7 @@ struct ReplacementReadinessInputs<'a> {
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
+    full_contract_evidence_ready: bool,
     dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
     background_graph_delta_evidence_missing: bool,
@@ -297,6 +311,7 @@ struct NextActionInputs<'a> {
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
+    full_contract_evidence_ready: bool,
     dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
     background_graph_delta_evidence_missing: bool,
@@ -313,6 +328,42 @@ struct DualEngineEvidenceSummary<'a> {
     matched_check_count: Option<u64>,
     primary_only_check_count: Option<u64>,
     matched_per_million: Option<u64>,
+}
+
+struct FullContractEvidenceSummary {
+    ready: bool,
+    required_contract_ready: Option<bool>,
+    full_contract_checked: Option<bool>,
+    full_contract_ready: Option<bool>,
+    selected_checks: Option<u64>,
+    check_count: Option<u64>,
+}
+
+fn full_contract_evidence_summary(bundle: &serde_json::Value) -> FullContractEvidenceSummary {
+    let path = if json_get_path(bundle, &["contract_evidence"]).is_some() {
+        &["contract_evidence"][..]
+    } else {
+        &[][..]
+    };
+    let required_contract_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "required_contract_ready");
+    let full_contract_checked =
+        json_get_bool_path_from_dynamic(bundle, path, "full_contract_checked");
+    let full_contract_ready = json_get_bool_path_from_dynamic(bundle, path, "full_contract_ready");
+    let selected_checks = json_get_u64_path_from_dynamic(bundle, path, "selected_checks");
+    let check_count = json_get_u64_path_from_dynamic(bundle, path, "check_count");
+    FullContractEvidenceSummary {
+        ready: required_contract_ready == Some(true)
+            && full_contract_checked == Some(true)
+            && full_contract_ready == Some(true)
+            && check_count.is_some_and(|count| count > 0)
+            && selected_checks == check_count,
+        required_contract_ready,
+        full_contract_checked,
+        full_contract_ready,
+        selected_checks,
+        check_count,
+    }
 }
 
 fn dual_engine_evidence_summary(bundle: &serde_json::Value) -> DualEngineEvidenceSummary<'_> {
@@ -361,7 +412,7 @@ fn nowledge_replacement_blocking_categories(
     if !inputs.cutover_evidence_eligible {
         categories.insert("cutover_evidence".to_string());
     }
-    if !inputs.previous_wrapper_contract_ready {
+    if !inputs.previous_wrapper_contract_ready || !inputs.full_contract_evidence_ready {
         categories.insert("previous_wrapper_contract".to_string());
     }
     if !inputs.dual_engine_evidence_present || inputs.dual_engine_evidence_ready != Some(true) {
@@ -456,11 +507,16 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
-    if !inputs.previous_wrapper_contract_ready {
+    if !inputs.previous_wrapper_contract_ready || !inputs.full_contract_evidence_ready {
         actions.push(next_action(
             "run_full_previous_wrapper_contract_check",
             "previous-wrapper contract evidence is missing or not ready",
             [
+                "required_contract_ready",
+                "full_contract_checked",
+                "full_contract_ready",
+                "selected_checks",
+                "check_count",
                 "previous_wrapper_contract_evidence.ready",
                 "previous_wrapper_contract_evidence.wrapper_identity",
                 "previous_wrapper_contract_evidence.blocker_codes",
@@ -579,6 +635,9 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     if bundle.get("previous_wrapper_contract_evidence").is_none() {
         missing.push("previous_wrapper_contract_evidence".to_string());
     }
+    if !full_contract_evidence_summary(bundle).ready {
+        missing.push("full_contract_evidence".to_string());
+    }
     if bundle.get("dual_engine_evidence").is_none()
         && json_get_path(bundle, &["cutover", "dual_engine_evidence"]).is_none()
     {
@@ -630,6 +689,10 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
         &["cutover_evidence", "background_maintenance_blockers"][..],
         &["cutover_evidence", "replacement_readiness_blockers"][..],
         &["previous_wrapper_contract_evidence", "blockers"][..],
+        &["contract_evidence", "full_contract_blockers"][..],
+        &["contract_evidence", "required_contract_blockers"][..],
+        &["full_contract_blockers"][..],
+        &["required_contract_blockers"][..],
     ] {
         for blocker in json_get_string_array_path(bundle, path) {
             blockers.insert(blocker);
@@ -811,6 +874,17 @@ mod tests {
             42
         );
         assert_eq!(summary["previous_wrapper_contract_evidence"]["ready"], true);
+        assert_eq!(summary["full_contract_evidence"]["ready"], true);
+        assert_eq!(
+            summary["full_contract_evidence"]["full_contract_checked"],
+            true
+        );
+        assert_eq!(
+            summary["full_contract_evidence"]["full_contract_ready"],
+            true
+        );
+        assert_eq!(summary["full_contract_evidence"]["selected_checks"], 2);
+        assert_eq!(summary["full_contract_evidence"]["check_count"], 2);
         assert_eq!(
             summary["previous_wrapper_contract_evidence"]["wrapper_identity"],
             "nowledge-previous-wrapper:test"
@@ -957,6 +1031,43 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "previous_wrapper_contract"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_full_contract_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["full_contract_checked"] = serde_json::json!(false);
+        bundle["full_contract_ready"] = serde_json::json!(false);
+        bundle["selected_checks"] = serde_json::json!(1);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["previous_wrapper_contract_evidence"]["ready"], true);
+        assert_eq!(summary["full_contract_evidence"]["ready"], false);
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "full_contract_evidence"));
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "previous_wrapper_contract"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "run_full_previous_wrapper_contract_check"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "full_contract_ready")
+            }));
     }
 
     #[test]
@@ -1178,6 +1289,7 @@ mod tests {
                 "storage_recovery",
                 "background_maintenance",
                 "previous_wrapper_contract_evidence",
+                "full_contract_evidence",
                 "dual_engine_evidence",
                 "shadow_run",
                 "shadow_ready"
@@ -1230,6 +1342,11 @@ mod tests {
                     "action": "run_full_previous_wrapper_contract_check",
                     "reason": "previous-wrapper contract evidence is missing or not ready",
                     "evidence_fields": [
+                        "required_contract_ready",
+                        "full_contract_checked",
+                        "full_contract_ready",
+                        "selected_checks",
+                        "check_count",
                         "previous_wrapper_contract_evidence.ready",
                         "previous_wrapper_contract_evidence.wrapper_identity",
                         "previous_wrapper_contract_evidence.blocker_codes"
@@ -1282,6 +1399,11 @@ mod tests {
 
     fn production_ready_bundle() -> serde_json::Value {
         serde_json::json!({
+            "required_contract_ready": true,
+            "full_contract_checked": true,
+            "full_contract_ready": true,
+            "selected_checks": 2,
+            "check_count": 2,
             "inventory_gate": {
                 "coverage_per_million": 1_000_000,
                 "blockers": []
