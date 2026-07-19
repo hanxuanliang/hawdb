@@ -112,7 +112,8 @@ jq -e '
   .adapter_smoke_ready == true and
   .engine_kind == "previous_wrapper" and
   .wrapper_identity == env.NOWLEDGE_WRAPPER_IDENTITY and
-  .primary_only_checks == 0
+  .primary_only_checks == 0 and
+  .dual_engine_evidence.ready == true
 ' "$NMEM_PREFLIGHT_ROOT/adapter-smoke.json"
 ```
 
@@ -242,5 +243,8 @@ maintenance evidence, and replacement summary artifacts. It fails closed unless
 every stage is ready, the storage/background evidence is explicitly required and
 present in the migration gate, and the replacement summary has no blockers,
 missing evidence, or next actions.
+When adapter smoke reports include `dual_engine_evidence`, the verifier also
+requires `dual_engine_evidence.ready == true` so side-by-side cutover evidence
+cannot silently degrade into a primary-only smoke run.
 Each per-stage check includes `failed_evidence_fields`, so release automation
 can report the exact missing or mismatched field without parsing blocker text.

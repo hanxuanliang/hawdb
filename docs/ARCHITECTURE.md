@@ -444,6 +444,11 @@ JSON. With `--require-ready`, the command exits with an error when the migration
 gate decision is blocked. With `--require-cutover-evidence`, the command also
 runs the ready preflight and requires previous-wrapper shadow evidence, making it
 suitable as a production cutover gate.
+External shadow adapter smoke reports include a `dual_engine_evidence` object
+that records the Skein primary side, the previous-wrapper shadow side, matched
+check count, primary-only count, and readiness. Preflight consumes this field
+when present so release automation can distinguish true side-by-side evidence
+from primary-only protocol smoke.
 With `--require-rollback-evidence`, the same gate also requires caller-supplied
 previous-database reopen proof through `--rollback-evidence <text>` before the
 migration decision can be ready.

@@ -1521,6 +1521,12 @@ fn external_shadow_adapter_smoke_report_json(
                 .map(|reason| (check.name.clone(), reason.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let primary_check_count = report.primary_checks.len();
+    let shadow_check_count = report.shadow_checks.len();
+    let dual_engine_ready = primary_check_count == shadow_check_count
+        && shadow_check_count > 0
+        && matched_checks == shadow_check_count
+        && primary_only_checks == 0;
     let mut json = serde_json::json!({
         "protocol": "skein-external-shadow-adapter-smoke",
         "ready": {
@@ -1536,6 +1542,15 @@ fn external_shadow_adapter_smoke_report_json(
         "matched_checks": matched_checks,
         "primary_only_checks": primary_only_checks,
         "primary_only_reasons": primary_only_reasons,
+        "dual_engine_evidence": {
+            "ready": dual_engine_ready,
+            "primary_engine": "skein",
+            "shadow_engine": report.shadow_engine,
+            "primary_check_count": primary_check_count,
+            "shadow_check_count": shadow_check_count,
+            "matched_check_count": matched_checks,
+            "primary_only_check_count": primary_only_checks,
+        },
         "request_count": request_count,
         "operation_expectations": {
             "ready": true,
@@ -4242,6 +4257,19 @@ mod tests {
         let json = external_shadow_adapter_smoke_report_json(&ready, &report, 3, None);
 
         assert_eq!(json["adapter_smoke_ready"], true);
+        assert_eq!(json["dual_engine_evidence"]["ready"], false);
+        assert_eq!(
+            json["dual_engine_evidence"]["primary_engine"],
+            serde_json::json!("skein")
+        );
+        assert_eq!(
+            json["dual_engine_evidence"]["shadow_engine"],
+            serde_json::json!("legacy-wrapper")
+        );
+        assert_eq!(json["dual_engine_evidence"]["primary_check_count"], 2);
+        assert_eq!(json["dual_engine_evidence"]["shadow_check_count"], 2);
+        assert_eq!(json["dual_engine_evidence"]["matched_check_count"], 1);
+        assert_eq!(json["dual_engine_evidence"]["primary_only_check_count"], 1);
         assert_eq!(json["matched_checks"], 1);
         assert_eq!(json["primary_only_checks"], 1);
         assert_eq!(
@@ -6928,12 +6956,16 @@ mod tests {
     fn adapter_smoke_report(
         shadow_checks: Vec<CompatibilityShadowCheckReport>,
     ) -> CompatibilityShadowReport {
+        let primary_checks = shadow_checks
+            .iter()
+            .map(|check| CompatibilityCheckReport {
+                name: check.name.clone(),
+            })
+            .collect();
         CompatibilityShadowReport {
             fixture: "external-shadow-adapter-smoke".to_string(),
             shadow_engine: "legacy-wrapper".to_string(),
-            primary_checks: vec![CompatibilityCheckReport {
-                name: "session query returns seeded memory".to_string(),
-            }],
+            primary_checks,
             shadow_checks,
         }
     }
