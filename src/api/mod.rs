@@ -3532,6 +3532,22 @@ pub struct KnowledgeThreadMessageListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageDeleteRequest {
+    pub thread_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageDeleteOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub thread_id: String,
+    pub thread_node_id: Option<u64>,
+    pub found_thread: bool,
+    pub matched_relationship_count: usize,
+    pub deleted_message_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeLabelLifecycleUpdate {
     pub label_id: String,
     pub name: Option<String>,
@@ -6392,6 +6408,13 @@ impl Database {
         request: &KnowledgeThreadMessageListRequest,
     ) -> Result<KnowledgeThreadMessageListOutput> {
         knowledge_thread_messages_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn delete_knowledge_thread_messages(
+        &mut self,
+        request: &KnowledgeThreadMessageDeleteRequest,
+    ) -> Result<KnowledgeThreadMessageDeleteOutput> {
+        delete_knowledge_thread_messages_for(self, request)
     }
 
     pub fn update_knowledge_label_lifecycle_batch(
@@ -16165,6 +16188,72 @@ fn knowledge_thread_messages_for(
     })
 }
 
+fn delete_knowledge_thread_messages_for(
+    db: &mut Database,
+    request: &KnowledgeThreadMessageDeleteRequest,
+) -> Result<KnowledgeThreadMessageDeleteOutput> {
+    db.ensure_writable()?;
+    if request.thread_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread message delete requires a non-empty thread id".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let Some(thread) =
+        seed_node_by_label_and_external_id(&db.catalog, &db.store, "Thread", &request.thread_id)
+    else {
+        return Ok(KnowledgeThreadMessageDeleteOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            thread_id: request.thread_id.clone(),
+            thread_node_id: None,
+            found_thread: false,
+            matched_relationship_count: 0,
+            deleted_message_count: 0,
+        });
+    };
+
+    let thread_node_id = thread.id;
+    let message_rows = thread_message_rows(&db.catalog, &db.store, thread_node_id);
+    let matched_relationship_count = message_rows.len();
+    let deleted_message_count = message_rows
+        .iter()
+        .map(|row| row.node_id)
+        .collect::<BTreeSet<_>>()
+        .len();
+
+    if deleted_message_count == 0 {
+        return Ok(KnowledgeThreadMessageDeleteOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            thread_id: request.thread_id.clone(),
+            thread_node_id: Some(thread_node_id.0),
+            found_thread: true,
+            matched_relationship_count,
+            deleted_message_count: 0,
+        });
+    }
+
+    db.query_with_params(
+        "MATCH (t:Thread {id: $thread_uuid})-[:CONTAINS]->(m:Message) DETACH DELETE m",
+        &BTreeMap::from([(
+            "thread_uuid".to_string(),
+            Value::String(request.thread_id.clone()),
+        )]),
+    )?;
+
+    Ok(KnowledgeThreadMessageDeleteOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        thread_id: request.thread_id.clone(),
+        thread_node_id: Some(thread_node_id.0),
+        found_thread: true,
+        matched_relationship_count,
+        deleted_message_count,
+    })
+}
+
 fn thread_message_rows(
     catalog: &Catalog,
     store: &GraphStore,
@@ -23903,6 +23992,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadMessageListRequest,
     ) -> Result<KnowledgeThreadMessageListOutput> {
         self.db.knowledge_thread_messages(request)
+    }
+
+    pub fn delete_knowledge_thread_messages(
+        &mut self,
+        request: &KnowledgeThreadMessageDeleteRequest,
+    ) -> Result<KnowledgeThreadMessageDeleteOutput> {
+        self.db.delete_knowledge_thread_messages(request)
     }
 
     pub fn update_knowledge_label_lifecycle_batch(

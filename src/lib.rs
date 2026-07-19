@@ -193,6 +193,7 @@ pub use api::{
     KnowledgeThreadListOutput, KnowledgeThreadListRequest, KnowledgeThreadListRow,
     KnowledgeThreadMessageCountBatchOutput, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountBatchRow, KnowledgeThreadMessageCountUpdate,
+    KnowledgeThreadMessageDeleteOutput, KnowledgeThreadMessageDeleteRequest,
     KnowledgeThreadMessageListOutput, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMessageLookupOutput, KnowledgeThreadMessageLookupRequest,
     KnowledgeThreadMessageRow, KnowledgeThreadMetaLookupOutput, KnowledgeThreadMetaLookupRequest,

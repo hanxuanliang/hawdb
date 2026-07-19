@@ -435,6 +435,14 @@ index/timestamps/token count/metadata plus relationship id and relationship
 order index, orders by `COALESCE(c.order_index, m.order_index)`, supports
 bounded limits, reports found/matched/returned counts and the graph commit
 epoch, and does not write WAL.
+Thread-owned Message cleanup is covered by
+`Database::delete_knowledge_thread_messages` for the Nowledge
+`MATCH (t:Thread {id})-[:CONTAINS]->(m:Message) DETACH DELETE m` shape. The
+typed facade validates Thread ids before WAL, reports missing Thread rows
+without writing, counts matched `CONTAINS` relationships and unique Message
+targets, preserves the Thread node, deletes only outgoing Message target nodes
+through the WAL-backed Cypher mutation path, and keeps empty-thread cleanup
+read-only.
 Thread compacted-memory reads are covered by
 `Database::knowledge_thread_compacted_memories`. The typed read resolves one
 Thread by physical `id` or logical `thread_id`, scans outgoing `COMPACTS_TO`

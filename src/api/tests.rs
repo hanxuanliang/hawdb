@@ -79,13 +79,14 @@ use super::{
     KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
     KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
     KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
-    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
-    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
-    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
-    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
+    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
+    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
+    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
+    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -11762,6 +11763,151 @@ fn typed_thread_delete_persists_as_one_wal_batch_and_replays() {
             })
             .entity
             .is_some());
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn deletes_thread_messages_for_nowledge_cleanup_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1'})-[:CONTAINS {order_index: 1}]->(:Message {id: 'message_1', order_index: 1})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'message_1'}) CREATE (t)-[:CONTAINS {order_index: 2}]->(m)")
+        .unwrap();
+    db.query("CREATE (:Message {id: 'message_2', order_index: 3})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'message_2'}) CREATE (t)-[:CONTAINS {order_index: 3}]->(m)")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_2'})-[:CONTAINS]->(:Message {id: 'message_other'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let output = db
+        .delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
+            thread_id: "thread_1".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, graph_commit_epoch_before);
+    assert_eq!(
+        output.graph_commit_epoch_after,
+        graph_commit_epoch_before + 1
+    );
+    assert!(output.found_thread);
+    assert!(output.thread_node_id.is_some());
+    assert_eq!(output.matched_relationship_count, 3);
+    assert_eq!(output.deleted_message_count, 2);
+    assert!(
+        db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
+            id: "thread_1".to_string(),
+        })
+        .unwrap()
+        .found_thread
+    );
+    assert_eq!(
+        db.query("MATCH (m:Message) RETURN m.id AS id ORDER BY id")
+            .unwrap()
+            .rows
+            .iter()
+            .map(|row| row.get("id").unwrap().clone())
+            .collect::<Vec<_>>(),
+        vec![Value::String("message_other".to_string())]
+    );
+    assert_eq!(
+        db.knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
+            thread_id: "thread_1".to_string(),
+            limit: 0,
+        })
+        .unwrap()
+        .matched_count,
+        0
+    );
+
+    let missing = db
+        .delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
+            thread_id: "missing".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found_thread);
+    assert_eq!(missing.deleted_message_count, 0);
+    assert_eq!(
+        missing.graph_commit_epoch_after,
+        output.graph_commit_epoch_after
+    );
+
+    let empty = db
+        .delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
+            thread_id: "thread_1".to_string(),
+        })
+        .unwrap();
+    assert!(empty.found_thread);
+    assert_eq!(empty.matched_relationship_count, 0);
+    assert_eq!(empty.deleted_message_count, 0);
+    assert_eq!(
+        empty.graph_commit_epoch_after,
+        output.graph_commit_epoch_after
+    );
+}
+
+#[test]
+fn thread_message_delete_rejects_empty_thread_id_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_1'})-[:CONTAINS]->(:Message {id: 'message_1'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
+            thread_id: String::new(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty thread id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_thread_message_delete_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_thread_message_delete_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Thread {id: 'thread_1'})-[:CONTAINS]->(:Message {id: 'message_1'})")
+            .unwrap();
+        db.query("CREATE (:Message {id: 'message_2'})").unwrap();
+        db.query("MATCH (t:Thread {id: 'thread_1'}), (m:Message {id: 'message_2'}) CREATE (t)-[:CONTAINS]->(m)")
+            .unwrap();
+        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.delete_knowledge_thread_messages(&KnowledgeThreadMessageDeleteRequest {
+            thread_id: "thread_1".to_string(),
+        })
+        .unwrap();
+        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("delete_node"));
+    {
+        let mut db = Database::open(&path).unwrap();
+        assert!(
+            db.knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
+                id: "thread_1".to_string(),
+            })
+            .unwrap()
+            .found_thread
+        );
+        assert_eq!(
+            db.query("MATCH (m:Message) RETURN count(m) AS messages")
+                .unwrap()
+                .rows[0]
+                .get("messages"),
+            Some(&Value::Int(0))
+        );
     }
     std::fs::remove_dir_all(path).unwrap();
 }

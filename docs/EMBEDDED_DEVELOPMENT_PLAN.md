@@ -216,7 +216,9 @@ without WAL writes. Thread message-render lookup is exposed as a typed
 `knowledge_thread_message_lookup` API for REST FS id lookup plus source filters
 without WAL writes. Thread metadata-render lookup is exposed as a typed
 `knowledge_thread_meta_lookup` API for REST FS id lookup plus source filters
-without WAL writes.
+without WAL writes. Thread-owned Message cleanup is exposed as a typed
+`delete_knowledge_thread_messages` API for exact Thread `CONTAINS` Message
+target-node detach deletes while preserving the Thread node.
 REST FS Skill detail lookup is exposed as a typed
 `knowledge_skill_detail_lookup` API for physical Skill id lookup without WAL
 writes.
