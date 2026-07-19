@@ -21,7 +21,9 @@ use super::{
     KnowledgeMemoryAccessTouch, KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankClearRequest,
+    KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
+    KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
+    KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
     KnowledgePageRankScoreBatchRequest, KnowledgePageRankScoreUpdate, KnowledgePathRequest,
     KnowledgePropertyBatchRequest, KnowledgePropertyUpdateBatchRequest,
     KnowledgePropertyUpdateRequest, KnowledgeRelationshipCreateBatchRequest,
@@ -7304,6 +7306,135 @@ fn typed_pagerank_score_batch_persists_as_one_wal_batch_and_replays() {
         );
     }
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_pagerank_plan_counts_for_nowledge_shapes() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'm1', created_at: 10, updated_at: 20, metadata: '{\"visible\":true}'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'm2', created_at: 120, updated_at: 130})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'e1', name: 'Entity One', created_at: 15, updated_at: 25})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'e2', name: 'Entity Two', created_at: 140, updated_at: 150})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm1'}), (e:Entity {id: 'e1'}) CREATE (m)-[:MENTIONS {created_at: 30}]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm2'}), (e:Entity {id: 'e2'}) CREATE (m)-[:MENTIONS {created_at: 160}]->(e)")
+        .unwrap();
+    db.query("MATCH (a:Entity {id: 'e1'}), (b:Entity {id: 'e2'}) CREATE (a)-[:RELATES_TO {created_at: 170}]->(b)")
+        .unwrap();
+    db.query("MATCH (a:Memory {id: 'm1'}), (b:Memory {id: 'm2'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'active', created_at: 180}]->(b)")
+        .unwrap();
+    db.query("MATCH (a:Memory {id: 'm2'}), (b:Memory {id: 'm1'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'inactive', created_at: 190}]->(b)")
+        .unwrap();
+
+    let graph_commit_epoch = db.store.commit_epoch();
+    let plan = db.knowledge_pagerank_plan(&KnowledgePageRankPlanRequest {
+        changed_since_epoch_nanos: Some(100),
+    });
+
+    assert_eq!(plan.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(plan.memory_node_count, 2);
+    assert_eq!(plan.entity_node_count, 2);
+    assert_eq!(plan.entity_relation_count, 1);
+    assert_eq!(plan.mention_edge_count, 2);
+    assert_eq!(plan.active_memory_relation_count, 1);
+    assert_eq!(plan.changed_memory_count, 1);
+    assert_eq!(plan.changed_entity_count, 1);
+    assert_eq!(plan.changed_mention_edge_count, 1);
+    assert_eq!(plan.changed_entity_relation_count, 1);
+    assert_eq!(plan.changed_memory_relation_count, 1);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn reads_pagerank_membership_visibility_and_central_entity() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'm1', metadata: '{\"space\":\"default\"}', is_latest: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'm2'})").unwrap();
+    db.query("CREATE (:Entity {id: 'e1', name: 'Central Entity'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let membership = db
+        .knowledge_pagerank_membership(&KnowledgePageRankMembershipRequest {
+            label: "Entity".to_string(),
+            external_ids: vec!["e1".to_string(), "missing".to_string()],
+        })
+        .unwrap();
+    assert_eq!(membership.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(membership.matched_count, 1);
+    assert_eq!(membership.missing_count, 1);
+    assert!(membership.rows[0].matched);
+    assert!(!membership.rows[1].matched);
+
+    let visibility = db
+        .knowledge_pagerank_memory_visibility(&KnowledgePageRankMemoryVisibilityRequest {
+            memory_ids: vec!["m1".to_string(), "m2".to_string(), "missing".to_string()],
+        })
+        .unwrap();
+    assert_eq!(visibility.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(visibility.matched_count, 2);
+    assert_eq!(visibility.missing_count, 1);
+    assert_eq!(
+        visibility.rows[0].metadata,
+        Some(Value::String("{\"space\":\"default\"}".to_string()))
+    );
+    assert!(!visibility.rows[0].is_latest);
+    assert!(visibility.rows[1].is_latest);
+    assert!(!visibility.rows[2].matched);
+
+    let central = db
+        .knowledge_pagerank_central_entity(&KnowledgePageRankCentralEntityRequest {
+            entity_id: "e1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(central.graph_commit_epoch, graph_commit_epoch);
+    assert!(central.found);
+    assert_eq!(central.name.as_deref(), Some("Central Entity"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn pagerank_read_requests_validate_nowledge_inputs() {
+    let db = Database::new();
+
+    let bad_label = db
+        .knowledge_pagerank_membership(&KnowledgePageRankMembershipRequest {
+            label: "Source".to_string(),
+            external_ids: vec!["s1".to_string()],
+        })
+        .unwrap_err();
+    assert!(bad_label
+        .to_string()
+        .contains("support only Memory and Entity labels"));
+
+    let bad_member = db
+        .knowledge_pagerank_membership(&KnowledgePageRankMembershipRequest {
+            label: "Memory".to_string(),
+            external_ids: vec![String::new()],
+        })
+        .unwrap_err();
+    assert!(bad_member.to_string().contains("non-empty external ids"));
+
+    let bad_visibility = db
+        .knowledge_pagerank_memory_visibility(&KnowledgePageRankMemoryVisibilityRequest {
+            memory_ids: vec![String::new()],
+        })
+        .unwrap_err();
+    assert!(bad_visibility.to_string().contains("non-empty memory ids"));
+
+    let bad_central = db
+        .knowledge_pagerank_central_entity(&KnowledgePageRankCentralEntityRequest {
+            entity_id: String::new(),
+        })
+        .unwrap_err();
+    assert!(bad_central.to_string().contains("non-empty entity id"));
 }
 
 #[test]

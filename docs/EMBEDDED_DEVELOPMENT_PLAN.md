@@ -172,6 +172,9 @@ Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches
 for Nowledge Memory and Entity `pagerank_score` writes.
+PageRank plan and read helpers are exposed as typed APIs for the Nowledge
+graph-count, changed-count, membership split, Memory visibility, and central
+entity lookup shapes used around unified PageRank execution.
 GraphMeta PageRank and community-detection stamps are exposed as a typed batch
 over `meta_id` plus validated state assignments.
 Schema migration log writes are exposed as a typed create-once batch over

@@ -215,6 +215,15 @@ Entity `pagerank_score` persistence and clear operations. The wrapper accepts
 only finite non-negative scores for Memory/Entity identities, reports missing,
 idless, duplicate, and clear-only non-writable rows without writing, and commits
 eligible score writes or clears through one grouped WAL batch.
+PageRank plan and read-side helpers are also covered by typed APIs:
+`Database::knowledge_pagerank_plan` exposes the Nowledge Memory/Entity node
+counts, `MENTIONS`, `RELATES_TO`, active `MEMORY_RELATES_TO`, and cutoff-based
+changed-count shapes; `Database::knowledge_pagerank_membership` covers
+Memory/Entity id membership splitting; `Database::knowledge_pagerank_memory_visibility`
+covers default-visible Memory metadata/latest checks; and
+`Database::knowledge_pagerank_central_entity` covers the central-entity name
+lookup without constructing application-side Cypher. These reads report the
+current graph commit epoch and do not write WAL.
 GraphMeta algorithm stamps are covered by a typed batch for Nowledge PageRank
 and community-detection state updates shaped as `MERGE (m:GraphMeta {meta_id})
 SET ...`. The wrapper validates non-empty `meta_id` values and property names,

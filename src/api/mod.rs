@@ -2098,6 +2098,83 @@ pub struct KnowledgePageRankClearOutput {
     pub non_writable_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgePageRankPlanRequest {
+    pub changed_since_epoch_nanos: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankPlanOutput {
+    pub graph_commit_epoch: u64,
+    pub memory_node_count: usize,
+    pub entity_node_count: usize,
+    pub entity_relation_count: usize,
+    pub mention_edge_count: usize,
+    pub active_memory_relation_count: usize,
+    pub changed_memory_count: usize,
+    pub changed_entity_count: usize,
+    pub changed_mention_edge_count: usize,
+    pub changed_entity_relation_count: usize,
+    pub changed_memory_relation_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankMembershipRequest {
+    pub label: String,
+    pub external_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankMembershipRow {
+    pub label: String,
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankMembershipOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgePageRankMembershipRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankMemoryVisibilityRequest {
+    pub memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankMemoryVisibilityRow {
+    pub memory_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub metadata: Option<Value>,
+    pub is_latest: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankMemoryVisibilityOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgePageRankMemoryVisibilityRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankCentralEntityRequest {
+    pub entity_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgePageRankCentralEntityOutput {
+    pub graph_commit_epoch: u64,
+    pub found: bool,
+    pub node_id: Option<u64>,
+    pub name: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityAssignmentClearRequest {
     pub labels: Vec<String>,
@@ -4309,6 +4386,34 @@ impl Database {
         request: &KnowledgePageRankClearRequest,
     ) -> Result<KnowledgePageRankClearOutput> {
         clear_knowledge_pagerank_scores_for(self, request)
+    }
+
+    pub fn knowledge_pagerank_plan(
+        &self,
+        request: &KnowledgePageRankPlanRequest,
+    ) -> KnowledgePageRankPlanOutput {
+        knowledge_pagerank_plan_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_pagerank_membership(
+        &self,
+        request: &KnowledgePageRankMembershipRequest,
+    ) -> Result<KnowledgePageRankMembershipOutput> {
+        knowledge_pagerank_membership_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_pagerank_memory_visibility(
+        &self,
+        request: &KnowledgePageRankMemoryVisibilityRequest,
+    ) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
+        knowledge_pagerank_memory_visibility_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_pagerank_central_entity(
+        &self,
+        request: &KnowledgePageRankCentralEntityRequest,
+    ) -> Result<KnowledgePageRankCentralEntityOutput> {
+        knowledge_pagerank_central_entity_for(&self.catalog, &self.store, request)
     }
 
     pub fn clear_knowledge_community_assignments(
@@ -8856,6 +8961,275 @@ fn clear_knowledge_pagerank_scores_for(
         cleared_count,
         non_writable_count,
     })
+}
+
+fn knowledge_pagerank_plan_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgePageRankPlanRequest,
+) -> KnowledgePageRankPlanOutput {
+    let cutoff = request.changed_since_epoch_nanos.map(Value::Int);
+    KnowledgePageRankPlanOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        memory_node_count: count_nodes_with_label(catalog, store, "Memory"),
+        entity_node_count: count_nodes_with_label(catalog, store, "Entity"),
+        entity_relation_count: count_relationships_between_labels(
+            catalog,
+            store,
+            "RELATES_TO",
+            "Entity",
+            "Entity",
+            |_| true,
+        ),
+        mention_edge_count: count_relationships_between_labels(
+            catalog,
+            store,
+            "MENTIONS",
+            "Memory",
+            "Entity",
+            |_| true,
+        ),
+        active_memory_relation_count: count_relationships_between_labels(
+            catalog,
+            store,
+            "MEMORY_RELATES_TO",
+            "Memory",
+            "Memory",
+            relationship_is_active,
+        ),
+        changed_memory_count: cutoff.as_ref().map_or(0, |cutoff| {
+            count_changed_nodes_with_label(catalog, store, "Memory", cutoff)
+        }),
+        changed_entity_count: cutoff.as_ref().map_or(0, |cutoff| {
+            count_changed_nodes_with_label(catalog, store, "Entity", cutoff)
+        }),
+        changed_mention_edge_count: cutoff.as_ref().map_or(0, |cutoff| {
+            count_relationships_between_labels(
+                catalog,
+                store,
+                "MENTIONS",
+                "Memory",
+                "Entity",
+                |r| relationship_changed_since(r, cutoff),
+            )
+        }),
+        changed_entity_relation_count: cutoff.as_ref().map_or(0, |cutoff| {
+            count_relationships_between_labels(
+                catalog,
+                store,
+                "RELATES_TO",
+                "Entity",
+                "Entity",
+                |r| relationship_changed_since(r, cutoff),
+            )
+        }),
+        changed_memory_relation_count: cutoff.as_ref().map_or(0, |cutoff| {
+            count_relationships_between_labels(
+                catalog,
+                store,
+                "MEMORY_RELATES_TO",
+                "Memory",
+                "Memory",
+                |r| relationship_is_active(r) && relationship_changed_since(r, cutoff),
+            )
+        }),
+    }
+}
+
+fn knowledge_pagerank_membership_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgePageRankMembershipRequest,
+) -> Result<KnowledgePageRankMembershipOutput> {
+    validate_pagerank_label(request.label.as_str())?;
+    validate_non_empty_external_ids(
+        &request.external_ids,
+        "knowledge pagerank membership requires non-empty external ids",
+    )?;
+    let label = pagerank_label(request.label.as_str());
+    let mut rows = Vec::with_capacity(request.external_ids.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    for external_id in &request.external_ids {
+        let node = seed_node_by_label_and_external_id(catalog, store, label, external_id);
+        if let Some(node) = node {
+            matched_count += 1;
+            rows.push(KnowledgePageRankMembershipRow {
+                label: label.to_string(),
+                external_id: external_id.clone(),
+                node_id: Some(node.id.0),
+                matched: true,
+            });
+        } else {
+            missing_count += 1;
+            rows.push(KnowledgePageRankMembershipRow {
+                label: label.to_string(),
+                external_id: external_id.clone(),
+                node_id: None,
+                matched: false,
+            });
+        }
+    }
+
+    Ok(KnowledgePageRankMembershipOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+    })
+}
+
+fn knowledge_pagerank_memory_visibility_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgePageRankMemoryVisibilityRequest,
+) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
+    validate_non_empty_external_ids(
+        &request.memory_ids,
+        "knowledge pagerank memory visibility requires non-empty memory ids",
+    )?;
+    let mut rows = Vec::with_capacity(request.memory_ids.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    for memory_id in &request.memory_ids {
+        let Some(node) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgePageRankMemoryVisibilityRow {
+                memory_id: memory_id.clone(),
+                node_id: None,
+                matched: false,
+                metadata: None,
+                is_latest: true,
+            });
+            continue;
+        };
+        matched_count += 1;
+        rows.push(KnowledgePageRankMemoryVisibilityRow {
+            memory_id: memory_id.clone(),
+            node_id: Some(node.id.0),
+            matched: true,
+            metadata: node.properties.get("metadata").cloned(),
+            is_latest: node.properties.get("is_latest") != Some(&Value::Bool(false)),
+        });
+    }
+
+    Ok(KnowledgePageRankMemoryVisibilityOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+    })
+}
+
+fn knowledge_pagerank_central_entity_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgePageRankCentralEntityRequest,
+) -> Result<KnowledgePageRankCentralEntityOutput> {
+    if request.entity_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge pagerank central entity requires a non-empty entity id".to_string(),
+        ));
+    }
+    let node = seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id);
+    Ok(KnowledgePageRankCentralEntityOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        found: node.is_some(),
+        node_id: node.map(|node| node.id.0),
+        name: node
+            .and_then(|node| node.properties.get("name"))
+            .map(value_to_external_id)
+            .filter(|name| !name.is_empty()),
+    })
+}
+
+fn count_nodes_with_label(catalog: &Catalog, store: &GraphStore, label: &str) -> usize {
+    let Some(label_id) = catalog.label_id(label) else {
+        return 0;
+    };
+    store.scan_nodes(Some(label_id)).count()
+}
+
+fn count_changed_nodes_with_label(
+    catalog: &Catalog,
+    store: &GraphStore,
+    label: &str,
+    cutoff: &Value,
+) -> usize {
+    let Some(label_id) = catalog.label_id(label) else {
+        return 0;
+    };
+    store
+        .scan_nodes(Some(label_id))
+        .filter(|node| node_changed_since(node, cutoff))
+        .count()
+}
+
+fn count_relationships_between_labels(
+    catalog: &Catalog,
+    store: &GraphStore,
+    rel_type: &str,
+    source_label: &str,
+    target_label: &str,
+    predicate: impl Fn(&RelRecord) -> bool,
+) -> usize {
+    let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
+        return 0;
+    };
+    let Some(source_label_id) = catalog.label_id(source_label) else {
+        return 0;
+    };
+    let Some(target_label_id) = catalog.label_id(target_label) else {
+        return 0;
+    };
+    store
+        .scan_relationships(Some(rel_type_id))
+        .filter(|relationship| {
+            predicate(relationship)
+                && store
+                    .node(relationship.source)
+                    .is_some_and(|node| node.labels.contains(&source_label_id))
+                && store
+                    .node(relationship.target)
+                    .is_some_and(|node| node.labels.contains(&target_label_id))
+        })
+        .count()
+}
+
+fn node_changed_since(node: &NodeRecord, cutoff: &Value) -> bool {
+    node.properties
+        .get("created_at")
+        .is_some_and(|value| value_is_greater(value, cutoff))
+        || node
+            .properties
+            .get("updated_at")
+            .is_some_and(|value| value_is_greater(value, cutoff))
+}
+
+fn relationship_changed_since(relationship: &RelRecord, cutoff: &Value) -> bool {
+    relationship
+        .properties
+        .get("created_at")
+        .is_some_and(|value| value_is_greater(value, cutoff))
+        || relationship
+            .properties
+            .get("updated_at")
+            .is_some_and(|value| value_is_greater(value, cutoff))
+}
+
+fn relationship_is_active(relationship: &RelRecord) -> bool {
+    relationship
+        .properties
+        .get("status")
+        .is_some_and(|value| value_to_external_id(value) == "active")
+}
+
+fn validate_non_empty_external_ids(external_ids: &[String], message: &str) -> Result<()> {
+    if external_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(message.to_string()));
+    }
+    Ok(())
 }
 
 fn validate_pagerank_label(label: &str) -> Result<()> {
@@ -14988,6 +15362,34 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgePageRankClearRequest,
     ) -> Result<KnowledgePageRankClearOutput> {
         self.db.clear_knowledge_pagerank_scores(request)
+    }
+
+    pub fn knowledge_pagerank_plan(
+        &self,
+        request: &KnowledgePageRankPlanRequest,
+    ) -> KnowledgePageRankPlanOutput {
+        self.db.knowledge_pagerank_plan(request)
+    }
+
+    pub fn knowledge_pagerank_membership(
+        &self,
+        request: &KnowledgePageRankMembershipRequest,
+    ) -> Result<KnowledgePageRankMembershipOutput> {
+        self.db.knowledge_pagerank_membership(request)
+    }
+
+    pub fn knowledge_pagerank_memory_visibility(
+        &self,
+        request: &KnowledgePageRankMemoryVisibilityRequest,
+    ) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
+        self.db.knowledge_pagerank_memory_visibility(request)
+    }
+
+    pub fn knowledge_pagerank_central_entity(
+        &self,
+        request: &KnowledgePageRankCentralEntityRequest,
+    ) -> Result<KnowledgePageRankCentralEntityOutput> {
+        self.db.knowledge_pagerank_central_entity(request)
     }
 
     pub fn clear_knowledge_community_assignments(
