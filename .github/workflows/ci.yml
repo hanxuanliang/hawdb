@@ -38,6 +38,46 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      - name: Optimizer smoke summary gate
+        run: |
+          set -euo pipefail
+          root="$(mktemp -d)"
+          cargo test --benches --quiet > "$root/optimizer-smoke.out"
+          python3 - "$root/optimizer-smoke.out" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1], encoding="utf-8") as file:
+              lines = file.readlines()
+
+          prefix = "optimizer_smoke_summaries_json "
+          matches = [line[len(prefix):] for line in lines if line.startswith(prefix)]
+          assert len(matches) == 1, f"expected one {prefix.strip()} line, found {len(matches)}"
+
+          summaries = json.loads(matches[0])
+          assert isinstance(summaries, list) and summaries, "optimizer smoke summaries must be a non-empty array"
+
+          required_fields = {
+              "case",
+              "groups",
+              "rows",
+              "cost",
+              "operator_counts",
+              "class_counts",
+              "fingerprint",
+          }
+          for summary in summaries:
+              missing = required_fields - set(summary)
+              assert not missing, f"{summary.get('case', '<unknown>')} missing fields: {sorted(missing)}"
+              assert isinstance(summary["case"], str) and summary["case"], "case must be a non-empty string"
+              assert isinstance(summary["groups"], int) and summary["groups"] > 0, "groups must be positive"
+              assert isinstance(summary["rows"], int) and summary["rows"] >= 0, "rows must be non-negative"
+              assert isinstance(summary["cost"], (int, float)) and summary["cost"] >= 0, "cost must be non-negative"
+              assert isinstance(summary["operator_counts"], dict) and summary["operator_counts"], "operator_counts must be non-empty"
+              assert isinstance(summary["class_counts"], dict) and summary["class_counts"], "class_counts must be non-empty"
+              assert isinstance(summary["fingerprint"], str) and summary["fingerprint"], "fingerprint must be a non-empty string"
+          PY
+
       - name: Fixture contract checker smoke
         run: |
           set -euo pipefail
