@@ -54,6 +54,7 @@ pub fn nowledge_replacement_summary_json_with_options(
     let dual_engine_evidence = dual_engine_evidence_summary(bundle);
     let dual_engine_evidence_present = dual_engine_evidence.present;
     let dual_engine_evidence_ready = dual_engine_evidence.ready;
+    let dual_engine_evidence_consistent = dual_engine_evidence.consistent;
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
     let production_cutover_ready = migration_gate_decision == Some("ready")
@@ -63,6 +64,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && full_contract_evidence_ready
         && dual_engine_evidence_present
         && dual_engine_evidence_ready == Some(true)
+        && dual_engine_evidence_consistent
         && !background_graph_delta_evidence_missing
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
@@ -83,6 +85,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             full_contract_evidence_ready,
             dual_engine_evidence_present,
             dual_engine_evidence_ready,
+            dual_engine_evidence_consistent,
             background_graph_delta_evidence_missing,
         },
     );
@@ -104,6 +107,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             full_contract_evidence_ready,
             dual_engine_evidence_present,
             dual_engine_evidence_ready,
+            dual_engine_evidence_consistent,
             background_graph_delta_evidence_missing,
             production_cutover_ready,
         },
@@ -127,6 +131,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         "dual_engine_evidence": {
             "present": dual_engine_evidence.present,
             "ready": dual_engine_evidence.ready,
+            "consistent": dual_engine_evidence.consistent,
             "primary_engine": dual_engine_evidence.primary_engine,
             "shadow_engine": dual_engine_evidence.shadow_engine,
             "primary_check_count": dual_engine_evidence.primary_check_count,
@@ -300,6 +305,7 @@ struct ReplacementReadinessInputs<'a> {
     full_contract_evidence_ready: bool,
     dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
+    dual_engine_evidence_consistent: bool,
     background_graph_delta_evidence_missing: bool,
 }
 
@@ -314,6 +320,7 @@ struct NextActionInputs<'a> {
     full_contract_evidence_ready: bool,
     dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
+    dual_engine_evidence_consistent: bool,
     background_graph_delta_evidence_missing: bool,
     production_cutover_ready: bool,
 }
@@ -321,6 +328,7 @@ struct NextActionInputs<'a> {
 struct DualEngineEvidenceSummary<'a> {
     present: bool,
     ready: Option<bool>,
+    consistent: bool,
     primary_engine: Option<&'a str>,
     shadow_engine: Option<&'a str>,
     primary_check_count: Option<u64>,
@@ -373,20 +381,27 @@ fn dual_engine_evidence_summary(bundle: &serde_json::Value) -> DualEngineEvidenc
         &["cutover", "dual_engine_evidence"][..]
     };
     let present = json_get_path(bundle, path).is_some();
+    let primary_check_count = json_get_u64_path_from_dynamic(bundle, path, "primary_check_count");
+    let shadow_check_count = json_get_u64_path_from_dynamic(bundle, path, "shadow_check_count");
+    let matched_check_count = json_get_u64_path_from_dynamic(bundle, path, "matched_check_count");
+    let primary_only_check_count =
+        json_get_u64_path_from_dynamic(bundle, path, "primary_only_check_count");
+    let matched_per_million = json_get_u64_path_from_dynamic(bundle, path, "matched_per_million");
     DualEngineEvidenceSummary {
         present,
         ready: json_get_bool_path_from_dynamic(bundle, path, "ready"),
+        consistent: primary_check_count.is_some_and(|count| count > 0)
+            && primary_check_count == shadow_check_count
+            && matched_check_count == shadow_check_count
+            && primary_only_check_count == Some(0)
+            && matched_per_million == Some(1_000_000),
         primary_engine: json_get_str_path_from_dynamic(bundle, path, "primary_engine"),
         shadow_engine: json_get_str_path_from_dynamic(bundle, path, "shadow_engine"),
-        primary_check_count: json_get_u64_path_from_dynamic(bundle, path, "primary_check_count"),
-        shadow_check_count: json_get_u64_path_from_dynamic(bundle, path, "shadow_check_count"),
-        matched_check_count: json_get_u64_path_from_dynamic(bundle, path, "matched_check_count"),
-        primary_only_check_count: json_get_u64_path_from_dynamic(
-            bundle,
-            path,
-            "primary_only_check_count",
-        ),
-        matched_per_million: json_get_u64_path_from_dynamic(bundle, path, "matched_per_million"),
+        primary_check_count,
+        shadow_check_count,
+        matched_check_count,
+        primary_only_check_count,
+        matched_per_million,
     }
 }
 
@@ -415,7 +430,10 @@ fn nowledge_replacement_blocking_categories(
     if !inputs.previous_wrapper_contract_ready || !inputs.full_contract_evidence_ready {
         categories.insert("previous_wrapper_contract".to_string());
     }
-    if !inputs.dual_engine_evidence_present || inputs.dual_engine_evidence_ready != Some(true) {
+    if !inputs.dual_engine_evidence_present
+        || inputs.dual_engine_evidence_ready != Some(true)
+        || !inputs.dual_engine_evidence_consistent
+    {
         categories.insert("dual_engine_evidence".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
@@ -523,16 +541,22 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
-    if !inputs.dual_engine_evidence_present || inputs.dual_engine_evidence_ready != Some(true) {
+    if !inputs.dual_engine_evidence_present
+        || inputs.dual_engine_evidence_ready != Some(true)
+        || !inputs.dual_engine_evidence_consistent
+    {
         actions.push(next_action(
             "rerun_dual_engine_shadow_gate",
             "side-by-side dual-engine evidence is missing or not ready",
             [
                 "dual_engine_evidence.present",
                 "dual_engine_evidence.ready",
+                "dual_engine_evidence.consistent",
                 "dual_engine_evidence.primary_check_count",
                 "dual_engine_evidence.shadow_check_count",
+                "dual_engine_evidence.matched_check_count",
                 "dual_engine_evidence.primary_only_check_count",
+                "dual_engine_evidence.matched_per_million",
             ],
         ));
     }
@@ -891,6 +915,7 @@ mod tests {
         );
         assert_eq!(summary["dual_engine_evidence"]["present"], true);
         assert_eq!(summary["dual_engine_evidence"]["ready"], true);
+        assert_eq!(summary["dual_engine_evidence"]["consistent"], true);
         assert_eq!(summary["dual_engine_evidence"]["primary_engine"], "skein");
         assert_eq!(
             summary["dual_engine_evidence"]["shadow_engine"],
@@ -959,6 +984,38 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "rerun_dual_engine_shadow_gate"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_when_dual_engine_counts_are_inconsistent() {
+        let mut bundle = production_ready_bundle();
+        bundle["dual_engine_evidence"]["ready"] = serde_json::json!(true);
+        bundle["dual_engine_evidence"]["matched_check_count"] = serde_json::json!(0);
+        bundle["dual_engine_evidence"]["primary_only_check_count"] = serde_json::json!(1);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["dual_engine_evidence"]["ready"], true);
+        assert_eq!(summary["dual_engine_evidence"]["consistent"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "dual_engine_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "rerun_dual_engine_shadow_gate"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "dual_engine_evidence.consistent")
+            }));
     }
 
     #[test]
@@ -1358,9 +1415,12 @@ mod tests {
                     "evidence_fields": [
                         "dual_engine_evidence.present",
                         "dual_engine_evidence.ready",
+                        "dual_engine_evidence.consistent",
                         "dual_engine_evidence.primary_check_count",
                         "dual_engine_evidence.shadow_check_count",
-                        "dual_engine_evidence.primary_only_check_count"
+                        "dual_engine_evidence.matched_check_count",
+                        "dual_engine_evidence.primary_only_check_count",
+                        "dual_engine_evidence.matched_per_million"
                     ]
                 },
                 {

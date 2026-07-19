@@ -178,6 +178,10 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 str_path(&adapter_smoke, &["wrapper_identity"]) == Some(wrapper_identity.as_str()),
                 u64_path(&adapter_smoke, &["primary_only_checks"]) == Some(0),
                 bool_path(&adapter_smoke, &["dual_engine_evidence", "ready"]) == Some(true),
+                dual_engine_primary_count_ready(&adapter_smoke, &["dual_engine_evidence"]),
+                dual_engine_primary_shadow_counts_match(&adapter_smoke, &["dual_engine_evidence"]),
+                dual_engine_matched_shadow_counts_match(&adapter_smoke, &["dual_engine_evidence"]),
+                dual_engine_primary_only_count_clear(&adapter_smoke, &["dual_engine_evidence"]),
             ],
             [
                 "adapter_smoke_ready",
@@ -185,6 +189,10 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "wrapper_identity",
                 "primary_only_checks",
                 "dual_engine_evidence.ready",
+                "dual_engine_evidence.primary_check_count",
+                "dual_engine_evidence.shadow_check_count",
+                "dual_engine_evidence.matched_check_count",
+                "dual_engine_evidence.primary_only_check_count",
             ],
             blocker_codes(&adapter_smoke, &[&["blocker_codes"][..]]),
         ),
@@ -309,6 +317,23 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 empty_array_path(&replacement_summary, &["next_actions"]),
                 bool_path(&replacement_summary, &["dual_engine_evidence", "present"]) == Some(true),
                 bool_path(&replacement_summary, &["dual_engine_evidence", "ready"]) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["dual_engine_evidence", "consistent"],
+                ) == Some(true),
+                dual_engine_primary_count_ready(&replacement_summary, &["dual_engine_evidence"]),
+                dual_engine_primary_shadow_counts_match(
+                    &replacement_summary,
+                    &["dual_engine_evidence"],
+                ),
+                dual_engine_matched_shadow_counts_match(
+                    &replacement_summary,
+                    &["dual_engine_evidence"],
+                ),
+                dual_engine_primary_only_count_clear(
+                    &replacement_summary,
+                    &["dual_engine_evidence"],
+                ),
             ],
             [
                 "production_cutover_ready",
@@ -318,6 +343,11 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "next_actions",
                 "dual_engine_evidence.present",
                 "dual_engine_evidence.ready",
+                "dual_engine_evidence.consistent",
+                "dual_engine_evidence.primary_check_count",
+                "dual_engine_evidence.shadow_check_count",
+                "dual_engine_evidence.matched_check_count",
+                "dual_engine_evidence.primary_only_check_count",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -377,6 +407,7 @@ fn previous_wrapper_preflight_release_summary(
         "adapter_request_count": u64_path(adapter_smoke, &["request_count"]),
         "adapter_primary_only_checks": u64_path(adapter_smoke, &["primary_only_checks"]),
         "adapter_dual_engine_ready": bool_path(adapter_smoke, &["dual_engine_evidence", "ready"]),
+        "adapter_dual_engine_counts_consistent": dual_engine_count_evidence_consistent(adapter_smoke, &["dual_engine_evidence"]),
         "adapter_dual_engine_primary_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "primary_check_count"]),
         "adapter_dual_engine_shadow_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "shadow_check_count"]),
         "adapter_dual_engine_matched_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "matched_check_count"]),
@@ -401,6 +432,8 @@ fn previous_wrapper_preflight_release_summary(
         "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": u64_path(replacement_summary, &["cutover_evidence", "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"]),
         "dual_engine_evidence_present": bool_path(replacement_summary, &["dual_engine_evidence", "present"]),
         "dual_engine_evidence_ready": bool_path(replacement_summary, &["dual_engine_evidence", "ready"]),
+        "dual_engine_evidence_consistent": bool_path(replacement_summary, &["dual_engine_evidence", "consistent"])
+            .or(Some(dual_engine_count_evidence_consistent(replacement_summary, &["dual_engine_evidence"]))),
         "dual_engine_primary_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "primary_check_count"]),
         "dual_engine_shadow_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "shadow_check_count"]),
         "dual_engine_matched_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "matched_check_count"]),
@@ -464,6 +497,49 @@ fn selected_checks_match_check_count(value: &serde_json::Value) -> bool {
         return false;
     };
     check_count > 0 && selected_checks == check_count
+}
+
+fn dual_engine_primary_count_ready(value: &serde_json::Value, path: &[&str]) -> bool {
+    dual_engine_u64_path(value, path, "primary_check_count").is_some_and(|count| count > 0)
+}
+
+fn dual_engine_primary_shadow_counts_match(value: &serde_json::Value, path: &[&str]) -> bool {
+    let Some(primary_check_count) = dual_engine_u64_path(value, path, "primary_check_count") else {
+        return false;
+    };
+    let Some(shadow_check_count) = dual_engine_u64_path(value, path, "shadow_check_count") else {
+        return false;
+    };
+    primary_check_count > 0 && primary_check_count == shadow_check_count
+}
+
+fn dual_engine_matched_shadow_counts_match(value: &serde_json::Value, path: &[&str]) -> bool {
+    let Some(matched_check_count) = dual_engine_u64_path(value, path, "matched_check_count") else {
+        return false;
+    };
+    let Some(shadow_check_count) = dual_engine_u64_path(value, path, "shadow_check_count") else {
+        return false;
+    };
+    shadow_check_count > 0 && matched_check_count == shadow_check_count
+}
+
+fn dual_engine_primary_only_count_clear(value: &serde_json::Value, path: &[&str]) -> bool {
+    dual_engine_u64_path(value, path, "primary_only_check_count") == Some(0)
+}
+
+fn dual_engine_count_evidence_consistent(value: &serde_json::Value, path: &[&str]) -> bool {
+    dual_engine_primary_count_ready(value, path)
+        && dual_engine_primary_shadow_counts_match(value, path)
+        && dual_engine_matched_shadow_counts_match(value, path)
+        && dual_engine_primary_only_count_clear(value, path)
+}
+
+fn dual_engine_u64_path(value: &serde_json::Value, path: &[&str], field: &str) -> Option<u64> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    current.get(field).and_then(serde_json::Value::as_u64)
 }
 
 fn empty_array_path(value: &serde_json::Value, path: &[&str]) -> bool {
@@ -530,6 +606,7 @@ mod tests {
                 "adapter_request_count": 4,
                 "adapter_primary_only_checks": 0,
                 "adapter_dual_engine_ready": true,
+                "adapter_dual_engine_counts_consistent": true,
                 "adapter_dual_engine_primary_check_count": 2,
                 "adapter_dual_engine_shadow_check_count": 2,
                 "adapter_dual_engine_matched_check_count": 2,
@@ -553,6 +630,7 @@ mod tests {
                 "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 42,
                 "dual_engine_evidence_present": true,
                 "dual_engine_evidence_ready": true,
+                "dual_engine_evidence_consistent": true,
                 "dual_engine_primary_check_count": 2,
                 "dual_engine_shadow_check_count": 2,
                 "dual_engine_matched_check_count": 2,
@@ -607,7 +685,12 @@ mod tests {
                 "blocking_categories",
                 "next_actions",
                 "dual_engine_evidence.present",
-                "dual_engine_evidence.ready"
+                "dual_engine_evidence.ready",
+                "dual_engine_evidence.consistent",
+                "dual_engine_evidence.primary_check_count",
+                "dual_engine_evidence.shadow_check_count",
+                "dual_engine_evidence.matched_check_count",
+                "dual_engine_evidence.primary_only_check_count"
             ])
         );
     }
@@ -648,7 +731,12 @@ mod tests {
             "next_actions": [],
             "dual_engine_evidence": {
                 "present": true,
-                "ready": false
+                "ready": false,
+                "consistent": true,
+                "primary_check_count": 2,
+                "shadow_check_count": 2,
+                "matched_check_count": 2,
+                "primary_only_check_count": 0
             }
         }));
 
@@ -768,6 +856,30 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_requires_adapter_dual_engine_counts_to_match() {
+        let mut inputs = ready_inputs();
+        let adapter_smoke = inputs.adapter_smoke.as_mut().unwrap();
+        adapter_smoke["dual_engine_evidence"]["ready"] = serde_json::json!(true);
+        adapter_smoke["dual_engine_evidence"]["matched_check_count"] = serde_json::json!(1);
+        adapter_smoke["dual_engine_evidence"]["primary_only_check_count"] = serde_json::json!(1);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["adapter_smoke"])
+        );
+        assert_eq!(
+            check_by_name(&report, "adapter_smoke")["failed_evidence_fields"],
+            serde_json::json!([
+                "dual_engine_evidence.matched_check_count",
+                "dual_engine_evidence.primary_only_check_count"
+            ])
+        );
+    }
+
+    #[test]
     fn preflight_check_requires_adapter_dual_engine_evidence() {
         let mut inputs = ready_inputs();
         inputs
@@ -787,7 +899,40 @@ mod tests {
         );
         assert_eq!(
             check_by_name(&report, "adapter_smoke")["failed_evidence_fields"],
-            serde_json::json!(["dual_engine_evidence.ready"])
+            serde_json::json!([
+                "dual_engine_evidence.ready",
+                "dual_engine_evidence.primary_check_count",
+                "dual_engine_evidence.shadow_check_count",
+                "dual_engine_evidence.matched_check_count",
+                "dual_engine_evidence.primary_only_check_count"
+            ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_replacement_dual_engine_consistency() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["dual_engine_evidence"]["ready"] = serde_json::json!(true);
+        replacement_summary["dual_engine_evidence"]["consistent"] = serde_json::json!(false);
+        replacement_summary["dual_engine_evidence"]["matched_check_count"] = serde_json::json!(1);
+        replacement_summary["dual_engine_evidence"]["primary_only_check_count"] =
+            serde_json::json!(1);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "dual_engine_evidence.consistent",
+                "dual_engine_evidence.matched_check_count",
+                "dual_engine_evidence.primary_only_check_count"
+            ])
         );
     }
 
@@ -923,6 +1068,7 @@ mod tests {
                 "dual_engine_evidence": {
                     "present": true,
                     "ready": true,
+                    "consistent": true,
                     "primary_check_count": 2,
                     "shadow_check_count": 2,
                     "matched_check_count": 2,
