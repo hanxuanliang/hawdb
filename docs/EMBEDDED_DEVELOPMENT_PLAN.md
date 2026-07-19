@@ -534,6 +534,13 @@ Memory EVOLVES latest reads are available as
 `Database::knowledge_memory_evolves_latest`, covering REST Skills successor
 checks over old Memory id lists with distinct latest-state rows and no WAL
 writes.
+Memory EVOLVES relation count reads are available as
+`Database::knowledge_memory_evolves_relation_counts`, covering the decay
+scheduler's bounded `content_relation IN [...]` count shape over requested
+Memory ids. The read scans only requested Memory nodes, filters outgoing
+`EVOLVES` edges to Memory targets by caller-supplied relation names, reports
+missing Memory ids separately, supports pinned read snapshots, and does not
+write WAL.
 Memory EVOLVES neighbor reads are available as
 `Database::knowledge_memory_evolves_neighbors`, covering MCP outgoing/incoming
 EVOLVES adjacency reads over one anchor Memory with explicit node and

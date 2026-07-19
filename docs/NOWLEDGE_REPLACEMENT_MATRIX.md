@@ -411,6 +411,13 @@ ids, follows outgoing `EVOLVES` edges to Memory targets, returns distinct
 new-memory id/latest-state rows for the REST Skills successor check, reports
 matched/missing old Memory ids and relationship counts, supports pinned read
 snapshots, and does not write WAL.
+Memory EVOLVES relation count reads are covered by
+`Database::knowledge_memory_evolves_relation_counts`. The typed read covers the
+decay scheduler's `content_relation IN [...]` count shape over requested Memory
+ids, scans only matched Memory nodes, filters outgoing `EVOLVES` edges to
+Memory targets by caller-supplied relation names, returns one row per Memory
+with a positive count, reports missing Memory ids and full matched relationship
+counts, supports pinned read snapshots, and does not write WAL.
 Memory EVOLVES neighbor reads are covered by
 `Database::knowledge_memory_evolves_neighbors`. The typed read covers the MCP
 outgoing and incoming `Memory-[:EVOLVES]-Memory` shapes, anchors by one physical
