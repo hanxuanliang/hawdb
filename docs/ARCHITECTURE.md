@@ -94,8 +94,12 @@ retrieval loops without creating ownership cycles.
 Cypher exposes lightweight runtime resource intent through session-scoped
 system variables instead of query-shape-specific typed APIs. `SET system.work_priority`,
 `SET system.work_class`, and `SET system.estimated_operations` configure the
-current query `WorkRequest` mapping, while hard limits and background admission
-remain owned by `DatabaseConfig`, `LocalQosPolicy`, and caller-owned schedulers.
+current query `WorkRequest` mapping. Per-query `CYPHER system.*` prefixes can
+override those variables for one statement without mutating the session or
+database defaults. `DatabaseSession::explain_query` and `skein explain-json`
+surface the effective `WorkRequest` so callers can audit scheduling intent
+beside optimizer evidence. Hard limits and background admission remain owned by
+`DatabaseConfig`, `LocalQosPolicy`, and caller-owned schedulers.
 These variables are runtime state only: they do not write WAL, are rejected
 inside graph transactions and read snapshots, and are meant to guide resource
 scheduling rather than change query semantics.

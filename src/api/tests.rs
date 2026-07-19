@@ -1532,6 +1532,52 @@ fn cypher_system_hints_are_session_relative() {
 }
 
 #[test]
+fn session_explain_reports_session_scoped_resource_intent() {
+    let mut db = Database::new();
+    let mut session = db.session();
+    session
+        .query("SET system.work_priority = 'background'")
+        .unwrap();
+    session.query("SET system.work_class = 'import'").unwrap();
+    session
+        .query("SET system.estimated_operations = 8")
+        .unwrap();
+
+    let explain = session
+        .explain_query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+    assert_eq!(
+        explain.work_request,
+        WorkRequest::background(WorkClass::Import, 8)
+    );
+
+    let hinted = session
+        .explain_query(
+            "CYPHER system.work_class = 'analytics' system.estimated_operations = 32 \
+             MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap();
+    assert_eq!(
+        hinted.work_request,
+        WorkRequest::background(WorkClass::Analytics, 32)
+    );
+}
+
+#[test]
+fn session_explain_is_rejected_inside_active_transaction() {
+    let mut db = Database::new();
+    let mut session = db.session();
+    session.query("BEGIN TRANSACTION").unwrap();
+
+    let error = session
+        .explain_query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("EXPLAIN is not allowed inside an active transaction"));
+}
+
+#[test]
 fn cypher_system_hints_allow_query_parameters_but_require_literal_hint_values() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Graph'})")

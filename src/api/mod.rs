@@ -29861,6 +29861,32 @@ impl DatabaseSession<'_> {
         query_work_request_for_statement(&self.system_variables, &statement)
     }
 
+    pub fn explain_query(&self, cypher_text: &str) -> Result<ExplainOutput> {
+        self.explain_query_with_params(cypher_text, &BTreeMap::new())
+    }
+
+    pub fn explain_query_with_params(
+        &self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<ExplainOutput> {
+        if self.transaction_mutations.is_some() {
+            return Err(SkeinError::Execution(
+                "EXPLAIN is not allowed inside an active transaction".to_string(),
+            ));
+        }
+        let statement = cypher::parse(cypher_text)?;
+        let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
+        let (physical_plan, trace) =
+            self.db
+                .optimized_query_plan(cypher_text, &statement, parameters)?;
+        Ok(ExplainOutput {
+            physical_plan,
+            trace,
+            work_request,
+        })
+    }
+
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
