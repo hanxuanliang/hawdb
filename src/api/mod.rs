@@ -2678,6 +2678,33 @@ pub struct KnowledgeThreadListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadDistillationCandidateRequest {
+    pub normalized_space_id: String,
+    pub source: Option<String>,
+    pub limit: usize,
+    pub offset: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadDistillationCandidateRow {
+    pub id: Option<String>,
+    pub thread_id: String,
+    pub node_id: u64,
+    pub source: Option<String>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: String,
+    pub recent_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadDistillationCandidateOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeThreadDistillationCandidateRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadCompactedMemoryListRequest {
     pub thread_id: String,
     pub identity_property: String,
@@ -5462,6 +5489,13 @@ impl Database {
         request: &KnowledgeThreadListRequest,
     ) -> Result<KnowledgeThreadListOutput> {
         knowledge_threads_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_distillation_candidates(
+        &self,
+        request: &KnowledgeThreadDistillationCandidateRequest,
+    ) -> Result<KnowledgeThreadDistillationCandidateOutput> {
+        knowledge_thread_distillation_candidates_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_compacted_memories(
@@ -12557,6 +12591,114 @@ fn compare_thread_recent_values(
             .or(right.import_date.as_ref())
             .or(right.created_at.as_ref()),
     )
+}
+
+fn knowledge_thread_distillation_candidates_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadDistillationCandidateRequest,
+) -> Result<KnowledgeThreadDistillationCandidateOutput> {
+    validate_knowledge_thread_distillation_candidate_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Thread") else {
+        return Ok(KnowledgeThreadDistillationCandidateOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| thread_matches_distillation_candidate_request(node, request))
+        .filter_map(knowledge_thread_distillation_candidate_row)
+        .collect::<Vec<_>>();
+    sort_thread_distillation_candidate_rows(&mut rows);
+    let matched_count = rows.len();
+    if request.offset > 0 {
+        rows = rows.into_iter().skip(request.offset).collect();
+    }
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    } else {
+        rows.clear();
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeThreadDistillationCandidateOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_thread_distillation_candidate_request(
+    request: &KnowledgeThreadDistillationCandidateRequest,
+) -> Result<()> {
+    if request.normalized_space_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread distillation candidate read requires a non-empty normalized space id"
+                .to_string(),
+        ));
+    }
+    if request.source.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge thread distillation candidate read requires a non-empty source".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn thread_matches_distillation_candidate_request(
+    node: &NodeRecord,
+    request: &KnowledgeThreadDistillationCandidateRequest,
+) -> bool {
+    if string_property(node, "thread_id").is_none() {
+        return false;
+    }
+    if normalized_node_space_id(node) != request.normalized_space_id {
+        return false;
+    }
+    if request
+        .source
+        .as_ref()
+        .is_some_and(|source| string_property(node, "source").as_ref() != Some(source))
+    {
+        return false;
+    }
+    true
+}
+
+fn knowledge_thread_distillation_candidate_row(
+    node: &NodeRecord,
+) -> Option<KnowledgeThreadDistillationCandidateRow> {
+    Some(KnowledgeThreadDistillationCandidateRow {
+        id: node_external_id(node),
+        thread_id: string_property(node, "thread_id")?,
+        node_id: node.id.0,
+        source: string_property(node, "source"),
+        raw_space_id: string_property(node, "space_id"),
+        normalized_space_id: normalized_node_space_id(node),
+        recent_at: thread_recent_value(node).cloned(),
+    })
+}
+
+fn thread_recent_value(node: &NodeRecord) -> Option<&Value> {
+    node.properties
+        .get("updated_at")
+        .or_else(|| node.properties.get("import_date"))
+        .or_else(|| node.properties.get("created_at"))
+}
+
+fn sort_thread_distillation_candidate_rows(rows: &mut [KnowledgeThreadDistillationCandidateRow]) {
+    rows.sort_by(|left, right| {
+        compare_optional_values_desc(left.recent_at.as_ref(), right.recent_at.as_ref())
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
+            .then_with(|| left.id.cmp(&right.id))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
 }
 
 fn knowledge_thread_compacted_memories_for(
@@ -20403,6 +20545,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadListRequest,
     ) -> Result<KnowledgeThreadListOutput> {
         self.db.knowledge_threads(request)
+    }
+
+    pub fn knowledge_thread_distillation_candidates(
+        &self,
+        request: &KnowledgeThreadDistillationCandidateRequest,
+    ) -> Result<KnowledgeThreadDistillationCandidateOutput> {
+        self.db.knowledge_thread_distillation_candidates(request)
     }
 
     pub fn knowledge_thread_compacted_memories(

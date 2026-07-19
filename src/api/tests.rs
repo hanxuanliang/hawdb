@@ -63,8 +63,8 @@ use super::{
     KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
     KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
-    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadListOrder,
-    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadDistillationCandidateRequest,
+    KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -9550,6 +9550,102 @@ fn thread_list_rejects_unbounded_or_empty_filters() {
         })
         .unwrap_err();
     assert!(empty_source.to_string().contains("non-empty source"));
+}
+
+#[test]
+fn reads_thread_distillation_candidates_for_optional_source_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', source: 'slack', space_id: '', created_at: 10, updated_at: 40})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', source: 'email', space_id: 'default', created_at: 30, import_date: 50})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_c', source: 'slack', space_id: 'default', created_at: 20})")
+        .unwrap();
+    db.query(
+        "CREATE (:Thread {id: 'thread_d', source: 'slack', space_id: 'default', updated_at: 100})",
+    )
+    .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_e', thread_id: 'logical_e', source: 'slack', space_id: 'archive', updated_at: 90})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let count_only = db
+        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
+            normalized_space_id: "default".to_string(),
+            source: None,
+            limit: 0,
+            offset: 0,
+        })
+        .unwrap();
+    assert_eq!(count_only.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(count_only.matched_count, 3);
+    assert_eq!(count_only.returned_count, 0);
+    assert!(count_only.rows.is_empty());
+
+    let filtered = db
+        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
+            normalized_space_id: "default".to_string(),
+            source: Some("slack".to_string()),
+            limit: 10,
+            offset: 0,
+        })
+        .unwrap();
+    assert_eq!(filtered.matched_count, 2);
+    assert_eq!(filtered.returned_count, 2);
+    assert_eq!(
+        filtered
+            .rows
+            .iter()
+            .map(|row| row.thread_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["logical_a", "logical_c"]
+    );
+    assert_eq!(filtered.rows[0].id.as_deref(), Some("thread_a"));
+    assert_eq!(filtered.rows[0].source.as_deref(), Some("slack"));
+    assert_eq!(filtered.rows[0].raw_space_id, None);
+    assert_eq!(filtered.rows[0].normalized_space_id, "default");
+
+    let paged = db
+        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
+            normalized_space_id: "default".to_string(),
+            source: None,
+            limit: 1,
+            offset: 1,
+        })
+        .unwrap();
+    assert_eq!(paged.matched_count, 3);
+    assert_eq!(paged.returned_count, 1);
+    assert_eq!(paged.rows[0].thread_id, "logical_a");
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn thread_distillation_candidate_read_rejects_empty_filters() {
+    let db = Database::new();
+
+    let empty_space = db
+        .knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
+            normalized_space_id: String::new(),
+            source: None,
+            limit: 10,
+            offset: 0,
+        })
+        .unwrap_err();
+    assert!(empty_space
+        .to_string()
+        .contains("non-empty normalized space id"));
+
+    let empty_source =
+        db.knowledge_thread_distillation_candidates(&KnowledgeThreadDistillationCandidateRequest {
+            normalized_space_id: "default".to_string(),
+            source: Some(String::new()),
+            limit: 10,
+            offset: 0,
+        });
+    assert!(empty_source
+        .unwrap_err()
+        .to_string()
+        .contains("non-empty source"));
 }
 
 #[test]
