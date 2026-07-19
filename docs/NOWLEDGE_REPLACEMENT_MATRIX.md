@@ -190,6 +190,13 @@ Memory lifecycle metadata writes are covered by a typed batch for the Nowledge
 wrapper validates Memory ids and non-empty lifecycle states before WAL, reports
 missing/idless/duplicate rows without writing, and commits eligible Memory rows
 through one grouped WAL batch.
+Memory entity mention reads are covered by
+`Database::knowledge_memory_entities`. The typed read validates a non-empty
+Memory id list, resolves each Memory in caller order, scans outgoing `MENTIONS`
+edges to Entity nodes, returns Entity id/name/type/confidence plus relationship
+confidence and mention count rows sorted by Entity name/id/relationship id,
+supports per-Memory limits and distinct Entity name limits, reports
+found/missing Memory counts and the graph commit epoch, and does not write WAL.
 Skill usage-stat writes are covered by a typed batch for Nowledge
 `use_count`, optional `success_rate`, `last_activity_at`, `updated_at`, and
 `metadata` update shapes. The wrapper validates Skill ids, non-negative use

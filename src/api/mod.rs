@@ -1393,6 +1393,45 @@ pub struct KnowledgeEntityBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEntityListRequest {
+    pub memory_ids: Vec<String>,
+    pub limit_per_memory: usize,
+    pub distinct_name_limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEntityRow {
+    pub entity_id: Option<String>,
+    pub node_id: u64,
+    pub relationship_id: u64,
+    pub name: Option<String>,
+    pub entity_type: Option<String>,
+    pub confidence: Option<Value>,
+    pub relationship_confidence: Option<Value>,
+    pub mention_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEntityGroup {
+    pub memory_id: String,
+    pub memory_node_id: Option<u64>,
+    pub found: bool,
+    pub entities: Vec<KnowledgeMemoryEntityRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEntityListOutput {
+    pub graph_commit_epoch: u64,
+    pub groups: Vec<KnowledgeMemoryEntityGroup>,
+    pub distinct_entity_names: Vec<String>,
+    pub found_memory_count: usize,
+    pub missing_memory_count: usize,
+    pub entity_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityCreateRequest {
     pub label: String,
     pub external_id: String,
@@ -4325,6 +4364,13 @@ impl Database {
         knowledge_entity_batch_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_entities(
+        &self,
+        request: &KnowledgeMemoryEntityListRequest,
+    ) -> Result<KnowledgeMemoryEntityListOutput> {
+        knowledge_memory_entities_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -6178,6 +6224,119 @@ fn knowledge_scoped_entity_batch_for(
         found_count,
         missing_count,
         filtered_out_count,
+    }
+}
+
+fn knowledge_memory_entities_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryEntityListRequest,
+) -> Result<KnowledgeMemoryEntityListOutput> {
+    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory entity read requires non-empty memory ids".to_string(),
+        ));
+    }
+
+    let mut groups = Vec::with_capacity(request.memory_ids.len());
+    let mut distinct_entity_names = BTreeSet::new();
+    let mut found_memory_count = 0;
+    let mut missing_memory_count = 0;
+    let mut entity_count = 0;
+
+    for memory_id in &request.memory_ids {
+        let Some(memory) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+        else {
+            missing_memory_count += 1;
+            groups.push(KnowledgeMemoryEntityGroup {
+                memory_id: memory_id.clone(),
+                memory_node_id: None,
+                found: false,
+                entities: Vec::new(),
+                matched_count: 0,
+                returned_count: 0,
+            });
+            continue;
+        };
+
+        found_memory_count += 1;
+        let mut rows = memory_entity_rows(catalog, store, memory.id);
+        let matched_count = rows.len();
+        for name in rows
+            .iter()
+            .filter_map(|row| row.name.as_ref())
+            .filter(|name| !name.is_empty())
+        {
+            distinct_entity_names.insert(name.clone());
+        }
+        if request.limit_per_memory > 0 {
+            rows.truncate(request.limit_per_memory);
+        }
+        entity_count += rows.len();
+        groups.push(KnowledgeMemoryEntityGroup {
+            memory_id: memory_id.clone(),
+            memory_node_id: Some(memory.id.0),
+            found: true,
+            matched_count,
+            returned_count: rows.len(),
+            entities: rows,
+        });
+    }
+
+    let mut distinct_entity_names = distinct_entity_names.into_iter().collect::<Vec<_>>();
+    if request.distinct_name_limit > 0 {
+        distinct_entity_names.truncate(request.distinct_name_limit);
+    }
+
+    Ok(KnowledgeMemoryEntityListOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        groups,
+        distinct_entity_names,
+        found_memory_count,
+        missing_memory_count,
+        entity_count,
+    })
+}
+
+fn memory_entity_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory_node_id: NodeId,
+) -> Vec<KnowledgeMemoryEntityRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
+        return Vec::new();
+    };
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return Vec::new();
+    };
+    let mut rows = store
+        .outgoing_relationships(memory_node_id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|entity| entity.labels.contains(&entity_label_id))
+                .map(|entity| memory_entity_row(entity, relationship))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    rows
+}
+
+fn memory_entity_row(entity: &NodeRecord, relationship: &RelRecord) -> KnowledgeMemoryEntityRow {
+    KnowledgeMemoryEntityRow {
+        entity_id: node_external_id(entity),
+        node_id: entity.id.0,
+        relationship_id: relationship.id.0,
+        name: string_property(entity, "name"),
+        entity_type: string_property(entity, "entity_type"),
+        confidence: entity.properties.get("confidence").cloned(),
+        relationship_confidence: relationship.properties.get("confidence").cloned(),
+        mention_count: relationship_integer_property(relationship, "mention_count"),
     }
 }
 
@@ -15721,6 +15880,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_entity_batch(request)
     }
 
+    pub fn knowledge_memory_entities(
+        &self,
+        request: &KnowledgeMemoryEntityListRequest,
+    ) -> Result<KnowledgeMemoryEntityListOutput> {
+        self.db.knowledge_memory_entities(request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -16650,6 +16816,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeEntityBatchRequest,
     ) -> KnowledgeEntityBatchOutput {
         knowledge_entity_batch_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_entities(
+        &self,
+        request: &KnowledgeMemoryEntityListRequest,
+    ) -> Result<KnowledgeMemoryEntityListOutput> {
+        knowledge_memory_entities_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_entity(

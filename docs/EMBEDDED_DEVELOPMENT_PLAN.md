@@ -399,6 +399,10 @@ Endpoint-known label assignment reads are also available as
 `Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
 bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
 construction or WAL writes.
+Memory entity mention reads are available as
+`Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
+`MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
+bounded limits, and no WAL writes.
 Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with
