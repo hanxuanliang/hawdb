@@ -352,6 +352,11 @@ normalized-space filters, metadata substring markers, after-id pagination,
 thread-id presence filtering, offset/limit, id, thread-id, message-count, and
 recent-update ordering, display-title and message-count fallbacks, missing-id
 reporting, and no WAL writes.
+ThreadIdentity exact resolution is covered by
+`Database::knowledge_thread_identity`. The typed read resolves one
+`ThreadIdentity` by external id, returns the Nowledge repo fields
+`thread_node_id`, `thread_id`, normalized/raw space, source, identity node id,
+missing-identity state, supports pinned read snapshots, and does not write WAL.
 Label lifecycle writes are covered by a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names

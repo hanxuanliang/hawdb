@@ -2784,6 +2784,24 @@ pub struct KnowledgeThreadListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadIdentityRequest {
+    pub identity_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadIdentityOutput {
+    pub graph_commit_epoch: u64,
+    pub identity_key: String,
+    pub identity_node_id: Option<u64>,
+    pub found_identity: bool,
+    pub thread_node_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: Option<String>,
+    pub source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadDistillationCandidateRequest {
     pub normalized_space_id: String,
     pub source: Option<String>,
@@ -5616,6 +5634,13 @@ impl Database {
         request: &KnowledgeThreadListRequest,
     ) -> Result<KnowledgeThreadListOutput> {
         knowledge_threads_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_identity(
+        &self,
+        request: &KnowledgeThreadIdentityRequest,
+    ) -> Result<KnowledgeThreadIdentityOutput> {
+        knowledge_thread_identity_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_distillation_candidates(
@@ -13104,6 +13129,53 @@ fn compare_thread_recent_values(
             .or(right.import_date.as_ref())
             .or(right.created_at.as_ref()),
     )
+}
+
+fn knowledge_thread_identity_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadIdentityRequest,
+) -> Result<KnowledgeThreadIdentityOutput> {
+    validate_knowledge_thread_identity_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(identity) =
+        seed_node_by_label_and_external_id(catalog, store, "ThreadIdentity", &request.identity_key)
+    else {
+        return Ok(KnowledgeThreadIdentityOutput {
+            graph_commit_epoch,
+            identity_key: request.identity_key.clone(),
+            identity_node_id: None,
+            found_identity: false,
+            thread_node_id: None,
+            thread_id: None,
+            raw_space_id: None,
+            normalized_space_id: None,
+            source: None,
+        });
+    };
+
+    Ok(KnowledgeThreadIdentityOutput {
+        graph_commit_epoch,
+        identity_key: request.identity_key.clone(),
+        identity_node_id: Some(identity.id.0),
+        found_identity: true,
+        thread_node_id: string_property(identity, "thread_node_id"),
+        thread_id: string_property(identity, "thread_id"),
+        raw_space_id: string_property(identity, "space_id"),
+        normalized_space_id: Some(normalized_node_space_id(identity)),
+        source: string_property(identity, "source"),
+    })
+}
+
+fn validate_knowledge_thread_identity_request(
+    request: &KnowledgeThreadIdentityRequest,
+) -> Result<()> {
+    if request.identity_key.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread identity read requires a non-empty identity key".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn knowledge_thread_distillation_candidates_for(
@@ -21081,6 +21153,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_threads(request)
     }
 
+    pub fn knowledge_thread_identity(
+        &self,
+        request: &KnowledgeThreadIdentityRequest,
+    ) -> Result<KnowledgeThreadIdentityOutput> {
+        self.db.knowledge_thread_identity(request)
+    }
+
     pub fn knowledge_thread_distillation_candidates(
         &self,
         request: &KnowledgeThreadDistillationCandidateRequest,
@@ -21971,6 +22050,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSkillThreadSourceListRequest,
     ) -> Result<KnowledgeSkillThreadSourceListOutput> {
         knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_identity(
+        &self,
+        request: &KnowledgeThreadIdentityRequest,
+    ) -> Result<KnowledgeThreadIdentityOutput> {
+        knowledge_thread_identity_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

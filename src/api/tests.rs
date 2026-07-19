@@ -66,8 +66,8 @@ use super::{
     KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
     KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadListOrder,
-    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityRequest,
+    KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -9952,6 +9952,64 @@ fn thread_list_rejects_unbounded_or_empty_filters() {
         })
         .unwrap_err();
     assert!(empty_source.to_string().contains("non-empty source"));
+}
+
+#[test]
+fn resolves_thread_identity_for_nowledge_repo_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_public', thread_node_id: 'thread_uuid', thread_id: 'logical_a', space_id: '', source: 'codex'})")
+        .unwrap();
+    db.query("CREATE (:ThreadIdentity {id: 'identity_other', thread_node_id: 'other_uuid', thread_id: 'logical_b', space_id: 'team', source: 'slack'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+            identity_key: "identity_public".to_string(),
+        })
+        .unwrap();
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.identity_key, "identity_public");
+    assert!(output.identity_node_id.is_some());
+    assert!(output.found_identity);
+    assert_eq!(output.thread_node_id.as_deref(), Some("thread_uuid"));
+    assert_eq!(output.thread_id.as_deref(), Some("logical_a"));
+    assert_eq!(output.raw_space_id, None);
+    assert_eq!(output.normalized_space_id.as_deref(), Some("default"));
+    assert_eq!(output.source.as_deref(), Some("codex"));
+
+    let missing = db
+        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+            identity_key: "missing_identity".to_string(),
+        })
+        .unwrap();
+    assert_eq!(missing.graph_commit_epoch, graph_commit_epoch);
+    assert!(!missing.found_identity);
+    assert_eq!(missing.identity_node_id, None);
+    assert_eq!(missing.thread_node_id, None);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let tx = db.begin_read_transaction();
+    db.query("MATCH (ti:ThreadIdentity {id: 'identity_public'}) SET ti.source = 'changed'")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+            identity_key: "identity_public".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.source.as_deref(), Some("codex"));
+}
+
+#[test]
+fn thread_identity_read_rejects_empty_key() {
+    let db = Database::new();
+    let error = db
+        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+            identity_key: String::new(),
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("non-empty identity key"));
 }
 
 #[test]
