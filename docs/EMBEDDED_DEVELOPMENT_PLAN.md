@@ -496,6 +496,12 @@ Endpoint-known label assignment reads are also available as
 `Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
 bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
 construction or WAL writes.
+Field-extensible endpoint-known label reads are available as
+`Database::knowledge_entity_label_projected_list`, reusing the same explicit
+entity label, external-id list, and per-entity limit while projecting only
+caller-allowlisted Label and `HAS_LABEL` relationship properties. This keeps
+future Memory/Source label fields extensible without cloning whole Label nodes
+or scanning labels outside the requested endpoints.
 Induced edge-list reads are available as `Database::knowledge_induced_edges`,
 covering Nowledge overview and MCP subgraph `MATCH (a)-[r]->(b) WHERE a.id IN
 $ids AND b.id IN $ids` shapes with relationship type and strength/confidence

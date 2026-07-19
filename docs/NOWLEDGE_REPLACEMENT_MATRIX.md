@@ -670,6 +670,12 @@ and non-empty external id list, resolves each input identity in caller order,
 returns Label id/name/canonical-name/color/description rows sorted by label
 name/id/node id with optional per-entity limits, reports found/missing entity
 counts and the graph commit epoch, and does not write WAL.
+Field-extensible endpoint-known `HAS_LABEL` reads are covered by
+`Database::knowledge_entity_label_projected_list`. The typed read preserves the
+same explicit entity-label, external-id, caller-order grouping, and per-entity
+limit semantics, but projects only caller-allowlisted Label and relationship
+properties so Memory/Source label payloads can grow without cloning whole Label
+nodes or broadening scans beyond requested endpoints.
 Induced edge-list reads are covered by `Database::knowledge_induced_edges` for
 Nowledge overview and MCP subgraph edge-list shapes. The typed read validates a
 non-empty external id set, scans canonical relationships whose source and

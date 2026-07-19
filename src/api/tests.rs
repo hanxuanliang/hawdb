@@ -21,10 +21,11 @@ use super::{
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteGuardRequest,
     KnowledgeEntityDeleteRequest, KnowledgeEntityLabelListRequest,
-    KnowledgeEntityMentionCountCursor, KnowledgeEntityMentionCountListRequest,
-    KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest,
-    KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest,
-    KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeEntityLabelProjectedListRequest, KnowledgeEntityMentionCountCursor,
+    KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
+    KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
+    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
+    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
@@ -16074,6 +16075,186 @@ fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
     assert_eq!(page.rows[0].label_id.as_deref(), Some("beta"));
     assert_eq!(page.rows[0].label_name.as_deref(), Some("Beta"));
     assert_eq!(page.rows[0].memory_count, 1);
+}
+
+#[test]
+fn projects_entity_labels_for_nowledge_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'projected_label_memory_a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_label_memory_b'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'projected_label_source_a'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'label_beta', name: 'Beta', canonical_name: 'beta', color: '#00f', future_label_field: 'label-b'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'label_zeta', name: 'Zeta', canonical_name: 'zeta', color: '#0f0', future_label_field: 'label-z'})")
+        .unwrap();
+    db.query(
+        "CREATE (:Label {id: 'label_source', name: 'Source', future_label_field: 'label-source'})",
+    )
+    .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_label_memory_a'}), (l:Label {id: 'label_beta'}) CREATE (m)-[:HAS_LABEL {assigned_by: 'system', weight: 2, future_edge_field: 'edge-b'}]->(l)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_label_memory_a'}), (l:Label {id: 'label_zeta'}) CREATE (m)-[:HAS_LABEL {assigned_by: 'manual', future_edge_field: 'edge-z'}]->(l)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_label_memory_b'}), (l:Label {id: 'label_zeta'}) CREATE (m)-[:HAS_LABEL {assigned_by: 'system', future_edge_field: 'edge-b2'}]->(l)")
+        .unwrap();
+    db.query("MATCH (s:Source {id: 'projected_label_source_a'}), (l:Label {id: 'label_source'}) CREATE (s)-[:HAS_LABEL {assigned_by: 'source', future_edge_field: 'edge-source'}]->(l)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query("CREATE (:Label {id: 'label_alpha', name: 'Alpha', canonical_name: 'alpha', color: '#f00', future_label_field: 'label-a'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_label_memory_a'}), (l:Label {id: 'label_alpha'}) CREATE (m)-[:HAS_LABEL {assigned_by: 'later', weight: 9, future_edge_field: 'edge-a'}]->(l)")
+        .unwrap();
+
+    let projected = db
+        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+            list: KnowledgeEntityLabelListRequest {
+                entity_label: "Memory".to_string(),
+                external_ids: vec![
+                    "projected_label_memory_a".to_string(),
+                    "missing_projected_label_memory".to_string(),
+                    "projected_label_memory_b".to_string(),
+                ],
+                limit_per_entity: 1,
+            },
+            label_property_names: vec![
+                "name".to_string(),
+                "future_label_field".to_string(),
+                "canonical_name".to_string(),
+                "name".to_string(),
+            ],
+            relationship_property_names: vec![
+                "assigned_by".to_string(),
+                "future_edge_field".to_string(),
+            ],
+        })
+        .unwrap();
+    assert_eq!(projected.found_entity_count, 2);
+    assert_eq!(projected.missing_entity_count, 1);
+    assert_eq!(projected.label_count, 2);
+    assert!(projected.groups[0].found);
+    assert_eq!(projected.groups[0].returned_count, 1);
+    assert_eq!(
+        projected.groups[0].labels[0].label_id.as_deref(),
+        Some("label_alpha")
+    );
+    assert_eq!(
+        projected.groups[0].labels[0]
+            .label_properties
+            .get("future_label_field"),
+        Some(&Value::String("label-a".to_string()))
+    );
+    assert!(!projected.groups[0].labels[0]
+        .label_properties
+        .contains_key("color"));
+    assert_eq!(
+        projected.groups[0].labels[0]
+            .relationship_properties
+            .get("future_edge_field"),
+        Some(&Value::String("edge-a".to_string()))
+    );
+    assert!(!projected.groups[0].labels[0]
+        .relationship_properties
+        .contains_key("weight"));
+    assert!(!projected.groups[1].found);
+    assert!(projected.groups[1].labels.is_empty());
+    assert_eq!(
+        projected.groups[2].labels[0].label_id.as_deref(),
+        Some("label_zeta")
+    );
+
+    let source_projected = db
+        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+            list: KnowledgeEntityLabelListRequest {
+                entity_label: "Source".to_string(),
+                external_ids: vec!["projected_label_source_a".to_string()],
+                limit_per_entity: 0,
+            },
+            label_property_names: vec!["future_label_field".to_string()],
+            relationship_property_names: vec!["assigned_by".to_string()],
+        })
+        .unwrap();
+    assert_eq!(source_projected.found_entity_count, 1);
+    assert_eq!(source_projected.label_count, 1);
+    assert_eq!(
+        source_projected.groups[0].labels[0].label_id.as_deref(),
+        Some("label_source")
+    );
+
+    let snapshot_projected = snapshot
+        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+            list: KnowledgeEntityLabelListRequest {
+                entity_label: "Memory".to_string(),
+                external_ids: vec!["projected_label_memory_a".to_string()],
+                limit_per_entity: 0,
+            },
+            label_property_names: vec!["name".to_string()],
+            relationship_property_names: vec!["future_edge_field".to_string()],
+        })
+        .unwrap();
+    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_projected.label_count, 2);
+    assert_eq!(
+        snapshot_projected.groups[0]
+            .labels
+            .iter()
+            .map(|row| row.label_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("label_beta"), Some("label_zeta")]
+    );
+}
+
+#[test]
+fn entity_label_projected_read_rejects_empty_property_names_without_wal() {
+    let path = unique_test_dir("entity_label_projected_empty_property_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'projected_label_wal_memory'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'projected_label_wal_label'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_label_wal_memory'}), (l:Label {id: 'projected_label_wal_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let label_property_error = db
+        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+            list: KnowledgeEntityLabelListRequest {
+                entity_label: "Memory".to_string(),
+                external_ids: vec!["projected_label_wal_memory".to_string()],
+                limit_per_entity: 10,
+            },
+            label_property_names: vec![String::new()],
+            relationship_property_names: Vec::new(),
+        })
+        .unwrap_err();
+    assert!(label_property_error
+        .to_string()
+        .contains("non-empty property names"));
+
+    let relationship_property_error = db
+        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
+            list: KnowledgeEntityLabelListRequest {
+                entity_label: "Memory".to_string(),
+                external_ids: vec!["projected_label_wal_memory".to_string()],
+                limit_per_entity: 10,
+            },
+            label_property_names: Vec::new(),
+            relationship_property_names: vec![String::new()],
+        })
+        .unwrap_err();
+    assert!(relationship_property_error
+        .to_string()
+        .contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
 }
 
 #[test]

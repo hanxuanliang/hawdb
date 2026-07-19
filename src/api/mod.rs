@@ -4258,6 +4258,40 @@ pub struct KnowledgeEntityLabelListOutput {
     pub label_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelProjectedListRequest {
+    pub list: KnowledgeEntityLabelListRequest,
+    pub label_property_names: Vec<String>,
+    pub relationship_property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelProjectedRow {
+    pub label_id: Option<String>,
+    pub label_node_id: u64,
+    pub relationship_id: u64,
+    pub label_properties: BTreeMap<String, Value>,
+    pub relationship_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelProjectedGroup {
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub found: bool,
+    pub labels: Vec<KnowledgeEntityLabelProjectedRow>,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelProjectedListOutput {
+    pub graph_commit_epoch: u64,
+    pub groups: Vec<KnowledgeEntityLabelProjectedGroup>,
+    pub found_entity_count: usize,
+    pub missing_entity_count: usize,
+    pub label_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePageRankScoreUpdate {
     pub label: String,
@@ -7241,6 +7275,13 @@ impl Database {
         request: &KnowledgeEntityLabelListRequest,
     ) -> Result<KnowledgeEntityLabelListOutput> {
         knowledge_entity_labels_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_entity_label_projected_list(
+        &self,
+        request: &KnowledgeEntityLabelProjectedListRequest,
+    ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
+        knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_pagerank_scores_batch(
@@ -20121,16 +20162,7 @@ fn knowledge_entity_labels_for(
     store: &GraphStore,
     request: &KnowledgeEntityLabelListRequest,
 ) -> Result<KnowledgeEntityLabelListOutput> {
-    validate_cypher_identifier(&request.entity_label, "knowledge entity label")?;
-    if request.external_ids.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge entity label read requires non-empty external ids".to_string(),
-        ));
-    }
-    validate_non_empty_external_ids(
-        &request.external_ids,
-        "knowledge entity label read requires non-empty external ids",
-    )?;
+    validate_knowledge_entity_label_list_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
     let mut groups = Vec::with_capacity(request.external_ids.len());
     let mut found_entity_count = 0;
@@ -20170,6 +20202,96 @@ fn knowledge_entity_labels_for(
         missing_entity_count,
         label_count,
     })
+}
+
+fn knowledge_entity_label_projected_list_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeEntityLabelProjectedListRequest,
+) -> Result<KnowledgeEntityLabelProjectedListOutput> {
+    validate_knowledge_entity_label_projected_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let mut groups = Vec::with_capacity(request.list.external_ids.len());
+    let mut found_entity_count = 0;
+    let mut missing_entity_count = 0;
+    let mut label_count = 0;
+
+    for external_id in &request.list.external_ids {
+        let Some(entity) = seed_node_by_label_and_external_id(
+            catalog,
+            store,
+            &request.list.entity_label,
+            external_id,
+        ) else {
+            missing_entity_count += 1;
+            groups.push(KnowledgeEntityLabelProjectedGroup {
+                external_id: external_id.clone(),
+                node_id: None,
+                found: false,
+                labels: Vec::new(),
+                returned_count: 0,
+            });
+            continue;
+        };
+        found_entity_count += 1;
+        let labels = entity_label_projected_rows(
+            catalog,
+            store,
+            entity,
+            request.list.limit_per_entity,
+            &request.label_property_names,
+            &request.relationship_property_names,
+        );
+        label_count += labels.len();
+        groups.push(KnowledgeEntityLabelProjectedGroup {
+            external_id: external_id.clone(),
+            node_id: Some(entity.id.0),
+            found: true,
+            returned_count: labels.len(),
+            labels,
+        });
+    }
+
+    Ok(KnowledgeEntityLabelProjectedListOutput {
+        graph_commit_epoch,
+        groups,
+        found_entity_count,
+        missing_entity_count,
+        label_count,
+    })
+}
+
+fn validate_knowledge_entity_label_list_request(
+    request: &KnowledgeEntityLabelListRequest,
+) -> Result<()> {
+    validate_cypher_identifier(&request.entity_label, "knowledge entity label")?;
+    if request.external_ids.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity label read requires non-empty external ids".to_string(),
+        ));
+    }
+    validate_non_empty_external_ids(
+        &request.external_ids,
+        "knowledge entity label read requires non-empty external ids",
+    )?;
+    Ok(())
+}
+
+fn validate_knowledge_entity_label_projected_list_request(
+    request: &KnowledgeEntityLabelProjectedListRequest,
+) -> Result<()> {
+    validate_knowledge_entity_label_list_request(&request.list)?;
+    if request.label_property_names.iter().any(String::is_empty)
+        || request
+            .relationship_property_names
+            .iter()
+            .any(String::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge entity label projected read requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_optional_label_id(label_id: Option<&str>) -> Result<()> {
@@ -20271,6 +20393,52 @@ fn entity_label_rows(
     rows
 }
 
+fn entity_label_projected_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    entity: &NodeRecord,
+    limit: usize,
+    label_property_names: &[String],
+    relationship_property_names: &[String],
+) -> Vec<KnowledgeEntityLabelProjectedRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return Vec::new();
+    };
+    let Some(label_label_id) = catalog.label_id("Label") else {
+        return Vec::new();
+    };
+    let mut rows = store
+        .outgoing_relationships(entity.id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|node| node.labels.contains(&label_label_id))
+                .map(|label| {
+                    (
+                        entity_label_projected_row(
+                            label,
+                            relationship,
+                            label_property_names,
+                            relationship_property_names,
+                        ),
+                        node_string_property(label, "name"),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.1
+            .cmp(&right.1)
+            .then_with(|| left.0.label_id.cmp(&right.0.label_id))
+            .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
+            .then_with(|| left.0.label_node_id.cmp(&right.0.label_node_id))
+    });
+    if limit > 0 {
+        rows.truncate(limit);
+    }
+    rows.into_iter().map(|(row, _name)| row).collect()
+}
+
 fn entity_label_row(node: &NodeRecord) -> KnowledgeEntityLabelRow {
     KnowledgeEntityLabelRow {
         label_id: node_external_id(node),
@@ -20279,6 +20447,24 @@ fn entity_label_row(node: &NodeRecord) -> KnowledgeEntityLabelRow {
         canonical_name: node_string_property(node, "canonical_name"),
         color: node.properties.get("color").cloned(),
         description: node.properties.get("description").cloned(),
+    }
+}
+
+fn entity_label_projected_row(
+    label: &NodeRecord,
+    relationship: &RelRecord,
+    label_property_names: &[String],
+    relationship_property_names: &[String],
+) -> KnowledgeEntityLabelProjectedRow {
+    KnowledgeEntityLabelProjectedRow {
+        label_id: node_external_id(label),
+        label_node_id: label.id.0,
+        relationship_id: relationship.id.0,
+        label_properties: projected_properties(&label.properties, label_property_names),
+        relationship_properties: projected_properties(
+            &relationship.properties,
+            relationship_property_names,
+        ),
     }
 }
 
@@ -27851,6 +28037,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_entity_labels(request)
     }
 
+    pub fn knowledge_entity_label_projected_list(
+        &self,
+        request: &KnowledgeEntityLabelProjectedListRequest,
+    ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
+        self.db.knowledge_entity_label_projected_list(request)
+    }
+
     pub fn update_knowledge_pagerank_scores_batch(
         &mut self,
         request: &KnowledgePageRankScoreBatchRequest,
@@ -28726,6 +28919,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSourceMemoryProjectedListRequest,
     ) -> Result<KnowledgeSourceMemoryProjectedListOutput> {
         knowledge_source_memory_projected_list_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_entity_label_projected_list(
+        &self,
+        request: &KnowledgeEntityLabelProjectedListRequest,
+    ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
+        knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skills(
