@@ -1387,6 +1387,42 @@ fn add_cutover_evidence_report(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_executable_search_projection_graph_delta_count",
+        background_maintenance_health.executable_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_admitted_search_projection_graph_delta_count",
+        background_maintenance_health.admitted_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_deferred_search_projection_graph_delta_count",
+        background_maintenance_health.deferred_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_rejected_search_projection_graph_delta_count",
+        background_maintenance_health.rejected_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_executable_search_projection_graph_delta_operations",
+        background_maintenance_health.executable_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_admitted_search_projection_graph_delta_operations",
+        background_maintenance_health.admitted_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+        background_maintenance_health
+            .max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_foreground_ranked_count",
         background_maintenance_health.foreground_ranked_count,
     );

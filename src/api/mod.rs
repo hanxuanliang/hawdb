@@ -623,6 +623,13 @@ pub struct BackgroundMaintenanceSummary {
     pub admitted_estimated_operations: usize,
     pub deferred_estimated_operations: usize,
     pub rejected_estimated_operations: usize,
+    pub executable_search_projection_graph_delta_count: usize,
+    pub admitted_search_projection_graph_delta_count: usize,
+    pub deferred_search_projection_graph_delta_count: usize,
+    pub rejected_search_projection_graph_delta_count: usize,
+    pub executable_search_projection_graph_delta_operations: usize,
+    pub admitted_search_projection_graph_delta_operations: usize,
+    pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
     pub top_admitted_kind: Option<BackgroundMaintenanceKind>,
     pub top_admitted_name: Option<String>,
     pub ranked: Vec<BackgroundMaintenanceSummaryItem>,
@@ -759,18 +766,52 @@ impl BackgroundMaintenanceSummary {
                         summary.top_admitted_kind = Some(item.kind);
                         summary.top_admitted_name = Some(item.name.clone());
                     }
+                    if item.has_executable_search_projection_graph_delta {
+                        summary.admitted_search_projection_graph_delta_count += 1;
+                        summary.admitted_search_projection_graph_delta_operations = summary
+                            .admitted_search_projection_graph_delta_operations
+                            .saturating_add(
+                                item.search_projection_graph_delta_operation_count
+                                    .unwrap_or_default(),
+                            );
+                    }
                 }
                 QosAdmission::Defer { .. } => {
                     summary.deferred_count += 1;
                     summary.deferred_estimated_operations = summary
                         .deferred_estimated_operations
                         .saturating_add(item.estimated_operations);
+                    if item.has_executable_search_projection_graph_delta {
+                        summary.deferred_search_projection_graph_delta_count += 1;
+                    }
                 }
                 QosAdmission::Reject { .. } => {
                     summary.rejected_count += 1;
                     summary.rejected_estimated_operations = summary
                         .rejected_estimated_operations
                         .saturating_add(item.estimated_operations);
+                    if item.has_executable_search_projection_graph_delta {
+                        summary.rejected_search_projection_graph_delta_count += 1;
+                    }
+                }
+            }
+            if item.has_executable_search_projection_graph_delta {
+                summary.executable_search_projection_graph_delta_count += 1;
+                summary.executable_search_projection_graph_delta_operations = summary
+                    .executable_search_projection_graph_delta_operations
+                    .saturating_add(
+                        item.search_projection_graph_delta_operation_count
+                            .unwrap_or_default(),
+                    );
+                if let Some(epoch) =
+                    item.search_projection_graph_delta_complete_through_graph_commit_epoch
+                {
+                    summary.max_search_projection_graph_delta_complete_through_graph_commit_epoch =
+                        Some(
+                            summary
+                                .max_search_projection_graph_delta_complete_through_graph_commit_epoch
+                                .map_or(epoch, |current| current.max(epoch)),
+                        );
                 }
             }
             summary.ranked.push(item);

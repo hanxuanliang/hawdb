@@ -547,16 +547,26 @@ and no torn tail was ignored.
 The bundle includes a top-level `background_maintenance` object with the local
 Skein maintenance summary after the compatibility fixture run. It reports
 candidate counts, admitted/deferred/rejected operation totals, stable work
-class/priority/admission strings, reason codes, and whether a search projection
-delta candidate carries an executable request. Executable search deltas also
-report operation, upsert, delete, max-operation, and complete-through graph
-commit epoch fields so caller-owned schedulers can distinguish precise
-incremental projection work from planning-only freshness signals. This object
-is resource readiness evidence for caller-owned scheduling. When
+class/priority/admission strings, reason codes, whether a search projection
+delta candidate carries an executable request, and top-level aggregate counts
+for executable/admitted/deferred/rejected search-projection graph deltas.
+Executable search deltas also report operation, upsert, delete, max-operation,
+and complete-through graph commit epoch fields, and the summary aggregates
+total/admitted delta operations plus the max complete-through graph commit
+epoch so caller-owned schedulers can distinguish precise incremental
+projection work from planning-only freshness signals. This object is resource
+readiness evidence for caller-owned scheduling. When
 `--require-background-maintenance-evidence` is passed, `cutover_evidence`
 reports `background_maintenance_required`, `background_maintenance_present`,
 `background_maintenance_ready`, `background_maintenance_protocol_matches`,
 `background_maintenance_total_candidates`, `background_maintenance_ranked_count`,
+`background_maintenance_executable_search_projection_graph_delta_count`,
+`background_maintenance_admitted_search_projection_graph_delta_count`,
+`background_maintenance_deferred_search_projection_graph_delta_count`,
+`background_maintenance_rejected_search_projection_graph_delta_count`,
+`background_maintenance_executable_search_projection_graph_delta_operations`,
+`background_maintenance_admitted_search_projection_graph_delta_operations`,
+`background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch`,
 `background_maintenance_foreground_ranked_count`,
 `background_maintenance_unknown_admission_count`,
 `background_maintenance_blocker_codes`, and

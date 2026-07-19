@@ -29452,6 +29452,19 @@ fn background_maintenance_summary_exposes_qos_counts_and_stable_codes() {
     assert_eq!(summary.rejected_count, 0);
     assert_eq!(summary.admitted_estimated_operations, 2);
     assert_eq!(summary.deferred_estimated_operations, 3);
+    assert_eq!(summary.executable_search_projection_graph_delta_count, 1);
+    assert_eq!(summary.admitted_search_projection_graph_delta_count, 1);
+    assert_eq!(summary.deferred_search_projection_graph_delta_count, 0);
+    assert_eq!(summary.rejected_search_projection_graph_delta_count, 0);
+    assert_eq!(
+        summary.executable_search_projection_graph_delta_operations,
+        2
+    );
+    assert_eq!(summary.admitted_search_projection_graph_delta_operations, 2);
+    assert_eq!(
+        summary.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+        Some(db.store.commit_epoch())
+    );
     assert_eq!(
         summary.top_admitted_kind,
         Some(BackgroundMaintenanceKind::SearchProjectionGraphDelta)

@@ -62,6 +62,13 @@ pub struct BackgroundMaintenanceEvidenceHealth {
     pub protocol_matches: Option<bool>,
     pub total_candidates: Option<u64>,
     pub ranked_count: Option<u64>,
+    pub executable_search_projection_graph_delta_count: Option<u64>,
+    pub admitted_search_projection_graph_delta_count: Option<u64>,
+    pub deferred_search_projection_graph_delta_count: Option<u64>,
+    pub rejected_search_projection_graph_delta_count: Option<u64>,
+    pub executable_search_projection_graph_delta_operations: Option<u64>,
+    pub admitted_search_projection_graph_delta_operations: Option<u64>,
+    pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
     pub foreground_ranked_count: u64,
     pub unknown_admission_count: u64,
     pub blocker_codes: Vec<String>,
@@ -601,6 +608,42 @@ fn insert_cutover_evidence_json(
     );
     insert_json(
         &mut evidence,
+        "background_maintenance_executable_search_projection_graph_delta_count",
+        background_maintenance_health.executable_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_admitted_search_projection_graph_delta_count",
+        background_maintenance_health.admitted_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_deferred_search_projection_graph_delta_count",
+        background_maintenance_health.deferred_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_rejected_search_projection_graph_delta_count",
+        background_maintenance_health.rejected_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_executable_search_projection_graph_delta_operations",
+        background_maintenance_health.executable_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_admitted_search_projection_graph_delta_operations",
+        background_maintenance_health.admitted_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut evidence,
+        "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+        background_maintenance_health
+            .max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+    );
+    insert_json(
+        &mut evidence,
         "background_maintenance_foreground_ranked_count",
         background_maintenance_health.foreground_ranked_count,
     );
@@ -765,6 +808,13 @@ pub fn background_maintenance_evidence_health(
             protocol_matches: None,
             total_candidates: None,
             ranked_count: None,
+            executable_search_projection_graph_delta_count: None,
+            admitted_search_projection_graph_delta_count: None,
+            deferred_search_projection_graph_delta_count: None,
+            rejected_search_projection_graph_delta_count: None,
+            executable_search_projection_graph_delta_operations: None,
+            admitted_search_projection_graph_delta_operations: None,
+            max_search_projection_graph_delta_complete_through_graph_commit_epoch: None,
             foreground_ranked_count: 0,
             unknown_admission_count: 0,
             blocker_codes: if required {
@@ -786,6 +836,74 @@ pub fn background_maintenance_evidence_health(
         .get("ranked")
         .and_then(serde_json::Value::as_array);
     let ranked_count = ranked.map(|items| items.len() as u64);
+    let executable_search_projection_graph_delta_count = optional_u64_field(
+        background_maintenance,
+        "executable_search_projection_graph_delta_count",
+    )
+    .or_else(|| {
+        Some(derived_executable_search_projection_graph_delta_count(
+            background_maintenance,
+        ))
+    });
+    let admitted_search_projection_graph_delta_count = optional_u64_field(
+        background_maintenance,
+        "admitted_search_projection_graph_delta_count",
+    )
+    .or_else(|| {
+        Some(derived_search_projection_graph_delta_admission_count(
+            background_maintenance,
+            "admit",
+        ))
+    });
+    let deferred_search_projection_graph_delta_count = optional_u64_field(
+        background_maintenance,
+        "deferred_search_projection_graph_delta_count",
+    )
+    .or_else(|| {
+        Some(derived_search_projection_graph_delta_admission_count(
+            background_maintenance,
+            "defer",
+        ))
+    });
+    let rejected_search_projection_graph_delta_count = optional_u64_field(
+        background_maintenance,
+        "rejected_search_projection_graph_delta_count",
+    )
+    .or_else(|| {
+        Some(derived_search_projection_graph_delta_admission_count(
+            background_maintenance,
+            "reject",
+        ))
+    });
+    let executable_search_projection_graph_delta_operations = optional_u64_field(
+        background_maintenance,
+        "executable_search_projection_graph_delta_operations",
+    )
+    .or_else(|| {
+        Some(derived_search_projection_graph_delta_operations(
+            background_maintenance,
+            None,
+        ))
+    });
+    let admitted_search_projection_graph_delta_operations = optional_u64_field(
+        background_maintenance,
+        "admitted_search_projection_graph_delta_operations",
+    )
+    .or_else(|| {
+        Some(derived_search_projection_graph_delta_operations(
+            background_maintenance,
+            Some("admit"),
+        ))
+    });
+    let max_search_projection_graph_delta_complete_through_graph_commit_epoch = optional_u64_field(
+        background_maintenance,
+        "max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+    )
+    .or_else(|| {
+        derived_max_search_projection_graph_delta_complete_through_graph_commit_epoch(
+            background_maintenance,
+        )
+    });
     let foreground_ranked_count = ranked
         .into_iter()
         .flatten()
@@ -834,11 +952,88 @@ pub fn background_maintenance_evidence_health(
         protocol_matches,
         total_candidates,
         ranked_count,
+        executable_search_projection_graph_delta_count,
+        admitted_search_projection_graph_delta_count,
+        deferred_search_projection_graph_delta_count,
+        rejected_search_projection_graph_delta_count,
+        executable_search_projection_graph_delta_operations,
+        admitted_search_projection_graph_delta_operations,
+        max_search_projection_graph_delta_complete_through_graph_commit_epoch,
         foreground_ranked_count,
         unknown_admission_count,
         blocker_codes,
         blockers,
     }
+}
+
+fn optional_u64_field(object: &serde_json::Value, field: &str) -> Option<u64> {
+    object.get(field).and_then(serde_json::Value::as_u64)
+}
+
+fn ranked_background_maintenance_items(
+    background_maintenance: &serde_json::Value,
+) -> impl Iterator<Item = &serde_json::Value> {
+    background_maintenance
+        .get("ranked")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+}
+
+fn is_executable_search_projection_graph_delta(item: &serde_json::Value) -> bool {
+    item.get("has_executable_search_projection_graph_delta")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+}
+
+fn derived_executable_search_projection_graph_delta_count(
+    background_maintenance: &serde_json::Value,
+) -> u64 {
+    ranked_background_maintenance_items(background_maintenance)
+        .filter(|item| is_executable_search_projection_graph_delta(item))
+        .count() as u64
+}
+
+fn derived_search_projection_graph_delta_admission_count(
+    background_maintenance: &serde_json::Value,
+    admission: &str,
+) -> u64 {
+    ranked_background_maintenance_items(background_maintenance)
+        .filter(|item| {
+            is_executable_search_projection_graph_delta(item)
+                && item.get("admission").and_then(serde_json::Value::as_str) == Some(admission)
+        })
+        .count() as u64
+}
+
+fn derived_search_projection_graph_delta_operations(
+    background_maintenance: &serde_json::Value,
+    admission: Option<&str>,
+) -> u64 {
+    ranked_background_maintenance_items(background_maintenance)
+        .filter(|item| {
+            is_executable_search_projection_graph_delta(item)
+                && admission.is_none_or(|admission| {
+                    item.get("admission").and_then(serde_json::Value::as_str) == Some(admission)
+                })
+        })
+        .filter_map(|item| {
+            item.get("search_projection_graph_delta_operation_count")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .sum()
+}
+
+fn derived_max_search_projection_graph_delta_complete_through_graph_commit_epoch(
+    background_maintenance: &serde_json::Value,
+) -> Option<u64> {
+    ranked_background_maintenance_items(background_maintenance)
+        .filter(|item| is_executable_search_projection_graph_delta(item))
+        .filter_map(|item| {
+            item.get("search_projection_graph_delta_complete_through_graph_commit_epoch")
+                .and_then(serde_json::Value::as_u64)
+        })
+        .max()
 }
 
 pub fn storage_recovery_evidence_health(
@@ -942,50 +1137,173 @@ fn insert_background_maintenance_summary_json(
 pub fn background_maintenance_summary_to_json(
     summary: &BackgroundMaintenanceSummary,
 ) -> serde_json::Value {
-    serde_json::json!({
-        "total_candidates": summary.total_candidates,
-        "admitted_count": summary.admitted_count,
-        "deferred_count": summary.deferred_count,
-        "rejected_count": summary.rejected_count,
-        "total_estimated_operations": summary.total_estimated_operations,
-        "admitted_estimated_operations": summary.admitted_estimated_operations,
-        "deferred_estimated_operations": summary.deferred_estimated_operations,
-        "rejected_estimated_operations": summary.rejected_estimated_operations,
-        "top_admitted_kind": summary.top_admitted_kind.map(|kind| kind.as_str()),
-        "top_admitted_name": summary.top_admitted_name.as_deref(),
-        "ranked": summary
+    let mut object = serde_json::Map::new();
+    insert_json(&mut object, "total_candidates", summary.total_candidates);
+    insert_json(&mut object, "admitted_count", summary.admitted_count);
+    insert_json(&mut object, "deferred_count", summary.deferred_count);
+    insert_json(&mut object, "rejected_count", summary.rejected_count);
+    insert_json(
+        &mut object,
+        "total_estimated_operations",
+        summary.total_estimated_operations,
+    );
+    insert_json(
+        &mut object,
+        "admitted_estimated_operations",
+        summary.admitted_estimated_operations,
+    );
+    insert_json(
+        &mut object,
+        "deferred_estimated_operations",
+        summary.deferred_estimated_operations,
+    );
+    insert_json(
+        &mut object,
+        "rejected_estimated_operations",
+        summary.rejected_estimated_operations,
+    );
+    insert_json(
+        &mut object,
+        "executable_search_projection_graph_delta_count",
+        summary.executable_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "admitted_search_projection_graph_delta_count",
+        summary.admitted_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "deferred_search_projection_graph_delta_count",
+        summary.deferred_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "rejected_search_projection_graph_delta_count",
+        summary.rejected_search_projection_graph_delta_count,
+    );
+    insert_json(
+        &mut object,
+        "executable_search_projection_graph_delta_operations",
+        summary.executable_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut object,
+        "admitted_search_projection_graph_delta_operations",
+        summary.admitted_search_projection_graph_delta_operations,
+    );
+    insert_json(
+        &mut object,
+        "max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+        summary.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+    );
+    insert_json(
+        &mut object,
+        "top_admitted_kind",
+        summary.top_admitted_kind.map(|kind| kind.as_str()),
+    );
+    insert_json(
+        &mut object,
+        "top_admitted_name",
+        summary.top_admitted_name.as_deref(),
+    );
+    insert_json(
+        &mut object,
+        "ranked",
+        summary
             .ranked
             .iter()
-            .map(|item| {
-                serde_json::json!({
-                    "kind": item.kind.as_str(),
-                    "name": &item.name,
-                    "work_class": &item.work_class_name,
-                    "priority": &item.priority_name,
-                    "estimated_operations": item.estimated_operations,
-                    "hint_active_topic": item.hint_active_topic,
-                    "hint_recent_delta_operations": item.hint_recent_delta_operations,
-                    "hint_source_graph_commit_lag": item.hint_source_graph_commit_lag,
-                    "hint_query_probability_per_million": item.hint_query_probability_per_million,
-                    "hint_staleness_millis": item.hint_staleness_millis,
-                    "hint_staleness_ttl_millis": item.hint_staleness_ttl_millis,
-                    "hint_freshness_slo_millis": item.hint_freshness_slo_millis,
-                    "hint_tenant_budget_remaining_operations": item.hint_tenant_budget_remaining_operations,
-                    "admission": &item.admission_name,
-                    "admission_code": &item.admission_code_name,
-                    "score": item.score,
-                    "reason_codes": &item.reason_code_names,
-                    "reasons": &item.reasons,
-                    "has_executable_search_projection_graph_delta": item.has_executable_search_projection_graph_delta,
-                    "search_projection_graph_delta_operation_count": item.search_projection_graph_delta_operation_count,
-                    "search_projection_graph_delta_upsert_node_count": item.search_projection_graph_delta_upsert_node_count,
-                    "search_projection_graph_delta_delete_document_count": item.search_projection_graph_delta_delete_document_count,
-                    "search_projection_graph_delta_complete_through_graph_commit_epoch": item.search_projection_graph_delta_complete_through_graph_commit_epoch,
-                    "search_projection_graph_delta_max_operations": item.search_projection_graph_delta_max_operations,
-                })
-            })
+            .map(background_maintenance_summary_item_to_json)
             .collect::<Vec<_>>(),
-    })
+    );
+    serde_json::Value::Object(object)
+}
+
+fn background_maintenance_summary_item_to_json(
+    item: &crate::api::BackgroundMaintenanceSummaryItem,
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    insert_json(&mut object, "kind", item.kind.as_str());
+    insert_json(&mut object, "name", &item.name);
+    insert_json(&mut object, "work_class", &item.work_class_name);
+    insert_json(&mut object, "priority", &item.priority_name);
+    insert_json(
+        &mut object,
+        "estimated_operations",
+        item.estimated_operations,
+    );
+    insert_json(&mut object, "hint_active_topic", item.hint_active_topic);
+    insert_json(
+        &mut object,
+        "hint_recent_delta_operations",
+        item.hint_recent_delta_operations,
+    );
+    insert_json(
+        &mut object,
+        "hint_source_graph_commit_lag",
+        item.hint_source_graph_commit_lag,
+    );
+    insert_json(
+        &mut object,
+        "hint_query_probability_per_million",
+        item.hint_query_probability_per_million,
+    );
+    insert_json(
+        &mut object,
+        "hint_staleness_millis",
+        item.hint_staleness_millis,
+    );
+    insert_json(
+        &mut object,
+        "hint_staleness_ttl_millis",
+        item.hint_staleness_ttl_millis,
+    );
+    insert_json(
+        &mut object,
+        "hint_freshness_slo_millis",
+        item.hint_freshness_slo_millis,
+    );
+    insert_json(
+        &mut object,
+        "hint_tenant_budget_remaining_operations",
+        item.hint_tenant_budget_remaining_operations,
+    );
+    insert_json(&mut object, "admission", &item.admission_name);
+    insert_json(&mut object, "admission_code", &item.admission_code_name);
+    insert_json(&mut object, "score", item.score);
+    insert_json(&mut object, "reason_codes", &item.reason_code_names);
+    insert_json(&mut object, "reasons", &item.reasons);
+    insert_json(
+        &mut object,
+        "has_executable_search_projection_graph_delta",
+        item.has_executable_search_projection_graph_delta,
+    );
+    insert_json(
+        &mut object,
+        "search_projection_graph_delta_operation_count",
+        item.search_projection_graph_delta_operation_count,
+    );
+    insert_json(
+        &mut object,
+        "search_projection_graph_delta_upsert_node_count",
+        item.search_projection_graph_delta_upsert_node_count,
+    );
+    insert_json(
+        &mut object,
+        "search_projection_graph_delta_delete_document_count",
+        item.search_projection_graph_delta_delete_document_count,
+    );
+    insert_json(
+        &mut object,
+        "search_projection_graph_delta_complete_through_graph_commit_epoch",
+        item.search_projection_graph_delta_complete_through_graph_commit_epoch,
+    );
+    insert_json(
+        &mut object,
+        "search_projection_graph_delta_max_operations",
+        item.search_projection_graph_delta_max_operations,
+    );
+    serde_json::Value::Object(object)
 }
 
 fn fixture_check_cypher(check: &crate::compat::CompatibilityCheck) -> Option<&str> {
@@ -1934,6 +2252,41 @@ mod tests {
             ["search_projection_graph_delta_complete_through_graph_commit_epoch"]
             .as_u64()
             .is_some());
+        assert!(
+            bundle["background_maintenance"]["executable_search_projection_graph_delta_count"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            bundle["background_maintenance"]["admitted_search_projection_graph_delta_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            bundle["background_maintenance"]["deferred_search_projection_graph_delta_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            bundle["background_maintenance"]["rejected_search_projection_graph_delta_count"]
+                .as_u64()
+                .is_some()
+        );
+        assert!(
+            bundle["background_maintenance"]["executable_search_projection_graph_delta_operations"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(bundle["background_maintenance"]
+            ["admitted_search_projection_graph_delta_operations"]
+            .as_u64()
+            .is_some());
+        assert!(bundle["background_maintenance"]
+            ["max_search_projection_graph_delta_complete_through_graph_commit_epoch"]
+            .as_u64()
+            .is_some());
         assert_eq!(
             bundle["migration_gate"]["blockers"]
                 .as_array()
@@ -2115,6 +2468,40 @@ mod tests {
                 .unwrap()
                 > 0
         );
+        assert!(
+            bundle["cutover_evidence"]
+                ["background_maintenance_executable_search_projection_graph_delta_count"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(bundle["cutover_evidence"]
+            ["background_maintenance_admitted_search_projection_graph_delta_count"]
+            .as_u64()
+            .is_some());
+        assert!(bundle["cutover_evidence"]
+            ["background_maintenance_deferred_search_projection_graph_delta_count"]
+            .as_u64()
+            .is_some());
+        assert!(bundle["cutover_evidence"]
+            ["background_maintenance_rejected_search_projection_graph_delta_count"]
+            .as_u64()
+            .is_some());
+        assert!(
+            bundle["cutover_evidence"]
+                ["background_maintenance_executable_search_projection_graph_delta_operations"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(bundle["cutover_evidence"]
+            ["background_maintenance_admitted_search_projection_graph_delta_operations"]
+            .as_u64()
+            .is_some());
+        assert!(bundle["cutover_evidence"]
+            ["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"]
+            .as_u64()
+            .is_some());
         assert_eq!(
             bundle["cutover_evidence"]["background_maintenance_foreground_ranked_count"],
             0
