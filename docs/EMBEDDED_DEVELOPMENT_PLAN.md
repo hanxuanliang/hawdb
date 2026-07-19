@@ -195,10 +195,13 @@ returning Thread title/source rows without treating Skill as a graph-kernel
 builtin. Skill rollback and cleanup deletes are exposed as a typed
 `delete_knowledge_skills` API for exact `(:Skill {id})` detach deletes,
 including `SYNTHESIZED_FROM` cascade cleanup through the shared WAL-backed
-typed entity delete path. Thread metadata updates are exposed as a typed batch
-for Nowledge `metadata` writes with optional `updated_at` stamping. Thread
-denormalized message-count refreshes are exposed as a typed batch for
-Nowledge `message_count` writes with optional timestamp stamping and
+typed entity delete path. Thread compensation deletes are exposed as a typed
+`delete_knowledge_threads` API for exact `(:Thread {id})` detach deletes,
+including `CONTAINS` and `COMPACTS_TO` relationship cleanup while preserving
+Message and Memory endpoint nodes. Thread metadata updates are exposed as a
+typed batch for Nowledge `metadata` writes with optional `updated_at`
+stamping. Thread denormalized message-count refreshes are exposed as a typed
+batch for Nowledge `message_count` writes with optional timestamp stamping and
 preserve-newer `updated_at` behavior. ThreadIdentity exact-id resolution is exposed as a typed
 `knowledge_thread_identity` API for Nowledge legacy identity lookup without
 WAL writes. Thread sync metadata reads are exposed as a typed

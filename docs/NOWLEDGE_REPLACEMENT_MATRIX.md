@@ -409,6 +409,14 @@ validates Skill ids before WAL, reuses the typed entity `DETACH DELETE` path
 with the fixed `Skill` label, reports missing and idless rows without writing,
 cascades `SYNTHESIZED_FROM` evidence relationships through storage/WAL, and
 commits eligible Skill node deletes through one grouped WAL batch.
+Thread compensation deletes are covered by `Database::delete_knowledge_threads`
+for exact Nowledge `(:Thread {id}) DETACH DELETE` cleanup. The Thread-specific
+facade validates Thread ids before WAL, reuses the typed entity `DETACH DELETE`
+path with the fixed `Thread` label, reports missing and idless rows without
+writing, cascades `CONTAINS` and `COMPACTS_TO` relationships through
+storage/WAL while preserving Message and Memory endpoint nodes, and commits
+eligible Thread node deletes through one grouped WAL batch. Thread-owned
+Message node cleanup remains a separate Nowledge cleanup shape.
 Thread metadata writes are covered by a typed batch for Nowledge `metadata`
 updates with optional `updated_at` stamping. The wrapper validates Thread ids
 before WAL, reports missing, idless, and duplicate rows without writing, keeps

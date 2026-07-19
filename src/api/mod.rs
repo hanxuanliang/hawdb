@@ -3164,6 +3164,30 @@ pub struct KnowledgeThreadMessageCountBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadDeleteBatchRequest {
+    pub thread_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadDeleteBatchRow {
+    pub thread_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadDeleteBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeThreadDeleteBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub non_writable_count: usize,
+    pub deleted_node_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum KnowledgeThreadListOrder {
     #[default]
@@ -6277,6 +6301,13 @@ impl Database {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         update_knowledge_thread_message_count_batch_for(self, request)
+    }
+
+    pub fn delete_knowledge_threads(
+        &mut self,
+        request: &KnowledgeThreadDeleteBatchRequest,
+    ) -> Result<KnowledgeThreadDeleteBatchOutput> {
+        delete_knowledge_threads_for(self, request)
     }
 
     pub fn knowledge_threads(
@@ -14244,6 +14275,46 @@ fn update_knowledge_thread_metadata_batch_for(
         non_writable_count,
         updated_count,
         updated_property_count,
+    })
+}
+
+fn delete_knowledge_threads_for(
+    db: &mut Database,
+    request: &KnowledgeThreadDeleteBatchRequest,
+) -> Result<KnowledgeThreadDeleteBatchOutput> {
+    for thread_id in &request.thread_ids {
+        if thread_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge thread delete requires a non-empty thread id".to_string(),
+            ));
+        }
+    }
+
+    let output = delete_knowledge_entity_batch_for(
+        db,
+        &KnowledgeEntityDeleteBatchRequest {
+            label: "Thread".to_string(),
+            external_ids: request.thread_ids.clone(),
+        },
+    )?;
+
+    Ok(KnowledgeThreadDeleteBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeThreadDeleteBatchRow {
+                thread_id: row.external_id,
+                node_id: row.node_id,
+                matched: row.matched,
+                non_writable: row.non_writable,
+            })
+            .collect(),
+        matched_count: output.matched_count,
+        missing_count: output.missing_count,
+        non_writable_count: output.non_writable_count,
+        deleted_node_count: output.deleted_node_count,
     })
 }
 
@@ -23741,6 +23812,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         self.db.update_knowledge_thread_message_count_batch(request)
+    }
+
+    pub fn delete_knowledge_threads(
+        &mut self,
+        request: &KnowledgeThreadDeleteBatchRequest,
+    ) -> Result<KnowledgeThreadDeleteBatchOutput> {
+        self.db.delete_knowledge_threads(request)
     }
 
     pub fn knowledge_threads(
