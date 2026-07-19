@@ -2328,6 +2328,42 @@ pub struct KnowledgeSourceLifecycleBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMetadataUpdate {
+    pub source_id: String,
+    pub metadata: Value,
+    pub updated_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMetadataBatchRequest {
+    pub updates: Vec<KnowledgeSourceMetadataUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMetadataBatchRow {
+    pub source_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMetadataBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceMetadataBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceParsedMetadataUpdate {
     pub source_id: String,
     pub parsed_path: Option<String>,
@@ -6018,6 +6054,13 @@ impl Database {
         request: &KnowledgeSourceLifecycleBatchRequest,
     ) -> Result<KnowledgeSourceLifecycleBatchOutput> {
         update_knowledge_source_lifecycle_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_source_metadata_batch(
+        &mut self,
+        request: &KnowledgeSourceMetadataBatchRequest,
+    ) -> Result<KnowledgeSourceMetadataBatchOutput> {
+        update_knowledge_source_metadata_batch_for(self, request)
     }
 
     pub fn update_knowledge_source_parsed_metadata_batch(
@@ -11942,6 +11985,129 @@ fn update_knowledge_source_lifecycle_batch_for(
         matched_count,
         missing_count,
         filtered_out_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
+}
+
+fn update_knowledge_source_metadata_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSourceMetadataBatchRequest,
+) -> Result<KnowledgeSourceMetadataBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.source_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge source metadata update requires a non-empty source id".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Source", &update.source_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeSourceMetadataBatchRow {
+                source_id: update.source_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.source_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeSourceMetadataBatchRow {
+                source_id: update.source_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeSourceMetadataBatchRow {
+                source_id: update.source_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let assignments = BTreeMap::from([
+            ("metadata".to_string(), update.metadata.clone()),
+            ("updated_at".to_string(), update.updated_at.clone()),
+        ]);
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeSourceMetadataBatchRow {
+            source_id: update.source_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeSourceMetadataBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Source", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeSourceMetadataBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
         duplicate_count,
         non_writable_count,
         updated_count,
@@ -23260,6 +23426,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSourceLifecycleBatchRequest,
     ) -> Result<KnowledgeSourceLifecycleBatchOutput> {
         self.db.update_knowledge_source_lifecycle_batch(request)
+    }
+
+    pub fn update_knowledge_source_metadata_batch(
+        &mut self,
+        request: &KnowledgeSourceMetadataBatchRequest,
+    ) -> Result<KnowledgeSourceMetadataBatchOutput> {
+        self.db.update_knowledge_source_metadata_batch(request)
     }
 
     pub fn update_knowledge_source_parsed_metadata_batch(

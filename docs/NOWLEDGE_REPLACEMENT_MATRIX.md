@@ -184,6 +184,11 @@ chunk counts before WAL, applies optional current-state filtering, reports
 missing/idless/duplicate rows without writing, writes `lifecycle_state`,
 optional `chunk_count`, and `updated_at`, and commits eligible Source rows
 through one grouped WAL batch.
+Source metadata-only writes are covered by
+`Database::update_knowledge_source_metadata_batch` for the Nowledge auto-OCR
+metadata timestamp shape. The wrapper writes only `metadata` and `updated_at`,
+validates Source ids before WAL, reports missing/idless/duplicate rows without
+writing, and commits eligible Source rows through one grouped WAL batch.
 Source parsed metadata writes are covered by
 `Database::update_knowledge_source_parsed_metadata_batch` for Nowledge parser
 completion updates. The wrapper marks the Source as `parsed`, writes summary,
