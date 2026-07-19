@@ -1840,10 +1840,25 @@ pub enum KnowledgeMemoryEvolvesProjectedSuccessorOrder {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesProjectedSuccessorCursor {
+    pub new_memory_id: Option<String>,
+    pub new_node_id: u64,
+    pub relationship_id: u64,
+    pub updated_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
+    pub old_memory_id: String,
+    pub cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryEvolvesProjectedSuccessorRequest {
     pub old_memory_ids: Vec<String>,
     pub limit_per_old_memory: usize,
     pub order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    pub page_cursors: Vec<KnowledgeMemoryEvolvesProjectedSuccessorPageCursor>,
     pub new_memory_property_names: Vec<String>,
     pub relationship_property_names: Vec<String>,
 }
@@ -1853,6 +1868,7 @@ pub struct KnowledgeMemoryEvolvesProjectedSuccessorRow {
     pub new_memory_id: Option<String>,
     pub new_node_id: u64,
     pub relationship_id: u64,
+    pub page_cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor,
     pub new_memory_properties: BTreeMap<String, Value>,
     pub relationship_properties: BTreeMap<String, Value>,
 }
@@ -10858,6 +10874,7 @@ fn knowledge_memory_evolves_projected_successors_for(
         ));
     };
     let evolves_type_id = catalog.rel_type_id("EVOLVES");
+    let page_cursors = knowledge_memory_evolves_projected_successor_page_cursor_map(request);
     let mut groups = Vec::with_capacity(request.old_memory_ids.len());
     let mut found_old_memory_count = 0;
     let mut missing_old_memory_count = 0;
@@ -10881,20 +10898,22 @@ fn knowledge_memory_evolves_projected_successors_for(
         };
 
         found_old_memory_count += 1;
-        let mut rows = evolves_type_id
+        let (group_matched_relationship_count, mut rows) = evolves_type_id
             .map(|rel_type_id| {
                 memory_evolves_projected_successor_rows(
                     store,
                     old_memory,
                     memory_label_id,
                     rel_type_id,
-                    request.order,
-                    &request.new_memory_property_names,
-                    &request.relationship_property_names,
+                    MemoryEvolvesProjectedSuccessorReadSpec {
+                        order: request.order,
+                        page_cursor: page_cursors.get(old_memory_id).copied(),
+                        new_memory_property_names: &request.new_memory_property_names,
+                        relationship_property_names: &request.relationship_property_names,
+                    },
                 )
             })
             .unwrap_or_default();
-        let group_matched_relationship_count = rows.len();
         if request.limit_per_old_memory > 0 {
             rows.truncate(request.limit_per_old_memory);
         }
@@ -10962,7 +10981,50 @@ fn validate_knowledge_memory_evolves_projected_successor_request(
                 .to_string(),
         ));
     }
+    let mut cursor_old_memory_ids = BTreeSet::new();
+    let requested_old_memory_ids = request
+        .old_memory_ids
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    for cursor in &request.page_cursors {
+        if cursor.old_memory_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge memory evolves projected successor read requires non-empty cursor memory ids"
+                    .to_string(),
+            ));
+        }
+        if !requested_old_memory_ids.contains(cursor.old_memory_id.as_str()) {
+            return Err(SkeinError::Semantic(
+                "knowledge memory evolves projected successor read requires cursor memory ids to be requested"
+                    .to_string(),
+            ));
+        }
+        if !cursor_old_memory_ids.insert(cursor.old_memory_id.as_str()) {
+            return Err(SkeinError::Semantic(
+                "knowledge memory evolves projected successor read requires one cursor per memory id"
+                    .to_string(),
+            ));
+        }
+    }
     Ok(())
+}
+
+fn knowledge_memory_evolves_projected_successor_page_cursor_map(
+    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+) -> BTreeMap<String, &KnowledgeMemoryEvolvesProjectedSuccessorCursor> {
+    request
+        .page_cursors
+        .iter()
+        .map(|cursor| (cursor.old_memory_id.clone(), &cursor.cursor))
+        .collect()
+}
+
+struct MemoryEvolvesProjectedSuccessorReadSpec<'a> {
+    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    page_cursor: Option<&'a KnowledgeMemoryEvolvesProjectedSuccessorCursor>,
+    new_memory_property_names: &'a [String],
+    relationship_property_names: &'a [String],
 }
 
 fn knowledge_memory_evolves_neighbor_row(
@@ -11025,10 +11087,8 @@ fn memory_evolves_projected_successor_rows(
     old_memory: &NodeRecord,
     memory_label_id: LabelId,
     evolves_type_id: RelTypeId,
-    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
-    new_memory_property_names: &[String],
-    relationship_property_names: &[String],
-) -> Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow> {
+    spec: MemoryEvolvesProjectedSuccessorReadSpec<'_>,
+) -> (usize, Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow>) {
     let mut rows = store
         .outgoing_relationships(old_memory.id, evolves_type_id)
         .filter_map(|relationship| {
@@ -11040,16 +11100,27 @@ fn memory_evolves_projected_successor_rows(
                         memory_evolves_projected_successor_row(
                             new_memory,
                             relationship,
-                            new_memory_property_names,
-                            relationship_property_names,
+                            spec.new_memory_property_names,
+                            spec.relationship_property_names,
                         ),
                         new_memory.properties.get("updated_at").cloned(),
                     )
                 })
         })
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| compare_memory_evolves_projected_successor_rows(left, right, order));
-    rows.into_iter().map(|(row, _)| row).collect()
+    rows.sort_by(|left, right| {
+        compare_memory_evolves_projected_successor_rows(left, right, spec.order)
+    });
+    let matched_relationship_count = rows.len();
+    if let Some(page_cursor) = spec.page_cursor {
+        rows.retain(|row| {
+            memory_evolves_projected_successor_is_after_cursor(row, page_cursor, spec.order)
+        });
+    }
+    (
+        matched_relationship_count,
+        rows.into_iter().map(|(row, _)| row).collect(),
+    )
 }
 
 fn compare_memory_evolves_projected_successor_rows(
@@ -11078,16 +11149,51 @@ fn compare_memory_evolves_projected_successor_ids(
         .then_with(|| left.relationship_id.cmp(&right.relationship_id))
 }
 
+fn memory_evolves_projected_successor_is_after_cursor(
+    row: &(KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>),
+    cursor: &KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+    order: KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+) -> bool {
+    match order {
+        KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc => {
+            compare_memory_evolves_projected_successor_row_to_cursor(&row.0, cursor)
+                == std::cmp::Ordering::Greater
+        }
+        KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc => {
+            compare_optional_values_desc(row.1.as_ref(), cursor.updated_at.as_ref()).then_with(
+                || compare_memory_evolves_projected_successor_row_to_cursor(&row.0, cursor),
+            ) == std::cmp::Ordering::Greater
+        }
+    }
+}
+
+fn compare_memory_evolves_projected_successor_row_to_cursor(
+    row: &KnowledgeMemoryEvolvesProjectedSuccessorRow,
+    cursor: &KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+) -> std::cmp::Ordering {
+    row.new_memory_id
+        .cmp(&cursor.new_memory_id)
+        .then_with(|| row.new_node_id.cmp(&cursor.new_node_id))
+        .then_with(|| row.relationship_id.cmp(&cursor.relationship_id))
+}
+
 fn memory_evolves_projected_successor_row(
     new_memory: &NodeRecord,
     relationship: &RelRecord,
     new_memory_property_names: &[String],
     relationship_property_names: &[String],
 ) -> KnowledgeMemoryEvolvesProjectedSuccessorRow {
+    let updated_at = new_memory.properties.get("updated_at").cloned();
     KnowledgeMemoryEvolvesProjectedSuccessorRow {
         new_memory_id: node_external_id(new_memory),
         new_node_id: new_memory.id.0,
         relationship_id: relationship.id.0,
+        page_cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor {
+            new_memory_id: node_external_id(new_memory),
+            new_node_id: new_memory.id.0,
+            relationship_id: relationship.id.0,
+            updated_at,
+        },
         new_memory_properties: projected_properties(
             &new_memory.properties,
             new_memory_property_names,

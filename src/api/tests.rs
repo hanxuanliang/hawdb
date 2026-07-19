@@ -36,7 +36,9 @@ use super::{
     KnowledgeMemoryContentUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
     KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
-    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+    KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryLabelDeleteRequest,
     KnowledgeMemoryLabelTransferRequest, KnowledgeMemoryLatestBatchRequest,
     KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
@@ -5559,6 +5561,7 @@ fn projects_memory_evolves_successors_for_nowledge_growth() {
                 ],
                 limit_per_old_memory: 2,
                 order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
+                page_cursors: Vec::new(),
                 new_memory_property_names: vec![
                     "title".to_string(),
                     "future_memory_field".to_string(),
@@ -5627,6 +5630,7 @@ fn projects_memory_evolves_successors_for_nowledge_growth() {
                 old_memory_ids: vec!["evolves_old_b".to_string()],
                 limit_per_old_memory: 0,
                 order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
+                page_cursors: Vec::new(),
                 new_memory_property_names: vec!["title".to_string()],
                 relationship_property_names: vec!["future_edge_field".to_string()],
             },
@@ -5666,6 +5670,7 @@ fn orders_memory_evolves_successors_by_updated_at_without_forcing_projection() {
                 old_memory_ids: vec!["evolves_order_old".to_string()],
                 limit_per_old_memory: 2,
                 order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
+                page_cursors: Vec::new(),
                 new_memory_property_names: vec!["title".to_string()],
                 relationship_property_names: vec!["content_relation".to_string()],
             },
@@ -5687,6 +5692,94 @@ fn orders_memory_evolves_successors_by_updated_at_without_forcing_projection() {
 }
 
 #[test]
+fn pages_memory_evolves_successors_per_old_memory_with_returned_cursors() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'evolves_page_old_a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_page_old_b'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_page_new_a', title: 'A', updated_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_page_new_b', title: 'B', updated_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_page_new_c', title: 'C', updated_at: 20})")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_page_old_a'}), (new:Memory {id: 'evolves_page_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'a'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_page_old_a'}), (new:Memory {id: 'evolves_page_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'b'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_page_old_a'}), (new:Memory {id: 'evolves_page_new_c'}) CREATE (old)-[:EVOLVES {content_relation: 'c'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_page_old_b'}), (new:Memory {id: 'evolves_page_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'b2'}]->(new)")
+        .unwrap();
+
+    let first_page = db
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec![
+                    "evolves_page_old_a".to_string(),
+                    "evolves_page_old_b".to_string(),
+                ],
+                limit_per_old_memory: 1,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
+                page_cursors: Vec::new(),
+                new_memory_property_names: vec!["title".to_string()],
+                relationship_property_names: vec!["content_relation".to_string()],
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        first_page.groups[0].rows[0].new_memory_id.as_deref(),
+        Some("evolves_page_new_b")
+    );
+    assert_eq!(
+        first_page.groups[1].rows[0].new_memory_id.as_deref(),
+        Some("evolves_page_new_b")
+    );
+    assert!(!first_page.groups[0].rows[0]
+        .new_memory_properties
+        .contains_key("updated_at"));
+
+    let second_page = db
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec![
+                    "evolves_page_old_a".to_string(),
+                    "evolves_page_old_b".to_string(),
+                ],
+                limit_per_old_memory: 2,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
+                page_cursors: vec![
+                    KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
+                        old_memory_id: "evolves_page_old_a".to_string(),
+                        cursor: first_page.groups[0].rows[0].page_cursor.clone(),
+                    },
+                    KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
+                        old_memory_id: "evolves_page_old_b".to_string(),
+                        cursor: first_page.groups[1].rows[0].page_cursor.clone(),
+                    },
+                ],
+                new_memory_property_names: vec!["title".to_string()],
+                relationship_property_names: vec!["content_relation".to_string()],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(second_page.groups[0].matched_relationship_count, 3);
+    assert_eq!(second_page.groups[0].returned_count, 2);
+    assert_eq!(
+        second_page.groups[0]
+            .rows
+            .iter()
+            .map(|row| row.new_memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("evolves_page_new_c"), Some("evolves_page_new_a")]
+    );
+    assert_eq!(second_page.groups[1].matched_relationship_count, 1);
+    assert_eq!(second_page.groups[1].returned_count, 0);
+}
+
+#[test]
 fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
     let path = unique_test_dir("memory_evolves_projected_successors_empty_without_wal");
     let mut db = Database::open(&path).unwrap();
@@ -5701,6 +5794,7 @@ fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
                 old_memory_ids: vec![String::new()],
                 limit_per_old_memory: 10,
                 order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
+                page_cursors: Vec::new(),
                 new_memory_property_names: Vec::new(),
                 relationship_property_names: Vec::new(),
             },
@@ -5714,6 +5808,7 @@ fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
                 old_memory_ids: vec!["evolves_old_wal".to_string()],
                 limit_per_old_memory: 10,
                 order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
+                page_cursors: Vec::new(),
                 new_memory_property_names: vec![String::new()],
                 relationship_property_names: Vec::new(),
             },
@@ -5722,6 +5817,30 @@ fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
     assert!(property_error
         .to_string()
         .contains("non-empty property names"));
+
+    let cursor_error = db
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec!["evolves_old_wal".to_string()],
+                limit_per_old_memory: 10,
+                order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::StableMemoryIdAsc,
+                page_cursors: vec![KnowledgeMemoryEvolvesProjectedSuccessorPageCursor {
+                    old_memory_id: String::new(),
+                    cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor {
+                        new_memory_id: None,
+                        new_node_id: 0,
+                        relationship_id: 0,
+                        updated_at: None,
+                    },
+                }],
+                new_memory_property_names: Vec::new(),
+                relationship_property_names: Vec::new(),
+            },
+        )
+        .unwrap_err();
+    assert!(cursor_error
+        .to_string()
+        .contains("non-empty cursor memory ids"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
     assert_eq!(
         std::fs::read_to_string(path.join("wal.skein")).unwrap(),

@@ -426,7 +426,9 @@ adjacency to Memory targets, supports per-old limits, projects caller-selected
 successor Memory and relationship properties, supports pinned read snapshots,
 supports stable id ordering plus Nowledge's `updated_at DESC` successor
 ordering without forcing `updated_at` into the response projection, and does
-not write WAL.
+not write WAL. Each returned row carries a page cursor, and callers can pass
+per-old cursors to resume bounded pages after the prior row while keeping
+duplicate `EVOLVES` relationships distinct by relationship id.
 Memory EVOLVES edge creation writes are covered by
 `Database::create_knowledge_memory_evolves_batch`. The typed write covers
 Nowledge `add_evolves_edge` and replacement-relation create shapes, fixes both
