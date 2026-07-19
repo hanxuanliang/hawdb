@@ -49,10 +49,13 @@ pub fn nowledge_replacement_summary_json_with_options(
     let previous_wrapper_contract_ready =
         json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "ready"])
             .unwrap_or(false);
+    let dual_engine_evidence = dual_engine_evidence_summary(bundle);
+    let dual_engine_evidence_ready = dual_engine_evidence.ready;
     let production_cutover_ready = migration_gate_decision == Some("ready")
         && cutover_decision == Some("ready")
         && cutover_evidence_eligible
         && previous_wrapper_contract_ready
+        && dual_engine_evidence_ready != Some(false)
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
         1_000_000
@@ -69,6 +72,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_decision,
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
+            dual_engine_evidence_ready,
         },
     );
     let blockers = nowledge_replacement_blockers(bundle);
@@ -86,6 +90,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_decision,
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
+            dual_engine_evidence_ready,
             production_cutover_ready,
         },
     );
@@ -105,6 +110,17 @@ pub fn nowledge_replacement_summary_json_with_options(
         "production_replacement_per_million": production_replacement_per_million,
         "production_cutover_ready": production_cutover_ready,
         "migration_gate_decision": migration_gate_decision,
+        "dual_engine_evidence": {
+            "present": dual_engine_evidence.present,
+            "ready": dual_engine_evidence.ready,
+            "primary_engine": dual_engine_evidence.primary_engine,
+            "shadow_engine": dual_engine_evidence.shadow_engine,
+            "primary_check_count": dual_engine_evidence.primary_check_count,
+            "shadow_check_count": dual_engine_evidence.shadow_check_count,
+            "matched_check_count": dual_engine_evidence.matched_check_count,
+            "primary_only_check_count": dual_engine_evidence.primary_only_check_count,
+            "matched_per_million": dual_engine_evidence.matched_per_million,
+        },
         "cutover_evidence": {
             "eligible": cutover_evidence_eligible,
             "evidence_kind": json_get_str_path(bundle, &["cutover_evidence", "evidence_kind"]),
@@ -252,6 +268,7 @@ struct ReplacementReadinessInputs<'a> {
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
+    dual_engine_evidence_ready: Option<bool>,
 }
 
 struct NextActionInputs<'a> {
@@ -262,7 +279,44 @@ struct NextActionInputs<'a> {
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
+    dual_engine_evidence_ready: Option<bool>,
     production_cutover_ready: bool,
+}
+
+struct DualEngineEvidenceSummary<'a> {
+    present: bool,
+    ready: Option<bool>,
+    primary_engine: Option<&'a str>,
+    shadow_engine: Option<&'a str>,
+    primary_check_count: Option<u64>,
+    shadow_check_count: Option<u64>,
+    matched_check_count: Option<u64>,
+    primary_only_check_count: Option<u64>,
+    matched_per_million: Option<u64>,
+}
+
+fn dual_engine_evidence_summary(bundle: &serde_json::Value) -> DualEngineEvidenceSummary<'_> {
+    let path = if json_get_path(bundle, &["dual_engine_evidence"]).is_some() {
+        &["dual_engine_evidence"][..]
+    } else {
+        &["cutover", "dual_engine_evidence"][..]
+    };
+    let present = json_get_path(bundle, path).is_some();
+    DualEngineEvidenceSummary {
+        present,
+        ready: json_get_bool_path_from_dynamic(bundle, path, "ready"),
+        primary_engine: json_get_str_path_from_dynamic(bundle, path, "primary_engine"),
+        shadow_engine: json_get_str_path_from_dynamic(bundle, path, "shadow_engine"),
+        primary_check_count: json_get_u64_path_from_dynamic(bundle, path, "primary_check_count"),
+        shadow_check_count: json_get_u64_path_from_dynamic(bundle, path, "shadow_check_count"),
+        matched_check_count: json_get_u64_path_from_dynamic(bundle, path, "matched_check_count"),
+        primary_only_check_count: json_get_u64_path_from_dynamic(
+            bundle,
+            path,
+            "primary_only_check_count",
+        ),
+        matched_per_million: json_get_u64_path_from_dynamic(bundle, path, "matched_per_million"),
+    }
 }
 
 fn nowledge_replacement_blocking_categories(
@@ -289,6 +343,9 @@ fn nowledge_replacement_blocking_categories(
     }
     if !inputs.previous_wrapper_contract_ready {
         categories.insert("previous_wrapper_contract".to_string());
+    }
+    if inputs.dual_engine_evidence_ready == Some(false) {
+        categories.insert("dual_engine_evidence".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
@@ -386,6 +443,18 @@ fn nowledge_replacement_next_actions(
                 "previous_wrapper_contract_evidence.ready",
                 "previous_wrapper_contract_evidence.wrapper_identity",
                 "previous_wrapper_contract_evidence.blocker_codes",
+            ],
+        ));
+    }
+    if inputs.dual_engine_evidence_ready == Some(false) {
+        actions.push(next_action(
+            "rerun_dual_engine_shadow_gate",
+            "side-by-side dual-engine evidence is present but not ready",
+            [
+                "dual_engine_evidence.ready",
+                "dual_engine_evidence.primary_check_count",
+                "dual_engine_evidence.shadow_check_count",
+                "dual_engine_evidence.primary_only_check_count",
             ],
         ));
     }
@@ -530,6 +599,42 @@ fn json_get_str_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<
     json_get_path(value, path).and_then(serde_json::Value::as_str)
 }
 
+fn json_get_bool_path_from_dynamic(
+    value: &serde_json::Value,
+    prefix: &[&str],
+    field: &str,
+) -> Option<bool> {
+    json_get_path_from_dynamic(value, prefix, field).and_then(serde_json::Value::as_bool)
+}
+
+fn json_get_str_path_from_dynamic<'a>(
+    value: &'a serde_json::Value,
+    prefix: &[&str],
+    field: &str,
+) -> Option<&'a str> {
+    json_get_path_from_dynamic(value, prefix, field).and_then(serde_json::Value::as_str)
+}
+
+fn json_get_u64_path_from_dynamic(
+    value: &serde_json::Value,
+    prefix: &[&str],
+    field: &str,
+) -> Option<u64> {
+    json_get_path_from_dynamic(value, prefix, field).and_then(serde_json::Value::as_u64)
+}
+
+fn json_get_path_from_dynamic<'a>(
+    value: &'a serde_json::Value,
+    prefix: &[&str],
+    field: &str,
+) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in prefix {
+        current = current.get(*key)?;
+    }
+    current.get(field)
+}
+
 fn json_get_array_path(value: &serde_json::Value, path: &[&str]) -> serde_json::Value {
     json_get_path(value, path)
         .filter(|value| value.is_array())
@@ -617,10 +722,41 @@ mod tests {
             summary["previous_wrapper_contract_evidence"]["wrapper_identity"],
             "nowledge-previous-wrapper:test"
         );
+        assert_eq!(summary["dual_engine_evidence"]["present"], true);
+        assert_eq!(summary["dual_engine_evidence"]["ready"], true);
+        assert_eq!(summary["dual_engine_evidence"]["primary_engine"], "skein");
+        assert_eq!(
+            summary["dual_engine_evidence"]["shadow_engine"],
+            "previous-wrapper"
+        );
         assert_eq!(
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_when_dual_engine_evidence_is_not_ready() {
+        let mut bundle = production_ready_bundle();
+        bundle["dual_engine_evidence"]["ready"] = serde_json::json!(false);
+        bundle["dual_engine_evidence"]["primary_only_check_count"] = serde_json::json!(1);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["dual_engine_evidence"]["present"], true);
+        assert_eq!(summary["dual_engine_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "dual_engine_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "rerun_dual_engine_shadow_gate"));
     }
 
     #[test]
@@ -1001,6 +1137,16 @@ mod tests {
             },
             "shadow_ready": {
                 "engine_kind": "previous_wrapper"
+            },
+            "dual_engine_evidence": {
+                "ready": true,
+                "primary_engine": "skein",
+                "shadow_engine": "previous-wrapper",
+                "primary_check_count": 1,
+                "shadow_check_count": 1,
+                "matched_check_count": 1,
+                "primary_only_check_count": 0,
+                "matched_per_million": 1_000_000
             },
             "previous_wrapper_contract_evidence": {
                 "ready": true,

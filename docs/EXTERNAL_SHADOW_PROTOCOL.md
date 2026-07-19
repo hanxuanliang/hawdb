@@ -651,15 +651,18 @@ The command reads an existing migration-gate bundle and prints
 `skein-nowledge-replacement-summary` JSON. It keeps scanner coverage,
 shadow-parity readiness, and production cutover readiness separate. If the
 bundle lacks eligible `cutover_evidence`, `production_replacement_per_million`
-is `0` even when scanner coverage and shadow matched ratios are complete. With
-`--require-production-ready`, the command exits with an error unless the summary
-reports `production_cutover_ready: true`. `--compact` omits the potentially
-large `replacement_readiness_by_query_family` and `blockers` arrays while
-retaining aggregate family counts, blocked family names, blocker counts, and
-omitted-item counts in `replacement_readiness_family_summary` and
-`blocker_summary`. `--max-family-items <n>` keeps only the first `n`
-family-detail rows and reports the omitted count. `--max-blockers <n>` keeps
-only the first `n` blocker strings and reports the omitted count.
+is `0` even when scanner coverage and shadow matched ratios are complete. If
+the bundle includes `dual_engine_evidence`, the summary copies it into the
+release-facing output and also requires `dual_engine_evidence.ready == true`
+for production readiness. With `--require-production-ready`, the command exits
+with an error unless the summary reports `production_cutover_ready: true`.
+`--compact` omits the potentially large `replacement_readiness_by_query_family`
+and `blockers` arrays while retaining aggregate family counts, blocked family
+names, blocker counts, and omitted-item counts in
+`replacement_readiness_family_summary` and `blocker_summary`.
+`--max-family-items <n>` keeps only the first `n` family-detail rows and reports
+the omitted count. `--max-blockers <n>` keeps only the first `n` blocker strings
+and reports the omitted count.
 The summary also includes a bounded `next_actions` array. Each entry contains a
 stable `action` code, a short `reason`, and the JSON `evidence_fields` that led
 to the action. These actions are diagnostic hints for release automation and
