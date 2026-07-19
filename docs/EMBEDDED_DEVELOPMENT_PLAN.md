@@ -609,6 +609,12 @@ Memory compacting-Thread reads are available as
 Thread id/source/metadata reads over incoming `COMPACTS_TO` relationships with
 missing-Memory rows, per-Memory limits, normalized-space fallbacks, and no WAL
 writes.
+Field-extensible Memory compacting-Thread reads are available as
+`Database::knowledge_memory_compacting_thread_projected_list`, covering the
+same per-Memory incoming `COMPACTS_TO` attribution shape while projecting only
+caller-allowlisted Thread and relationship fields. It preserves missing-Memory
+rows, per-Memory limits, stable Thread identity, normalized-space fallback, and
+snapshot/no-WAL semantics without broadening the fixed attribution row.
 Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with

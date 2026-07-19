@@ -560,6 +560,13 @@ Memory compacting-Thread reads are covered by
 bounded Memory ids, scans incoming `COMPACTS_TO` Thread edges, returns Thread
 physical/logical ids, title, source, metadata, normalized space, relationship
 ids, missing-Memory rows, per-Memory limits, and no WAL writes.
+Field-extensible Memory compacting-Thread reads are covered by
+`Database::knowledge_memory_compacting_thread_projected_list`. The typed read
+reuses the same ordered Memory id input and per-Memory incoming `COMPACTS_TO`
+walk, but projects only caller-allowlisted Thread and relationship properties
+plus stable Memory/Thread/relationship identity and normalized Thread space. It
+preserves missing-Memory rows, supports pinned snapshots, and does not write
+WAL.
 Thread list and source reads are covered by `Database::knowledge_threads` for
 Nowledge bounded Thread page, source lookup, source page, normalized-space
 count/list, favorite metadata page, id/thread-id bulk lookup, and

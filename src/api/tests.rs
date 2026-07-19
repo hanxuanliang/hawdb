@@ -30,7 +30,8 @@ use super::{
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
     KnowledgeLabelMemoryTransferRequest, KnowledgeLabelUsageListRequest,
     KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
-    KnowledgeMemoryCompactingThreadListRequest, KnowledgeMemoryContentBatchRequest,
+    KnowledgeMemoryCompactingThreadListRequest,
+    KnowledgeMemoryCompactingThreadProjectedListRequest, KnowledgeMemoryContentBatchRequest,
     KnowledgeMemoryContentUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
     KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
@@ -14314,6 +14315,174 @@ fn reads_memory_compacting_threads_for_nowledge_metadata_and_source_shapes() {
     assert_eq!(limited.rows[0].thread_id.as_deref(), Some("thread_a"));
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn projects_memory_compacting_thread_fields_for_nowledge_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'projected_compacting_memory_a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_compacting_memory_b'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'projected_compacting_thread_a', thread_id: 'logical_a', title: 'Thread A', source: 'slack', metadata: '{\"source\":\"rest\"}', space_id: '', future_thread_field: 'future-a'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'projected_compacting_thread_b', thread_id: 'logical_b', title: 'Thread B', source: 'email', metadata: '{\"thread\":true}', space_id: 'archive', future_thread_field: 'future-b'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_a'}), (m:Memory {id: 'projected_compacting_memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 10, future_edge_field: 'edge-a'}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_b'}), (m:Memory {id: 'projected_compacting_memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 20, future_edge_field: 'edge-b'}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_b'}), (m:Memory {id: 'projected_compacting_memory_b'}) CREATE (t)-[:COMPACTS_TO {created_at: 30, future_edge_field: 'edge-c'}]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query("CREATE (:Thread {id: 'projected_compacting_thread_c', thread_id: 'logical_c', title: 'Thread C', future_thread_field: 'future-c'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_compacting_thread_c'}), (m:Memory {id: 'projected_compacting_memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 40, future_edge_field: 'edge-d'}]->(m)")
+        .unwrap();
+
+    let projected = db
+        .knowledge_memory_compacting_thread_projected_list(
+            &KnowledgeMemoryCompactingThreadProjectedListRequest {
+                list: KnowledgeMemoryCompactingThreadListRequest {
+                    memory_ids: vec![
+                        "projected_compacting_memory_a".to_string(),
+                        "missing_projected_compacting_memory".to_string(),
+                        "projected_compacting_memory_b".to_string(),
+                    ],
+                    limit_per_memory: 1,
+                },
+                thread_property_names: vec![
+                    "title".to_string(),
+                    "future_thread_field".to_string(),
+                    "space_id".to_string(),
+                    "title".to_string(),
+                ],
+                relationship_property_names: vec![
+                    "created_at".to_string(),
+                    "future_edge_field".to_string(),
+                ],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(projected.found_memory_count, 2);
+    assert_eq!(projected.missing_memory_count, 1);
+    assert_eq!(projected.returned_thread_count, 2);
+    assert_eq!(projected.rows[0].memory_id, "projected_compacting_memory_a");
+    assert!(projected.rows[0].found_memory);
+    assert_eq!(
+        projected.rows[0].thread_id.as_deref(),
+        Some("projected_compacting_thread_a")
+    );
+    assert_eq!(
+        projected.rows[0]
+            .thread_properties
+            .get("future_thread_field"),
+        Some(&Value::String("future-a".to_string()))
+    );
+    assert_eq!(
+        projected.rows[0].normalized_space_id.as_deref(),
+        Some("default")
+    );
+    assert!(!projected.rows[0]
+        .thread_properties
+        .contains_key("thread_id"));
+    assert_eq!(
+        projected.rows[0]
+            .relationship_properties
+            .get("future_edge_field"),
+        Some(&Value::String("edge-a".to_string()))
+    );
+    assert_eq!(
+        projected.rows[1].memory_id,
+        "missing_projected_compacting_memory"
+    );
+    assert!(!projected.rows[1].found_memory);
+    assert!(projected.rows[1].thread_properties.is_empty());
+    assert_eq!(projected.rows[2].memory_id, "projected_compacting_memory_b");
+    assert_eq!(
+        projected.rows[2].thread_id.as_deref(),
+        Some("projected_compacting_thread_b")
+    );
+
+    let snapshot_projected = snapshot
+        .knowledge_memory_compacting_thread_projected_list(
+            &KnowledgeMemoryCompactingThreadProjectedListRequest {
+                list: KnowledgeMemoryCompactingThreadListRequest {
+                    memory_ids: vec!["projected_compacting_memory_a".to_string()],
+                    limit_per_memory: 0,
+                },
+                thread_property_names: vec!["title".to_string()],
+                relationship_property_names: vec!["future_edge_field".to_string()],
+            },
+        )
+        .unwrap();
+    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_projected.returned_thread_count, 2);
+    assert_eq!(
+        snapshot_projected
+            .rows
+            .iter()
+            .map(|row| row.thread_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("projected_compacting_thread_a"),
+            Some("projected_compacting_thread_b")
+        ]
+    );
+}
+
+#[test]
+fn memory_compacting_thread_projected_read_rejects_empty_property_names_without_wal() {
+    let path = unique_test_dir("memory_compacting_thread_projected_empty_property_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'projected_compacting_wal_memory'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'projected_compacting_wal_thread'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_compacting_wal_thread'}), (m:Memory {id: 'projected_compacting_wal_memory'}) CREATE (t)-[:COMPACTS_TO]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let thread_property_error = db
+        .knowledge_memory_compacting_thread_projected_list(
+            &KnowledgeMemoryCompactingThreadProjectedListRequest {
+                list: KnowledgeMemoryCompactingThreadListRequest {
+                    memory_ids: vec!["projected_compacting_wal_memory".to_string()],
+                    limit_per_memory: 10,
+                },
+                thread_property_names: vec![String::new()],
+                relationship_property_names: Vec::new(),
+            },
+        )
+        .unwrap_err();
+    assert!(thread_property_error
+        .to_string()
+        .contains("non-empty property names"));
+
+    let relationship_property_error = db
+        .knowledge_memory_compacting_thread_projected_list(
+            &KnowledgeMemoryCompactingThreadProjectedListRequest {
+                list: KnowledgeMemoryCompactingThreadListRequest {
+                    memory_ids: vec!["projected_compacting_wal_memory".to_string()],
+                    limit_per_memory: 10,
+                },
+                thread_property_names: Vec::new(),
+                relationship_property_names: vec![String::new()],
+            },
+        )
+        .unwrap_err();
+    assert!(relationship_property_error
+        .to_string()
+        .contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
 }
 
 #[test]

@@ -3909,6 +3909,36 @@ pub struct KnowledgeMemoryCompactingThreadListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCompactingThreadProjectedListRequest {
+    pub list: KnowledgeMemoryCompactingThreadListRequest,
+    pub thread_property_names: Vec<String>,
+    pub relationship_property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCompactingThreadProjectedRow {
+    pub memory_id: String,
+    pub memory_node_id: Option<u64>,
+    pub found_memory: bool,
+    pub thread_id: Option<String>,
+    pub thread_node_id: Option<u64>,
+    pub thread_logical_id: Option<String>,
+    pub thread_properties: BTreeMap<String, Value>,
+    pub normalized_space_id: Option<String>,
+    pub relationship_id: Option<u64>,
+    pub relationship_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCompactingThreadProjectedListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryCompactingThreadProjectedRow>,
+    pub found_memory_count: usize,
+    pub missing_memory_count: usize,
+    pub returned_thread_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMessageListRequest {
     pub thread_id: String,
     pub limit: usize,
@@ -7085,6 +7115,13 @@ impl Database {
         request: &KnowledgeMemoryCompactingThreadListRequest,
     ) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
         knowledge_memory_compacting_threads_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_compacting_thread_projected_list(
+        &self,
+        request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
+    ) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
+        knowledge_memory_compacting_thread_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_messages(
@@ -18467,11 +18504,7 @@ fn knowledge_memory_compacting_threads_for(
     store: &GraphStore,
     request: &KnowledgeMemoryCompactingThreadListRequest,
 ) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
-    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory compacting thread read requires non-empty memory ids".to_string(),
-        ));
-    }
+    validate_memory_compacting_thread_request(request)?;
     let graph_commit_epoch = store.commit_epoch();
     let mut rows = Vec::new();
     let mut found_memory_count = 0;
@@ -18513,6 +18546,86 @@ fn knowledge_memory_compacting_threads_for(
     })
 }
 
+fn knowledge_memory_compacting_thread_projected_list_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
+) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
+    validate_memory_compacting_thread_projected_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let mut rows = Vec::new();
+    let mut found_memory_count = 0;
+    let mut missing_memory_count = 0;
+    for memory_id in &request.list.memory_ids {
+        let Some(memory) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+        else {
+            missing_memory_count += 1;
+            rows.push(KnowledgeMemoryCompactingThreadProjectedRow {
+                memory_id: memory_id.clone(),
+                memory_node_id: None,
+                found_memory: false,
+                thread_id: None,
+                thread_node_id: None,
+                thread_logical_id: None,
+                thread_properties: BTreeMap::new(),
+                normalized_space_id: None,
+                relationship_id: None,
+                relationship_properties: BTreeMap::new(),
+            });
+            continue;
+        };
+        found_memory_count += 1;
+        let mut memory_rows = compacting_thread_projected_rows_for_memory(
+            catalog,
+            store,
+            memory,
+            &request.thread_property_names,
+            &request.relationship_property_names,
+        );
+        if request.list.limit_per_memory > 0 {
+            memory_rows.truncate(request.list.limit_per_memory);
+        }
+        rows.extend(memory_rows);
+    }
+    let returned_thread_count = rows.iter().filter(|row| row.thread_id.is_some()).count();
+    Ok(KnowledgeMemoryCompactingThreadProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        found_memory_count,
+        missing_memory_count,
+        returned_thread_count,
+    })
+}
+
+fn validate_memory_compacting_thread_request(
+    request: &KnowledgeMemoryCompactingThreadListRequest,
+) -> Result<()> {
+    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory compacting thread read requires non-empty memory ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_memory_compacting_thread_projected_request(
+    request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
+) -> Result<()> {
+    validate_memory_compacting_thread_request(&request.list)?;
+    if request.thread_property_names.iter().any(String::is_empty)
+        || request
+            .relationship_property_names
+            .iter()
+            .any(String::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge memory compacting thread projected read requires non-empty property names"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn compacting_thread_rows_for_memory(
     catalog: &Catalog,
     store: &GraphStore,
@@ -18541,6 +18654,72 @@ fn compacting_thread_rows_for_memory(
             .then_with(|| left.relationship_id.cmp(&right.relationship_id))
     });
     rows
+}
+
+fn compacting_thread_projected_rows_for_memory(
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory: &NodeRecord,
+    thread_property_names: &[String],
+    relationship_property_names: &[String],
+) -> Vec<KnowledgeMemoryCompactingThreadProjectedRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
+        return Vec::new();
+    };
+    let Some(thread_label_id) = catalog.label_id("Thread") else {
+        return Vec::new();
+    };
+    let memory_id = node_external_id(memory).unwrap_or_else(|| memory.id.0.to_string());
+    let mut rows = store
+        .incoming_relationships(memory.id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.source)
+                .filter(|thread| thread.labels.contains(&thread_label_id))
+                .map(|thread| {
+                    compacting_thread_projected_row(
+                        &memory_id,
+                        memory.id,
+                        thread,
+                        relationship,
+                        thread_property_names,
+                        relationship_property_names,
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.thread_logical_id
+            .cmp(&right.thread_logical_id)
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    rows
+}
+
+fn compacting_thread_projected_row(
+    memory_id: &str,
+    memory_node_id: NodeId,
+    thread: &NodeRecord,
+    relationship: &RelRecord,
+    thread_property_names: &[String],
+    relationship_property_names: &[String],
+) -> KnowledgeMemoryCompactingThreadProjectedRow {
+    KnowledgeMemoryCompactingThreadProjectedRow {
+        memory_id: memory_id.to_string(),
+        memory_node_id: Some(memory_node_id.0),
+        found_memory: true,
+        thread_id: node_external_id(thread),
+        thread_node_id: Some(thread.id.0),
+        thread_logical_id: string_property(thread, "thread_id"),
+        thread_properties: projected_properties(&thread.properties, thread_property_names),
+        normalized_space_id: Some(normalized_node_space_id(thread)),
+        relationship_id: Some(relationship.id.0),
+        relationship_properties: projected_properties(
+            &relationship.properties,
+            relationship_property_names,
+        ),
+    }
 }
 
 fn compacting_thread_row(
@@ -27409,6 +27588,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_compacting_threads(request)
     }
 
+    pub fn knowledge_memory_compacting_thread_projected_list(
+        &self,
+        request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
+    ) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
+        self.db
+            .knowledge_memory_compacting_thread_projected_list(request)
+    }
+
     pub fn knowledge_thread_messages(
         &self,
         request: &KnowledgeThreadMessageListRequest,
@@ -28453,6 +28640,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
     ) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
         knowledge_thread_compacted_memory_projected_list_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_compacting_thread_projected_list(
+        &self,
+        request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
+    ) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
+        knowledge_memory_compacting_thread_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(
