@@ -756,6 +756,9 @@ pub fn plan_with_params(
         Statement::Checkpoint => Err(SkeinError::Semantic(
             "CHECKPOINT is executed by the database session".to_string(),
         )),
+        Statement::CypherQuery(_) => Err(SkeinError::Semantic(
+            "CYPHER system hints are applied before planning".to_string(),
+        )),
         Statement::SetSystemVariable(_) => Err(SkeinError::Semantic(
             "SET system variable is executed by the database session".to_string(),
         )),

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 pub enum Statement {
     BeginTransaction,
     Checkpoint,
+    CypherQuery(Box<CypherQuery>),
     Commit,
     CreateNodeLabel(String),
     CreateRelationshipType(String),
@@ -41,6 +42,12 @@ pub enum Statement {
     MatchExpandMatchMergeRelationship(MatchExpandMatchMergeRelationship),
     SetSystemVariable(SetSystemVariable),
     Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CypherQuery {
+    pub system_variables: Vec<SetSystemVariable>,
+    pub statement: Statement,
 }
 
 #[derive(Debug, Clone, PartialEq)]

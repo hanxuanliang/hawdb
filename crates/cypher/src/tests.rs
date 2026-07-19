@@ -58,6 +58,52 @@ fn parses_set_system_variable_statement() {
 }
 
 #[test]
+fn parses_cypher_system_hints() {
+    let statement = parse(
+        "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
+         system.estimated_operations = 64 MATCH (m:Memory) RETURN m.id AS id",
+    )
+    .unwrap();
+    let Statement::CypherQuery(query) = statement else {
+        panic!("expected cypher query");
+    };
+    assert_eq!(query.system_variables.len(), 3);
+    assert_eq!(query.system_variables[0].name, "work_priority");
+    assert_eq!(
+        query.system_variables[0].value,
+        ValueExpression::Literal(Value::String("background".to_string()))
+    );
+    assert_eq!(query.system_variables[1].name, "work_class");
+    assert_eq!(
+        query.system_variables[1].value,
+        ValueExpression::Literal(Value::String("analytics".to_string()))
+    );
+    assert_eq!(query.system_variables[2].name, "estimated_operations");
+    assert_eq!(
+        query.system_variables[2].value,
+        ValueExpression::Literal(Value::Int(64))
+    );
+    let Statement::MatchReturn(match_return) = query.statement else {
+        panic!("expected inner match return");
+    };
+    assert_eq!(match_return.variable, "m");
+}
+
+#[test]
+fn rejects_cypher_system_hints_on_control_statements() {
+    let error = parse("CYPHER system.work_priority = 'background' SET system.work_class = 'query'")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("CYPHER system hints require a query or mutation statement"));
+
+    let error = parse("CYPHER system.work_priority = 'background' CHECKPOINT").unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("CYPHER system hints require a query or mutation statement"));
+}
+
+#[test]
 fn parses_unlabeled_node_match() {
     let statement = parse("MATCH (n) WHERE n.id IN $ids RETURN n.id").unwrap();
     let Statement::MatchReturn(query) = statement else {

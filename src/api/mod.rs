@@ -187,6 +187,17 @@ impl QuerySystemVariables {
             ))),
         }
     }
+
+    fn apply_system_variable_hints(
+        &self,
+        hints: &[cypher::SetSystemVariable],
+    ) -> Result<QuerySystemVariables> {
+        let mut variables = self.clone();
+        for hint in hints {
+            variables.apply_set_system_variable(hint)?;
+        }
+        Ok(variables)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5562,6 +5573,11 @@ impl Database {
         self.system_variables.query_work_request()
     }
 
+    pub fn query_work_request_for(&self, cypher_text: &str) -> Result<WorkRequest> {
+        let statement = cypher::parse(cypher_text)?;
+        query_work_request_for_statement(&self.system_variables, &statement)
+    }
+
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -5572,11 +5588,12 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
-        if let cypher::Statement::SetSystemVariable(set) = &statement {
+        let body = statement_body(&statement);
+        if let cypher::Statement::SetSystemVariable(set) = body {
             reject_system_variable_parameters(parameters)?;
             return self.system_variables.apply_set_system_variable(set);
         }
-        if matches!(statement, cypher::Statement::Checkpoint) {
+        if matches!(body, cypher::Statement::Checkpoint) {
             if !parameters.is_empty() {
                 return Err(SkeinError::Semantic(
                     "CHECKPOINT does not accept parameters".to_string(),
@@ -5585,6 +5602,7 @@ impl Database {
             self.checkpoint()?;
             return Ok(QueryOutput { rows: Vec::new() });
         }
+        query_work_request_for_statement(&self.system_variables, &statement)?;
         let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
         let is_mutation = executor::is_mutation_plan(&physical)?;
         if is_mutation {
@@ -5642,6 +5660,7 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
+        query_work_request_for_statement(&self.system_variables, &statement)?;
         let (physical_plan, trace) =
             self.optimized_query_plan(cypher_text, &statement, parameters)?;
         Ok(ExplainOutput {
@@ -28498,6 +28517,25 @@ fn reject_system_variable_parameters(parameters: &BTreeMap<String, Value>) -> Re
     }
 }
 
+fn statement_body(statement: &cypher::Statement) -> &cypher::Statement {
+    match statement {
+        cypher::Statement::CypherQuery(query) => &query.statement,
+        _ => statement,
+    }
+}
+
+fn query_work_request_for_statement(
+    variables: &QuerySystemVariables,
+    statement: &cypher::Statement,
+) -> Result<WorkRequest> {
+    match statement {
+        cypher::Statement::CypherQuery(query) => variables
+            .apply_system_variable_hints(&query.system_variables)
+            .map(|variables| variables.query_work_request()),
+        _ => Ok(variables.query_work_request()),
+    }
+}
+
 fn literal_system_variable_value(value: &cypher::ValueExpression) -> Result<Value> {
     match value {
         cypher::ValueExpression::Literal(value) => Ok(value.clone()),
@@ -28564,6 +28602,10 @@ impl<'a> NowledgeGraphAdapter<'a> {
     pub fn query(&mut self, statement: &NowledgeGraphStatement) -> Result<QueryOutput> {
         self.db
             .query_with_params(&statement.cypher, &statement.parameters)
+    }
+
+    pub fn query_work_request(&self, statement: &NowledgeGraphStatement) -> Result<WorkRequest> {
+        self.db.query_work_request_for(&statement.cypher)
     }
 
     pub fn explain(
@@ -29764,12 +29806,14 @@ impl DatabaseTransaction<'_> {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
-        if matches!(statement, cypher::Statement::SetSystemVariable(_)) {
+        let body = statement_body(&statement);
+        if matches!(body, cypher::Statement::SetSystemVariable(_)) {
             reject_system_variable_parameters(parameters)?;
             return Err(SkeinError::Execution(
                 "SET system variable is not allowed inside a transaction".to_string(),
             ));
         }
+        query_work_request_for_statement(&self.db.system_variables, &statement)?;
         let (physical, _) = self
             .db
             .optimized_query_plan(cypher_text, &statement, parameters)?;
@@ -29808,6 +29852,11 @@ impl DatabaseSession<'_> {
         self.system_variables.query_work_request()
     }
 
+    pub fn query_work_request_for(&self, cypher_text: &str) -> Result<WorkRequest> {
+        let statement = cypher::parse(cypher_text)?;
+        query_work_request_for_statement(&self.system_variables, &statement)
+    }
+
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -29818,7 +29867,8 @@ impl DatabaseSession<'_> {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
-        match statement {
+        let body = statement_body(&statement);
+        match body {
             cypher::Statement::BeginTransaction => {
                 reject_transaction_control_parameters("BEGIN TRANSACTION", parameters)?;
                 if self.transaction_mutations.is_some() {
@@ -29865,16 +29915,16 @@ impl DatabaseSession<'_> {
             }
             cypher::Statement::SetSystemVariable(set) => {
                 reject_system_variable_parameters(parameters)?;
-                self.system_variables.apply_set_system_variable(&set)
+                self.system_variables.apply_set_system_variable(set)
             }
             statement if self.transaction_mutations.is_some() => {
                 let mutation =
-                    mutation_command_for_statement(self.db, cypher_text, &statement, parameters)?
+                    mutation_command_for_statement(self.db, cypher_text, statement, parameters)?
                         .ok_or_else(|| {
-                        SkeinError::Execution(
-                            "session transaction query must be a mutation".to_string(),
-                        )
-                    })?;
+                            SkeinError::Execution(
+                                "session transaction query must be a mutation".to_string(),
+                            )
+                        })?;
                 self.db.ensure_writable()?;
                 self.transaction_mutations
                     .as_mut()
@@ -29882,7 +29932,10 @@ impl DatabaseSession<'_> {
                     .push(mutation);
                 Ok(QueryOutput { rows: Vec::new() })
             }
-            _ => self.db.query_with_params(cypher_text, parameters),
+            _ => {
+                query_work_request_for_statement(&self.system_variables, &statement)?;
+                self.db.query_with_params(cypher_text, parameters)
+            }
         }
     }
 }
@@ -29975,7 +30028,7 @@ fn optimized_query_plan_for(
         }
     }
 
-    let logical = planner::plan_with_params(statement, parameters)?;
+    let logical = planner::plan_with_params(statement_body(statement), parameters)?;
     let (physical_plan, trace) = context.optimizer.optimize_with_catalog(
         &logical,
         &optimizer_catalog(context.catalog, &context.store.statistics()),
@@ -30004,7 +30057,7 @@ fn optimized_query_plan_for(
 
 fn statement_uses_plan_cache(statement: &cypher::Statement) -> bool {
     matches!(
-        statement,
+        statement_body(statement),
         cypher::Statement::MatchReturn(_)
             | cypher::Statement::ShortestPathReturn(_)
             | cypher::Statement::MatchNodesReturn(_)
@@ -30025,18 +30078,20 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
-        if matches!(statement, cypher::Statement::Checkpoint) {
+        let body = statement_body(&statement);
+        if matches!(body, cypher::Statement::Checkpoint) {
             reject_transaction_control_parameters("CHECKPOINT", parameters)?;
             return Err(SkeinError::Execution(
                 "CHECKPOINT is not allowed inside a read transaction".to_string(),
             ));
         }
-        if matches!(statement, cypher::Statement::SetSystemVariable(_)) {
+        if matches!(body, cypher::Statement::SetSystemVariable(_)) {
             reject_system_variable_parameters(parameters)?;
             return Err(SkeinError::Execution(
                 "SET system variable is not allowed inside a read transaction".to_string(),
             ));
         }
+        query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
         let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
         if executor::is_mutation_plan(&physical)? {
             return Err(SkeinError::Execution(
@@ -30058,6 +30113,7 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
+        query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
         let (physical_plan, trace) =
             self.optimized_query_plan(cypher_text, &statement, parameters)?;
         if executor::is_mutation_plan(&physical_plan)? {

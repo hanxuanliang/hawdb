@@ -1,4 +1,4 @@
-use super::ast::{SetSystemVariable, Statement};
+use super::ast::{CypherQuery, SetSystemVariable, Statement};
 use skein_core::Result;
 
 mod cursor;
@@ -24,6 +24,7 @@ enum StatementDispatch {
     Begin,
     Create,
     Alter,
+    Cypher,
     Merge,
     Match,
     Set,
@@ -37,6 +38,7 @@ const TOP_LEVEL_STATEMENTS: &[(&str, StatementDispatch)] = &[
     ("BEGIN", StatementDispatch::Begin),
     ("CREATE", StatementDispatch::Create),
     ("ALTER", StatementDispatch::Alter),
+    ("CYPHER", StatementDispatch::Cypher),
     ("MERGE", StatementDispatch::Merge),
     ("MATCH", StatementDispatch::Match),
     ("SET", StatementDispatch::Set),
@@ -69,6 +71,7 @@ impl<'a> Parser<'a> {
             }
             StatementDispatch::Create => self.parse_create_statement(),
             StatementDispatch::Alter => self.parse_alter_statement(),
+            StatementDispatch::Cypher => self.parse_cypher_query_statement(),
             StatementDispatch::Merge => self.parse_merge_statement(),
             StatementDispatch::Match => self.parse_match_statement(),
             StatementDispatch::Set => self.parse_set_system_variable_statement(),
@@ -82,7 +85,7 @@ impl<'a> Parser<'a> {
     fn parse_statement_dispatch(&mut self) -> Result<StatementDispatch> {
         self.parse_keyword_choice(
             TOP_LEVEL_STATEMENTS,
-            "expected BEGIN, CREATE, ALTER, MERGE, MATCH, SET, CALL, CHECKPOINT, COMMIT, or ROLLBACK",
+            "expected BEGIN, CREATE, ALTER, CYPHER, MERGE, MATCH, SET, CALL, CHECKPOINT, COMMIT, or ROLLBACK",
         )
     }
 
@@ -102,5 +105,38 @@ impl<'a> Parser<'a> {
             name: name.to_ascii_lowercase(),
             value,
         }))
+    }
+
+    fn parse_cypher_query_statement(&mut self) -> Result<Statement> {
+        let mut system_variables = Vec::new();
+        while self.consume_keyword("SYSTEM") {
+            self.expect_char('.')?;
+            let name = self.parse_ident()?;
+            self.expect_char('=')?;
+            let value = self.parse_value()?;
+            system_variables.push(SetSystemVariable {
+                name: name.to_ascii_lowercase(),
+                value,
+            });
+        }
+        if system_variables.is_empty() {
+            return Err(self.error("expected at least one CYPHER system hint"));
+        }
+        let statement = self.parse_statement()?;
+        match statement {
+            Statement::BeginTransaction
+            | Statement::Checkpoint
+            | Statement::Commit
+            | Statement::CypherQuery(_)
+            | Statement::Rollback
+            | Statement::SetSystemVariable(_) => {
+                return Err(self.error("CYPHER system hints require a query or mutation statement"));
+            }
+            _ => {}
+        }
+        Ok(Statement::CypherQuery(Box::new(CypherQuery {
+            system_variables,
+            statement,
+        })))
     }
 }

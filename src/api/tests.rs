@@ -1457,6 +1457,80 @@ fn set_system_variables_are_session_scoped() {
 }
 
 #[test]
+fn cypher_system_hints_configure_single_query_work_request() {
+    let mut db = Database::new();
+    db.query("SET system.work_class = 'projection'").unwrap();
+
+    let work_request = db
+        .query_work_request_for(
+            "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
+             system.estimated_operations = 64 MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap();
+    assert_eq!(
+        work_request,
+        WorkRequest::background(WorkClass::Analytics, 64)
+    );
+    assert_eq!(
+        db.query_work_request(),
+        WorkRequest::foreground(WorkClass::Projection, 1)
+    );
+}
+
+#[test]
+fn cypher_system_hints_are_session_relative() {
+    let mut db = Database::new();
+    let mut session = db.session();
+    session
+        .query("SET system.work_priority = 'background'")
+        .unwrap();
+    session.query("SET system.work_class = 'import'").unwrap();
+
+    let work_request = session
+        .query_work_request_for(
+            "CYPHER system.work_class = 'analytics' system.estimated_operations = 32 \
+             MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap();
+    assert_eq!(
+        work_request,
+        WorkRequest::background(WorkClass::Analytics, 32)
+    );
+    assert_eq!(
+        session.query_work_request(),
+        WorkRequest::background(WorkClass::Import, 1)
+    );
+}
+
+#[test]
+fn cypher_system_hints_allow_query_parameters_but_require_literal_hint_values() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 1, title: 'Graph'})")
+        .unwrap();
+
+    let mut parameters = BTreeMap::new();
+    parameters.insert("id".to_string(), Value::Int(1));
+    let output = db
+        .query_with_params(
+            "CYPHER system.work_priority = 'background' MATCH (m:Memory {id: $id}) \
+             RETURN m.title AS title",
+            &parameters,
+        )
+        .unwrap();
+    assert_eq!(
+        output.rows[0].get("title"),
+        Some(&Value::String("Graph".to_string()))
+    );
+
+    let error = db
+        .query_work_request_for(
+            "CYPHER system.work_priority = $priority MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("requires a literal value"));
+}
+
+#[test]
 fn set_system_variables_reject_invalid_values_without_wal() {
     let path = unique_test_dir("set_system_variables_invalid_without_wal");
     let mut db = Database::open(&path).unwrap();
