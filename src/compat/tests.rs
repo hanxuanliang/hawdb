@@ -370,6 +370,13 @@ fn query_inventory_can_audit_scanner_names_by_cypher() {
         CompatibilityCutoverDecision::Ready
     );
     assert!(bundle.migration_gate.blockers.is_empty());
+    let json = super::compatibility_migration_gate_bundle_to_json(&bundle);
+    assert_eq!(json["dual_engine_evidence"]["ready"], true);
+    assert_eq!(json["dual_engine_evidence"]["primary_check_count"], 1);
+    assert_eq!(json["dual_engine_evidence"]["shadow_check_count"], 1);
+    assert_eq!(json["dual_engine_evidence"]["matched_check_count"], 1);
+    assert_eq!(json["dual_engine_evidence"]["primary_only_check_count"], 0);
+    assert_eq!(json["cutover"]["dual_engine_evidence"]["ready"], true);
 }
 
 #[test]
@@ -526,6 +533,7 @@ fn migration_gate_combines_inventory_and_shadow_blockers() {
         fixture: "other-fixture".to_string(),
         shadow_engine: "shadow".to_string(),
         decision: CompatibilityCutoverDecision::Blocked,
+        primary_check_count: 1,
         total_checks: 1,
         matched_checks: 0,
         primary_only_checks: vec!["extra check".to_string()],
@@ -613,6 +621,7 @@ fn migration_gate_blocks_when_required_rollback_evidence_is_missing() {
         fixture: "fixture".to_string(),
         shadow_engine: "previous-wrapper".to_string(),
         decision: CompatibilityCutoverDecision::Ready,
+        primary_check_count: 1,
         total_checks: 1,
         matched_checks: 1,
         primary_only_checks: Vec::new(),
@@ -662,6 +671,7 @@ fn migration_gate_accepts_caller_owned_rollback_evidence() {
         fixture: "fixture".to_string(),
         shadow_engine: "previous-wrapper".to_string(),
         decision: CompatibilityCutoverDecision::Ready,
+        primary_check_count: 1,
         total_checks: 1,
         matched_checks: 1,
         primary_only_checks: Vec::new(),
@@ -751,7 +761,22 @@ fn migration_gate_bundle_reports_blocked_json() {
     assert_eq!(json["inventory_gate"]["decision"], "blocked");
     assert_eq!(json["inventory_gate"]["coverage_per_million"], 0);
     assert_eq!(json["cutover"]["decision"], "blocked");
+    assert_eq!(json["cutover"]["primary_check_count"], 1);
     assert_eq!(json["cutover"]["matched_per_million"], 0);
+    assert_eq!(json["cutover"]["dual_engine_evidence"]["ready"], false);
+    assert_eq!(json["dual_engine_evidence"]["ready"], false);
+    assert_eq!(
+        json["dual_engine_evidence"]["primary_engine"],
+        serde_json::json!("skein")
+    );
+    assert_eq!(
+        json["dual_engine_evidence"]["shadow_engine"],
+        serde_json::json!("shadow")
+    );
+    assert_eq!(json["dual_engine_evidence"]["primary_check_count"], 1);
+    assert_eq!(json["dual_engine_evidence"]["shadow_check_count"], 1);
+    assert_eq!(json["dual_engine_evidence"]["matched_check_count"], 0);
+    assert_eq!(json["dual_engine_evidence"]["primary_only_check_count"], 1);
     assert_eq!(json["migration_gate"]["decision"], "blocked");
     assert_eq!(json["migration_gate"]["shadow_total_checks"], 1);
     assert_eq!(json["migration_gate"]["shadow_matched_checks"], 0);
@@ -847,6 +872,11 @@ fn migration_gate_bundle_reports_replacement_readiness_by_query_family() {
         .as_array()
         .unwrap();
 
+    assert_eq!(json["dual_engine_evidence"]["ready"], false);
+    assert_eq!(json["dual_engine_evidence"]["primary_check_count"], 2);
+    assert_eq!(json["dual_engine_evidence"]["shadow_check_count"], 2);
+    assert_eq!(json["dual_engine_evidence"]["matched_check_count"], 1);
+    assert_eq!(json["dual_engine_evidence"]["primary_only_check_count"], 1);
     assert_eq!(json["replacement_readiness_per_million"], 500_000);
     assert_eq!(families.len(), 2);
     assert_eq!(families[0]["query_family"], "mutation");

@@ -165,6 +165,7 @@ pub struct CompatibilityCutoverReport {
     pub fixture: String,
     pub shadow_engine: String,
     pub decision: CompatibilityCutoverDecision,
+    pub primary_check_count: usize,
     pub total_checks: usize,
     pub matched_checks: usize,
     pub primary_only_checks: Vec<String>,
@@ -537,6 +538,7 @@ pub fn assess_compatibility_cutover(
         } else {
             CompatibilityCutoverDecision::Blocked
         },
+        primary_check_count: report.primary_checks.len(),
         total_checks,
         matched_checks,
         primary_only_checks,

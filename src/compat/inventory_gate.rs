@@ -315,11 +315,13 @@ pub fn compatibility_cutover_report_to_json(
         "fixture": report.fixture,
         "shadow_engine": report.shadow_engine,
         "decision": compatibility_cutover_decision_as_str(report.decision),
+        "primary_check_count": report.primary_check_count,
         "total_checks": report.total_checks,
         "matched_checks": report.matched_checks,
         "matched_per_million": ratio_per_million(report.matched_checks, report.total_checks),
         "primary_only_checks": report.primary_only_checks,
         "primary_only_reasons": report.primary_only_reasons,
+        "dual_engine_evidence": cutover_dual_engine_evidence_to_json(report),
         "blockers": report.blockers,
     })
 }
@@ -365,6 +367,7 @@ pub fn compatibility_migration_gate_bundle_to_json(
         "inventory_gate": compatibility_inventory_gate_report_to_json(&bundle.inventory_gate),
         "cutover": compatibility_cutover_report_to_json(&bundle.cutover),
         "migration_gate": compatibility_migration_gate_report_to_json(&bundle.migration_gate),
+        "dual_engine_evidence": cutover_dual_engine_evidence_to_json(&bundle.cutover),
         "replacement_readiness_by_query_family": replacement_readiness_by_query_family_to_json(bundle),
         "replacement_readiness_per_million": ratio_per_million(
             bundle.coverage.covered_checks.min(bundle.cutover.matched_checks),
@@ -385,6 +388,24 @@ fn ratio_per_million(numerator: usize, denominator: usize) -> u64 {
         return 0;
     }
     ((numerator as u128).saturating_mul(1_000_000) / denominator as u128) as u64
+}
+
+fn cutover_dual_engine_evidence_to_json(report: &CompatibilityCutoverReport) -> serde_json::Value {
+    let primary_only_check_count = report.primary_only_checks.len();
+    serde_json::json!({
+        "ready": report.decision == CompatibilityCutoverDecision::Ready
+            && report.primary_check_count == report.total_checks
+            && report.total_checks > 0
+            && report.matched_checks == report.total_checks
+            && primary_only_check_count == 0,
+        "primary_engine": "skein",
+        "shadow_engine": report.shadow_engine,
+        "primary_check_count": report.primary_check_count,
+        "shadow_check_count": report.total_checks,
+        "matched_check_count": report.matched_checks,
+        "primary_only_check_count": primary_only_check_count,
+        "matched_per_million": ratio_per_million(report.matched_checks, report.total_checks),
+    })
 }
 
 fn query_family_coverage_to_json(report: &CompatibilityQueryFamilyCoverage) -> serde_json::Value {

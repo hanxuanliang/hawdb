@@ -292,7 +292,8 @@ gate, shadow cutover, and migration gate reports all have JSON exporters with
 stable lowercase `decision` values for CI consumption.
 `assess_compatibility_migration_gate_bundle` and
 `compatibility_migration_gate_bundle_to_json` provide the single-call CI path
-that packages coverage, inventory gate, cutover, and migration gate evidence.
+that packages coverage, inventory gate, cutover, migration gate, and
+`dual_engine_evidence` side-by-side check-count evidence.
 `assess_compatibility_migration_gate` combines the inventory gate and shadow
 cutover gate into one migration decision. `scan_nowledge_query_inventory` and
 the `scan-nowledge-inventory` CLI command provide a production graph-source

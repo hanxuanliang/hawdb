@@ -615,6 +615,12 @@ coverage and shadow parity, scaled so `1000000` means all required checks are
 covered and matched. These fields are progress and dashboard signals only;
 cutover automation must still honor the Ready/Blocked decision and blocker
 arrays.
+The cutover object and top-level bundle also include `dual_engine_evidence`,
+which records `primary_engine`, `shadow_engine`, primary and shadow check
+counts, matched check count, primary-only check count, matched ratio, and a
+`ready` boolean. This is the stable side-by-side evidence field for release
+automation; it makes primary-only or self-shadow protocol smoke visibly
+different from real Skein-vs-previous-wrapper parity.
 The coverage and inventory gate objects also include
 `coverage_by_query_family`, which groups required inventory checks by their
 scanner-assigned query family and reports per-family required, covered, missing,
