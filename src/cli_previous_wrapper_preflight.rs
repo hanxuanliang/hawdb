@@ -347,6 +347,55 @@ fn nowledge_previous_wrapper_preflight_check_json(
                     &replacement_summary,
                     &["dual_engine_evidence"],
                 ),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "present"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "derived_projection"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "all_tables_covered"],
+                ) == Some(true),
+                search_projection_table_counts_match(&replacement_summary),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "fts_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "vector_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "embedding_identity_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "fail_soft_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "rebuild_marker_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "metadata_repair_marker_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "incremental_update_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_evidence", "source_chunk_ready"],
+                ) == Some(true),
             ],
             [
                 "production_cutover_ready",
@@ -365,6 +414,19 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "dual_engine_evidence.shadow_check_count",
                 "dual_engine_evidence.matched_check_count",
                 "dual_engine_evidence.primary_only_check_count",
+                "search_projection_evidence.present",
+                "search_projection_evidence.ready",
+                "search_projection_evidence.derived_projection",
+                "search_projection_evidence.all_tables_covered",
+                "search_projection_evidence.covered_table_count",
+                "search_projection_evidence.fts_ready",
+                "search_projection_evidence.vector_ready",
+                "search_projection_evidence.embedding_identity_ready",
+                "search_projection_evidence.fail_soft_ready",
+                "search_projection_evidence.rebuild_marker_ready",
+                "search_projection_evidence.metadata_repair_marker_ready",
+                "search_projection_evidence.incremental_update_ready",
+                "search_projection_evidence.source_chunk_ready",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -372,6 +434,7 @@ fn nowledge_previous_wrapper_preflight_check_json(
                     &["blocking_categories"][..],
                     &["missing_evidence"][..],
                     &["next_actions"][..],
+                    &["search_projection_evidence", "blocker_codes"][..],
                 ],
             ),
         ),
@@ -655,6 +718,78 @@ fn previous_wrapper_preflight_release_summary(
             u64_path(replacement_summary, &["dual_engine_evidence", path]),
         );
     }
+    insert_json_value(
+        &mut summary,
+        "search_projection_evidence_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_all_tables_covered",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "all_tables_covered"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_covered_table_count",
+        u64_path(
+            replacement_summary,
+            &["search_projection_evidence", "covered_table_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_required_table_count",
+        u64_path(
+            replacement_summary,
+            &["search_projection_evidence", "required_table_count"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_fts_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "fts_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_vector_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "vector_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_embedding_identity_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "embedding_identity_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_fail_soft_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "fail_soft_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_incremental_update_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "incremental_update_ready"],
+        ),
+    );
     serde_json::Value::Object(summary)
 }
 
@@ -756,6 +891,22 @@ fn dual_engine_count_evidence_consistent(value: &serde_json::Value, path: &[&str
         && dual_engine_primary_shadow_counts_match(value, path)
         && dual_engine_matched_shadow_counts_match(value, path)
         && dual_engine_primary_only_count_clear(value, path)
+}
+
+fn search_projection_table_counts_match(value: &serde_json::Value) -> bool {
+    let Some(covered_table_count) = u64_path(
+        value,
+        &["search_projection_evidence", "covered_table_count"],
+    ) else {
+        return false;
+    };
+    let Some(required_table_count) = u64_path(
+        value,
+        &["search_projection_evidence", "required_table_count"],
+    ) else {
+        return false;
+    };
+    required_table_count > 0 && covered_table_count == required_table_count
 }
 
 fn dual_engine_u64_path(value: &serde_json::Value, path: &[&str], field: &str) -> Option<u64> {
@@ -876,6 +1027,15 @@ mod tests {
         assert_release_summary_field(summary, "dual_engine_matched_check_count", 2);
         assert_release_summary_field(summary, "dual_engine_primary_only_check_count", 0);
         assert_release_summary_field(summary, "dual_engine_matched_per_million", 1_000_000);
+        assert_release_summary_field(summary, "search_projection_evidence_ready", true);
+        assert_release_summary_field(summary, "search_projection_all_tables_covered", true);
+        assert_release_summary_field(summary, "search_projection_covered_table_count", 6);
+        assert_release_summary_field(summary, "search_projection_required_table_count", 6);
+        assert_release_summary_field(summary, "search_projection_fts_ready", true);
+        assert_release_summary_field(summary, "search_projection_vector_ready", true);
+        assert_release_summary_field(summary, "search_projection_embedding_identity_ready", true);
+        assert_release_summary_field(summary, "search_projection_fail_soft_ready", true);
+        assert_release_summary_field(summary, "search_projection_incremental_update_ready", true);
         assert!(report["checks"]
             .as_array()
             .unwrap()
@@ -932,7 +1092,20 @@ mod tests {
                 "dual_engine_evidence.primary_check_count",
                 "dual_engine_evidence.shadow_check_count",
                 "dual_engine_evidence.matched_check_count",
-                "dual_engine_evidence.primary_only_check_count"
+                "dual_engine_evidence.primary_only_check_count",
+                "search_projection_evidence.present",
+                "search_projection_evidence.ready",
+                "search_projection_evidence.derived_projection",
+                "search_projection_evidence.all_tables_covered",
+                "search_projection_evidence.covered_table_count",
+                "search_projection_evidence.fts_ready",
+                "search_projection_evidence.vector_ready",
+                "search_projection_evidence.embedding_identity_ready",
+                "search_projection_evidence.fail_soft_ready",
+                "search_projection_evidence.rebuild_marker_ready",
+                "search_projection_evidence.metadata_repair_marker_ready",
+                "search_projection_evidence.incremental_update_ready",
+                "search_projection_evidence.source_chunk_ready"
             ])
         );
     }
@@ -985,7 +1158,8 @@ mod tests {
                 "shadow_check_count": 2,
                 "matched_check_count": 2,
                 "primary_only_check_count": 0
-            }
+            },
+            "search_projection_evidence": ready_search_projection_evidence()
         }));
 
         let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
@@ -998,6 +1172,38 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
             serde_json::json!(["dual_engine_evidence.ready"])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_summary_search_projection_evidence() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["search_projection_evidence"]["ready"] = serde_json::json!(true);
+        replacement_summary["search_projection_evidence"]["covered_table_count"] =
+            serde_json::json!(5);
+        replacement_summary["search_projection_evidence"]["source_chunk_ready"] =
+            serde_json::json!(false);
+        replacement_summary["search_projection_evidence"]["blocker_codes"] =
+            serde_json::json!(["missing_source_chunks_index"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "search_projection_evidence.covered_table_count",
+                "search_projection_evidence.source_chunk_ready"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["blocker_codes"],
+            serde_json::json!(["missing_source_chunks_index"])
         );
     }
 
@@ -1373,8 +1579,29 @@ mod tests {
                     "matched_check_count": 2,
                     "primary_only_check_count": 0,
                     "matched_per_million": 1_000_000
-                }
+                },
+                "search_projection_evidence": ready_search_projection_evidence()
             })),
         }
+    }
+
+    fn ready_search_projection_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "present": true,
+            "ready": true,
+            "derived_projection": true,
+            "all_tables_covered": true,
+            "covered_table_count": 6,
+            "required_table_count": 6,
+            "fts_ready": true,
+            "vector_ready": true,
+            "embedding_identity_ready": true,
+            "fail_soft_ready": true,
+            "rebuild_marker_ready": true,
+            "metadata_repair_marker_ready": true,
+            "incremental_update_ready": true,
+            "source_chunk_ready": true,
+            "blocker_codes": []
+        })
     }
 }

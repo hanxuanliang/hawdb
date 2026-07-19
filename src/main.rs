@@ -2,6 +2,7 @@ mod cli_fixture_contract;
 mod cli_fixture_contract_check;
 mod cli_previous_wrapper_preflight;
 mod cli_replacement_summary;
+mod cli_search_projection_evidence;
 
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
@@ -10,6 +11,7 @@ use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
+use cli_search_projection_evidence::run_nowledge_search_projection_evidence;
 use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
@@ -94,6 +96,17 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge previous-wrapper preflight is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-search-projection-evidence" {
+            let (json, require_ready) = run_nowledge_search_projection_evidence(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge search projection evidence is not ready".to_string(),
                 ));
             }
             return Ok(());
