@@ -204,6 +204,13 @@ Memory rows and non-crystal rows, orders by `created_at` descending, supports
 bounded limits, can either return Memory title/unit-type preview rows or expand
 outgoing `HAS_LABEL` rows to Label id/canonical-name/name fields, reports
 matched Memory counts and the graph commit epoch, and does not write WAL.
+Memory bulk detail and filtered list reads are covered by
+`Database::knowledge_memories`. The typed read supports id-bounded bulk detail
+rows, normalized-space inclusion/exclusion using the Nowledge default-space
+rule, unit-type/latest/crystal filters, created-at or score ordering, and
+bounded limits. It returns Memory title/content/metadata/lifecycle/review/
+space/timestamp/source/rank fields, reports missing ids and the graph commit
+epoch, rejects unbounded scans without filters, and does not write WAL.
 Skill usage-stat writes are covered by a typed batch for Nowledge
 `use_count`, optional `success_rate`, `last_activity_at`, `updated_at`, and
 `metadata` update shapes. The wrapper validates Skill ids, non-negative use

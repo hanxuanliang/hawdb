@@ -408,6 +408,10 @@ Induced edge-list reads are available as `Database::knowledge_induced_edges`,
 covering Nowledge overview and MCP subgraph `MATCH (a)-[r]->(b) WHERE a.id IN
 $ids AND b.id IN $ids` shapes with relationship type and strength/confidence
 fallback projection and no WAL writes.
+Memory bulk detail and filtered list reads are available as
+`Database::knowledge_memories`, covering id-bounded metadata/space/detail
+reads, normalized-space inclusion and exclusion, learning latest lists, and
+ranked overview lists with bounded limits and no WAL writes.
 Memory entity mention reads are available as
 `Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
 `MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
@@ -939,6 +943,7 @@ source attribution reads,
 source fan-in relationship count reads,
 thread compaction attribution reads,
 memory created-at bulk reads, memory bulk metadata and space reads,
+memory filtered list reads,
 entity relationship endpoint checks, count-only optional thread cleanup reads,
 thread message target `DETACH DELETE` cleanup writes,
 top-entities-by-degree graph analysis reads,
