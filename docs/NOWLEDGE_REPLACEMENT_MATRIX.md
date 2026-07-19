@@ -425,6 +425,12 @@ Memory ids, scans only matched Memory nodes, filters incoming `SYNTHESIZED_FROM`
 edges to `Memory` crystals with `is_crystal = true`, returns one row per Memory
 with a positive count, reports missing Memory ids and full matched relationship
 counts, supports pinned read snapshots, and does not write WAL.
+Memory decay detail reads are covered by
+`Database::knowledge_memory_decay_detail`. The typed read covers the scheduler's
+exact-id `Memory` detail shape, returns typed core fields plus a bounded
+property projection, defaults that projection to the current production columns,
+accepts explicit future property names without widening default payloads,
+supports pinned read snapshots, and does not write WAL.
 Memory EVOLVES neighbor reads are covered by
 `Database::knowledge_memory_evolves_neighbors`. The typed read covers the MCP
 outgoing and incoming `Memory-[:EVOLVES]-Memory` shapes, anchors by one physical

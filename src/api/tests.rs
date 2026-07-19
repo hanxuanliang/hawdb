@@ -34,10 +34,11 @@ use super::{
     KnowledgeMemoryCompactingThreadListRequest,
     KnowledgeMemoryCompactingThreadProjectedListRequest, KnowledgeMemoryContentBatchRequest,
     KnowledgeMemoryContentUpdate, KnowledgeMemoryCrystalSynthesisCountRequest,
-    KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEntityListRequest,
-    KnowledgeMemoryEvolvesCreate, KnowledgeMemoryEvolvesCreateBatchRequest,
-    KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryEvolvesNeighborRequest,
-    KnowledgeMemoryEvolvesProjectedSuccessorCursor, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryDecayDetailRequest, KnowledgeMemoryDedupReviewedBatchRequest,
+    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
+    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
+    KnowledgeMemoryEvolvesProjectedSuccessorOrder,
     KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesRelationCountRequest,
     KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLabelTransferRequest,
@@ -14739,6 +14740,122 @@ fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
     assert_eq!(missing.thread_node_id, None);
     assert_eq!(missing.matched_count, 0);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn reads_memory_decay_detail_for_scheduler_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', title: 'Decay Detail', content: 'content', unit_type: 'fact', source: 'agent', space_id: 'default', created_at: 12, decay_score_cached: 0.4, metadata: '{}', is_latest: true, lifecycle_state: 'active', future_decay_field: 'future'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query("MATCH (m:Memory {id: 'scheduler-memory-decay-detail'}) SET m.decay_score_cached = 0.9, m.future_decay_field = 'late'")
+        .unwrap();
+
+    let output = db
+        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
+            memory_id: "scheduler-memory-decay-detail".to_string(),
+            property_names: Vec::new(),
+        })
+        .unwrap();
+    assert!(output.found);
+    let memory = output.memory.unwrap();
+    assert_eq!(
+        memory.memory_id.as_deref(),
+        Some("scheduler-memory-decay-detail")
+    );
+    assert_eq!(memory.title.as_deref(), Some("Decay Detail"));
+    assert_eq!(memory.content.as_deref(), Some("content"));
+    assert_eq!(memory.unit_type.as_deref(), Some("fact"));
+    assert_eq!(memory.source.as_deref(), Some("agent"));
+    assert_eq!(memory.raw_space_id.as_deref(), Some("default"));
+    assert_eq!(memory.normalized_space_id, "default");
+    assert_eq!(memory.created_at, Some(Value::Int(12)));
+    assert_eq!(memory.decay_score_cached, Some(Value::Float(0.9)));
+    assert_eq!(memory.metadata, Some(Value::String("{}".to_string())));
+    assert_eq!(memory.is_latest, Some(true));
+    assert_eq!(memory.lifecycle_state.as_deref(), Some("active"));
+    assert_eq!(
+        memory.properties.get("decay_score_cached"),
+        Some(&Value::Float(0.9))
+    );
+    assert!(!memory.properties.contains_key("future_decay_field"));
+
+    let projected = db
+        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
+            memory_id: "scheduler-memory-decay-detail".to_string(),
+            property_names: vec![
+                "future_decay_field".to_string(),
+                "decay_score_cached".to_string(),
+                "future_decay_field".to_string(),
+            ],
+        })
+        .unwrap();
+    let projected_memory = projected.memory.unwrap();
+    assert_eq!(projected_memory.properties.len(), 2);
+    assert_eq!(
+        projected_memory.properties.get("future_decay_field"),
+        Some(&Value::String("late".to_string()))
+    );
+
+    let snapshot_output = snapshot
+        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
+            memory_id: "scheduler-memory-decay-detail".to_string(),
+            property_names: Vec::new(),
+        })
+        .unwrap();
+    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(
+        snapshot_output.memory.unwrap().decay_score_cached,
+        Some(Value::Float(0.4))
+    );
+
+    let missing = db
+        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
+            memory_id: "missing".to_string(),
+            property_names: Vec::new(),
+        })
+        .unwrap();
+    assert!(!missing.found);
+    assert_eq!(missing.memory, None);
+}
+
+#[test]
+fn memory_decay_detail_rejects_empty_inputs_without_wal() {
+    let path = unique_test_dir("memory_decay_detail_rejects_empty_inputs_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', decay_score_cached: 0.4})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let err = db
+        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
+            memory_id: String::new(),
+            property_names: Vec::new(),
+        })
+        .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("knowledge memory decay detail read requires a non-empty memory id"));
+
+    let err = db
+        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
+            memory_id: "scheduler-memory-decay-detail".to_string(),
+            property_names: vec![String::new()],
+        })
+        .unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("knowledge memory decay detail read requires non-empty property names"));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

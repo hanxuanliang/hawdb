@@ -548,6 +548,13 @@ source Memory ids. The read scans only requested Memory nodes, filters incoming
 `SYNTHESIZED_FROM` edges to `Memory` crystals with `is_crystal = true`, reports
 missing Memory ids separately, supports pinned read snapshots, and does not
 write WAL.
+Memory decay detail reads are available as
+`Database::knowledge_memory_decay_detail`, covering the scheduler's exact-id
+Memory detail lookup for title, content, unit type, source, space, created-at,
+cached decay score, metadata, latest flag, and lifecycle state. The read keeps
+the default projection to this production field set, accepts explicit
+additional property names for future field growth, supports pinned read
+snapshots, and does not write WAL.
 Memory EVOLVES neighbor reads are available as
 `Database::knowledge_memory_evolves_neighbors`, covering MCP outgoing/incoming
 EVOLVES adjacency reads over one anchor Memory with explicit node and

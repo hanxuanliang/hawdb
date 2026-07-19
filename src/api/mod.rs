@@ -3958,6 +3958,37 @@ pub struct KnowledgeThreadCompactedMemoryListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDecayDetailRequest {
+    pub memory_id: String,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDecayDetail {
+    pub memory_id: Option<String>,
+    pub node_id: u64,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub unit_type: Option<String>,
+    pub source: Option<String>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: String,
+    pub created_at: Option<Value>,
+    pub decay_score_cached: Option<Value>,
+    pub metadata: Option<Value>,
+    pub is_latest: Option<bool>,
+    pub lifecycle_state: Option<String>,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryDecayDetailOutput {
+    pub graph_commit_epoch: u64,
+    pub found: bool,
+    pub memory: Option<KnowledgeMemoryDecayDetail>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadCompactedMemoryProjectedListRequest {
     pub list: KnowledgeThreadCompactedMemoryListRequest,
     pub memory_property_names: Vec<String>,
@@ -7310,6 +7341,13 @@ impl Database {
         request: &KnowledgeThreadCompactedMemoryListRequest,
     ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
         knowledge_thread_compacted_memories_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_decay_detail(
+        &self,
+        request: &KnowledgeMemoryDecayDetailRequest,
+    ) -> Result<KnowledgeMemoryDecayDetailOutput> {
+        knowledge_memory_decay_detail_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_compacted_memory_projected_list(
@@ -19409,6 +19447,87 @@ fn thread_compacted_memory_row(
     }
 }
 
+const KNOWLEDGE_MEMORY_DECAY_DETAIL_DEFAULT_PROPERTIES: &[&str] = &[
+    "id",
+    "title",
+    "content",
+    "unit_type",
+    "source",
+    "space_id",
+    "created_at",
+    "decay_score_cached",
+    "metadata",
+    "is_latest",
+    "lifecycle_state",
+];
+
+fn knowledge_memory_decay_detail_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryDecayDetailRequest,
+) -> Result<KnowledgeMemoryDecayDetailOutput> {
+    validate_knowledge_memory_decay_detail_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let memory = seed_node_by_label_and_external_id(catalog, store, "Memory", &request.memory_id)
+        .map(|memory| knowledge_memory_decay_detail_row(memory, request));
+    Ok(KnowledgeMemoryDecayDetailOutput {
+        graph_commit_epoch,
+        found: memory.is_some(),
+        memory,
+    })
+}
+
+fn validate_knowledge_memory_decay_detail_request(
+    request: &KnowledgeMemoryDecayDetailRequest,
+) -> Result<()> {
+    if request.memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory decay detail read requires a non-empty memory id".to_string(),
+        ));
+    }
+    if request.property_names.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory decay detail read requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_memory_decay_detail_row(
+    memory: &NodeRecord,
+    request: &KnowledgeMemoryDecayDetailRequest,
+) -> KnowledgeMemoryDecayDetail {
+    let property_names = knowledge_memory_decay_detail_property_names(request);
+    KnowledgeMemoryDecayDetail {
+        memory_id: node_external_id(memory),
+        node_id: memory.id.0,
+        title: string_property(memory, "title"),
+        content: string_property(memory, "content"),
+        unit_type: string_property(memory, "unit_type"),
+        source: string_property(memory, "source"),
+        raw_space_id: string_property(memory, "space_id"),
+        normalized_space_id: normalized_node_space_id(memory),
+        created_at: memory.properties.get("created_at").cloned(),
+        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
+        metadata: memory.properties.get("metadata").cloned(),
+        is_latest: boolean_property(memory, "is_latest"),
+        lifecycle_state: string_property(memory, "lifecycle_state"),
+        properties: projected_properties(&memory.properties, &property_names),
+    }
+}
+
+fn knowledge_memory_decay_detail_property_names(
+    request: &KnowledgeMemoryDecayDetailRequest,
+) -> Vec<String> {
+    if request.property_names.is_empty() {
+        return KNOWLEDGE_MEMORY_DECAY_DETAIL_DEFAULT_PROPERTIES
+            .iter()
+            .map(|property_name| (*property_name).to_string())
+            .collect();
+    }
+    deduplicated_strings_in_order(&request.property_names)
+}
+
 fn knowledge_memory_compacting_threads_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -28699,6 +28818,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_thread_compacted_memories(request)
     }
 
+    pub fn knowledge_memory_decay_detail(
+        &self,
+        request: &KnowledgeMemoryDecayDetailRequest,
+    ) -> Result<KnowledgeMemoryDecayDetailOutput> {
+        self.db.knowledge_memory_decay_detail(request)
+    }
+
     pub fn knowledge_thread_compacted_memory_projected_list(
         &self,
         request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
@@ -29654,6 +29780,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
     ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
         knowledge_memory_evolves_projected_successors_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_decay_detail(
+        &self,
+        request: &KnowledgeMemoryDecayDetailRequest,
+    ) -> Result<KnowledgeMemoryDecayDetailOutput> {
+        knowledge_memory_decay_detail_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_source_sourced_memory_count(
