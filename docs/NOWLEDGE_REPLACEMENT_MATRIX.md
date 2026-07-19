@@ -221,6 +221,14 @@ Source ids before WAL, reuses the existing typed entity `DETACH DELETE` path,
 reports missing and idless rows without writing, cascades Source relationships
 through storage/WAL, and commits eligible Source node deletes through one
 grouped WAL batch.
+Source label assignment and cleanup writes are covered by
+`Database::assign_knowledge_source_labels_batch` and
+`Database::delete_knowledge_source_labels_batch` for the Nowledge
+`(:Source)-[:HAS_LABEL]->(:Label)` merge/delete shapes. The typed facades fix
+the Source/Label/HAS_LABEL endpoints, validate ids and assignment origins
+before WAL, report missing or projected-idless endpoints without writing, keep
+existing label edges create-only, preserve endpoint nodes on cleanup, and route
+eligible relationship writes through one grouped WAL batch.
 Source operational reads are covered by typed APIs for Nowledge source detail,
 source count, extracted-source id list, and normalized-space id list paths.
 `Database::knowledge_source` returns the Source identity, display fields,

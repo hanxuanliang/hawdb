@@ -2561,6 +2561,78 @@ pub struct KnowledgeSourceDeleteBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelAssignment {
+    pub source_id: String,
+    pub label_id: String,
+    pub assigned_by: String,
+    pub created_at: Value,
+    pub properties: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelAssignmentBatchRequest {
+    pub assignments: Vec<KnowledgeSourceLabelAssignment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelAssignmentRow {
+    pub source_id: String,
+    pub label_id: String,
+    pub source_node_id: Option<u64>,
+    pub label_node_id: Option<u64>,
+    pub relationship_id: Option<u64>,
+    pub matched: bool,
+    pub created: bool,
+    pub already_exists: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelAssignmentBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceLabelAssignmentRow>,
+    pub matched_count: usize,
+    pub missing_endpoint_count: usize,
+    pub non_writable_count: usize,
+    pub created_count: usize,
+    pub already_exists_count: usize,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelDelete {
+    pub source_id: String,
+    pub label_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelDeleteBatchRequest {
+    pub deletes: Vec<KnowledgeSourceLabelDelete>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelDeleteRow {
+    pub source_id: String,
+    pub label_id: String,
+    pub source_node_id: Option<u64>,
+    pub label_node_id: Option<u64>,
+    pub matched: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceLabelDeleteBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceLabelDeleteRow>,
+    pub matched_count: usize,
+    pub missing_endpoint_count: usize,
+    pub non_writable_count: usize,
+    pub deleted_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRequest {
     pub source_id: String,
 }
@@ -6364,6 +6436,20 @@ impl Database {
         request: &KnowledgeSourceDeleteBatchRequest,
     ) -> Result<KnowledgeSourceDeleteBatchOutput> {
         delete_knowledge_sources_for(self, request)
+    }
+
+    pub fn assign_knowledge_source_labels_batch(
+        &mut self,
+        request: &KnowledgeSourceLabelAssignmentBatchRequest,
+    ) -> Result<KnowledgeSourceLabelAssignmentBatchOutput> {
+        assign_knowledge_source_labels_batch_for(self, request)
+    }
+
+    pub fn delete_knowledge_source_labels_batch(
+        &mut self,
+        request: &KnowledgeSourceLabelDeleteBatchRequest,
+    ) -> Result<KnowledgeSourceLabelDeleteBatchOutput> {
+        delete_knowledge_source_labels_batch_for(self, request)
     }
 
     pub fn knowledge_source(
@@ -13139,6 +13225,155 @@ fn delete_knowledge_skills_for(
         non_writable_count: output.non_writable_count,
         deleted_node_count: output.deleted_node_count,
     })
+}
+
+fn assign_knowledge_source_labels_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSourceLabelAssignmentBatchRequest,
+) -> Result<KnowledgeSourceLabelAssignmentBatchOutput> {
+    for assignment in &request.assignments {
+        validate_knowledge_source_label_assignment(assignment)?;
+    }
+
+    let upserts = request
+        .assignments
+        .iter()
+        .map(|assignment| KnowledgeRelationshipUpsertRequest {
+            source: KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: assignment.source_id.clone(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Label".to_string(),
+                external_id: assignment.label_id.clone(),
+            },
+            relationship_type: "HAS_LABEL".to_string(),
+            create_properties: BTreeMap::from([
+                (
+                    "assigned_by".to_string(),
+                    Value::String(assignment.assigned_by.clone()),
+                ),
+                ("created_at".to_string(), assignment.created_at.clone()),
+                ("properties".to_string(), assignment.properties.clone()),
+            ]),
+        })
+        .collect::<Vec<_>>();
+    let output = upsert_knowledge_relationship_batch_for(
+        db,
+        &KnowledgeRelationshipUpsertBatchRequest { upserts },
+    )?;
+
+    Ok(KnowledgeSourceLabelAssignmentBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeSourceLabelAssignmentRow {
+                source_id: row.source.external_id,
+                label_id: row.target.external_id,
+                source_node_id: row.source_node_id,
+                label_node_id: row.target_node_id,
+                relationship_id: row.relationship_id,
+                matched: row.matched,
+                created: row.created,
+                already_exists: row.already_exists,
+                non_writable: row.non_writable,
+            })
+            .collect(),
+        matched_count: output.matched_count,
+        missing_endpoint_count: output.missing_endpoint_count,
+        non_writable_count: output.non_writable_count,
+        created_count: output.created_count,
+        already_exists_count: output.already_exists_count,
+        created_relationship_count: output.created_relationship_count,
+    })
+}
+
+fn validate_knowledge_source_label_assignment(
+    assignment: &KnowledgeSourceLabelAssignment,
+) -> Result<()> {
+    if assignment.source_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source label assignment requires a non-empty source id".to_string(),
+        ));
+    }
+    if assignment.label_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source label assignment requires a non-empty label id".to_string(),
+        ));
+    }
+    if assignment.assigned_by.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source label assignment requires a non-empty assigned_by".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn delete_knowledge_source_labels_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSourceLabelDeleteBatchRequest,
+) -> Result<KnowledgeSourceLabelDeleteBatchOutput> {
+    for delete in &request.deletes {
+        validate_knowledge_source_label_delete(delete)?;
+    }
+
+    let deletes = request
+        .deletes
+        .iter()
+        .map(|delete| KnowledgeRelationshipDeleteRequest {
+            source: KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: delete.source_id.clone(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Label".to_string(),
+                external_id: delete.label_id.clone(),
+            },
+            relationship_type: "HAS_LABEL".to_string(),
+            relationship_properties: BTreeMap::new(),
+        })
+        .collect::<Vec<_>>();
+    let output = delete_knowledge_relationship_batch_for(
+        db,
+        &KnowledgeRelationshipDeleteBatchRequest { deletes },
+    )?;
+
+    Ok(KnowledgeSourceLabelDeleteBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeSourceLabelDeleteRow {
+                source_id: row.source.external_id,
+                label_id: row.target.external_id,
+                source_node_id: row.source_node_id,
+                label_node_id: row.target_node_id,
+                matched: row.matched,
+                non_writable: row.non_writable,
+            })
+            .collect(),
+        matched_count: output.matched_count,
+        missing_endpoint_count: output.missing_endpoint_count,
+        non_writable_count: output.non_writable_count,
+        deleted_relationship_count: output.deleted_relationship_count,
+    })
+}
+
+fn validate_knowledge_source_label_delete(delete: &KnowledgeSourceLabelDelete) -> Result<()> {
+    if delete.source_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source label delete requires a non-empty source id".to_string(),
+        ));
+    }
+    if delete.label_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source label delete requires a non-empty label id".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn knowledge_source_for(
@@ -24883,6 +25118,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSourceDeleteBatchRequest,
     ) -> Result<KnowledgeSourceDeleteBatchOutput> {
         self.db.delete_knowledge_sources(request)
+    }
+
+    pub fn assign_knowledge_source_labels_batch(
+        &mut self,
+        request: &KnowledgeSourceLabelAssignmentBatchRequest,
+    ) -> Result<KnowledgeSourceLabelAssignmentBatchOutput> {
+        self.db.assign_knowledge_source_labels_batch(request)
+    }
+
+    pub fn delete_knowledge_source_labels_batch(
+        &mut self,
+        request: &KnowledgeSourceLabelDeleteBatchRequest,
+    ) -> Result<KnowledgeSourceLabelDeleteBatchOutput> {
+        self.db.delete_knowledge_source_labels_batch(request)
     }
 
     pub fn knowledge_source(

@@ -585,6 +585,11 @@ latest-version reads without WAL writes and
 Source node cleanup is available as `Database::delete_knowledge_sources`,
 covering Nowledge Source `DETACH DELETE` cleanup through the typed entity
 delete path and one grouped WAL batch.
+Source label assignment and cleanup writes are available as
+`Database::assign_knowledge_source_labels_batch` and
+`Database::delete_knowledge_source_labels_batch`, covering Nowledge
+`Source`-to-`Label` `HAS_LABEL` merge/delete shapes with fixed create-only
+edge properties and one grouped WAL batch for eligible relationship writes.
 Bounded Source list and summary reads are available as
 `Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
 overview ranking, parsed-path list, lifecycle attention, and metadata-marker
