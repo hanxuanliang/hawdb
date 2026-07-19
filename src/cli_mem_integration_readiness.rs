@@ -1,0 +1,544 @@
+use skein::{Result, SkeinError};
+use std::path::Path;
+
+pub fn nowledge_mem_integration_readiness_usage() -> String {
+    "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
+        .to_string()
+}
+
+pub fn run_nowledge_mem_integration_readiness(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(serde_json::Value, bool)> {
+    let mut require_ready = false;
+    while let Some(arg) = args.next() {
+        match arg.as_str() {
+            "--require-ready" => {
+                require_ready = true;
+            }
+            path => {
+                if args.next().is_some() {
+                    return Err(SkeinError::Semantic(
+                        nowledge_mem_integration_readiness_usage(),
+                    ));
+                }
+                let bundle = read_json_file(Path::new(path))?;
+                return Ok((
+                    nowledge_mem_integration_readiness_json(&bundle),
+                    require_ready,
+                ));
+            }
+        }
+    }
+    Err(SkeinError::Semantic(
+        nowledge_mem_integration_readiness_usage(),
+    ))
+}
+
+pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> serde_json::Value {
+    let checks = vec![
+        check(
+            "skein_submodule",
+            [
+                bool_path(bundle, &["submodule", "present"]) == Some(true),
+                non_empty_str_path(bundle, &["submodule", "path"]),
+                non_empty_str_path(bundle, &["submodule", "commit"]),
+            ],
+            [
+                "submodule.present",
+                "submodule.path",
+                "submodule.commit",
+            ],
+            blocker_codes(bundle, &[&["submodule", "blocker_codes"][..]]),
+        ),
+        check(
+            "legacy_coexistence",
+            [
+                bool_path(bundle, &["coexistence", "old_database_retained"]) == Some(true),
+                coexistence_mode_is_safe(bundle),
+                bool_path(bundle, &["coexistence", "old_database_deleted"]) != Some(true),
+            ],
+            [
+                "coexistence.old_database_retained",
+                "coexistence.mode",
+                "coexistence.old_database_deleted",
+            ],
+            blocker_codes(bundle, &[&["coexistence", "blocker_codes"][..]]),
+        ),
+        check(
+            "content_store_boundary",
+            [
+                bool_path(bundle, &["content_store", "present"]) == Some(true),
+                str_path(bundle, &["content_store", "engine"]) == Some("sqlite"),
+                bool_path(bundle, &["content_store", "messages_available"]) == Some(true),
+                bool_path(bundle, &["content_store", "source_chunks_available"]) == Some(true),
+            ],
+            [
+                "content_store.present",
+                "content_store.engine",
+                "content_store.messages_available",
+                "content_store.source_chunks_available",
+            ],
+            blocker_codes(bundle, &[&["content_store", "blocker_codes"][..]]),
+        ),
+        check(
+            "previous_wrapper_preflight",
+            [bool_path(bundle, &["previous_wrapper_preflight", "ready"]) == Some(true)],
+            ["previous_wrapper_preflight.ready"],
+            blocker_codes(
+                bundle,
+                &[
+                    &["previous_wrapper_preflight", "blocker_codes"][..],
+                    &["previous_wrapper_preflight", "failed_checks"][..],
+                ],
+            ),
+        ),
+        check(
+            "graph_replacement_evidence",
+            [
+                bool_path(bundle, &["replacement_summary", "production_cutover_ready"])
+                    == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "shadow_evidence", "ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "dual_engine_evidence", "present"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "dual_engine_evidence", "ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "dual_engine_evidence", "consistent"],
+                ) == Some(true),
+            ],
+            [
+                "replacement_summary.production_cutover_ready",
+                "replacement_summary.shadow_evidence.ready",
+                "replacement_summary.dual_engine_evidence.present",
+                "replacement_summary.dual_engine_evidence.ready",
+                "replacement_summary.dual_engine_evidence.consistent",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &["replacement_summary", "blocking_categories"][..],
+                    &["replacement_summary", "missing_evidence"][..],
+                    &["replacement_summary", "dual_engine_evidence", "blocker_codes"][..],
+                ],
+            ),
+        ),
+        check(
+            "search_projection_replacement_evidence",
+            [
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "search_projection_evidence", "ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "present",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "document_count_parity",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "table_parity_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "embedding_identity_parity",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "incremental_watermark_parity",
+                    ],
+                ) == Some(true),
+            ],
+            [
+                "replacement_summary.search_projection_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.present",
+                "replacement_summary.search_projection_shadow_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.document_count_parity",
+                "replacement_summary.search_projection_shadow_evidence.table_parity_ready",
+                "replacement_summary.search_projection_shadow_evidence.embedding_identity_parity",
+                "replacement_summary.search_projection_shadow_evidence.incremental_watermark_parity",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &[
+                        "replacement_summary",
+                        "search_projection_evidence",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "blocker_codes",
+                    ][..],
+                ],
+            ),
+        ),
+    ];
+    let ready = checks
+        .iter()
+        .all(|check| bool_path(check, &["ready"]) == Some(true));
+    let failed_checks = checks
+        .iter()
+        .filter(|check| bool_path(check, &["ready"]) != Some(true))
+        .filter_map(|check| str_path(check, &["name"]))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let blocker_codes = checks
+        .iter()
+        .flat_map(|check| string_array_path(check, &["blocker_codes"]))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "protocol": "skein-nowledge-mem-integration-readiness",
+        "ready": ready,
+        "failed_checks": failed_checks,
+        "checks": checks,
+        "blocker_codes": blocker_codes,
+        "next_actions": next_actions(bundle, ready),
+    })
+}
+
+fn check(
+    name: &'static str,
+    conditions: impl IntoIterator<Item = bool>,
+    evidence_fields: impl IntoIterator<Item = &'static str>,
+    blocker_codes: Vec<String>,
+) -> serde_json::Value {
+    let conditions = conditions.into_iter().collect::<Vec<_>>();
+    let evidence_fields = evidence_fields.into_iter().collect::<Vec<_>>();
+    let failed_evidence_fields = conditions
+        .iter()
+        .zip(evidence_fields.iter())
+        .filter_map(|(condition, field)| (!*condition).then_some(*field))
+        .collect::<Vec<_>>();
+    serde_json::json!({
+        "name": name,
+        "ready": failed_evidence_fields.is_empty(),
+        "evidence_fields": evidence_fields,
+        "failed_evidence_fields": failed_evidence_fields,
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Value> {
+    if ready {
+        return Vec::new();
+    }
+    let mut actions = Vec::new();
+    if bool_path(bundle, &["submodule", "present"]) != Some(true) {
+        actions.push(next_action(
+            "add_skein_submodule",
+            "Nowledge Mem must depend on Skein as a submodule instead of copying sources",
+            ["submodule.present", "submodule.path", "submodule.commit"],
+        ));
+    }
+    if bool_path(bundle, &["coexistence", "old_database_retained"]) != Some(true)
+        || !coexistence_mode_is_safe(bundle)
+        || bool_path(bundle, &["coexistence", "old_database_deleted"]) == Some(true)
+    {
+        actions.push(next_action(
+            "enable_side_by_side_coexistence",
+            "Kuzu/Ladybug and LanceDB must remain available while Skein runs in shadow",
+            [
+                "coexistence.old_database_retained",
+                "coexistence.mode",
+                "coexistence.old_database_deleted",
+            ],
+        ));
+    }
+    if bool_path(bundle, &["content_store", "present"]) != Some(true) {
+        actions.push(next_action(
+            "attach_content_store_evidence",
+            "messages and source chunks still come from content.db during replacement validation",
+            [
+                "content_store.present",
+                "content_store.engine",
+                "content_store.messages_available",
+                "content_store.source_chunks_available",
+            ],
+        ));
+    }
+    if bool_path(bundle, &["previous_wrapper_preflight", "ready"]) != Some(true) {
+        actions.push(next_action(
+            "run_previous_wrapper_preflight",
+            "the previous-wrapper release bundle must pass before Mem cutover",
+            ["previous_wrapper_preflight.ready"],
+        ));
+    }
+    if bool_path(bundle, &["replacement_summary", "production_cutover_ready"]) != Some(true) {
+        actions.push(next_action(
+            "produce_replacement_summary",
+            "graph and search replacement evidence must be production-ready",
+            [
+                "replacement_summary.production_cutover_ready",
+                "replacement_summary.blocking_categories",
+                "replacement_summary.missing_evidence",
+            ],
+        ));
+    }
+    if bool_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "search_projection_shadow_evidence",
+            "ready",
+        ],
+    ) != Some(true)
+    {
+        actions.push(next_action(
+            "run_search_projection_shadow_evidence",
+            "LanceDB and Skein search projection parity must be proven side-by-side",
+            [
+                "replacement_summary.search_projection_shadow_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.blocker_codes",
+            ],
+        ));
+    }
+    actions
+}
+
+fn next_action(
+    action: &str,
+    reason: &str,
+    evidence_fields: impl IntoIterator<Item = &'static str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "action": action,
+        "reason": reason,
+        "evidence_fields": evidence_fields.into_iter().collect::<Vec<_>>(),
+    })
+}
+
+fn read_json_file(path: &Path) -> Result<serde_json::Value> {
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        SkeinError::Execution(format!(
+            "failed to read Nowledge Mem integration bundle '{}': {error}",
+            path.display()
+        ))
+    })?;
+    serde_json::from_str(&raw).map_err(|error| {
+        SkeinError::Execution(format!(
+            "failed to parse Nowledge Mem integration bundle '{}': {error}",
+            path.display()
+        ))
+    })
+}
+
+fn coexistence_mode_is_safe(bundle: &serde_json::Value) -> bool {
+    matches!(
+        str_path(bundle, &["coexistence", "mode"]),
+        Some("shadow") | Some("side_by_side")
+    )
+}
+
+fn blocker_codes(value: &serde_json::Value, paths: &[&[&str]]) -> Vec<String> {
+    paths
+        .iter()
+        .flat_map(|path| string_array_path(value, path))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {
+    json_get_path(value, path)
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(serde_json::Value::as_str)
+        .map(str::to_string)
+        .collect()
+}
+
+fn non_empty_str_path(value: &serde_json::Value, path: &[&str]) -> bool {
+    str_path(value, path).is_some_and(|s| !s.trim().is_empty())
+}
+
+fn bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
+    json_get_path(value, path).and_then(serde_json::Value::as_bool)
+}
+
+fn str_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
+    json_get_path(value, path).and_then(serde_json::Value::as_str)
+}
+
+fn json_get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
+    let mut current = value;
+    for key in path {
+        current = current.get(*key)?;
+    }
+    Some(current)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::nowledge_mem_integration_readiness_json;
+
+    #[test]
+    fn reports_ready_when_mem_integration_evidence_is_complete() {
+        let report = nowledge_mem_integration_readiness_json(&ready_bundle());
+
+        assert_eq!(report["ready"], true);
+        assert_eq!(report["failed_checks"], serde_json::json!([]));
+        assert_eq!(report["blocker_codes"], serde_json::json!([]));
+        assert_eq!(report["next_actions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn fails_closed_without_submodule_and_coexistence() {
+        let mut bundle = ready_bundle();
+        bundle["submodule"]["present"] = serde_json::json!(false);
+        bundle["submodule"]["commit"] = serde_json::json!("");
+        bundle["coexistence"]["old_database_retained"] = serde_json::json!(false);
+        bundle["coexistence"]["old_database_deleted"] = serde_json::json!(true);
+        bundle["coexistence"]["mode"] = serde_json::json!("replace_in_place");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["skein_submodule", "legacy_coexistence"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "add_skein_submodule"));
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "enable_side_by_side_coexistence"));
+    }
+
+    #[test]
+    fn requires_search_projection_shadow_parity() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]
+            ["document_count_parity"] = serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["document_count_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["document_count_mismatch"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_shadow_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.document_count_parity"
+            ])
+        );
+    }
+
+    fn ready_bundle() -> serde_json::Value {
+        serde_json::json!({
+            "submodule": {
+                "present": true,
+                "path": "vendor/skein",
+                "commit": "46f8bfb",
+                "blocker_codes": []
+            },
+            "coexistence": {
+                "old_database_retained": true,
+                "old_database_deleted": false,
+                "mode": "shadow",
+                "blocker_codes": []
+            },
+            "content_store": {
+                "present": true,
+                "engine": "sqlite",
+                "messages_available": true,
+                "source_chunks_available": true,
+                "blocker_codes": []
+            },
+            "previous_wrapper_preflight": {
+                "ready": true,
+                "blocker_codes": [],
+                "failed_checks": []
+            },
+            "replacement_summary": {
+                "production_cutover_ready": true,
+                "blocking_categories": [],
+                "missing_evidence": [],
+                "shadow_evidence": {
+                    "ready": true
+                },
+                "dual_engine_evidence": {
+                    "present": true,
+                    "ready": true,
+                    "consistent": true
+                },
+                "search_projection_evidence": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "search_projection_shadow_evidence": {
+                    "present": true,
+                    "ready": true,
+                    "document_count_parity": true,
+                    "table_parity_ready": true,
+                    "embedding_identity_parity": true,
+                    "incremental_watermark_parity": true,
+                    "blocker_codes": []
+                }
+            }
+        })
+    }
+}
