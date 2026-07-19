@@ -46,6 +46,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let cutover_decision = json_get_str_path(bundle, &["cutover", "decision"]);
     let cutover_evidence_eligible =
         json_get_bool_path(bundle, &["cutover_evidence", "eligible"]).unwrap_or(false);
+    let shadow_evidence = shadow_evidence_summary(bundle);
+    let shadow_evidence_ready = shadow_evidence.ready;
     let previous_wrapper_contract_ready =
         json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "ready"])
             .unwrap_or(false);
@@ -60,6 +62,7 @@ pub fn nowledge_replacement_summary_json_with_options(
     let production_cutover_ready = migration_gate_decision == Some("ready")
         && cutover_decision == Some("ready")
         && cutover_evidence_eligible
+        && shadow_evidence_ready
         && previous_wrapper_contract_ready
         && full_contract_evidence_ready
         && dual_engine_evidence_present
@@ -81,6 +84,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             migration_gate_decision,
             cutover_decision,
             cutover_evidence_eligible,
+            shadow_evidence_ready,
             previous_wrapper_contract_ready,
             full_contract_evidence_ready,
             dual_engine_evidence_present,
@@ -103,6 +107,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             migration_gate_decision,
             cutover_decision,
             cutover_evidence_eligible,
+            shadow_evidence_ready,
             previous_wrapper_contract_ready,
             full_contract_evidence_ready,
             dual_engine_evidence_present,
@@ -161,6 +166,14 @@ pub fn nowledge_replacement_summary_json_with_options(
             "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"]),
             "background_maintenance_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "background_maintenance_blocker_codes"]),
             "replacement_readiness_min_per_million": json_get_u64_path(bundle, &["cutover_evidence", "replacement_readiness_min_per_million"]),
+        },
+        "shadow_evidence": {
+            "ready": shadow_evidence.ready,
+            "run_evidence_kind": shadow_evidence.run_evidence_kind,
+            "ready_engine_kind": shadow_evidence.ready_engine_kind,
+            "ready_wrapper_identity": shadow_evidence.ready_wrapper_identity,
+            "contract_wrapper_identity": shadow_evidence.contract_wrapper_identity,
+            "cutover_ready_wrapper_identity": shadow_evidence.cutover_ready_wrapper_identity,
         },
         "previous_wrapper_contract_evidence": {
             "ready": previous_wrapper_contract_ready,
@@ -301,6 +314,7 @@ struct ReplacementReadinessInputs<'a> {
     migration_gate_decision: Option<&'a str>,
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
+    shadow_evidence_ready: bool,
     previous_wrapper_contract_ready: bool,
     full_contract_evidence_ready: bool,
     dual_engine_evidence_present: bool,
@@ -316,6 +330,7 @@ struct NextActionInputs<'a> {
     migration_gate_decision: Option<&'a str>,
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
+    shadow_evidence_ready: bool,
     previous_wrapper_contract_ready: bool,
     full_contract_evidence_ready: bool,
     dual_engine_evidence_present: bool,
@@ -336,6 +351,39 @@ struct DualEngineEvidenceSummary<'a> {
     matched_check_count: Option<u64>,
     primary_only_check_count: Option<u64>,
     matched_per_million: Option<u64>,
+}
+
+struct ShadowEvidenceSummary<'a> {
+    ready: bool,
+    run_evidence_kind: Option<&'a str>,
+    ready_engine_kind: Option<&'a str>,
+    ready_wrapper_identity: Option<&'a str>,
+    contract_wrapper_identity: Option<&'a str>,
+    cutover_ready_wrapper_identity: Option<&'a str>,
+}
+
+fn shadow_evidence_summary(bundle: &serde_json::Value) -> ShadowEvidenceSummary<'_> {
+    let run_evidence_kind = json_get_str_path(bundle, &["shadow_run", "evidence_kind"]);
+    let ready_engine_kind = json_get_str_path(bundle, &["shadow_ready", "engine_kind"]);
+    let ready_wrapper_identity = json_get_str_path(bundle, &["shadow_ready", "wrapper_identity"]);
+    let contract_wrapper_identity = json_get_str_path(
+        bundle,
+        &["previous_wrapper_contract_evidence", "wrapper_identity"],
+    );
+    let cutover_ready_wrapper_identity =
+        json_get_str_path(bundle, &["cutover_evidence", "ready_wrapper_identity"]);
+    ShadowEvidenceSummary {
+        ready: run_evidence_kind == Some("previous_wrapper")
+            && ready_engine_kind == Some("previous_wrapper")
+            && ready_wrapper_identity.is_some()
+            && ready_wrapper_identity == contract_wrapper_identity
+            && ready_wrapper_identity == cutover_ready_wrapper_identity,
+        run_evidence_kind,
+        ready_engine_kind,
+        ready_wrapper_identity,
+        contract_wrapper_identity,
+        cutover_ready_wrapper_identity,
+    }
 }
 
 struct FullContractEvidenceSummary {
@@ -415,6 +463,7 @@ fn nowledge_replacement_blocking_categories(
     }
     if inputs.shadow_parity_per_million != Some(1_000_000)
         || inputs.cutover_decision != Some("ready")
+        || !inputs.shadow_evidence_ready
     {
         categories.insert("shadow_parity".to_string());
     }
@@ -502,6 +551,7 @@ fn nowledge_replacement_next_actions(
     if inputs.shadow_parity_per_million != Some(1_000_000)
         || inputs.cutover_decision != Some("ready")
         || inputs.migration_gate_decision != Some("ready")
+        || !inputs.shadow_evidence_ready
     {
         actions.push(next_action(
             "run_previous_wrapper_shadow_gate",
@@ -510,6 +560,11 @@ fn nowledge_replacement_next_actions(
                 "cutover.matched_per_million",
                 "cutover.decision",
                 "migration_gate.decision",
+                "shadow_run.evidence_kind",
+                "shadow_ready.engine_kind",
+                "shadow_ready.wrapper_identity",
+                "cutover_evidence.ready_wrapper_identity",
+                "previous_wrapper_contract_evidence.wrapper_identity",
             ],
         ));
     }
@@ -838,7 +893,8 @@ mod tests {
             serde_json::json!([
                 "cutover_evidence",
                 "dual_engine_evidence",
-                "previous_wrapper_contract"
+                "previous_wrapper_contract",
+                "shadow_parity"
             ])
         );
         assert!(summary["missing_evidence"]
@@ -896,6 +952,11 @@ mod tests {
             summary["cutover_evidence"]
                 ["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"],
             42
+        );
+        assert_eq!(summary["shadow_evidence"]["ready"], true);
+        assert_eq!(
+            summary["shadow_evidence"]["ready_wrapper_identity"],
+            "nowledge-previous-wrapper:test"
         );
         assert_eq!(summary["previous_wrapper_contract_evidence"]["ready"], true);
         assert_eq!(summary["full_contract_evidence"]["ready"], true);
@@ -1079,15 +1140,48 @@ mod tests {
             summary["missing_evidence"],
             serde_json::json!(["previous_wrapper_contract_evidence"])
         );
-        assert_eq!(
-            summary["next_actions"][0]["action"],
-            "run_full_previous_wrapper_contract_check"
-        );
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "run_full_previous_wrapper_contract_check"));
         assert!(summary["blocking_categories"]
             .as_array()
             .unwrap()
             .iter()
             .any(|item| item == "previous_wrapper_contract"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_shadow_wrapper_identity() {
+        let mut bundle = production_ready_bundle();
+        bundle["shadow_ready"]
+            .as_object_mut()
+            .unwrap()
+            .remove("wrapper_identity");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["shadow_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "shadow_parity"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "run_previous_wrapper_shadow_gate"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "shadow_ready.wrapper_identity")
+            }));
     }
 
     #[test]
@@ -1382,7 +1476,12 @@ mod tests {
                     "evidence_fields": [
                         "cutover.matched_per_million",
                         "cutover.decision",
-                        "migration_gate.decision"
+                        "migration_gate.decision",
+                        "shadow_run.evidence_kind",
+                        "shadow_ready.engine_kind",
+                        "shadow_ready.wrapper_identity",
+                        "cutover_evidence.ready_wrapper_identity",
+                        "previous_wrapper_contract_evidence.wrapper_identity"
                     ]
                 },
                 {
@@ -1481,6 +1580,7 @@ mod tests {
                 "eligible": true,
                 "evidence_kind": "previous_wrapper",
                 "ready_engine_kind": "previous_wrapper",
+                "ready_wrapper_identity": "nowledge-previous-wrapper:test",
                 "storage_recovery_required": true,
                 "storage_recovery_present": true,
                 "storage_recovery_ready": true,
@@ -1509,7 +1609,8 @@ mod tests {
                 "evidence_kind": "previous_wrapper"
             },
             "shadow_ready": {
-                "engine_kind": "previous_wrapper"
+                "engine_kind": "previous_wrapper",
+                "wrapper_identity": "nowledge-previous-wrapper:test"
             },
             "dual_engine_evidence": {
                 "ready": true,
