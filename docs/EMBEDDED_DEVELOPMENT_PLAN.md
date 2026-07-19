@@ -445,6 +445,13 @@ community anchor row shape for Entity nodes in explicit communities plus
 row-preserving optional incoming `Memory` `MENTIONS` metadata, latest-state
 fallback, and lifecycle fields with pinned read-transaction snapshots and no
 WAL writes.
+Community Memory ranking reads are available as
+`Database::knowledge_community_memories`, covering Nowledge wiki community
+memory ranking and export shapes over explicit community scopes. The typed read
+supports incoming `Memory` -> `MENTIONS` -> `Entity` mention breadth, direct
+`Memory.community_id` ranking, `is_crystal` false/null-or-false filters,
+importance and `created_at` fallbacks, distinct mentioned Entity ids, pinned
+read-transaction snapshots, and no WAL writes.
 Related Entity name reads are available as
 `Database::knowledge_related_entity_names`, covering Nowledge REST list
 `Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`

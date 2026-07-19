@@ -243,6 +243,14 @@ nodes in explicit community scopes and preserves the Nowledge optional incoming
 `Memory` `MENTIONS` row shape, including zero-Memory Entity rows, Memory
 metadata, `COALESCE(is_latest, true)` semantics, lifecycle state,
 read-transaction snapshots, and no WAL writes.
+Community Memory ranking reads are covered by
+`Database::knowledge_community_memories`. The typed read validates explicit
+non-null community scopes, returns Nowledge wiki ranking/export rows from either
+incoming `Memory` `MENTIONS` over Entity communities or direct
+`Memory.community_id` assignment, preserves distinct mentioned Entity ids,
+supports false-only and null-or-false crystal filters, applies importance and
+latest-state fallbacks, supports the Nowledge ordering variants, read-transaction
+snapshots, and no WAL writes.
 Related Entity name reads are covered by
 `Database::knowledge_related_entity_names`. The typed read validates either a
 non-empty Memory id list or one Thread id with physical `id` or logical

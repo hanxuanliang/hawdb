@@ -1516,6 +1516,72 @@ pub struct KnowledgeCommunityEntityVisibilityOutput {
     pub returned_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCommunityMemorySource {
+    MentionedEntities,
+    DirectMemoryCommunity,
+    Both,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCommunityMemoryCrystalFilter {
+    Any,
+    FalseOnly,
+    NullOrFalse,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCommunityMemoryListOrder {
+    CommunityBreadthImportanceCreatedAt,
+    EntityCountImportancePagerank,
+    CommunityImportanceCreatedAt,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityMemoryListRequest {
+    pub community_ids: Vec<Value>,
+    pub source: KnowledgeCommunityMemorySource,
+    pub crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
+    pub order: KnowledgeCommunityMemoryListOrder,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum KnowledgeCommunityMemoryRowSource {
+    MentionedEntities,
+    DirectMemoryCommunity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityMemoryRow {
+    pub community_id: Value,
+    pub source: KnowledgeCommunityMemoryRowSource,
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub title: Option<String>,
+    pub title_or_empty: String,
+    pub content: Option<String>,
+    pub content_or_empty: String,
+    pub unit_type: Option<String>,
+    pub metadata: Option<Value>,
+    pub is_latest: bool,
+    pub lifecycle_state: Option<String>,
+    pub importance: Option<Value>,
+    pub created_at: Option<Value>,
+    pub is_crystal: Option<bool>,
+    pub pagerank_score: Option<Value>,
+    pub mention_breadth: usize,
+    pub entity_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityMemoryListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeCommunityMemoryRow>,
+    pub matched_row_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KnowledgeRelatedEntityNameScope {
     MemoryIds(Vec<String>),
@@ -5085,6 +5151,13 @@ impl Database {
         knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_community_memories(
+        &self,
+        request: &KnowledgeCommunityMemoryListRequest,
+    ) -> Result<KnowledgeCommunityMemoryListOutput> {
+        knowledge_community_memories_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_related_entity_names(
         &self,
         request: &KnowledgeRelatedEntityNameListRequest,
@@ -7421,6 +7494,315 @@ fn sort_community_entity_visibility_rows(rows: &mut [KnowledgeCommunityEntityVis
             .then_with(|| left.entity_node_id.cmp(&right.entity_node_id))
             .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
     });
+}
+
+struct KnowledgeCommunityMemoryAccumulator {
+    community_id: Value,
+    memory: NodeRecord,
+    entity_ids: BTreeSet<String>,
+    mention_count: usize,
+}
+
+fn knowledge_community_memories_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeCommunityMemoryListRequest,
+) -> Result<KnowledgeCommunityMemoryListOutput> {
+    validate_knowledge_community_memory_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(empty_community_memory_list_output(graph_commit_epoch));
+    };
+    let community_ids = request
+        .community_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut rows = Vec::new();
+
+    if matches!(
+        request.source,
+        KnowledgeCommunityMemorySource::MentionedEntities | KnowledgeCommunityMemorySource::Both
+    ) {
+        rows.extend(mentioned_community_memory_rows(
+            catalog,
+            store,
+            memory_label_id,
+            &community_ids,
+            request.crystal_filter,
+        ));
+    }
+    if matches!(
+        request.source,
+        KnowledgeCommunityMemorySource::DirectMemoryCommunity
+            | KnowledgeCommunityMemorySource::Both
+    ) {
+        rows.extend(direct_community_memory_rows(
+            catalog,
+            store,
+            memory_label_id,
+            &community_ids,
+            request.crystal_filter,
+        ));
+    }
+
+    sort_community_memory_rows(&mut rows, request.order);
+    let matched_row_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCommunityMemoryListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_row_count,
+        returned_count,
+    })
+}
+
+fn empty_community_memory_list_output(
+    graph_commit_epoch: u64,
+) -> KnowledgeCommunityMemoryListOutput {
+    KnowledgeCommunityMemoryListOutput {
+        graph_commit_epoch,
+        rows: Vec::new(),
+        matched_row_count: 0,
+        returned_count: 0,
+    }
+}
+
+fn validate_knowledge_community_memory_list_request(
+    request: &KnowledgeCommunityMemoryListRequest,
+) -> Result<()> {
+    if request.community_ids.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge community memory list requires non-empty community ids".to_string(),
+        ));
+    }
+    if request
+        .community_ids
+        .iter()
+        .any(|community_id| community_id == &Value::Null)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge community memory list requires non-null community ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn mentioned_community_memory_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory_label_id: LabelId,
+    community_ids: &BTreeSet<Value>,
+    crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
+) -> Vec<KnowledgeCommunityMemoryRow> {
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return Vec::new();
+    };
+    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
+        return Vec::new();
+    };
+    let mut groups: BTreeMap<(Value, NodeId), KnowledgeCommunityMemoryAccumulator> =
+        BTreeMap::new();
+    for entity in store.scan_nodes(Some(entity_label_id)).filter(|entity| {
+        entity
+            .properties
+            .get("community_id")
+            .is_some_and(|community_id| community_ids.contains(community_id))
+    }) {
+        let community_id = entity
+            .properties
+            .get("community_id")
+            .cloned()
+            .unwrap_or(Value::Null);
+        for relationship in store.incoming_relationships(entity.id, mentions_type_id) {
+            let Some(memory) = store
+                .node(relationship.source)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .filter(|memory| {
+                    memory_matches_community_memory_crystal_filter(memory, crystal_filter)
+                })
+            else {
+                continue;
+            };
+            let accumulator = groups
+                .entry((community_id.clone(), memory.id))
+                .or_insert_with(|| KnowledgeCommunityMemoryAccumulator {
+                    community_id: community_id.clone(),
+                    memory: memory.clone(),
+                    entity_ids: BTreeSet::new(),
+                    mention_count: 0,
+                });
+            accumulator.mention_count += 1;
+            if let Some(entity_id) = node_external_id(entity) {
+                accumulator.entity_ids.insert(entity_id);
+            }
+        }
+    }
+    groups
+        .into_values()
+        .map(|accumulator| {
+            let entity_ids = accumulator.entity_ids.into_iter().collect::<Vec<_>>();
+            let mention_breadth = if entity_ids.is_empty() {
+                accumulator.mention_count
+            } else {
+                entity_ids.len()
+            };
+            knowledge_community_memory_row(
+                &accumulator.memory,
+                accumulator.community_id,
+                KnowledgeCommunityMemoryRowSource::MentionedEntities,
+                mention_breadth,
+                entity_ids,
+            )
+        })
+        .collect()
+}
+
+fn direct_community_memory_rows(
+    _catalog: &Catalog,
+    store: &GraphStore,
+    memory_label_id: LabelId,
+    community_ids: &BTreeSet<Value>,
+    crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
+) -> Vec<KnowledgeCommunityMemoryRow> {
+    store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| {
+            memory
+                .properties
+                .get("community_id")
+                .is_some_and(|community_id| community_ids.contains(community_id))
+                && memory_matches_community_memory_crystal_filter(memory, crystal_filter)
+        })
+        .filter_map(|memory| {
+            memory
+                .properties
+                .get("community_id")
+                .cloned()
+                .map(|community_id| {
+                    knowledge_community_memory_row(
+                        memory,
+                        community_id,
+                        KnowledgeCommunityMemoryRowSource::DirectMemoryCommunity,
+                        0,
+                        Vec::new(),
+                    )
+                })
+        })
+        .collect()
+}
+
+fn memory_matches_community_memory_crystal_filter(
+    memory: &NodeRecord,
+    crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
+) -> bool {
+    match crystal_filter {
+        KnowledgeCommunityMemoryCrystalFilter::Any => true,
+        KnowledgeCommunityMemoryCrystalFilter::FalseOnly => {
+            boolean_property(memory, "is_crystal") == Some(false)
+        }
+        KnowledgeCommunityMemoryCrystalFilter::NullOrFalse => {
+            boolean_property(memory, "is_crystal") != Some(true)
+        }
+    }
+}
+
+fn knowledge_community_memory_row(
+    memory: &NodeRecord,
+    community_id: Value,
+    source: KnowledgeCommunityMemoryRowSource,
+    mention_breadth: usize,
+    entity_ids: Vec<String>,
+) -> KnowledgeCommunityMemoryRow {
+    let title = string_property(memory, "title");
+    let content = string_property(memory, "content");
+    KnowledgeCommunityMemoryRow {
+        community_id,
+        source,
+        memory_id: node_external_id(memory),
+        memory_node_id: memory.id.0,
+        title_or_empty: title.clone().unwrap_or_default(),
+        title,
+        content_or_empty: content.clone().unwrap_or_default(),
+        content,
+        unit_type: string_property(memory, "unit_type"),
+        metadata: memory.properties.get("metadata").cloned(),
+        is_latest: boolean_property(memory, "is_latest").unwrap_or(true),
+        lifecycle_state: string_property(memory, "lifecycle_state"),
+        importance: memory.properties.get("importance").cloned(),
+        created_at: memory.properties.get("created_at").cloned(),
+        is_crystal: boolean_property(memory, "is_crystal"),
+        pagerank_score: memory.properties.get("pagerank_score").cloned(),
+        mention_breadth,
+        entity_ids,
+    }
+}
+
+fn sort_community_memory_rows(
+    rows: &mut [KnowledgeCommunityMemoryRow],
+    order: KnowledgeCommunityMemoryListOrder,
+) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeCommunityMemoryListOrder::CommunityBreadthImportanceCreatedAt => left
+            .community_id
+            .cmp(&right.community_id)
+            .then_with(|| right.mention_breadth.cmp(&left.mention_breadth))
+            .then_with(|| compare_community_memory_importance_desc(left, right))
+            .then_with(|| {
+                compare_skill_memory_created_at(
+                    &left.created_at,
+                    &right.created_at,
+                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                )
+            })
+            .then_with(|| compare_community_memory_ids(left, right)),
+        KnowledgeCommunityMemoryListOrder::EntityCountImportancePagerank => right
+            .mention_breadth
+            .cmp(&left.mention_breadth)
+            .then_with(|| compare_community_memory_importance_desc(left, right))
+            .then_with(|| {
+                compare_optional_values_desc(
+                    left.pagerank_score.as_ref(),
+                    right.pagerank_score.as_ref(),
+                )
+            })
+            .then_with(|| compare_community_memory_ids(left, right)),
+        KnowledgeCommunityMemoryListOrder::CommunityImportanceCreatedAt => left
+            .community_id
+            .cmp(&right.community_id)
+            .then_with(|| compare_community_memory_importance_desc(left, right))
+            .then_with(|| {
+                compare_skill_memory_created_at(
+                    &left.created_at,
+                    &right.created_at,
+                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                )
+            })
+            .then_with(|| compare_community_memory_ids(left, right)),
+    });
+}
+
+fn compare_community_memory_importance_desc(
+    left: &KnowledgeCommunityMemoryRow,
+    right: &KnowledgeCommunityMemoryRow,
+) -> std::cmp::Ordering {
+    let left_importance = left.importance.clone().unwrap_or(Value::Float(0.5));
+    let right_importance = right.importance.clone().unwrap_or(Value::Float(0.5));
+    compare_skill_memory_values(&right_importance, &left_importance)
+}
+
+fn compare_community_memory_ids(
+    left: &KnowledgeCommunityMemoryRow,
+    right: &KnowledgeCommunityMemoryRow,
+) -> std::cmp::Ordering {
+    left.memory_id
+        .cmp(&right.memory_id)
+        .then_with(|| left.source.cmp(&right.source))
+        .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
 }
 
 fn knowledge_related_entity_names_for(
@@ -19462,6 +19844,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_community_entity_visibility(request)
     }
 
+    pub fn knowledge_community_memories(
+        &self,
+        request: &KnowledgeCommunityMemoryListRequest,
+    ) -> Result<KnowledgeCommunityMemoryListOutput> {
+        self.db.knowledge_community_memories(request)
+    }
+
     pub fn knowledge_related_entity_names(
         &self,
         request: &KnowledgeRelatedEntityNameListRequest,
@@ -20524,6 +20913,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
         knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_community_memories(
+        &self,
+        request: &KnowledgeCommunityMemoryListRequest,
+    ) -> Result<KnowledgeCommunityMemoryListOutput> {
+        knowledge_community_memories_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_related_entity_names(
