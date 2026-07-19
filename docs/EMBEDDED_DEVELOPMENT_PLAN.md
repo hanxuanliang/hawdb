@@ -318,6 +318,12 @@ search state to `/tmp`, run the full exported fixture contract against a
 Nowledge-owned persistent wrapper command, smoke the external shadow adapter,
 attach storage-recovery and background-maintenance evidence, then run the
 migration gate and replacement summary with fail-closed production readiness.
+Nowledge Mem integration is side-by-side only during this phase: the existing
+Kuzu/Ladybug store remains available while Skein runs as a sibling embedded
+graph store behind explicit adapter flags, shadow comparison, and per-surface
+cutover evidence. Replacement readiness is not permission to delete or replace
+the old database in place; old-store removal requires a later explicit cleanup
+phase after rollback and parity evidence exists.
 The embedded front door now includes a bounded exact physical-plan LFU cache for
 literal and parameterized query/explain paths. Cache keys include Cypher text,
 bound parameter values, graph commit epoch, and optimizer group budget; any
@@ -1167,7 +1173,8 @@ agent context activity task reads,
 agent context stale crystal and EVOLVES cluster reads,
 health stale memory count reads,
 entity lifecycle impact counts, detail projections, relation/label/community
-preview reads, and entity-node `DETACH DELETE` cascade checks,
+preview reads, REST write Entity pre-delete guard counts, and entity-node
+`DETACH DELETE` cascade checks,
 graph orphan entity reads and cleanup-candidate reads with one-hop relationship
 existence predicates,
 AugmentationJob lifecycle create/running/progress/completed/failed writes and

@@ -122,6 +122,11 @@ shows full per-query-family replacement readiness. Adapter bring-up should use
 `skein external-shadow-adapter-smoke --require-previous-wrapper ...` first to
 validate `ready`, `execute_session`, and `project_graph` wiring, but smoke output
 does not count as production cutover evidence.
+Production replacement is a side-by-side cutover signal, not an old-store
+deletion signal. Nowledge Mem must keep the existing Kuzu/Ladybug database
+available while Skein is introduced as a sibling graph store through explicit
+adapter flags, shadow comparison, and rollback evidence. Removing the old store
+belongs to a later cleanup phase with its own approval and evidence.
 
 ## LanceDB Replacement Surface
 
@@ -317,6 +322,13 @@ from `Memory` nodes while preserving zero-mention Entities, returns
 id/name/updated_at/mention_count rows ordered by mention count descending then
 name ascending, supports the Nowledge cursor predicate over count/name,
 bounded limits, read-transaction snapshots, and no WAL writes.
+REST write Entity delete guards are covered by
+`Database::knowledge_entity_delete_guard`. The typed read resolves one
+`Entity.id`, returns the Nowledge pre-delete counts for other Memory mentions,
+HAS_LABEL relationships, and the distinct relationship orphan guard, preserves
+the current incoming-edge double-counting implied by the production
+`COUNT(DISTINCT r1) + COUNT(DISTINCT r2)` shape, supports read-transaction
+snapshots, and does not write WAL.
 Community Entity visibility reads are covered by
 `Database::knowledge_community_entity_visibility`. The typed read scans Entity
 nodes in explicit community scopes and preserves the Nowledge optional incoming

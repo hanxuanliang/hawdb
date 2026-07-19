@@ -4611,6 +4611,23 @@ pub struct KnowledgeEntityDeleteBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityDeleteGuardRequest {
+    pub entity_id: String,
+    pub excluded_memory_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityDeleteGuardOutput {
+    pub graph_commit_epoch: u64,
+    pub entity_id: String,
+    pub entity_node_id: Option<u64>,
+    pub found_entity: bool,
+    pub other_memory_mention_count: usize,
+    pub label_relationship_count: usize,
+    pub distinct_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeRelationshipCreateRequest {
     pub source: KnowledgeEntityRequest,
     pub target: KnowledgeEntityRequest,
@@ -6251,6 +6268,13 @@ impl Database {
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
         knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_entity_delete_guard(
+        &self,
+        request: &KnowledgeEntityDeleteGuardRequest,
+    ) -> Result<KnowledgeEntityDeleteGuardOutput> {
+        knowledge_entity_delete_guard_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_community_memories(
@@ -8680,6 +8704,115 @@ fn validate_entity_mention_count_request(
         }
     }
     Ok(())
+}
+
+fn knowledge_entity_delete_guard_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeEntityDeleteGuardRequest,
+) -> Result<KnowledgeEntityDeleteGuardOutput> {
+    if request.entity_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity delete guard requires a non-empty entity id".to_string(),
+        ));
+    }
+    if request.excluded_memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity delete guard requires a non-empty excluded memory id".to_string(),
+        ));
+    }
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(entity) =
+        seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)
+    else {
+        return Ok(KnowledgeEntityDeleteGuardOutput {
+            graph_commit_epoch,
+            entity_id: request.entity_id.clone(),
+            entity_node_id: None,
+            found_entity: false,
+            other_memory_mention_count: 0,
+            label_relationship_count: 0,
+            distinct_relationship_count: 0,
+        });
+    };
+
+    Ok(KnowledgeEntityDeleteGuardOutput {
+        graph_commit_epoch,
+        entity_id: request.entity_id.clone(),
+        entity_node_id: Some(entity.id.0),
+        found_entity: true,
+        other_memory_mention_count: entity_delete_guard_other_memory_mentions(
+            catalog,
+            store,
+            entity.id,
+            &request.excluded_memory_id,
+        ),
+        label_relationship_count: entity_delete_guard_label_relationship_count(
+            catalog, store, entity.id,
+        ),
+        distinct_relationship_count: entity_delete_guard_distinct_relationship_count(
+            store, entity.id,
+        ),
+    })
+}
+
+fn entity_delete_guard_other_memory_mentions(
+    catalog: &Catalog,
+    store: &GraphStore,
+    entity_node_id: NodeId,
+    excluded_memory_id: &str,
+) -> usize {
+    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
+        return 0;
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return 0;
+    };
+    store
+        .incoming_relationships(entity_node_id, mentions_type_id)
+        .filter(|relationship| {
+            store
+                .node(relationship.source)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .and_then(node_external_id)
+                .is_some_and(|memory_id| memory_id != excluded_memory_id)
+        })
+        .count()
+}
+
+fn entity_delete_guard_label_relationship_count(
+    catalog: &Catalog,
+    store: &GraphStore,
+    entity_node_id: NodeId,
+) -> usize {
+    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return 0;
+    };
+    store
+        .scan_relationships(Some(has_label_type_id))
+        .filter(|relationship| {
+            relationship.source == entity_node_id || relationship.target == entity_node_id
+        })
+        .count()
+}
+
+fn entity_delete_guard_distinct_relationship_count(
+    store: &GraphStore,
+    entity_node_id: NodeId,
+) -> usize {
+    let incident_relationships = store
+        .scan_relationships(None)
+        .filter(|relationship| {
+            relationship.source == entity_node_id || relationship.target == entity_node_id
+        })
+        .map(|relationship| relationship.id)
+        .collect::<BTreeSet<_>>();
+    let incoming_relationships = store
+        .scan_relationships(None)
+        .filter(|relationship| relationship.target == entity_node_id)
+        .map(|relationship| relationship.id)
+        .collect::<BTreeSet<_>>();
+    incident_relationships.len() + incoming_relationships.len()
 }
 
 fn entity_mention_count_row(
@@ -25233,6 +25366,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_community_entity_visibility(request)
     }
 
+    pub fn knowledge_entity_delete_guard(
+        &self,
+        request: &KnowledgeEntityDeleteGuardRequest,
+    ) -> Result<KnowledgeEntityDeleteGuardOutput> {
+        self.db.knowledge_entity_delete_guard(request)
+    }
+
     pub fn knowledge_community_memories(
         &self,
         request: &KnowledgeCommunityMemoryListRequest,
@@ -26592,6 +26732,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
         knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_entity_delete_guard(
+        &self,
+        request: &KnowledgeEntityDeleteGuardRequest,
+    ) -> Result<KnowledgeEntityDeleteGuardOutput> {
+        knowledge_entity_delete_guard_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_community_memories(

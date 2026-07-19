@@ -19,12 +19,12 @@ use super::{
     KnowledgeCrystalListOrder, KnowledgeCrystalListRequest, KnowledgeCrystalSourceMergeRequest,
     KnowledgeCrystalSourceVisibilityRequest, KnowledgeEntityBatchRequest,
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
-    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
-    KnowledgeEntityLabelListRequest, KnowledgeEntityMentionCountCursor,
-    KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
-    KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
-    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteGuardRequest,
+    KnowledgeEntityDeleteRequest, KnowledgeEntityLabelListRequest,
+    KnowledgeEntityMentionCountCursor, KnowledgeEntityMentionCountListRequest,
+    KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest,
+    KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest,
+    KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
@@ -17894,6 +17894,110 @@ fn typed_knowledge_entity_delete_persists_and_replays_from_wal() {
             .entity
             .is_some());
     }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_entity_delete_guard_counts_for_nowledge_rest_write() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'entity'})").unwrap();
+    db.query("CREATE (:Memory {id: 'other_memory'})").unwrap();
+    db.query("CREATE (:Memory {id: 'excluded_memory'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'label'})").unwrap();
+    db.query("CREATE (:Entity {id: 'out_entity'})").unwrap();
+    db.query("CREATE (:Entity {id: 'in_entity'})").unwrap();
+    db.query("MATCH (m:Memory {id: 'other_memory'}), (e:Entity {id: 'entity'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'excluded_memory'}), (e:Entity {id: 'entity'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query(
+        "MATCH (e:Entity {id: 'entity'}), (l:Label {id: 'label'}) CREATE (e)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query("MATCH (e:Entity {id: 'entity'}), (out:Entity {id: 'out_entity'}) CREATE (e)-[:RELATES_TO]->(out)")
+        .unwrap();
+    db.query("MATCH (incoming:Entity {id: 'in_entity'}), (e:Entity {id: 'entity'}) CREATE (incoming)-[:RELATES_TO]->(e)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_entity_delete_guard(&KnowledgeEntityDeleteGuardRequest {
+            entity_id: "entity".to_string(),
+            excluded_memory_id: "excluded_memory".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert!(output.found_entity);
+    assert_eq!(output.other_memory_mention_count, 1);
+    assert_eq!(output.label_relationship_count, 1);
+    assert_eq!(output.distinct_relationship_count, 8);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let snapshot = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'later_memory'})").unwrap();
+    db.query("MATCH (m:Memory {id: 'later_memory'}), (e:Entity {id: 'entity'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    let snapshot_output = snapshot
+        .knowledge_entity_delete_guard(&KnowledgeEntityDeleteGuardRequest {
+            entity_id: "entity".to_string(),
+            excluded_memory_id: "excluded_memory".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot_output.other_memory_mention_count, 1);
+}
+
+#[test]
+fn entity_delete_guard_reports_missing_entity_without_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'entity'})").unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_entity_delete_guard(&KnowledgeEntityDeleteGuardRequest {
+            entity_id: "missing".to_string(),
+            excluded_memory_id: "excluded_memory".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert!(!output.found_entity);
+    assert_eq!(output.other_memory_mention_count, 0);
+    assert_eq!(output.label_relationship_count, 0);
+    assert_eq!(output.distinct_relationship_count, 0);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn entity_delete_guard_rejects_empty_inputs_without_wal() {
+    let path = unique_test_dir("entity_delete_guard_empty_inputs");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Entity {id: 'entity'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let entity_error = db
+        .knowledge_entity_delete_guard(&KnowledgeEntityDeleteGuardRequest {
+            entity_id: String::new(),
+            excluded_memory_id: "memory".to_string(),
+        })
+        .unwrap_err();
+    assert!(entity_error.to_string().contains("entity id"));
+
+    let memory_error = db
+        .knowledge_entity_delete_guard(&KnowledgeEntityDeleteGuardRequest {
+            entity_id: "entity".to_string(),
+            excluded_memory_id: String::new(),
+        })
+        .unwrap_err();
+    assert!(memory_error.to_string().contains("excluded memory id"));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
     std::fs::remove_dir_all(path).unwrap();
 }
 
