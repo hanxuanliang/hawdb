@@ -592,7 +592,11 @@ aggregate filter shape
 `WITH c.id AS cid, count(DISTINCT s.id) AS covered WHERE covered = $n RETURN cid LIMIT 1`
 and the two-column title variant returning `cid, ct`. This is implemented as
 grouped aggregation over matched rows, a column filter on the aggregate alias,
-and final column projection; it is not a general HAVING implementation.
+and final column projection; it is not a general HAVING implementation. The
+same Nowledge business shape is also available as the typed
+`Database::knowledge_synthesized_source_coverage` read, which accepts explicit
+source Memory ids plus the required distinct coverage count and returns matching
+crystal ids/titles without WAL writes.
 Nowledge community memory reads also support the bounded
 `WITH m, COUNT(e) AS entity_count` shape after a one-hop relationship match.
 The grouped node is represented as a projected map column, so subsequent

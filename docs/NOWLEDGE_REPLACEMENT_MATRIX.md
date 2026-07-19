@@ -223,6 +223,14 @@ returning Crystal fields plus source Memory metadata, `COALESCE(is_latest,
 true)` semantics, and lifecycle state for Nowledge wiki community crystal
 rendering; it supports explicit community-id scopes, read-transaction
 snapshots, and no WAL writes.
+Synthesized-source coverage lookups are covered by
+`Database::knowledge_synthesized_source_coverage`. The typed read validates an
+explicit non-empty source Memory id set and positive required distinct coverage
+count, scans only `Memory` crystals with outgoing `SYNTHESIZED_FROM` Memory
+sources, de-duplicates repeated source relationships, returns matching crystal
+ids/titles plus matched source ids for the Nowledge `cid` and `cid, ct`
+coverage lookup shapes, supports read-transaction snapshots, and does not write
+WAL.
 Memory entity mention reads are covered by
 `Database::knowledge_memory_entities`. The typed read validates a non-empty
 Memory id list, resolves each Memory in caller order, scans outgoing `MENTIONS`

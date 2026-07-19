@@ -62,8 +62,9 @@ use super::{
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
     KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
+    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadListOrder,
+    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -5212,6 +5213,158 @@ fn crystal_source_visibility_rejects_invalid_scope() {
         })
         .unwrap_err();
     assert!(null_id_error.to_string().contains("non-null community ids"));
+}
+
+#[test]
+fn reads_synthesized_source_coverage_for_existing_crystal_lookup_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'coverage-crystal-alpha', is_crystal: true, crystal_title: 'Coverage Alpha'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'coverage-crystal-beta', is_crystal: true, crystal_title: 'Coverage Beta'})")
+        .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'coverage-plain', is_crystal: false, crystal_title: 'Plain Skip'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'coverage-source-one'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'coverage-source-two'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'coverage-source-three'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'coverage-source-node-skip'})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM {source: 'duplicate'}]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-crystal-alpha'}), (s:Memory {id: 'coverage-source-three'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-crystal-beta'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-plain'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-crystal-beta'}), (s:Source {id: 'coverage-source-node-skip'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let exact = db
+        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
+            source_memory_ids: vec![
+                "coverage-source-one".to_string(),
+                "coverage-source-two".to_string(),
+            ],
+            required_covered_count: 2,
+            limit: 1,
+        })
+        .unwrap();
+
+    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(exact.matched_candidate_count, 1);
+    assert_eq!(exact.returned_count, 1);
+    assert_eq!(
+        exact.rows[0].crystal_memory_id.as_deref(),
+        Some("coverage-crystal-alpha")
+    );
+    assert_eq!(
+        exact.rows[0].crystal_title.as_deref(),
+        Some("Coverage Alpha")
+    );
+    assert_eq!(exact.rows[0].covered_count, 2);
+    assert_eq!(
+        exact.rows[0].matched_source_memory_ids,
+        vec![
+            "coverage-source-one".to_string(),
+            "coverage-source-two".to_string()
+        ]
+    );
+
+    let one_source = db
+        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
+            source_memory_ids: vec![
+                "coverage-source-one".to_string(),
+                "coverage-source-two".to_string(),
+            ],
+            required_covered_count: 1,
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(one_source.matched_candidate_count, 1);
+    assert_eq!(one_source.returned_count, 1);
+    assert_eq!(
+        one_source.rows[0].crystal_memory_id.as_deref(),
+        Some("coverage-crystal-beta")
+    );
+    assert_eq!(
+        one_source.rows[0].matched_source_memory_ids,
+        vec!["coverage-source-one".to_string()]
+    );
+
+    let tx = db.begin_read_transaction();
+    db.query(
+        "CREATE (:Memory {id: 'coverage-crystal-after', is_crystal: true, crystal_title: 'After'})",
+    )
+    .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-crystal-after'}), (s:Memory {id: 'coverage-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
+            source_memory_ids: vec!["coverage-source-one".to_string()],
+            required_covered_count: 1,
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.matched_candidate_count, 2);
+    assert_eq!(
+        snapshot
+            .rows
+            .iter()
+            .map(|row| row.crystal_memory_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["coverage-crystal-alpha", "coverage-crystal-beta"]
+    );
+}
+
+#[test]
+fn synthesized_source_coverage_rejects_invalid_request() {
+    let db = Database::new();
+
+    let empty_sources_error = db
+        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
+            source_memory_ids: Vec::new(),
+            required_covered_count: 1,
+            limit: 1,
+        })
+        .unwrap_err();
+    assert!(empty_sources_error
+        .to_string()
+        .contains("non-empty source memory ids"));
+
+    let empty_source_error = db
+        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
+            source_memory_ids: vec![String::new()],
+            required_covered_count: 1,
+            limit: 1,
+        })
+        .unwrap_err();
+    assert!(empty_source_error
+        .to_string()
+        .contains("non-empty source memory ids"));
+
+    let zero_covered_error = db
+        .knowledge_synthesized_source_coverage(&KnowledgeSynthesizedSourceCoverageRequest {
+            source_memory_ids: vec!["source".to_string()],
+            required_covered_count: 0,
+            limit: 1,
+        })
+        .unwrap_err();
+    assert!(zero_covered_error
+        .to_string()
+        .contains("positive covered count"));
 }
 
 #[test]
