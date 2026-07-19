@@ -113,7 +113,7 @@ use super::{
 use crate::optimizer::PlanCost;
 use crate::qos::{
     BackgroundWorkHint, BackgroundWorkReasonCode, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-    QosAdmission, WorkClass, WorkRequest,
+    QosAdmission, WorkClass, WorkPriority, WorkRequest,
 };
 use crate::schema::{
     ConstraintKind, ConstraintSubject, IndexKind, PropertyType, SchemaObjectState, TableKind,
@@ -1394,6 +1394,84 @@ fn database_session_rejects_reads_inside_write_transaction() {
     assert!(error
         .to_string()
         .contains("session transaction query must be a mutation"));
+}
+
+#[test]
+fn set_system_variables_configures_query_work_request() {
+    let mut db = Database::new();
+
+    let priority = db.query("SET system.work_priority = 'background'").unwrap();
+    db.query("SET system.work_class = 'projection'").unwrap();
+    db.query("SET system.estimated_operations = 128").unwrap();
+
+    assert_eq!(
+        priority.rows[0].get("name"),
+        Some(&Value::String("system.work_priority".to_string()))
+    );
+    assert_eq!(
+        priority.rows[0].get("value"),
+        Some(&Value::String("background".to_string()))
+    );
+    assert_eq!(
+        db.system_variables().work_priority,
+        WorkPriority::Background
+    );
+    assert_eq!(db.system_variables().work_class, WorkClass::Projection);
+    assert_eq!(db.system_variables().estimated_operations, 128);
+    assert_eq!(
+        db.query_work_request(),
+        WorkRequest::background(WorkClass::Projection, 128)
+    );
+}
+
+#[test]
+fn set_system_variables_reject_invalid_values_without_wal() {
+    let path = unique_test_dir("set_system_variables_invalid_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'stable'})").unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let bad_priority = db.query("SET system.work_priority = 'urgent'").unwrap_err();
+    let bad_estimate = db
+        .query("SET system.estimated_operations = -1")
+        .unwrap_err();
+    let unknown = db.query("SET system.unknown = 'x'").unwrap_err();
+
+    assert!(bad_priority
+        .to_string()
+        .contains("foreground or background"));
+    assert!(bad_estimate.to_string().contains("non-negative integer"));
+    assert!(unknown.to_string().contains("unknown system variable"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+}
+
+#[test]
+fn set_system_variable_is_rejected_inside_transactions() {
+    let mut db = Database::new();
+    {
+        let mut session = db.session();
+        session.query("BEGIN TRANSACTION").unwrap();
+        let error = session
+            .query("SET system.work_priority = 'background'")
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("not allowed inside an active transaction"));
+        session.query("ROLLBACK").unwrap();
+    }
+
+    let mut snapshot = db.begin_read_transaction();
+    let error = snapshot
+        .query("SET system.work_priority = 'background'")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("not allowed inside a read transaction"));
 }
 
 #[test]

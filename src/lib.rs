@@ -260,7 +260,7 @@ pub use api::{
     KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
     NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheStats, QueryOutput,
-    RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
+    QuerySystemVariables, RankedBackgroundMaintenance, SearchProjectionGraphDeltaRequest,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
 };
 pub use compat::{

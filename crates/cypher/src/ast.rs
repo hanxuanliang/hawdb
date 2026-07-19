@@ -39,7 +39,14 @@ pub enum Statement {
     MatchMergeRelationship(MatchMergeRelationship),
     MatchExpandMergeRelationship(MatchExpandMergeRelationship),
     MatchExpandMatchMergeRelationship(MatchExpandMatchMergeRelationship),
+    SetSystemVariable(SetSystemVariable),
     Rollback,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SetSystemVariable {
+    pub name: String,
+    pub value: ValueExpression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -91,6 +91,14 @@ background hints, expected-value ranking, and scheduler state. It must remain
 free of graph storage, search index, planner, and executor dependencies so
 resource policy can be reused by projection, import, schema maintenance, and
 retrieval loops without creating ownership cycles.
+Cypher exposes lightweight runtime resource intent through session-scoped
+system variables instead of query-shape-specific typed APIs. `SET system.work_priority`,
+`SET system.work_class`, and `SET system.estimated_operations` configure the
+current query `WorkRequest` mapping, while hard limits and background admission
+remain owned by `DatabaseConfig`, `LocalQosPolicy`, and caller-owned schedulers.
+These variables are runtime state only: they do not write WAL, are rejected
+inside graph transactions and read snapshots, and are meant to guide resource
+scheduling rather than change query semantics.
 
 The current Cypher crate uses:
 

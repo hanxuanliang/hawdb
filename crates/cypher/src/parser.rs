@@ -1,4 +1,4 @@
-use super::ast::Statement;
+use super::ast::{SetSystemVariable, Statement};
 use skein_core::Result;
 
 mod cursor;
@@ -26,6 +26,7 @@ enum StatementDispatch {
     Alter,
     Merge,
     Match,
+    Set,
     Call,
     Checkpoint,
     Commit,
@@ -38,6 +39,7 @@ const TOP_LEVEL_STATEMENTS: &[(&str, StatementDispatch)] = &[
     ("ALTER", StatementDispatch::Alter),
     ("MERGE", StatementDispatch::Merge),
     ("MATCH", StatementDispatch::Match),
+    ("SET", StatementDispatch::Set),
     ("CALL", StatementDispatch::Call),
     ("CHECKPOINT", StatementDispatch::Checkpoint),
     ("COMMIT", StatementDispatch::Commit),
@@ -69,6 +71,7 @@ impl<'a> Parser<'a> {
             StatementDispatch::Alter => self.parse_alter_statement(),
             StatementDispatch::Merge => self.parse_merge_statement(),
             StatementDispatch::Match => self.parse_match_statement(),
+            StatementDispatch::Set => self.parse_set_system_variable_statement(),
             StatementDispatch::Call => self.parse_call_statement(),
             StatementDispatch::Checkpoint => Ok(Statement::Checkpoint),
             StatementDispatch::Commit => Ok(Statement::Commit),
@@ -79,7 +82,7 @@ impl<'a> Parser<'a> {
     fn parse_statement_dispatch(&mut self) -> Result<StatementDispatch> {
         self.parse_keyword_choice(
             TOP_LEVEL_STATEMENTS,
-            "expected BEGIN, CREATE, ALTER, MERGE, MATCH, CALL, CHECKPOINT, COMMIT, or ROLLBACK",
+            "expected BEGIN, CREATE, ALTER, MERGE, MATCH, SET, CALL, CHECKPOINT, COMMIT, or ROLLBACK",
         )
     }
 
@@ -87,5 +90,17 @@ impl<'a> Parser<'a> {
         let variable = format!("__anon{}", self.anonymous_variable_id);
         self.anonymous_variable_id += 1;
         variable
+    }
+
+    fn parse_set_system_variable_statement(&mut self) -> Result<Statement> {
+        self.expect_keyword("SYSTEM")?;
+        self.expect_char('.')?;
+        let name = self.parse_ident()?;
+        self.expect_char('=')?;
+        let value = self.parse_value()?;
+        Ok(Statement::SetSystemVariable(SetSystemVariable {
+            name: name.to_ascii_lowercase(),
+            value,
+        }))
     }
 }

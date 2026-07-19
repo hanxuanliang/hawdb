@@ -45,6 +45,19 @@ fn parses_transaction_control_statements() {
 }
 
 #[test]
+fn parses_set_system_variable_statement() {
+    let statement = parse("SET system.work_priority = 'background'").unwrap();
+    let Statement::SetSystemVariable(set) = statement else {
+        panic!("expected set system variable");
+    };
+    assert_eq!(set.name, "work_priority");
+    assert_eq!(
+        set.value,
+        ValueExpression::Literal(Value::String("background".to_string()))
+    );
+}
+
+#[test]
 fn parses_unlabeled_node_match() {
     let statement = parse("MATCH (n) WHERE n.id IN $ids RETURN n.id").unwrap();
     let Statement::MatchReturn(query) = statement else {
