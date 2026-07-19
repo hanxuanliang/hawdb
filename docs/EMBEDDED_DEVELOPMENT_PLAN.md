@@ -178,11 +178,13 @@ lifecycle state. Context memory preview reads are
 exposed as a typed API for Nowledge semantic-unit title, typed, and label
 preview rows with latest/non-crystal filtering. Skill usage-stat updates are
 exposed as a typed batch for Nowledge `use_count`, optional `success_rate`,
-`last_activity_at`, `updated_at`, and `metadata` writes. Skill lifecycle and
-write-state updates are exposed as a typed batch for Nowledge stage changes,
-rejections, promotions, compiled metadata, draft bundle writes, content hashes,
-and `updated_at` stamping. REST Skills source merges are exposed as a typed
-`merge_knowledge_skill_source` API for
+`last_activity_at`, `updated_at`, and `metadata` writes. Skill metadata-only
+replacement writes are exposed as a typed `update_knowledge_skill_metadata_batch`
+API for Nowledge `metadata` and `updated_at` updates without changing lifecycle
+state. Skill lifecycle and write-state updates are exposed as a typed batch for
+Nowledge stage changes, rejections, promotions, compiled metadata, draft bundle
+writes, content hashes, and `updated_at` stamping. REST Skills source merges
+are exposed as a typed `merge_knowledge_skill_source` API for
 `(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)` writes with create-only `weight`,
 `occasion_key`, and `created_at` relationship properties. Skill
 synthesized-memory evidence reads are exposed

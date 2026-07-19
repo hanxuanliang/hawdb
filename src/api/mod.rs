@@ -2864,6 +2864,42 @@ pub struct KnowledgeSkillUsageStatsBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillMetadataUpdate {
+    pub skill_id: String,
+    pub metadata: Value,
+    pub updated_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillMetadataBatchRequest {
+    pub updates: Vec<KnowledgeSkillMetadataUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillMetadataBatchRow {
+    pub skill_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillMetadataBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSkillMetadataBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSkillSourceMergeRequest {
     pub skill_id: String,
     pub memory_id: String,
@@ -6391,6 +6427,13 @@ impl Database {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         update_knowledge_skill_usage_stats_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_skill_metadata_batch(
+        &mut self,
+        request: &KnowledgeSkillMetadataBatchRequest,
+    ) -> Result<KnowledgeSkillMetadataBatchOutput> {
+        update_knowledge_skill_metadata_batch_for(self, request)
     }
 
     pub fn merge_knowledge_skill_source(
@@ -14201,6 +14244,129 @@ fn update_knowledge_skill_usage_stats_batch_for(
     tx.commit()?;
 
     Ok(KnowledgeSkillUsageStatsBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
+}
+
+fn update_knowledge_skill_metadata_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSkillMetadataBatchRequest,
+) -> Result<KnowledgeSkillMetadataBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        if update.skill_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge skill metadata update requires a non-empty skill id".to_string(),
+            ));
+        }
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Skill", &update.skill_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeSkillMetadataBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.skill_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeSkillMetadataBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeSkillMetadataBatchRow {
+                skill_id: update.skill_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let assignments = BTreeMap::from([
+            ("metadata".to_string(), update.metadata.clone()),
+            ("updated_at".to_string(), update.updated_at.clone()),
+        ]);
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeSkillMetadataBatchRow {
+            skill_id: update.skill_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeSkillMetadataBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Skill", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeSkillMetadataBatchOutput {
         graph_commit_epoch_before,
         graph_commit_epoch_after: db.store.commit_epoch(),
         rows,
@@ -24777,6 +24943,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSkillUsageStatsBatchRequest,
     ) -> Result<KnowledgeSkillUsageStatsBatchOutput> {
         self.db.update_knowledge_skill_usage_stats_batch(request)
+    }
+
+    pub fn update_knowledge_skill_metadata_batch(
+        &mut self,
+        request: &KnowledgeSkillMetadataBatchRequest,
+    ) -> Result<KnowledgeSkillMetadataBatchOutput> {
+        self.db.update_knowledge_skill_metadata_batch(request)
     }
 
     pub fn merge_knowledge_skill_source(

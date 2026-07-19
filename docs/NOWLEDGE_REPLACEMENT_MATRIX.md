@@ -362,6 +362,11 @@ Skill usage-stat writes are covered by a typed batch for Nowledge
 counts, and bounded numeric success rates before WAL, reports missing,
 idless, and duplicate rows without writing, and commits eligible Skill rows
 through one grouped WAL batch.
+Skill metadata replacement writes are covered by
+`Database::update_knowledge_skill_metadata_batch` for Nowledge `metadata` and
+`updated_at` updates without lifecycle state changes. The wrapper validates
+Skill ids before WAL, reports missing, idless, and duplicate rows without
+writing, and commits eligible Skill rows through one grouped WAL batch.
 Skill lifecycle/write-state updates are covered by a typed batch for Nowledge
 stage changes, rejection timestamps, promotion rationale, compiled version
 metadata, draft bundle writes, content hashes, bundle paths, triggers, tools,
