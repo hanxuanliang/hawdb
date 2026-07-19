@@ -1639,6 +1639,51 @@ pub struct KnowledgeCrystalListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeCrystalCommunityScope {
+    CommunityIds(Vec<Value>),
+    NonNullCommunity,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCrystalCommunityListOrder {
+    CommunityIdAscCrystalIdAsc,
+    HitsDescImportanceDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalCommunityListRequest {
+    pub scope: KnowledgeCrystalCommunityScope,
+    pub limit: usize,
+    pub order: KnowledgeCrystalCommunityListOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalCommunityRow {
+    pub crystal_memory_id: Option<String>,
+    pub crystal_node_id: u64,
+    pub community_id: Value,
+    pub hit_count: usize,
+    pub source_memory_count: usize,
+    pub crystal_title: Option<String>,
+    pub title: Option<String>,
+    pub display_title: String,
+    pub content: Option<String>,
+    pub importance: Option<Value>,
+    pub metadata: Option<Value>,
+    pub is_latest: Option<bool>,
+    pub lifecycle_state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalCommunityListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeCrystalCommunityRow>,
+    pub matched_path_count: usize,
+    pub matched_pair_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityCreateRequest {
     pub label: String,
     pub external_id: String,
@@ -4996,6 +5041,13 @@ impl Database {
         knowledge_crystals_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_crystal_communities(
+        &self,
+        request: &KnowledgeCrystalCommunityListRequest,
+    ) -> Result<KnowledgeCrystalCommunityListOutput> {
+        knowledge_crystal_communities_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -7768,6 +7820,202 @@ fn compare_crystal_importance_created_at(
             )
         },
     )
+}
+
+struct KnowledgeCrystalCommunityAccumulator {
+    row: KnowledgeCrystalCommunityRow,
+    source_memory_ids: BTreeSet<u64>,
+}
+
+fn knowledge_crystal_communities_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeCrystalCommunityListRequest,
+) -> Result<KnowledgeCrystalCommunityListOutput> {
+    validate_knowledge_crystal_community_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(empty_crystal_community_output(graph_commit_epoch));
+    };
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return Ok(empty_crystal_community_output(graph_commit_epoch));
+    };
+    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
+        return Ok(empty_crystal_community_output(graph_commit_epoch));
+    };
+    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
+        return Ok(empty_crystal_community_output(graph_commit_epoch));
+    };
+
+    let community_filter = crystal_community_filter_values(request);
+    let mut matched_path_count = 0;
+    let mut groups: BTreeMap<(NodeId, Value), KnowledgeCrystalCommunityAccumulator> =
+        BTreeMap::new();
+
+    for crystal in store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| boolean_property(memory, "is_crystal") == Some(true))
+    {
+        for source_rel in store.outgoing_relationships(crystal.id, synthesized_from_type_id) {
+            let Some(source_memory) = store
+                .node(source_rel.target)
+                .filter(|node| node.labels.contains(&memory_label_id))
+            else {
+                continue;
+            };
+            for mention_rel in store.outgoing_relationships(source_memory.id, mentions_type_id) {
+                let Some(entity) = store
+                    .node(mention_rel.target)
+                    .filter(|node| node.labels.contains(&entity_label_id))
+                else {
+                    continue;
+                };
+                let Some(community_id) = entity.properties.get("community_id").cloned() else {
+                    continue;
+                };
+                if community_id == Value::Null
+                    || !crystal_community_scope_matches(&community_id, &community_filter)
+                {
+                    continue;
+                }
+                matched_path_count += 1;
+                let accumulator = groups
+                    .entry((crystal.id, community_id.clone()))
+                    .or_insert_with(|| KnowledgeCrystalCommunityAccumulator {
+                        row: knowledge_crystal_community_row(crystal, community_id),
+                        source_memory_ids: BTreeSet::new(),
+                    });
+                accumulator.row.hit_count += 1;
+                accumulator.source_memory_ids.insert(source_memory.id.0);
+                accumulator.row.source_memory_count = accumulator.source_memory_ids.len();
+            }
+        }
+    }
+
+    let mut rows = groups
+        .into_values()
+        .map(|accumulator| accumulator.row)
+        .collect::<Vec<_>>();
+    sort_crystal_community_rows(&mut rows, request.order);
+    let matched_pair_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCrystalCommunityListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_path_count,
+        matched_pair_count,
+        returned_count,
+    })
+}
+
+fn empty_crystal_community_output(graph_commit_epoch: u64) -> KnowledgeCrystalCommunityListOutput {
+    KnowledgeCrystalCommunityListOutput {
+        graph_commit_epoch,
+        rows: Vec::new(),
+        matched_path_count: 0,
+        matched_pair_count: 0,
+        returned_count: 0,
+    }
+}
+
+fn validate_knowledge_crystal_community_list_request(
+    request: &KnowledgeCrystalCommunityListRequest,
+) -> Result<()> {
+    match &request.scope {
+        KnowledgeCrystalCommunityScope::CommunityIds(community_ids) => {
+            if community_ids.is_empty() {
+                return Err(SkeinError::Semantic(
+                    "knowledge crystal community list requires non-empty community ids".to_string(),
+                ));
+            }
+            if community_ids
+                .iter()
+                .any(|community_id| community_id == &Value::Null)
+            {
+                return Err(SkeinError::Semantic(
+                    "knowledge crystal community list requires non-null community ids".to_string(),
+                ));
+            }
+        }
+        KnowledgeCrystalCommunityScope::NonNullCommunity => {}
+    }
+    Ok(())
+}
+
+fn crystal_community_filter_values(
+    request: &KnowledgeCrystalCommunityListRequest,
+) -> Option<BTreeSet<Value>> {
+    match &request.scope {
+        KnowledgeCrystalCommunityScope::CommunityIds(community_ids) => {
+            Some(community_ids.iter().cloned().collect())
+        }
+        KnowledgeCrystalCommunityScope::NonNullCommunity => None,
+    }
+}
+
+fn crystal_community_scope_matches(community_id: &Value, filter: &Option<BTreeSet<Value>>) -> bool {
+    filter
+        .as_ref()
+        .is_none_or(|community_ids| community_ids.contains(community_id))
+}
+
+fn knowledge_crystal_community_row(
+    crystal: &NodeRecord,
+    community_id: Value,
+) -> KnowledgeCrystalCommunityRow {
+    let crystal_title = string_property(crystal, "crystal_title");
+    let title = string_property(crystal, "title");
+    let display_title = crystal_title
+        .clone()
+        .or_else(|| title.clone())
+        .unwrap_or_default();
+    KnowledgeCrystalCommunityRow {
+        crystal_memory_id: node_external_id(crystal),
+        crystal_node_id: crystal.id.0,
+        community_id,
+        hit_count: 0,
+        source_memory_count: 0,
+        crystal_title,
+        title,
+        display_title,
+        content: string_property(crystal, "content"),
+        importance: crystal.properties.get("importance").cloned(),
+        metadata: crystal.properties.get("metadata").cloned(),
+        is_latest: boolean_property(crystal, "is_latest"),
+        lifecycle_state: string_property(crystal, "lifecycle_state"),
+    }
+}
+
+fn sort_crystal_community_rows(
+    rows: &mut [KnowledgeCrystalCommunityRow],
+    order: KnowledgeCrystalCommunityListOrder,
+) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeCrystalCommunityListOrder::CommunityIdAscCrystalIdAsc => {
+            compare_crystal_community_ids(left, right)
+        }
+        KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc => right
+            .hit_count
+            .cmp(&left.hit_count)
+            .then_with(|| {
+                compare_optional_values_desc(left.importance.as_ref(), right.importance.as_ref())
+            })
+            .then_with(|| compare_crystal_community_ids(left, right)),
+    });
+}
+
+fn compare_crystal_community_ids(
+    left: &KnowledgeCrystalCommunityRow,
+    right: &KnowledgeCrystalCommunityRow,
+) -> std::cmp::Ordering {
+    left.community_id
+        .cmp(&right.community_id)
+        .then_with(|| left.crystal_memory_id.cmp(&right.crystal_memory_id))
+        .then_with(|| left.crystal_node_id.cmp(&right.crystal_node_id))
 }
 
 enum KnowledgeScopedEntityMatch {
@@ -18849,6 +19097,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_crystals(request)
     }
 
+    pub fn knowledge_crystal_communities(
+        &self,
+        request: &KnowledgeCrystalCommunityListRequest,
+    ) -> Result<KnowledgeCrystalCommunityListOutput> {
+        self.db.knowledge_crystal_communities(request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -19876,6 +20131,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeCrystalListRequest,
     ) -> Result<KnowledgeCrystalListOutput> {
         knowledge_crystals_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_crystal_communities(
+        &self,
+        request: &KnowledgeCrystalCommunityListRequest,
+    ) -> Result<KnowledgeCrystalCommunityListOutput> {
+        knowledge_crystal_communities_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

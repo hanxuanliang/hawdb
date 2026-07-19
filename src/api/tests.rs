@@ -11,8 +11,10 @@ use super::{
     KnowledgeCommunityListRequest, KnowledgeCommunityLookupKey, KnowledgeCommunityMembershipCreate,
     KnowledgeCommunityMembershipCreateBatchRequest, KnowledgeCommunityRequest,
     KnowledgeCommunitySummaryUpdate, KnowledgeContextMemoryLatestFilter,
-    KnowledgeContextMemoryPreviewRequest, KnowledgeCrystalListOrder, KnowledgeCrystalListRequest,
-    KnowledgeEntityBatchRequest, KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
+    KnowledgeContextMemoryPreviewRequest, KnowledgeCrystalCommunityListOrder,
+    KnowledgeCrystalCommunityListRequest, KnowledgeCrystalCommunityScope,
+    KnowledgeCrystalListOrder, KnowledgeCrystalListRequest, KnowledgeEntityBatchRequest,
+    KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
     KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
     KnowledgeEntityLabelListRequest, KnowledgeEntityMentionCountCursor,
     KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
@@ -4574,6 +4576,168 @@ fn crystal_read_rejects_invalid_filters() {
     assert!(mixed_filter_error
         .to_string()
         .contains("key_match or after_id"));
+}
+
+#[test]
+fn reads_crystal_communities_for_topic_ranking_and_okf_mapping() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'crystal-alpha', is_crystal: true, crystal_title: 'Alpha Crystal', title: 'Alpha Title', content: 'Alpha content', importance: 0.8, metadata: '{\"c\":1}', is_latest: true, lifecycle_state: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'crystal-beta', is_crystal: true, title: 'Beta Title', content: 'Beta content', importance: 0.9, is_latest: false})")
+        .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'plain-memory', is_crystal: false, title: 'Plain', importance: 9.0})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'source-one', metadata: '{\"s\":1}', is_latest: true, lifecycle_state: 'ready'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'source-two', metadata: '{\"s\":2}', is_latest: false, lifecycle_state: 'archived'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'source-three'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity-one', name: 'One', community_id: 7})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity-two', name: 'Two', community_id: 7})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity-three', name: 'Three', community_id: 8})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity-null', name: 'Null Entity'})")
+        .unwrap();
+    db.query(
+        "MATCH (c:Memory {id: 'crystal-alpha'}), (s:Memory {id: 'source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (c:Memory {id: 'crystal-alpha'}), (s:Memory {id: 'source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (c:Memory {id: 'crystal-beta'}), (s:Memory {id: 'source-three'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (c:Memory {id: 'plain-memory'}), (s:Memory {id: 'source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (s:Memory {id: 'source-one'}), (e:Entity {id: 'entity-one'}) CREATE (s)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (s:Memory {id: 'source-one'}), (e:Entity {id: 'entity-two'}) CREATE (s)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (s:Memory {id: 'source-two'}), (e:Entity {id: 'entity-one'}) CREATE (s)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (s:Memory {id: 'source-two'}), (e:Entity {id: 'entity-three'}) CREATE (s)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (s:Memory {id: 'source-two'}), (e:Entity {id: 'entity-null'}) CREATE (s)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (s:Memory {id: 'source-three'}), (e:Entity {id: 'entity-three'}) CREATE (s)-[:MENTIONS]->(e)",
+    )
+    .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let topic = db
+        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+            scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Int(7)]),
+            limit: 10,
+            order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
+        })
+        .unwrap();
+    assert_eq!(topic.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(topic.matched_path_count, 3);
+    assert_eq!(topic.matched_pair_count, 1);
+    assert_eq!(topic.returned_count, 1);
+    assert_eq!(
+        topic.rows[0].crystal_memory_id.as_deref(),
+        Some("crystal-alpha")
+    );
+    assert_eq!(topic.rows[0].community_id, Value::Int(7));
+    assert_eq!(topic.rows[0].hit_count, 3);
+    assert_eq!(topic.rows[0].source_memory_count, 2);
+    assert_eq!(
+        topic.rows[0].crystal_title.as_deref(),
+        Some("Alpha Crystal")
+    );
+    assert_eq!(topic.rows[0].display_title, "Alpha Crystal");
+    assert_eq!(topic.rows[0].content.as_deref(), Some("Alpha content"));
+    assert_eq!(topic.rows[0].importance, Some(Value::Float(0.8)));
+    assert_eq!(
+        topic.rows[0].metadata,
+        Some(Value::String("{\"c\":1}".to_string()))
+    );
+    assert_eq!(topic.rows[0].is_latest, Some(true));
+    assert_eq!(topic.rows[0].lifecycle_state.as_deref(), Some("active"));
+
+    let tx = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'crystal-top-community', is_crystal: true, crystal_title: 'Top Community', importance: 10.0})")
+        .unwrap();
+    db.query(
+        "MATCH (c:Memory {id: 'crystal-top-community'}), (s:Memory {id: 'source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)",
+    )
+    .unwrap();
+    let okf = tx
+        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+            scope: KnowledgeCrystalCommunityScope::NonNullCommunity,
+            limit: 0,
+            order: KnowledgeCrystalCommunityListOrder::CommunityIdAscCrystalIdAsc,
+        })
+        .unwrap();
+    assert_eq!(okf.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(okf.matched_path_count, 5);
+    assert_eq!(okf.matched_pair_count, 3);
+    assert_eq!(okf.returned_count, 3);
+    assert_eq!(okf.rows[0].community_id, Value::Int(7));
+    assert_eq!(
+        okf.rows[0].crystal_memory_id.as_deref(),
+        Some("crystal-alpha")
+    );
+    assert_eq!(okf.rows[0].hit_count, 3);
+    assert_eq!(okf.rows[1].community_id, Value::Int(8));
+    assert_eq!(
+        okf.rows[1].crystal_memory_id.as_deref(),
+        Some("crystal-alpha")
+    );
+    assert_eq!(okf.rows[1].hit_count, 1);
+    assert_eq!(okf.rows[2].community_id, Value::Int(8));
+    assert_eq!(
+        okf.rows[2].crystal_memory_id.as_deref(),
+        Some("crystal-beta")
+    );
+    assert_eq!(okf.rows[2].hit_count, 1);
+}
+
+#[test]
+fn crystal_community_read_rejects_invalid_scope() {
+    let db = Database::new();
+
+    let empty_ids_error = db
+        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+            scope: KnowledgeCrystalCommunityScope::CommunityIds(Vec::new()),
+            limit: 10,
+            order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
+        })
+        .unwrap_err();
+    assert!(empty_ids_error
+        .to_string()
+        .contains("non-empty community ids"));
+
+    let null_id_error = db
+        .knowledge_crystal_communities(&KnowledgeCrystalCommunityListRequest {
+            scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Null]),
+            limit: 10,
+            order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
+        })
+        .unwrap_err();
+    assert!(null_id_error.to_string().contains("non-null community ids"));
 }
 
 #[test]

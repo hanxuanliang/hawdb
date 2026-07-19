@@ -417,6 +417,12 @@ Nowledge wiki crystal detail key lookup, crystal page `id > after` pagination,
 and OKF crystal list rows with `crystal_title`, display-title fallback,
 importance/created-at ordering, pinned read-transaction snapshots, and no WAL
 writes.
+Crystal-to-Community aggregation reads are available as
+`Database::knowledge_crystal_communities`, covering Nowledge
+`SYNTHESIZED_FROM` source Memory to `MENTIONS` Entity community paths for wiki
+topic crystal ranking and OKF crystal community mapping, with hit counts,
+distinct source-memory counts, pinned read-transaction snapshots, and no WAL
+writes.
 Memory entity mention reads are available as
 `Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
 `MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,

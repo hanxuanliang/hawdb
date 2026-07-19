@@ -209,6 +209,13 @@ read scans only `Memory` nodes with `is_crystal = true`, supports wiki key
 lookup by exact/prefix/contains id matching, crystal page `id > after`
 pagination, OKF importance/created-at ordering, display-title fallback from
 `crystal_title` to `title`, read-transaction snapshots, and no WAL writes.
+Crystal community aggregation reads are covered by
+`Database::knowledge_crystal_communities`. The typed read scans only
+`is_crystal = true` Memory nodes, follows `SYNTHESIZED_FROM` to source Memory
+nodes and `MENTIONS` to Entity nodes, filters by explicit community ids or
+non-null communities, returns hit counts and distinct source-memory counts for
+each crystal/community pair, supports topic-ranking and OKF mapping orderings,
+read-transaction snapshots, and no WAL writes.
 Memory entity mention reads are covered by
 `Database::knowledge_memory_entities`. The typed read validates a non-empty
 Memory id list, resolves each Memory in caller order, scans outgoing `MENTIONS`
