@@ -2383,6 +2383,75 @@ pub struct KnowledgeThreadListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactedMemoryListRequest {
+    pub thread_id: String,
+    pub identity_property: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactedMemoryRow {
+    pub thread_id: Option<String>,
+    pub thread_node_id: u64,
+    pub thread_logical_id: Option<String>,
+    pub relationship_id: u64,
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub display_title: String,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub content_preview: Option<String>,
+    pub importance: Option<Value>,
+    pub pagerank_score: Option<Value>,
+    pub confidence: Option<Value>,
+    pub source_range: Option<Value>,
+    pub source: Option<String>,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub metadata: Option<Value>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: String,
+    pub last_reindexed_at: Option<Value>,
+    pub reindex_needed: Option<bool>,
+    pub unit_type: String,
+    pub is_latest: bool,
+    pub version: i64,
+    pub is_crystal: bool,
+    pub crystal_title: Option<String>,
+    pub source_unit_count: Option<i64>,
+    pub extraction_method: String,
+    pub access_count: i64,
+    pub appearances: i64,
+    pub clicks: i64,
+    pub decay_score_cached: Option<Value>,
+    pub event_end: Option<Value>,
+    pub event_start: Option<Value>,
+    pub last_accessed_at: Option<Value>,
+    pub last_clicked_at: Option<Value>,
+    pub last_evaluated_at: Option<Value>,
+    pub review_status: String,
+    pub temporal_confidence: Option<Value>,
+    pub temporal_context: Option<String>,
+    pub temporal_precision: Option<String>,
+    pub temporal_type: Option<String>,
+    pub total_dwell_time_ms: i64,
+    pub compaction_method: Option<String>,
+    pub relationship_created_at: Option<Value>,
+    pub relationship_properties: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactedMemoryListOutput {
+    pub graph_commit_epoch: u64,
+    pub thread_id: String,
+    pub thread_node_id: Option<u64>,
+    pub found: bool,
+    pub rows: Vec<KnowledgeThreadCompactedMemoryRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMessageListRequest {
     pub thread_id: String,
     pub limit: usize,
@@ -4936,6 +5005,13 @@ impl Database {
         request: &KnowledgeThreadListRequest,
     ) -> Result<KnowledgeThreadListOutput> {
         knowledge_threads_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_compacted_memories(
+        &self,
+        request: &KnowledgeThreadCompactedMemoryListRequest,
+    ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
+        knowledge_thread_compacted_memories_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_messages(
@@ -10651,6 +10727,180 @@ fn compare_thread_recent_values(
             .or(right.import_date.as_ref())
             .or(right.created_at.as_ref()),
     )
+}
+
+fn knowledge_thread_compacted_memories_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadCompactedMemoryListRequest,
+) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
+    validate_thread_compacted_memory_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(thread) = thread_node_by_identity(
+        catalog,
+        store,
+        &request.identity_property,
+        &request.thread_id,
+    ) else {
+        return Ok(KnowledgeThreadCompactedMemoryListOutput {
+            graph_commit_epoch,
+            thread_id: request.thread_id.clone(),
+            thread_node_id: None,
+            found: false,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = thread_compacted_memory_rows(catalog, store, thread.id);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    Ok(KnowledgeThreadCompactedMemoryListOutput {
+        graph_commit_epoch,
+        thread_id: request.thread_id.clone(),
+        thread_node_id: Some(thread.id.0),
+        found: true,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_thread_compacted_memory_request(
+    request: &KnowledgeThreadCompactedMemoryListRequest,
+) -> Result<()> {
+    if request.thread_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread compacted memory read requires a non-empty thread id".to_string(),
+        ));
+    }
+    if request.identity_property != "id" && request.identity_property != "thread_id" {
+        return Err(SkeinError::Semantic(
+            "knowledge thread compacted memory read requires id or thread_id identity".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn thread_node_by_identity<'a>(
+    catalog: &Catalog,
+    store: &'a GraphStore,
+    identity_property: &str,
+    thread_id: &str,
+) -> Option<&'a NodeRecord> {
+    let label_id = catalog.label_id("Thread")?;
+    store.scan_nodes(Some(label_id)).find(|node| {
+        node.properties
+            .get(identity_property)
+            .map(value_to_external_id)
+            .as_deref()
+            == Some(thread_id)
+    })
+}
+
+fn thread_compacted_memory_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    thread_node_id: NodeId,
+) -> Vec<KnowledgeThreadCompactedMemoryRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
+        return Vec::new();
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    let Some(thread) = store.node(thread_node_id) else {
+        return Vec::new();
+    };
+    let mut rows = store
+        .outgoing_relationships(thread_node_id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .map(|memory| thread_compacted_memory_row(thread, memory, relationship))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_optional_values_desc(left.importance.as_ref(), right.importance.as_ref())
+            .then_with(|| {
+                compare_skill_memory_created_at(
+                    &left.created_at,
+                    &right.created_at,
+                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                )
+            })
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    rows
+}
+
+fn thread_compacted_memory_row(
+    thread: &NodeRecord,
+    memory: &NodeRecord,
+    relationship: &RelRecord,
+) -> KnowledgeThreadCompactedMemoryRow {
+    let title = string_property(memory, "title");
+    let content = string_property(memory, "content");
+    let display_title = title
+        .clone()
+        .or_else(|| content.as_ref().map(|content| truncate_chars(content, 60)))
+        .unwrap_or_default();
+    KnowledgeThreadCompactedMemoryRow {
+        thread_id: node_external_id(thread),
+        thread_node_id: thread.id.0,
+        thread_logical_id: string_property(thread, "thread_id"),
+        relationship_id: relationship.id.0,
+        memory_id: node_external_id(memory),
+        memory_node_id: memory.id.0,
+        display_title,
+        title,
+        content_preview: content.as_ref().map(|content| truncate_chars(content, 200)),
+        content,
+        importance: memory.properties.get("importance").cloned(),
+        pagerank_score: memory.properties.get("pagerank_score").cloned(),
+        confidence: memory.properties.get("confidence").cloned(),
+        source_range: memory.properties.get("source_range").cloned(),
+        source: string_property(memory, "source"),
+        created_at: memory.properties.get("created_at").cloned(),
+        updated_at: memory.properties.get("updated_at").cloned(),
+        metadata: memory.properties.get("metadata").cloned(),
+        raw_space_id: string_property(memory, "space_id"),
+        normalized_space_id: normalized_node_space_id(memory),
+        last_reindexed_at: memory.properties.get("last_reindexed_at").cloned(),
+        reindex_needed: boolean_property(memory, "reindex_needed"),
+        unit_type: string_property(memory, "unit_type").unwrap_or_else(|| "fact".to_string()),
+        is_latest: boolean_property(memory, "is_latest").unwrap_or(true),
+        version: integer_property(memory, "version").unwrap_or(1),
+        is_crystal: boolean_property(memory, "is_crystal").unwrap_or(false),
+        crystal_title: string_property(memory, "crystal_title"),
+        source_unit_count: integer_property(memory, "source_unit_count"),
+        extraction_method: string_property(memory, "extraction_method")
+            .unwrap_or_else(|| "manual".to_string()),
+        access_count: integer_property(memory, "access_count").unwrap_or(0),
+        appearances: integer_property(memory, "appearances").unwrap_or(0),
+        clicks: integer_property(memory, "clicks").unwrap_or(0),
+        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
+        event_end: memory.properties.get("event_end").cloned(),
+        event_start: memory.properties.get("event_start").cloned(),
+        last_accessed_at: memory.properties.get("last_accessed_at").cloned(),
+        last_clicked_at: memory.properties.get("last_clicked_at").cloned(),
+        last_evaluated_at: memory.properties.get("last_evaluated_at").cloned(),
+        review_status: string_property(memory, "review_status").unwrap_or_default(),
+        temporal_confidence: memory.properties.get("temporal_confidence").cloned(),
+        temporal_context: string_property(memory, "temporal_context"),
+        temporal_precision: string_property(memory, "temporal_precision"),
+        temporal_type: string_property(memory, "temporal_type"),
+        total_dwell_time_ms: integer_property(memory, "total_dwell_time_ms").unwrap_or(0),
+        compaction_method: relationship_string_property(relationship, "compaction_method"),
+        relationship_created_at: relationship.properties.get("created_at").cloned(),
+        relationship_properties: relationship.properties.get("properties").cloned(),
+    }
 }
 
 fn knowledge_thread_messages_for(
@@ -17940,6 +18190,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadListRequest,
     ) -> Result<KnowledgeThreadListOutput> {
         self.db.knowledge_threads(request)
+    }
+
+    pub fn knowledge_thread_compacted_memories(
+        &self,
+        request: &KnowledgeThreadCompactedMemoryListRequest,
+    ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
+        self.db.knowledge_thread_compacted_memories(request)
     }
 
     pub fn knowledge_thread_messages(

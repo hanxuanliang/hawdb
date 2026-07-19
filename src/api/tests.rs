@@ -52,8 +52,8 @@ use super::{
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
     KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadListOrder,
-    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadCompactedMemoryListRequest,
+    KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -7830,6 +7830,178 @@ fn typed_thread_message_count_batch_persists_as_one_wal_batch_and_replays() {
         );
     }
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Thread A'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory Alpha', content: 'Alpha compacted memory content', importance: 0.8, pagerank_score: 0.9, confidence: 0.7, source_range: '1..2', source: 'agent', created_at: 10, updated_at: 20, metadata: '{}', space_id: '', last_reindexed_at: 21, reindex_needed: true, unit_type: 'decision', is_latest: false, version: 4, is_crystal: true, crystal_title: 'Crystal Alpha', source_unit_count: 3, extraction_method: 'agent', access_count: 5, appearances: 6, clicks: 7, decay_score_cached: 0.2, event_end: 30, event_start: 25, last_accessed_at: 31, last_clicked_at: 32, last_evaluated_at: 33, review_status: 'reviewed', temporal_confidence: 0.6, temporal_context: 'past', temporal_precision: 'day', temporal_type: 'event', total_dwell_time_ms: 800})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b', content: 'Beta compacted memory content', importance: 0.4, created_at: 30})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'manual', created_at: 100, properties: '{}'}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'auto', created_at: 90}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: "thread_a".to_string(),
+            identity_property: "id".to_string(),
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert!(output.found);
+    assert_eq!(output.thread_id, "thread_a");
+    assert!(output.thread_node_id.is_some());
+    assert_eq!(output.matched_count, 2);
+    assert_eq!(output.returned_count, 2);
+    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
+    assert_eq!(
+        output.rows[0].thread_logical_id.as_deref(),
+        Some("logical_a")
+    );
+    assert_eq!(output.rows[0].memory_id.as_deref(), Some("memory_a"));
+    assert_eq!(output.rows[0].display_title, "Memory Alpha");
+    assert_eq!(output.rows[0].title.as_deref(), Some("Memory Alpha"));
+    assert_eq!(
+        output.rows[0].content.as_deref(),
+        Some("Alpha compacted memory content")
+    );
+    assert_eq!(
+        output.rows[0].content_preview.as_deref(),
+        Some("Alpha compacted memory content")
+    );
+    assert_eq!(output.rows[0].importance, Some(Value::Float(0.8)));
+    assert_eq!(output.rows[0].pagerank_score, Some(Value::Float(0.9)));
+    assert_eq!(output.rows[0].confidence, Some(Value::Float(0.7)));
+    assert_eq!(
+        output.rows[0].source_range,
+        Some(Value::String("1..2".to_string()))
+    );
+    assert_eq!(output.rows[0].source.as_deref(), Some("agent"));
+    assert_eq!(output.rows[0].created_at, Some(Value::Int(10)));
+    assert_eq!(output.rows[0].updated_at, Some(Value::Int(20)));
+    assert_eq!(
+        output.rows[0].metadata,
+        Some(Value::String("{}".to_string()))
+    );
+    assert_eq!(output.rows[0].raw_space_id, None);
+    assert_eq!(output.rows[0].normalized_space_id, "default");
+    assert_eq!(output.rows[0].last_reindexed_at, Some(Value::Int(21)));
+    assert_eq!(output.rows[0].reindex_needed, Some(true));
+    assert_eq!(output.rows[0].unit_type, "decision");
+    assert!(!output.rows[0].is_latest);
+    assert_eq!(output.rows[0].version, 4);
+    assert!(output.rows[0].is_crystal);
+    assert_eq!(
+        output.rows[0].crystal_title.as_deref(),
+        Some("Crystal Alpha")
+    );
+    assert_eq!(output.rows[0].source_unit_count, Some(3));
+    assert_eq!(output.rows[0].extraction_method, "agent");
+    assert_eq!(output.rows[0].access_count, 5);
+    assert_eq!(output.rows[0].appearances, 6);
+    assert_eq!(output.rows[0].clicks, 7);
+    assert_eq!(output.rows[0].decay_score_cached, Some(Value::Float(0.2)));
+    assert_eq!(output.rows[0].event_end, Some(Value::Int(30)));
+    assert_eq!(output.rows[0].event_start, Some(Value::Int(25)));
+    assert_eq!(output.rows[0].last_accessed_at, Some(Value::Int(31)));
+    assert_eq!(output.rows[0].last_clicked_at, Some(Value::Int(32)));
+    assert_eq!(output.rows[0].last_evaluated_at, Some(Value::Int(33)));
+    assert_eq!(output.rows[0].review_status, "reviewed");
+    assert_eq!(output.rows[0].temporal_confidence, Some(Value::Float(0.6)));
+    assert_eq!(output.rows[0].temporal_context.as_deref(), Some("past"));
+    assert_eq!(output.rows[0].temporal_precision.as_deref(), Some("day"));
+    assert_eq!(output.rows[0].temporal_type.as_deref(), Some("event"));
+    assert_eq!(output.rows[0].total_dwell_time_ms, 800);
+    assert_eq!(output.rows[0].compaction_method.as_deref(), Some("manual"));
+    assert_eq!(
+        output.rows[0].relationship_created_at,
+        Some(Value::Int(100))
+    );
+    assert_eq!(
+        output.rows[0].relationship_properties,
+        Some(Value::String("{}".to_string()))
+    );
+    assert_eq!(output.rows[1].memory_id.as_deref(), Some("memory_b"));
+    assert_eq!(
+        output.rows[1].display_title,
+        "Beta compacted memory content"
+    );
+    assert_eq!(output.rows[1].unit_type, "fact");
+    assert!(output.rows[1].is_latest);
+    assert_eq!(output.rows[1].version, 1);
+    assert!(!output.rows[1].is_crystal);
+    assert_eq!(output.rows[1].extraction_method, "manual");
+
+    let by_logical_thread = db
+        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: "logical_b".to_string(),
+            identity_property: "thread_id".to_string(),
+            limit: 10,
+        })
+        .unwrap();
+    assert!(by_logical_thread.found);
+    assert_eq!(by_logical_thread.matched_count, 1);
+    assert_eq!(
+        by_logical_thread.rows[0].thread_logical_id.as_deref(),
+        Some("logical_b")
+    );
+
+    let limited = db
+        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: "thread_a".to_string(),
+            identity_property: "id".to_string(),
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(limited.matched_count, 2);
+    assert_eq!(limited.returned_count, 1);
+
+    let missing = db
+        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: "missing".to_string(),
+            identity_property: "id".to_string(),
+            limit: 10,
+        })
+        .unwrap();
+    assert!(!missing.found);
+    assert_eq!(missing.thread_node_id, None);
+    assert_eq!(missing.matched_count, 0);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn thread_compacted_memory_read_rejects_invalid_identity() {
+    let db = Database::new();
+    let empty_thread = db
+        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: String::new(),
+            identity_property: "id".to_string(),
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(empty_thread.to_string().contains("non-empty thread id"));
+
+    let invalid_identity = db
+        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: "thread_a".to_string(),
+            identity_property: "metadata".to_string(),
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(invalid_identity
+        .to_string()
+        .contains("id or thread_id identity"));
 }
 
 #[test]

@@ -263,6 +263,13 @@ index/timestamps/token count/metadata plus relationship id and relationship
 order index, orders by `COALESCE(c.order_index, m.order_index)`, supports
 bounded limits, reports found/matched/returned counts and the graph commit
 epoch, and does not write WAL.
+Thread compacted-memory reads are covered by
+`Database::knowledge_thread_compacted_memories`. The typed read resolves one
+Thread by physical `id` or logical `thread_id`, scans outgoing `COMPACTS_TO`
+Memory edges, returns Memory id/title/content previews, rank/time/space/
+review/reindex/temporal/access fields, relationship metadata, count/id-list/
+summary/full-row compatible fallbacks, importance/created-at ordering, bounded
+limits, and no WAL writes.
 Thread list and source reads are covered by `Database::knowledge_threads` for
 Nowledge bounded Thread page, source lookup, source page, normalized-space
 count/list, favorite metadata page, id/thread-id bulk lookup, and

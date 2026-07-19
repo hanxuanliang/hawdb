@@ -425,6 +425,11 @@ Bounded Thread list and source reads are available as
 source page, normalized-space count/list, favorite metadata, id/thread-id bulk
 lookup, and message-count ranking shapes with explicit filters, ordering,
 missing-id reporting, display-title fallbacks, and no WAL writes.
+Thread compacted-memory reads are available as
+`Database::knowledge_thread_compacted_memories`, covering Nowledge `COMPACTS_TO`
+count/id-list/summary/full-row read shapes by physical `id` or logical
+`thread_id`, with Memory display/rank/reindex/review/temporal/access fields,
+relationship metadata, bounded limits, and no WAL writes.
 Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with
