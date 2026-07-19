@@ -336,6 +336,38 @@ fn optimizer_smoke_cases() -> Vec<OptimizerSmokeCase> {
             ],
         },
         OptimizerSmokeCase {
+            name: "skill_thread_source_provenance_workload",
+            logical: skill_thread_source_provenance_workload_plan(),
+            catalog: skill_thread_source_provenance_workload_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 2,
+                cost: 44,
+            },
+            fingerprint_contains: "COMPACTS_TO",
+            decision_contains: &[
+                "choose IndexNodeSeek for Skill.id",
+                "estimate AdjacencyExpand for Skill-[:SYNTHESIZED_FROM*1..1]->Memory",
+                "estimate AdjacencyExpand for Memory-[:COMPACTS_TO*1..1]->Thread",
+                "selected physical plan cost: estimated_rows=2 cost=44",
+            ],
+        },
+        OptimizerSmokeCase {
+            name: "community_member_memory_evidence_workload",
+            logical: community_member_memory_evidence_workload_plan(),
+            catalog: community_member_memory_evidence_workload_catalog(),
+            expected_cost: PlanCost {
+                estimated_rows: 1,
+                cost: 12,
+            },
+            fingerprint_contains: "BELONGS_TO",
+            decision_contains: &[
+                "choose IndexNodeSeek for Community.id",
+                "estimate AdjacencyExpand for Community-[:BELONGS_TO*1..1]->Entity",
+                "estimate AdjacencyExpand for Entity-[:MENTIONS*1..1]->Memory",
+                "selected physical plan cost: estimated_rows=1 cost=12",
+            ],
+        },
+        OptimizerSmokeCase {
             name: "entity_bridge_span_aggregate",
             logical: entity_bridge_span_aggregate_plan(),
             catalog: entity_bridge_span_aggregate_catalog(),
@@ -1789,6 +1821,267 @@ fn feed_synthesized_source_collect_catalog() -> OptimizerCatalog {
             ),
             6_000,
         )]),
+    )
+}
+
+fn skill_thread_source_provenance_workload_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(20),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![SortItem {
+                key: SortKey::Column("thread_title".to_string()),
+                direction: SortDirection::Asc,
+            }],
+            input: Box::new(LogicalPlan::Project {
+                items: vec![
+                    Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "t".to_string(),
+                            property: "title".to_string(),
+                        },
+                        name: "thread_title".to_string(),
+                    },
+                    Projection {
+                        expression: ProjectionExpression::Property {
+                            variable: "m".to_string(),
+                            property: "id".to_string(),
+                        },
+                        name: "memory_id".to_string(),
+                    },
+                ],
+                input: Box::new(LogicalPlan::Expand {
+                    source_variable: "m".to_string(),
+                    source_label: "Memory".to_string(),
+                    rel_variable: None,
+                    rel_type: "COMPACTS_TO".to_string(),
+                    rel_properties: BTreeMap::new(),
+                    direction: RelationshipDirection::Incoming,
+                    target_variable: "t".to_string(),
+                    target_label: "Thread".to_string(),
+                    min_hops: 1,
+                    max_hops: 1,
+                    optional: false,
+                    input: Box::new(LogicalPlan::Expand {
+                        source_variable: "sk".to_string(),
+                        source_label: "Skill".to_string(),
+                        rel_variable: None,
+                        rel_type: "SYNTHESIZED_FROM".to_string(),
+                        rel_properties: BTreeMap::new(),
+                        direction: RelationshipDirection::Outgoing,
+                        target_variable: "m".to_string(),
+                        target_label: "Memory".to_string(),
+                        min_hops: 1,
+                        max_hops: 1,
+                        optional: false,
+                        input: Box::new(LogicalPlan::Filter {
+                            predicate: Predicate::PropertyEq {
+                                variable: "sk".to_string(),
+                                property: "id".to_string(),
+                                value: Value::String("skill-42".to_string()),
+                            },
+                            input: Box::new(LogicalPlan::NodeScan {
+                                variable: "sk".to_string(),
+                                label: "Skill".to_string(),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn skill_thread_source_provenance_workload_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Skill".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Skill".to_string(), 2_000),
+                ("Memory".to_string(), 100_000),
+                ("Thread".to_string(), 10_000),
+            ],
+            [
+                ("SYNTHESIZED_FROM".to_string(), 30_000),
+                ("COMPACTS_TO".to_string(), 15_000),
+            ],
+            [
+                ("SYNTHESIZED_FROM".to_string(), 10_000),
+                ("COMPACTS_TO".to_string(), 10_000),
+            ],
+            [
+                (
+                    (
+                        "Skill".to_string(),
+                        "SYNTHESIZED_FROM".to_string(),
+                        "Memory".to_string(),
+                    ),
+                    30_000,
+                ),
+                (
+                    (
+                        "Thread".to_string(),
+                        "COMPACTS_TO".to_string(),
+                        "Memory".to_string(),
+                    ),
+                    15_000,
+                ),
+            ],
+            [
+                (
+                    (
+                        "Skill".to_string(),
+                        "SYNTHESIZED_FROM".to_string(),
+                        "Memory".to_string(),
+                        1,
+                    ),
+                    30_000,
+                ),
+                (
+                    (
+                        "Thread".to_string(),
+                        "COMPACTS_TO".to_string(),
+                        "Memory".to_string(),
+                        1,
+                    ),
+                    15_000,
+                ),
+            ],
+            [
+                (("Skill".to_string(), "id".to_string()), 2_000),
+                (("Thread".to_string(), "title".to_string()), 8_000),
+            ],
+            [],
+        ),
+    )
+}
+
+fn community_member_memory_evidence_workload_plan() -> LogicalPlan {
+    LogicalPlan::Limit {
+        offset: 0,
+        limit: Some(25),
+        input: Box::new(LogicalPlan::Sort {
+            items: vec![SortItem {
+                key: SortKey::Column("memory_count".to_string()),
+                direction: SortDirection::Desc,
+            }],
+            input: Box::new(LogicalPlan::Aggregate {
+                group_keys: vec![Projection {
+                    expression: ProjectionExpression::Property {
+                        variable: "e".to_string(),
+                        property: "entity_type".to_string(),
+                    },
+                    name: "entity_type".to_string(),
+                }],
+                items: vec![Aggregation {
+                    function: AggregateFunction::Count,
+                    target: AggregateTarget::Variable("m".to_string()),
+                    distinct: true,
+                    name: "memory_count".to_string(),
+                }],
+                input: Box::new(LogicalPlan::Expand {
+                    source_variable: "e".to_string(),
+                    source_label: "Entity".to_string(),
+                    rel_variable: None,
+                    rel_type: "MENTIONS".to_string(),
+                    rel_properties: BTreeMap::new(),
+                    direction: RelationshipDirection::Incoming,
+                    target_variable: "m".to_string(),
+                    target_label: "Memory".to_string(),
+                    min_hops: 1,
+                    max_hops: 1,
+                    optional: false,
+                    input: Box::new(LogicalPlan::Expand {
+                        source_variable: "c".to_string(),
+                        source_label: "Community".to_string(),
+                        rel_variable: None,
+                        rel_type: "BELONGS_TO".to_string(),
+                        rel_properties: BTreeMap::new(),
+                        direction: RelationshipDirection::Incoming,
+                        target_variable: "e".to_string(),
+                        target_label: "Entity".to_string(),
+                        min_hops: 1,
+                        max_hops: 1,
+                        optional: false,
+                        input: Box::new(LogicalPlan::Filter {
+                            predicate: Predicate::PropertyEq {
+                                variable: "c".to_string(),
+                                property: "id".to_string(),
+                                value: Value::String("community-42".to_string()),
+                            },
+                            input: Box::new(LogicalPlan::NodeScan {
+                                variable: "c".to_string(),
+                                label: "Community".to_string(),
+                            }),
+                        }),
+                    }),
+                }),
+            }),
+        }),
+    }
+}
+
+fn community_member_memory_evidence_workload_catalog() -> OptimizerCatalog {
+    OptimizerCatalog::new(
+        OptimizerCatalogIndexes::new([("Community".to_string(), "id".to_string())], [], [], []),
+        OptimizerCatalogStatistics::new(
+            [
+                ("Community".to_string(), 5_000),
+                ("Entity".to_string(), 50_000),
+                ("Memory".to_string(), 100_000),
+            ],
+            [
+                ("BELONGS_TO".to_string(), 40_000),
+                ("MENTIONS".to_string(), 300_000),
+            ],
+            [
+                ("BELONGS_TO".to_string(), 5_000),
+                ("MENTIONS".to_string(), 90_000),
+            ],
+            [
+                (
+                    (
+                        "Entity".to_string(),
+                        "BELONGS_TO".to_string(),
+                        "Community".to_string(),
+                    ),
+                    40_000,
+                ),
+                (
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                    ),
+                    300_000,
+                ),
+            ],
+            [
+                (
+                    (
+                        "Entity".to_string(),
+                        "BELONGS_TO".to_string(),
+                        "Community".to_string(),
+                        1,
+                    ),
+                    40_000,
+                ),
+                (
+                    (
+                        "Memory".to_string(),
+                        "MENTIONS".to_string(),
+                        "Entity".to_string(),
+                        1,
+                    ),
+                    300_000,
+                ),
+            ],
+            [
+                (("Community".to_string(), "id".to_string()), 5_000),
+                (("Entity".to_string(), "entity_type".to_string()), 12),
+            ],
+            [],
+        ),
     )
 }
 

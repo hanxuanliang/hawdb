@@ -1558,6 +1558,8 @@ Current implemented slice:
   workloads backed by relationship target statistics,
   source-attributed entity community export aggregation with memory unit-type
   filtering and distinct memory/entity counts,
+  Skill-to-synthesized-Memory-to-compacting-Thread provenance reads, community
+  membership-to-Memory evidence aggregates,
   endpoint-existence and nested endpoint-existence cartesian product cost
   tracing and single-row input ordering, residual node-property filter
   equality/inequality/`IN`/range/null selectivity, residual relationship-property
@@ -1580,7 +1582,7 @@ Remaining Phase 4 work:
 - bounded left-deep join-order enumeration beyond the current all-single-row
   endpoint-product ordering
 - broader cross-pattern workload-shaped optimizer benchmark suites beyond the
-  current source/memory/entity/community/label smoke cases
+  current source/memory/entity/community/label/skill smoke cases
 
 ### Phase 5: Analytics and Cutover
 
