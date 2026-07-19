@@ -363,6 +363,12 @@ Thread attachment title lookup is covered by
 the Nowledge REST agent attached-source shape, reports total matched Thread
 rows for ambiguity diagnostics, supports pinned read snapshots, and does not
 write WAL.
+Thread source summary lookup is covered by
+`Database::knowledge_thread_source`. The typed read resolves exact physical
+`id` or logical `thread_id`, returns the first stable node-id ordered
+thread-id/title/source/created-at projection for the Nowledge REST export
+source-thread shape, reports total matched Thread rows for ambiguity
+diagnostics, supports pinned read snapshots, and does not write WAL.
 ThreadIdentity exact resolution is covered by
 `Database::knowledge_thread_identity`. The typed read resolves one
 `ThreadIdentity` by external id, returns the Nowledge repo fields

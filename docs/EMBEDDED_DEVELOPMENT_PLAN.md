@@ -188,7 +188,9 @@ Cypher-compatible `COALESCE` fallbacks without WAL writes. Distinct Thread
 source listing is exposed as a typed `knowledge_thread_sources` API for REST FS
 source directories without WAL writes. Thread attachment title lookup is
 exposed as a typed `knowledge_thread_title` API for exact physical/logical
-Thread ids without WAL writes.
+Thread ids without WAL writes. Thread source summary lookup is exposed as a
+typed `knowledge_thread_source` API for exact physical/logical Thread ids
+without WAL writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches

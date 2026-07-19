@@ -70,10 +70,11 @@ use super::{
     KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSyncMetadataRequest,
-    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
+    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -10058,6 +10059,77 @@ fn thread_title_read_rejects_empty_id() {
     let db = Database::new();
     let error = db
         .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest { id: String::new() })
+        .unwrap_err();
+    assert!(error.to_string().contains("non-empty thread id"));
+}
+
+#[test]
+fn reads_thread_source_summary_for_rest_export_memory_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', source: 'codex', created_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack', created_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_c', thread_id: 'logical_a', title: 'Later Duplicate', source: 'email', created_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'logical_a', title: 'Ignored Memory', source: 'ignored'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let by_logical = db
+        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
+            sid: "logical_a".to_string(),
+        })
+        .unwrap();
+    assert_eq!(by_logical.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(by_logical.sid, "logical_a");
+    assert!(by_logical.thread_node_id.is_some());
+    assert!(by_logical.found_thread);
+    assert_eq!(by_logical.thread_id.as_deref(), Some("logical_a"));
+    assert_eq!(by_logical.title.as_deref(), Some("Alpha Thread"));
+    assert_eq!(by_logical.source.as_deref(), Some("codex"));
+    assert_eq!(by_logical.created_at, Some(Value::Int(10)));
+    assert_eq!(by_logical.matched_count, 2);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let by_physical = db
+        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
+            sid: "thread_b".to_string(),
+        })
+        .unwrap();
+    assert_eq!(by_physical.thread_id.as_deref(), Some("logical_b"));
+    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
+    assert_eq!(by_physical.source.as_deref(), Some("slack"));
+    assert_eq!(by_physical.created_at, Some(Value::Int(20)));
+    assert_eq!(by_physical.matched_count, 1);
+
+    let missing = db
+        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
+            sid: "missing_thread".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found_thread);
+    assert_eq!(missing.thread_node_id, None);
+    assert_eq!(missing.thread_id, None);
+    assert_eq!(missing.matched_count, 0);
+
+    let tx = db.begin_read_transaction();
+    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.source = 'changed'")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest {
+            sid: "logical_a".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.source.as_deref(), Some("codex"));
+}
+
+#[test]
+fn thread_source_read_rejects_empty_sid() {
+    let db = Database::new();
+    let error = db
+        .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest { sid: String::new() })
         .unwrap_err();
     assert!(error.to_string().contains("non-empty thread id"));
 }

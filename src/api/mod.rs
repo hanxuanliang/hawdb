@@ -2812,6 +2812,24 @@ pub struct KnowledgeThreadTitleLookupOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadSourceLookupRequest {
+    pub sid: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadSourceLookupOutput {
+    pub graph_commit_epoch: u64,
+    pub sid: String,
+    pub thread_node_id: Option<u64>,
+    pub found_thread: bool,
+    pub thread_id: Option<String>,
+    pub title: Option<String>,
+    pub source: Option<String>,
+    pub created_at: Option<Value>,
+    pub matched_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadIdentityRequest {
     pub identity_key: String,
 }
@@ -5694,6 +5712,13 @@ impl Database {
         request: &KnowledgeThreadTitleLookupRequest,
     ) -> Result<KnowledgeThreadTitleLookupOutput> {
         knowledge_thread_title_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_source(
+        &self,
+        request: &KnowledgeThreadSourceLookupRequest,
+    ) -> Result<KnowledgeThreadSourceLookupOutput> {
+        knowledge_thread_source_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_identity(
@@ -13258,14 +13283,7 @@ fn knowledge_thread_title_for(
         });
     };
 
-    let mut matched = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| {
-            node_external_id(node).as_deref() == Some(request.id.as_str())
-                || string_property(node, "thread_id").as_deref() == Some(request.id.as_str())
-        })
-        .collect::<Vec<_>>();
-    matched.sort_by_key(|node| node.id.0);
+    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.id);
     let matched_count = matched.len();
     let first = matched.into_iter().next();
 
@@ -13288,6 +13306,71 @@ fn validate_knowledge_thread_title_request(
         ));
     }
     Ok(())
+}
+
+fn knowledge_thread_source_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadSourceLookupRequest,
+) -> Result<KnowledgeThreadSourceLookupOutput> {
+    validate_knowledge_thread_source_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Thread") else {
+        return Ok(KnowledgeThreadSourceLookupOutput {
+            graph_commit_epoch,
+            sid: request.sid.clone(),
+            thread_node_id: None,
+            found_thread: false,
+            thread_id: None,
+            title: None,
+            source: None,
+            created_at: None,
+            matched_count: 0,
+        });
+    };
+
+    let matched = exact_thread_id_or_logical_candidates(store, label_id, &request.sid);
+    let matched_count = matched.len();
+    let first = matched.into_iter().next();
+
+    Ok(KnowledgeThreadSourceLookupOutput {
+        graph_commit_epoch,
+        sid: request.sid.clone(),
+        thread_node_id: first.map(|node| node.id.0),
+        found_thread: first.is_some(),
+        thread_id: first.and_then(|node| string_property(node, "thread_id")),
+        title: first.and_then(|node| string_property(node, "title")),
+        source: first.and_then(|node| string_property(node, "source")),
+        created_at: first.and_then(|node| node.properties.get("created_at").cloned()),
+        matched_count,
+    })
+}
+
+fn validate_knowledge_thread_source_request(
+    request: &KnowledgeThreadSourceLookupRequest,
+) -> Result<()> {
+    if request.sid.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread source read requires a non-empty thread id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn exact_thread_id_or_logical_candidates<'a>(
+    store: &'a GraphStore,
+    label_id: LabelId,
+    id: &str,
+) -> Vec<&'a NodeRecord> {
+    let mut matched = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| {
+            node_external_id(node).as_deref() == Some(id)
+                || string_property(node, "thread_id").as_deref() == Some(id)
+        })
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|node| node.id.0);
+    matched
 }
 
 fn knowledge_thread_identity_for(
@@ -21372,6 +21455,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_thread_title(request)
     }
 
+    pub fn knowledge_thread_source(
+        &self,
+        request: &KnowledgeThreadSourceLookupRequest,
+    ) -> Result<KnowledgeThreadSourceLookupOutput> {
+        self.db.knowledge_thread_source(request)
+    }
+
     pub fn knowledge_thread_identity(
         &self,
         request: &KnowledgeThreadIdentityRequest,
@@ -22304,6 +22394,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeThreadTitleLookupRequest,
     ) -> Result<KnowledgeThreadTitleLookupOutput> {
         knowledge_thread_title_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_source(
+        &self,
+        request: &KnowledgeThreadSourceLookupRequest,
+    ) -> Result<KnowledgeThreadSourceLookupOutput> {
+        knowledge_thread_source_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

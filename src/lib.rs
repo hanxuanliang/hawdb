@@ -176,6 +176,7 @@ pub use api::{
     KnowledgeThreadMetadataBatchOutput, KnowledgeThreadMetadataBatchRequest,
     KnowledgeThreadMetadataBatchRow, KnowledgeThreadMetadataUpdate,
     KnowledgeThreadSourceListOutput, KnowledgeThreadSourceListRequest,
+    KnowledgeThreadSourceLookupOutput, KnowledgeThreadSourceLookupRequest,
     KnowledgeThreadSyncMetadataOutput, KnowledgeThreadSyncMetadataRequest,
     KnowledgeThreadTitleLookupOutput, KnowledgeThreadTitleLookupRequest,
     KnowledgeTraversalDiagnostics, KnowledgeTraversalFallbackReasonCode,
