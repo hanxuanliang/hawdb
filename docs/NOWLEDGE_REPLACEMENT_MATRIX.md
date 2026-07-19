@@ -433,6 +433,11 @@ The typed read supports exact id lists, key lookup using exact/prefix/contains
 matching, stage-filtered catalog and active lists, active after-id pagination,
 updated-at or id ordering, missing-id reporting, and pinned read snapshots
 without WAL writes.
+Field-extensible Skill catalog reads are covered by
+`Database::knowledge_skill_projected_list`. The typed read reuses the same
+bounded Skill id/key/stage/after-id filters and ordering, but returns only
+caller-selected Skill properties through an explicit allowlist so MCP catalog
+fields can grow without cloning whole Skill nodes or adding raw-Cypher paths.
 REST FS Skill detail lookup is covered by
 `Database::knowledge_skill_detail_lookup`. The typed read applies the
 Nowledge REST FS physical `Skill.id` exact/prefix/contains lookup, returns the

@@ -3340,6 +3340,29 @@ pub struct KnowledgeSkillListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillProjectedListRequest {
+    pub list: KnowledgeSkillListRequest,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillProjectedRow {
+    pub id: Option<String>,
+    pub node_id: u64,
+    pub properties: BTreeMap<String, Value>,
+    pub normalized_space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillProjectedListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSkillProjectedRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMetadataUpdate {
     pub thread_id: String,
     pub metadata: Value,
@@ -6822,6 +6845,13 @@ impl Database {
         request: &KnowledgeSkillListRequest,
     ) -> Result<KnowledgeSkillListOutput> {
         knowledge_skills_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_projected_list(
+        &self,
+        request: &KnowledgeSkillProjectedListRequest,
+    ) -> Result<KnowledgeSkillProjectedListOutput> {
+        knowledge_skill_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_thread_metadata_batch(
@@ -15990,6 +16020,78 @@ fn knowledge_skills_for(
     })
 }
 
+fn knowledge_skill_projected_list_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSkillProjectedListRequest,
+) -> Result<KnowledgeSkillProjectedListOutput> {
+    validate_knowledge_skill_projected_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Skill") else {
+        return Ok(KnowledgeSkillProjectedListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_ids: request.list.ids.clone(),
+        });
+    };
+
+    let requested_ids = request.list.ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut matched_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| skill_matches_list_request(node, &request.list, &requested_ids))
+        .map(|node| {
+            if let Some(id) = node_external_id(node) {
+                matched_ids.insert(id);
+            }
+            (
+                knowledge_skill_projected_row(node, &request.property_names),
+                node.properties.get("updated_at").cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    sort_skill_projected_rows(&mut rows, request.list.order);
+    let matched_count = rows.len();
+    if request.list.limit > 0 {
+        rows.truncate(request.list.limit);
+    }
+    let returned_count = rows.len();
+    let rows = rows
+        .into_iter()
+        .map(|(row, _updated_at)| row)
+        .collect::<Vec<_>>();
+    let missing_ids = request
+        .list
+        .ids
+        .iter()
+        .filter(|id| !matched_ids.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeSkillProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_ids,
+    })
+}
+
+fn validate_knowledge_skill_projected_list_request(
+    request: &KnowledgeSkillProjectedListRequest,
+) -> Result<()> {
+    validate_knowledge_skill_list_request(&request.list)?;
+    if request.property_names.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge skill projected list requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_knowledge_skill_list_request(request: &KnowledgeSkillListRequest) -> Result<()> {
     if request.ids.iter().any(String::is_empty) {
         return Err(SkeinError::Semantic(
@@ -16058,6 +16160,18 @@ fn skill_matches_list_request(
     true
 }
 
+fn knowledge_skill_projected_row(
+    node: &NodeRecord,
+    property_names: &[String],
+) -> KnowledgeSkillProjectedRow {
+    KnowledgeSkillProjectedRow {
+        id: node_external_id(node),
+        node_id: node.id.0,
+        properties: projected_properties(&node.properties, property_names),
+        normalized_space_id: normalized_node_space_id(node),
+    }
+}
+
 fn knowledge_skill_row(node: &NodeRecord) -> KnowledgeSkillRow {
     KnowledgeSkillRow {
         id: node_external_id(node),
@@ -16096,6 +16210,28 @@ fn sort_skill_rows(rows: &mut [KnowledgeSkillRow], order: KnowledgeSkillListOrde
 }
 
 fn compare_skill_ids(left: &KnowledgeSkillRow, right: &KnowledgeSkillRow) -> std::cmp::Ordering {
+    left.id
+        .cmp(&right.id)
+        .then_with(|| left.node_id.cmp(&right.node_id))
+}
+
+fn sort_skill_projected_rows(
+    rows: &mut [(KnowledgeSkillProjectedRow, Option<Value>)],
+    order: KnowledgeSkillListOrder,
+) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeSkillListOrder::IdAsc => compare_skill_projected_ids(&left.0, &right.0),
+        KnowledgeSkillListOrder::UpdatedAtDesc => {
+            compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
+                .then_with(|| compare_skill_projected_ids(&left.0, &right.0))
+        }
+    });
+}
+
+fn compare_skill_projected_ids(
+    left: &KnowledgeSkillProjectedRow,
+    right: &KnowledgeSkillProjectedRow,
+) -> std::cmp::Ordering {
     left.id
         .cmp(&right.id)
         .then_with(|| left.node_id.cmp(&right.node_id))
@@ -26498,6 +26634,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_skills(request)
     }
 
+    pub fn knowledge_skill_projected_list(
+        &self,
+        request: &KnowledgeSkillProjectedListRequest,
+    ) -> Result<KnowledgeSkillProjectedListOutput> {
+        self.db.knowledge_skill_projected_list(request)
+    }
+
     pub fn update_knowledge_thread_metadata_batch(
         &mut self,
         request: &KnowledgeThreadMetadataBatchRequest,
@@ -27556,6 +27699,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSkillListRequest,
     ) -> Result<KnowledgeSkillListOutput> {
         knowledge_skills_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skill_projected_list(
+        &self,
+        request: &KnowledgeSkillProjectedListRequest,
+    ) -> Result<KnowledgeSkillProjectedListOutput> {
+        knowledge_skill_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skill_thread_sources(

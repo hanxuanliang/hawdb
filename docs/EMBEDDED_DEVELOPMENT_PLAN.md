@@ -197,6 +197,10 @@ as a typed `knowledge_skill_memories` API for id-filtered and stage-filtered
 catalog/detail reads are exposed as a typed `knowledge_skills` API for
 stage-filtered lists, exact id lookup, key prefix/contains lookup, active
 after-id pagination, and updated-at/id ordering without WAL writes. Skill
+projected catalog reads are also exposed as
+`knowledge_skill_projected_list`, reusing the same bounded filters and ordering
+while returning only caller-selected Skill properties through an explicit
+allowlist for future field growth. Skill
 context thread-source reads are exposed as a typed
 `knowledge_skill_thread_sources` API for the Nowledge business shape
 `(:Skill)-[:SYNTHESIZED_FROM]->(:Memory)<-[:COMPACTS_TO]-(:Thread)`,

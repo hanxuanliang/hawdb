@@ -67,19 +67,19 @@ use super::{
     KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder, KnowledgeSkillListRequest,
     KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
     KnowledgeSkillMetadataBatchRequest, KnowledgeSkillMetadataUpdate,
-    KnowledgeSkillSourceMergeRequest, KnowledgeSkillStateRequest,
-    KnowledgeSkillThreadSourceListRequest, KnowledgeSkillUsageStatsBatchRequest,
-    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceDeleteBatchRequest,
-    KnowledgeSourceIdListRequest, KnowledgeSourceLabelAssignment,
-    KnowledgeSourceLabelAssignmentBatchRequest, KnowledgeSourceLabelDelete,
-    KnowledgeSourceLabelDeleteBatchRequest, KnowledgeSourceLifecycleBatchRequest,
-    KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
-    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
-    KnowledgeSourceMemoryListRequest, KnowledgeSourceMetadataBatchRequest,
-    KnowledgeSourceMetadataUpdate, KnowledgeSourceParsedCreate,
-    KnowledgeSourceParsedCreateBatchRequest, KnowledgeSourceParsedMetadataBatchRequest,
-    KnowledgeSourceParsedMetadataUpdate, KnowledgeSourceReferenceEntityListRequest,
-    KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSkillProjectedListRequest, KnowledgeSkillSourceMergeRequest,
+    KnowledgeSkillStateRequest, KnowledgeSkillThreadSourceListRequest,
+    KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
+    KnowledgeSourceDeleteBatchRequest, KnowledgeSourceIdListRequest,
+    KnowledgeSourceLabelAssignment, KnowledgeSourceLabelAssignmentBatchRequest,
+    KnowledgeSourceLabelDelete, KnowledgeSourceLabelDeleteBatchRequest,
+    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
+    KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
+    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
+    KnowledgeSourceMetadataBatchRequest, KnowledgeSourceMetadataUpdate,
+    KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
+    KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
+    KnowledgeSourceReferenceEntityListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
     KnowledgeSourceReferenceRelationshipCountRequest, KnowledgeSourceRequest,
     KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
     KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSourceVersionLookupRequest,
@@ -11974,6 +11974,97 @@ fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
 }
 
 #[test]
+fn projects_skill_list_fields_for_mcp_catalog_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-active', stage: 'active', name: 'catalog-active', title: 'Catalog Active', description: 'active catalog skill', triggers: '[\"catalog\"]', content_hash: 'hash-active', metadata: '{\"stage\":\"active\"}', space_id: '', updated_at: 20, future_field: 'future-active'})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-draft', stage: 'draft', name: 'catalog-draft', title: 'Catalog Draft', description: 'draft catalog skill', triggers: '[\"draft\"]', content_hash: 'hash-draft', metadata: '{\"stage\":\"draft\"}', space_id: 'team', updated_at: 10, future_field: 'future-draft'})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-archived', stage: 'archived', title: 'Archived', updated_at: 30})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let projected = db
+        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
+            list: KnowledgeSkillListRequest {
+                stages: vec![
+                    "active".to_string(),
+                    "draft".to_string(),
+                    "stale".to_string(),
+                    "candidate".to_string(),
+                    "promotable".to_string(),
+                    "rejected".to_string(),
+                ],
+                limit: 1500,
+                order: KnowledgeSkillListOrder::UpdatedAtDesc,
+                ..KnowledgeSkillListRequest::default()
+            },
+            property_names: vec![
+                "stage".to_string(),
+                "name".to_string(),
+                "title".to_string(),
+                "description".to_string(),
+                "triggers".to_string(),
+                "content_hash".to_string(),
+                "metadata".to_string(),
+                "space_id".to_string(),
+                "future_field".to_string(),
+                "stage".to_string(),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(projected.matched_count, 2);
+    assert_eq!(projected.returned_count, 2);
+    assert_eq!(
+        projected
+            .rows
+            .iter()
+            .map(|row| row.id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["mcp-skill-catalog-active", "mcp-skill-catalog-draft"]
+    );
+    assert_eq!(projected.rows[0].normalized_space_id, "default");
+    assert_eq!(projected.rows[1].normalized_space_id, "team");
+    assert_eq!(
+        projected.rows[0].properties.get("future_field"),
+        Some(&Value::String("future-active".to_string()))
+    );
+    assert_eq!(
+        projected.rows[0].properties.get("stage"),
+        Some(&Value::String("active".to_string()))
+    );
+    assert_eq!(
+        projected.rows[0].properties.get("space_id"),
+        Some(&Value::String(String::new()))
+    );
+    assert!(!projected.rows[0].properties.contains_key("updated_at"));
+
+    let snapshot = db.begin_read_transaction();
+    db.query("CREATE (:Skill {id: 'mcp-skill-catalog-late', stage: 'active', updated_at: 100})")
+        .unwrap();
+    let snapshot_output = snapshot
+        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
+            list: KnowledgeSkillListRequest {
+                stages: vec!["active".to_string()],
+                limit: 10,
+                order: KnowledgeSkillListOrder::UpdatedAtDesc,
+                ..KnowledgeSkillListRequest::default()
+            },
+            property_names: vec!["stage".to_string(), "updated_at".to_string()],
+        })
+        .unwrap();
+    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_output.matched_count, 1);
+    assert_eq!(
+        snapshot_output.rows[0].id.as_deref(),
+        Some("mcp-skill-catalog-active")
+    );
+}
+
+#[test]
 fn skill_list_rejects_unbounded_or_empty_filters() {
     let db = Database::new();
 
@@ -12017,6 +12108,34 @@ fn skill_list_rejects_unbounded_or_empty_filters() {
         })
         .unwrap_err();
     assert!(empty_after.to_string().contains("non-empty after id"));
+}
+
+#[test]
+fn projected_skill_list_rejects_empty_property_names_without_wal() {
+    let path = unique_test_dir("projected_skill_list_empty_property_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Skill {id: 'skill-active', stage: 'active'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
+            list: KnowledgeSkillListRequest {
+                stages: vec!["active".to_string()],
+                limit: 10,
+                ..KnowledgeSkillListRequest::default()
+            },
+            property_names: vec![String::new()],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
 }
 
 #[test]
