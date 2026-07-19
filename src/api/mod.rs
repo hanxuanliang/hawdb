@@ -2452,6 +2452,37 @@ pub struct KnowledgeThreadCompactedMemoryListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCompactingThreadListRequest {
+    pub memory_ids: Vec<String>,
+    pub limit_per_memory: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCompactingThreadRow {
+    pub memory_id: String,
+    pub memory_node_id: Option<u64>,
+    pub found_memory: bool,
+    pub thread_id: Option<String>,
+    pub thread_node_id: Option<u64>,
+    pub thread_logical_id: Option<String>,
+    pub title: Option<String>,
+    pub source: Option<String>,
+    pub metadata: Option<Value>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: Option<String>,
+    pub relationship_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCompactingThreadListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryCompactingThreadRow>,
+    pub found_memory_count: usize,
+    pub missing_memory_count: usize,
+    pub returned_thread_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMessageListRequest {
     pub thread_id: String,
     pub limit: usize,
@@ -5012,6 +5043,13 @@ impl Database {
         request: &KnowledgeThreadCompactedMemoryListRequest,
     ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
         knowledge_thread_compacted_memories_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_compacting_threads(
+        &self,
+        request: &KnowledgeMemoryCompactingThreadListRequest,
+    ) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
+        knowledge_memory_compacting_threads_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_messages(
@@ -10900,6 +10938,109 @@ fn thread_compacted_memory_row(
         compaction_method: relationship_string_property(relationship, "compaction_method"),
         relationship_created_at: relationship.properties.get("created_at").cloned(),
         relationship_properties: relationship.properties.get("properties").cloned(),
+    }
+}
+
+fn knowledge_memory_compacting_threads_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryCompactingThreadListRequest,
+) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
+    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory compacting thread read requires non-empty memory ids".to_string(),
+        ));
+    }
+    let graph_commit_epoch = store.commit_epoch();
+    let mut rows = Vec::new();
+    let mut found_memory_count = 0;
+    let mut missing_memory_count = 0;
+    for memory_id in &request.memory_ids {
+        let Some(memory) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+        else {
+            missing_memory_count += 1;
+            rows.push(KnowledgeMemoryCompactingThreadRow {
+                memory_id: memory_id.clone(),
+                memory_node_id: None,
+                found_memory: false,
+                thread_id: None,
+                thread_node_id: None,
+                thread_logical_id: None,
+                title: None,
+                source: None,
+                metadata: None,
+                raw_space_id: None,
+                normalized_space_id: None,
+                relationship_id: None,
+            });
+            continue;
+        };
+        found_memory_count += 1;
+        let mut memory_rows = compacting_thread_rows_for_memory(catalog, store, memory);
+        if request.limit_per_memory > 0 {
+            memory_rows.truncate(request.limit_per_memory);
+        }
+        rows.extend(memory_rows);
+    }
+    let returned_thread_count = rows.iter().filter(|row| row.thread_id.is_some()).count();
+    Ok(KnowledgeMemoryCompactingThreadListOutput {
+        graph_commit_epoch,
+        rows,
+        found_memory_count,
+        missing_memory_count,
+        returned_thread_count,
+    })
+}
+
+fn compacting_thread_rows_for_memory(
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory: &NodeRecord,
+) -> Vec<KnowledgeMemoryCompactingThreadRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
+        return Vec::new();
+    };
+    let Some(thread_label_id) = catalog.label_id("Thread") else {
+        return Vec::new();
+    };
+    let memory_id = node_external_id(memory).unwrap_or_else(|| memory.id.0.to_string());
+    let mut rows = store
+        .incoming_relationships(memory.id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.source)
+                .filter(|thread| thread.labels.contains(&thread_label_id))
+                .map(|thread| compacting_thread_row(&memory_id, memory.id, thread, relationship))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.thread_logical_id
+            .cmp(&right.thread_logical_id)
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    rows
+}
+
+fn compacting_thread_row(
+    memory_id: &str,
+    memory_node_id: NodeId,
+    thread: &NodeRecord,
+    relationship: &RelRecord,
+) -> KnowledgeMemoryCompactingThreadRow {
+    KnowledgeMemoryCompactingThreadRow {
+        memory_id: memory_id.to_string(),
+        memory_node_id: Some(memory_node_id.0),
+        found_memory: true,
+        thread_id: node_external_id(thread),
+        thread_node_id: Some(thread.id.0),
+        thread_logical_id: string_property(thread, "thread_id"),
+        title: string_property(thread, "title"),
+        source: string_property(thread, "source"),
+        metadata: thread.properties.get("metadata").cloned(),
+        raw_space_id: string_property(thread, "space_id"),
+        normalized_space_id: Some(normalized_node_space_id(thread)),
+        relationship_id: Some(relationship.id.0),
     }
 }
 
@@ -18197,6 +18338,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadCompactedMemoryListRequest,
     ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
         self.db.knowledge_thread_compacted_memories(request)
+    }
+
+    pub fn knowledge_memory_compacting_threads(
+        &self,
+        request: &KnowledgeMemoryCompactingThreadListRequest,
+    ) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
+        self.db.knowledge_memory_compacting_threads(request)
     }
 
     pub fn knowledge_thread_messages(

@@ -430,6 +430,11 @@ Thread compacted-memory reads are available as
 count/id-list/summary/full-row read shapes by physical `id` or logical
 `thread_id`, with Memory display/rank/reindex/review/temporal/access fields,
 relationship metadata, bounded limits, and no WAL writes.
+Memory compacting-Thread reads are available as
+`Database::knowledge_memory_compacting_threads`, covering Nowledge Memory id to
+Thread id/source/metadata reads over incoming `COMPACTS_TO` relationships with
+missing-Memory rows, per-Memory limits, normalized-space fallbacks, and no WAL
+writes.
 Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with

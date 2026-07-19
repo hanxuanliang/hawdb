@@ -20,11 +20,11 @@ use super::{
     KnowledgeLabelBackfillScanRequest, KnowledgeLabelCanonicalLookupRequest,
     KnowledgeLabelLifecycleBatchRequest, KnowledgeLabelLifecycleUpdate,
     KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryEntityListRequest,
-    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
-    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
-    KnowledgeMemoryListRequest, KnowledgeMemorySourceAttributionRequest,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeMemoryAccessTouch, KnowledgeMemoryCompactingThreadListRequest,
+    KnowledgeMemoryEntityListRequest, KnowledgeMemoryLatestBatchRequest,
+    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
+    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
+    KnowledgeMemorySourceAttributionRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -8002,6 +8002,103 @@ fn thread_compacted_memory_read_rejects_invalid_identity() {
     assert!(invalid_identity
         .to_string()
         .contains("id or thread_id identity"));
+}
+
+#[test]
+fn reads_memory_compacting_threads_for_nowledge_metadata_and_source_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b'})").unwrap();
+    db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Thread A', source: 'slack', metadata: '{\"source\":\"rest\"}', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Thread B', source: 'email', metadata: '{\"thread\":true}', space_id: 'archive'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_a'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 10}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 20}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'thread_b'}), (m:Memory {id: 'memory_b'}) CREATE (t)-[:COMPACTS_TO {created_at: 30}]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
+            memory_ids: vec![
+                "memory_a".to_string(),
+                "missing".to_string(),
+                "memory_b".to_string(),
+            ],
+            limit_per_memory: 0,
+        })
+        .unwrap();
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.found_memory_count, 2);
+    assert_eq!(output.missing_memory_count, 1);
+    assert_eq!(output.returned_thread_count, 3);
+    assert_eq!(output.rows[0].memory_id, "memory_a");
+    assert!(output.rows[0].found_memory);
+    assert!(output.rows[0].memory_node_id.is_some());
+    assert_eq!(output.rows[0].thread_id.as_deref(), Some("thread_a"));
+    assert!(output.rows[0].thread_node_id.is_some());
+    assert_eq!(
+        output.rows[0].thread_logical_id.as_deref(),
+        Some("logical_a")
+    );
+    assert_eq!(output.rows[0].title.as_deref(), Some("Thread A"));
+    assert_eq!(output.rows[0].source.as_deref(), Some("slack"));
+    assert_eq!(
+        output.rows[0].metadata,
+        Some(Value::String("{\"source\":\"rest\"}".to_string()))
+    );
+    assert_eq!(output.rows[0].raw_space_id, None);
+    assert_eq!(
+        output.rows[0].normalized_space_id.as_deref(),
+        Some("default")
+    );
+    assert!(output.rows[0].relationship_id.is_some());
+    assert_eq!(output.rows[1].thread_id.as_deref(), Some("thread_b"));
+    assert_eq!(output.rows[1].raw_space_id.as_deref(), Some("archive"));
+    assert_eq!(
+        output.rows[1].normalized_space_id.as_deref(),
+        Some("archive")
+    );
+    assert_eq!(output.rows[2].memory_id, "missing");
+    assert!(!output.rows[2].found_memory);
+    assert_eq!(output.rows[2].thread_id, None);
+    assert_eq!(output.rows[3].memory_id, "memory_b");
+    assert_eq!(output.rows[3].thread_id.as_deref(), Some("thread_b"));
+
+    let limited = db
+        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
+            memory_ids: vec!["memory_a".to_string()],
+            limit_per_memory: 1,
+        })
+        .unwrap();
+    assert_eq!(limited.found_memory_count, 1);
+    assert_eq!(limited.returned_thread_count, 1);
+    assert_eq!(limited.rows[0].thread_id.as_deref(), Some("thread_a"));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn memory_compacting_thread_read_rejects_empty_memory_ids() {
+    let db = Database::new();
+    let empty = db
+        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
+            memory_ids: Vec::new(),
+            limit_per_memory: 10,
+        })
+        .unwrap_err();
+    assert!(empty.to_string().contains("non-empty memory ids"));
+
+    let empty_item = db
+        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
+            memory_ids: vec![String::new()],
+            limit_per_memory: 10,
+        })
+        .unwrap_err();
+    assert!(empty_item.to_string().contains("non-empty memory ids"));
 }
 
 #[test]

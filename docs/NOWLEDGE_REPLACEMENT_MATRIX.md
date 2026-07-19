@@ -270,6 +270,11 @@ Memory edges, returns Memory id/title/content previews, rank/time/space/
 review/reindex/temporal/access fields, relationship metadata, count/id-list/
 summary/full-row compatible fallbacks, importance/created-at ordering, bounded
 limits, and no WAL writes.
+Memory compacting-Thread reads are covered by
+`Database::knowledge_memory_compacting_threads`. The typed read resolves
+bounded Memory ids, scans incoming `COMPACTS_TO` Thread edges, returns Thread
+physical/logical ids, title, source, metadata, normalized space, relationship
+ids, missing-Memory rows, per-Memory limits, and no WAL writes.
 Thread list and source reads are covered by `Database::knowledge_threads` for
 Nowledge bounded Thread page, source lookup, source page, normalized-space
 count/list, favorite metadata page, id/thread-id bulk lookup, and
