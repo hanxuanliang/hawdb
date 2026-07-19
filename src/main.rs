@@ -12,7 +12,8 @@ use cli_replacement_summary::{
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
 use cli_search_projection_evidence::{
-    run_nowledge_search_projection_evidence, run_skein_search_projection_probe,
+    run_nowledge_search_projection_evidence, run_nowledge_search_projection_shadow_evidence,
+    run_skein_search_projection_probe,
 };
 use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::{
@@ -116,6 +117,17 @@ fn main() -> Result<()> {
         if command == "skein-search-projection-probe" {
             let json = run_skein_search_projection_probe(args)?;
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            return Ok(());
+        }
+        if command == "nowledge-search-projection-shadow-evidence" {
+            let (json, require_ready) = run_nowledge_search_projection_shadow_evidence(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge search projection shadow evidence is not ready".to_string(),
+                ));
+            }
             return Ok(());
         }
         if command == "explain-json" {

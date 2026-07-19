@@ -30,6 +30,11 @@ pub fn skein_search_projection_probe_usage() -> String {
         .to_string()
 }
 
+pub fn nowledge_search_projection_shadow_evidence_usage() -> String {
+    "nowledge-search-projection-shadow-evidence requires [--require-ready] --primary-probe-json <path> --shadow-probe-json <path>"
+        .to_string()
+}
+
 pub fn run_nowledge_search_projection_evidence(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(serde_json::Value, bool)> {
@@ -87,6 +92,46 @@ pub fn run_skein_search_projection_probe(
         }
     }
     Err(SkeinError::Semantic(skein_search_projection_probe_usage()))
+}
+
+pub fn run_nowledge_search_projection_shadow_evidence(
+    mut args: impl Iterator<Item = String>,
+) -> Result<(serde_json::Value, bool)> {
+    let mut require_ready = false;
+    let mut primary_probe = None;
+    let mut shadow_probe = None;
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--require-ready" => {
+                require_ready = true;
+            }
+            "--primary-probe-json" => {
+                let path = args.next().ok_or_else(|| {
+                    SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage())
+                })?;
+                primary_probe = Some(read_json_file(Path::new(&path))?);
+            }
+            "--shadow-probe-json" => {
+                let path = args.next().ok_or_else(|| {
+                    SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage())
+                })?;
+                shadow_probe = Some(read_json_file(Path::new(&path))?);
+            }
+            _ => {
+                return Err(SkeinError::Semantic(
+                    nowledge_search_projection_shadow_evidence_usage(),
+                ));
+            }
+        }
+    }
+    let primary_probe = primary_probe
+        .ok_or_else(|| SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
+    let shadow_probe = shadow_probe
+        .ok_or_else(|| SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
+    Ok((
+        nowledge_search_projection_shadow_evidence_json(&primary_probe, &shadow_probe),
+        require_ready,
+    ))
 }
 
 pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> serde_json::Value {
@@ -182,6 +227,120 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         "incremental_update": incremental_update,
         "blocker_codes": blocker_codes.into_iter().collect::<Vec<_>>(),
     })
+}
+
+pub fn nowledge_search_projection_shadow_evidence_json(
+    primary_probe: &serde_json::Value,
+    shadow_probe: &serde_json::Value,
+) -> serde_json::Value {
+    let primary_evidence = nowledge_search_projection_evidence_json(primary_probe);
+    let shadow_evidence = nowledge_search_projection_evidence_json(shadow_probe);
+    let table_parity = search_projection_table_parity(&primary_evidence, &shadow_evidence);
+    let document_count_parity =
+        u64_path(primary_probe, &["document_count"]) == u64_path(shadow_probe, &["document_count"]);
+    let embedding_identity_parity = value_path(&primary_evidence, &["embedding_identity"])
+        == value_path(&shadow_evidence, &["embedding_identity"]);
+    let lifecycle_parity = value_path(&primary_evidence, &["lifecycle"])
+        == value_path(&shadow_evidence, &["lifecycle"]);
+    let incremental_watermark_parity = u64_path(
+        primary_probe,
+        &["incremental_update", "source_graph_commit_epoch"],
+    ) == u64_path(
+        shadow_probe,
+        &["incremental_update", "source_graph_commit_epoch"],
+    );
+    let mut blocker_codes = BTreeSet::new();
+    collect_prefixed_evidence_blockers("primary", &primary_evidence, &mut blocker_codes);
+    collect_prefixed_evidence_blockers("shadow", &shadow_evidence, &mut blocker_codes);
+    if bool_path(&primary_evidence, &["ready"]) != Some(true) {
+        blocker_codes.insert("primary_not_ready".to_string());
+    }
+    if bool_path(&shadow_evidence, &["ready"]) != Some(true) {
+        blocker_codes.insert("shadow_not_ready".to_string());
+    }
+    if !bool_path(&table_parity, &["ready"]).unwrap_or(false) {
+        blocker_codes.insert("table_parity_mismatch".to_string());
+    }
+    if !document_count_parity {
+        blocker_codes.insert("document_count_mismatch".to_string());
+    }
+    if !embedding_identity_parity {
+        blocker_codes.insert("embedding_identity_mismatch".to_string());
+    }
+    if !lifecycle_parity {
+        blocker_codes.insert("lifecycle_mismatch".to_string());
+    }
+    if !incremental_watermark_parity {
+        blocker_codes.insert("incremental_watermark_mismatch".to_string());
+    }
+    let ready = blocker_codes.is_empty();
+    serde_json::json!({
+        "protocol": "skein-nowledge-search-projection-shadow-evidence",
+        "ready": ready,
+        "primary_engine": str_path(primary_probe, &["engine"]).unwrap_or("lancedb"),
+        "shadow_engine": str_path(shadow_probe, &["engine"]).unwrap_or("skein"),
+        "primary_ready": bool_path(&primary_evidence, &["ready"]).unwrap_or(false),
+        "shadow_ready": bool_path(&shadow_evidence, &["ready"]).unwrap_or(false),
+        "document_count_parity": document_count_parity,
+        "primary_document_count": u64_path(primary_probe, &["document_count"]),
+        "shadow_document_count": u64_path(shadow_probe, &["document_count"]),
+        "table_parity": table_parity,
+        "embedding_identity_parity": embedding_identity_parity,
+        "lifecycle_parity": lifecycle_parity,
+        "incremental_watermark_parity": incremental_watermark_parity,
+        "primary_evidence": primary_evidence,
+        "shadow_evidence": shadow_evidence,
+        "blocker_codes": blocker_codes.into_iter().collect::<Vec<_>>(),
+    })
+}
+
+fn search_projection_table_parity(
+    primary_evidence: &serde_json::Value,
+    shadow_evidence: &serde_json::Value,
+) -> serde_json::Value {
+    let tables = REQUIRED_TABLES
+        .iter()
+        .map(|table| {
+            let primary = find_table(primary_evidence, table).unwrap_or(&serde_json::Value::Null);
+            let shadow = find_table(shadow_evidence, table).unwrap_or(&serde_json::Value::Null);
+            let row_count_matches =
+                u64_path(primary, &["row_count"]) == u64_path(shadow, &["row_count"]);
+            let ready_matches = bool_path(primary, &["present"]) == bool_path(shadow, &["present"])
+                && bool_path(primary, &["fts_ready"]) == bool_path(shadow, &["fts_ready"])
+                && bool_path(primary, &["vector_ready"]) == bool_path(shadow, &["vector_ready"]);
+            serde_json::json!({
+                "name": table,
+                "ready": row_count_matches && ready_matches,
+                "row_count_matches": row_count_matches,
+                "ready_matches": ready_matches,
+                "primary_row_count": u64_path(primary, &["row_count"]),
+                "shadow_row_count": u64_path(shadow, &["row_count"]),
+                "primary_present": bool_path(primary, &["present"]),
+                "shadow_present": bool_path(shadow, &["present"]),
+                "primary_fts_ready": bool_path(primary, &["fts_ready"]),
+                "shadow_fts_ready": bool_path(shadow, &["fts_ready"]),
+                "primary_vector_ready": bool_path(primary, &["vector_ready"]),
+                "shadow_vector_ready": bool_path(shadow, &["vector_ready"]),
+            })
+        })
+        .collect::<Vec<_>>();
+    let ready = tables
+        .iter()
+        .all(|table| bool_path(table, &["ready"]) == Some(true));
+    serde_json::json!({
+        "ready": ready,
+        "tables": tables,
+    })
+}
+
+fn collect_prefixed_evidence_blockers(
+    prefix: &str,
+    evidence: &serde_json::Value,
+    blockers: &mut BTreeSet<String>,
+) {
+    for code in array_path(evidence, &["blocker_codes"]).unwrap_or_default() {
+        blockers.insert(format!("{prefix}_{code}"));
+    }
 }
 
 fn required_table_reports(probe: &serde_json::Value) -> Vec<serde_json::Value> {
@@ -369,7 +528,10 @@ fn array_path(value: &serde_json::Value, path: &[&str]) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{nowledge_search_projection_evidence_json, run_skein_search_projection_probe};
+    use super::{
+        nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
+        run_skein_search_projection_probe,
+    };
     use skein::{
         SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
         SearchProjectionRow,
@@ -482,9 +644,55 @@ mod tests {
         std::fs::remove_dir_all(path).unwrap();
     }
 
+    #[test]
+    fn search_projection_shadow_evidence_reports_ready_for_matching_probes() {
+        let primary = ready_probe();
+        let shadow = ready_probe();
+
+        let report = nowledge_search_projection_shadow_evidence_json(&primary, &shadow);
+
+        assert_eq!(report["ready"], true);
+        assert_eq!(report["primary_ready"], true);
+        assert_eq!(report["shadow_ready"], true);
+        assert_eq!(report["document_count_parity"], true);
+        assert_eq!(report["table_parity"]["ready"], true);
+        assert_eq!(report["embedding_identity_parity"], true);
+        assert_eq!(report["lifecycle_parity"], true);
+        assert_eq!(report["incremental_watermark_parity"], true);
+        assert_eq!(report["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_projection_shadow_evidence_fails_closed_on_table_mismatch() {
+        let primary = ready_probe();
+        let mut shadow = ready_probe();
+        shadow["tables"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|table| table["name"].as_str() != Some("source_chunks_index"));
+
+        let report = nowledge_search_projection_shadow_evidence_json(&primary, &shadow);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["shadow_ready"], false);
+        assert_eq!(report["table_parity"]["ready"], false);
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "table_parity_mismatch"));
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "shadow_source_chunks_index_not_ready"));
+    }
+
     fn ready_probe() -> serde_json::Value {
         serde_json::json!({
+            "engine": "skein",
             "derived_projection": true,
+            "document_count": 6,
             "tables": [
                 table("memories_index", true),
                 table("messages_index", false),
@@ -512,7 +720,8 @@ mod tests {
                 "ready": true,
                 "upsert_ready": true,
                 "delete_ready": true,
-                "watermark_ready": true
+                "watermark_ready": true,
+                "source_graph_commit_epoch": 7
             }
         })
     }
