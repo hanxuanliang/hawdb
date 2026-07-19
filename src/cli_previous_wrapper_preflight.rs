@@ -333,14 +333,59 @@ fn nowledge_previous_wrapper_preflight_check_json(
         .filter_map(|check| check.get("name").and_then(serde_json::Value::as_str))
         .map(str::to_string)
         .collect::<Vec<_>>();
+    let release_summary = previous_wrapper_preflight_release_summary(
+        &wrapper_identity,
+        &contract_evidence,
+        &adapter_smoke,
+        &migration_gate,
+        &replacement_summary,
+    );
 
     Ok(serde_json::json!({
         "protocol": "skein-nowledge-previous-wrapper-preflight-check",
         "ready": ready,
         "wrapper_identity": wrapper_identity,
         "failed_checks": failed_checks,
+        "release_summary": release_summary,
         "checks": checks,
     }))
+}
+
+fn previous_wrapper_preflight_release_summary(
+    wrapper_identity: &str,
+    contract_evidence: &serde_json::Value,
+    adapter_smoke: &serde_json::Value,
+    migration_gate: &serde_json::Value,
+    replacement_summary: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "wrapper_identity": wrapper_identity,
+        "required_contract_ready": bool_path(contract_evidence, &["required_contract_ready"]),
+        "full_contract_checked": bool_path(contract_evidence, &["full_contract_checked"]),
+        "selected_checks": u64_path(contract_evidence, &["selected_checks"]),
+        "check_count": u64_path(contract_evidence, &["check_count"]),
+        "adapter_smoke_ready": bool_path(adapter_smoke, &["adapter_smoke_ready"]),
+        "adapter_request_count": u64_path(adapter_smoke, &["request_count"]),
+        "adapter_primary_only_checks": u64_path(adapter_smoke, &["primary_only_checks"]),
+        "migration_gate_decision": str_path(migration_gate, &["migration_gate", "decision"]),
+        "cutover_decision": str_path(migration_gate, &["cutover", "decision"]),
+        "cutover_eligible": bool_path(migration_gate, &["cutover_evidence", "eligible"]),
+        "ready_engine_kind": str_path(migration_gate, &["cutover_evidence", "ready_engine_kind"]),
+        "ready_wrapper_identity": str_path(migration_gate, &["cutover_evidence", "ready_wrapper_identity"]),
+        "replacement_readiness_per_million": u64_path(migration_gate, &["replacement_readiness_per_million"])
+            .or_else(|| u64_path(replacement_summary, &["replacement_readiness_per_million"])),
+        "production_cutover_ready": bool_path(replacement_summary, &["production_cutover_ready"]),
+        "production_replacement_per_million": u64_path(replacement_summary, &["production_replacement_per_million"]),
+        "storage_recovery_ready": bool_path(migration_gate, &["cutover_evidence", "storage_recovery_ready"]),
+        "background_maintenance_ready": bool_path(migration_gate, &["cutover_evidence", "background_maintenance_ready"]),
+        "dual_engine_evidence_present": bool_path(replacement_summary, &["dual_engine_evidence", "present"]),
+        "dual_engine_evidence_ready": bool_path(replacement_summary, &["dual_engine_evidence", "ready"]),
+        "dual_engine_primary_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "primary_check_count"]),
+        "dual_engine_shadow_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "shadow_check_count"]),
+        "dual_engine_matched_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "matched_check_count"]),
+        "dual_engine_primary_only_check_count": u64_path(replacement_summary, &["dual_engine_evidence", "primary_only_check_count"]),
+        "dual_engine_matched_per_million": u64_path(replacement_summary, &["dual_engine_evidence", "matched_per_million"]),
+    })
 }
 
 fn preflight_check(
@@ -441,6 +486,36 @@ mod tests {
         assert_eq!(report["ready"], true);
         assert_eq!(report["failed_checks"], serde_json::json!([]));
         assert_eq!(report["wrapper_identity"], "nowledge-previous-wrapper:test");
+        assert_eq!(
+            report["release_summary"],
+            serde_json::json!({
+                "wrapper_identity": "nowledge-previous-wrapper:test",
+                "required_contract_ready": true,
+                "full_contract_checked": true,
+                "selected_checks": 2,
+                "check_count": 2,
+                "adapter_smoke_ready": true,
+                "adapter_request_count": 4,
+                "adapter_primary_only_checks": 0,
+                "migration_gate_decision": "ready",
+                "cutover_decision": "ready",
+                "cutover_eligible": true,
+                "ready_engine_kind": "previous_wrapper",
+                "ready_wrapper_identity": "nowledge-previous-wrapper:test",
+                "replacement_readiness_per_million": 1_000_000,
+                "production_cutover_ready": true,
+                "production_replacement_per_million": 1_000_000,
+                "storage_recovery_ready": true,
+                "background_maintenance_ready": true,
+                "dual_engine_evidence_present": true,
+                "dual_engine_evidence_ready": true,
+                "dual_engine_primary_check_count": 2,
+                "dual_engine_shadow_check_count": 2,
+                "dual_engine_matched_check_count": 2,
+                "dual_engine_primary_only_check_count": 0,
+                "dual_engine_matched_per_million": 1_000_000
+            })
+        );
         assert!(report["checks"]
             .as_array()
             .unwrap()
@@ -681,6 +756,9 @@ mod tests {
             bundle_dir: None,
             contract_evidence: Some(serde_json::json!({
                 "required_contract_ready": true,
+                "full_contract_checked": true,
+                "selected_checks": 2,
+                "check_count": 2,
                 "previous_wrapper_contract_evidence": {
                     "ready": true,
                     "wrapper_identity": "nowledge-previous-wrapper:test",
@@ -693,6 +771,7 @@ mod tests {
                 "engine_kind": "previous_wrapper",
                 "wrapper_identity": "nowledge-previous-wrapper:test",
                 "primary_only_checks": 0,
+                "request_count": 4,
                 "dual_engine_evidence": {
                     "ready": true
                 },
@@ -736,7 +815,12 @@ mod tests {
                 "next_actions": [],
                 "dual_engine_evidence": {
                     "present": true,
-                    "ready": true
+                    "ready": true,
+                    "primary_check_count": 2,
+                    "shadow_check_count": 2,
+                    "matched_check_count": 2,
+                    "primary_only_check_count": 0,
+                    "matched_per_million": 1_000_000
                 }
             })),
         }

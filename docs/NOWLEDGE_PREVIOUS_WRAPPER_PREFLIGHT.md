@@ -269,6 +269,10 @@ requires `dual_engine_evidence.ready == true` so side-by-side cutover evidence
 cannot silently degrade into a primary-only smoke run.
 Each per-stage check includes `failed_evidence_fields`, so release automation
 can report the exact missing or mismatched field without parsing blocker text.
+The final JSON also includes `release_summary`, a compact copy of the wrapper
+identity, contract counts, adapter request counts, migration/cutover decisions,
+replacement readiness, storage/background readiness, and dual-engine counts
+needed by release notes and dashboards.
 For targeted debugging, the same command still accepts explicit
 `--contract-evidence-json`, `--adapter-smoke-json`, `--migration-gate-json`,
 and `--replacement-summary-json` paths; explicit files override the standard
