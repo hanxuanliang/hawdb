@@ -396,6 +396,48 @@ fn nowledge_previous_wrapper_preflight_check_json(
                     &replacement_summary,
                     &["search_projection_evidence", "source_chunk_ready"],
                 ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "present"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "primary_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "shadow_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "document_count_parity"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "table_parity_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "search_projection_shadow_evidence",
+                        "embedding_identity_parity",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "lifecycle_parity"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "search_projection_shadow_evidence",
+                        "incremental_watermark_parity",
+                    ],
+                ) == Some(true),
             ],
             [
                 "production_cutover_ready",
@@ -427,6 +469,15 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "search_projection_evidence.metadata_repair_marker_ready",
                 "search_projection_evidence.incremental_update_ready",
                 "search_projection_evidence.source_chunk_ready",
+                "search_projection_shadow_evidence.present",
+                "search_projection_shadow_evidence.ready",
+                "search_projection_shadow_evidence.primary_ready",
+                "search_projection_shadow_evidence.shadow_ready",
+                "search_projection_shadow_evidence.document_count_parity",
+                "search_projection_shadow_evidence.table_parity_ready",
+                "search_projection_shadow_evidence.embedding_identity_parity",
+                "search_projection_shadow_evidence.lifecycle_parity",
+                "search_projection_shadow_evidence.incremental_watermark_parity",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -435,6 +486,7 @@ fn nowledge_previous_wrapper_preflight_check_json(
                     &["missing_evidence"][..],
                     &["next_actions"][..],
                     &["search_projection_evidence", "blocker_codes"][..],
+                    &["search_projection_shadow_evidence", "blocker_codes"][..],
                 ],
             ),
         ),
@@ -790,6 +842,76 @@ fn previous_wrapper_preflight_release_summary(
             &["search_projection_evidence", "incremental_update_ready"],
         ),
     );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_evidence_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_primary_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "primary_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_shadow_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "shadow_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_document_count_parity",
+        bool_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "document_count_parity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_table_parity_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "table_parity_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_embedding_identity_parity",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "embedding_identity_parity",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_lifecycle_parity",
+        bool_path(
+            replacement_summary,
+            &["search_projection_shadow_evidence", "lifecycle_parity"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_incremental_watermark_parity",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "incremental_watermark_parity",
+            ],
+        ),
+    );
     serde_json::Value::Object(summary)
 }
 
@@ -1036,6 +1158,26 @@ mod tests {
         assert_release_summary_field(summary, "search_projection_embedding_identity_ready", true);
         assert_release_summary_field(summary, "search_projection_fail_soft_ready", true);
         assert_release_summary_field(summary, "search_projection_incremental_update_ready", true);
+        assert_release_summary_field(summary, "search_projection_shadow_evidence_ready", true);
+        assert_release_summary_field(summary, "search_projection_shadow_primary_ready", true);
+        assert_release_summary_field(summary, "search_projection_shadow_shadow_ready", true);
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_document_count_parity",
+            true,
+        );
+        assert_release_summary_field(summary, "search_projection_shadow_table_parity_ready", true);
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_embedding_identity_parity",
+            true,
+        );
+        assert_release_summary_field(summary, "search_projection_shadow_lifecycle_parity", true);
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_incremental_watermark_parity",
+            true,
+        );
         assert!(report["checks"]
             .as_array()
             .unwrap()
@@ -1105,7 +1247,16 @@ mod tests {
                 "search_projection_evidence.rebuild_marker_ready",
                 "search_projection_evidence.metadata_repair_marker_ready",
                 "search_projection_evidence.incremental_update_ready",
-                "search_projection_evidence.source_chunk_ready"
+                "search_projection_evidence.source_chunk_ready",
+                "search_projection_shadow_evidence.present",
+                "search_projection_shadow_evidence.ready",
+                "search_projection_shadow_evidence.primary_ready",
+                "search_projection_shadow_evidence.shadow_ready",
+                "search_projection_shadow_evidence.document_count_parity",
+                "search_projection_shadow_evidence.table_parity_ready",
+                "search_projection_shadow_evidence.embedding_identity_parity",
+                "search_projection_shadow_evidence.lifecycle_parity",
+                "search_projection_shadow_evidence.incremental_watermark_parity"
             ])
         );
     }
@@ -1159,7 +1310,8 @@ mod tests {
                 "matched_check_count": 2,
                 "primary_only_check_count": 0
             },
-            "search_projection_evidence": ready_search_projection_evidence()
+            "search_projection_evidence": ready_search_projection_evidence(),
+            "search_projection_shadow_evidence": ready_search_projection_shadow_evidence()
         }));
 
         let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
@@ -1204,6 +1356,38 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "replacement_summary")["blocker_codes"],
             serde_json::json!(["missing_source_chunks_index"])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_summary_search_projection_shadow_evidence() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
+        replacement_summary["search_projection_shadow_evidence"]["table_parity_ready"] =
+            serde_json::json!(false);
+        replacement_summary["search_projection_shadow_evidence"]["incremental_watermark_parity"] =
+            serde_json::json!(false);
+        replacement_summary["search_projection_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["table_parity_mismatch", "incremental_watermark_mismatch"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "search_projection_shadow_evidence.table_parity_ready",
+                "search_projection_shadow_evidence.incremental_watermark_parity"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["blocker_codes"],
+            serde_json::json!(["incremental_watermark_mismatch", "table_parity_mismatch"])
         );
     }
 
@@ -1580,7 +1764,8 @@ mod tests {
                     "primary_only_check_count": 0,
                     "matched_per_million": 1_000_000
                 },
-                "search_projection_evidence": ready_search_projection_evidence()
+                "search_projection_evidence": ready_search_projection_evidence(),
+                "search_projection_shadow_evidence": ready_search_projection_shadow_evidence()
             })),
         }
     }
@@ -1601,6 +1786,23 @@ mod tests {
             "metadata_repair_marker_ready": true,
             "incremental_update_ready": true,
             "source_chunk_ready": true,
+            "blocker_codes": []
+        })
+    }
+
+    fn ready_search_projection_shadow_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "present": true,
+            "ready": true,
+            "primary_engine": "lancedb",
+            "shadow_engine": "skein",
+            "primary_ready": true,
+            "shadow_ready": true,
+            "document_count_parity": true,
+            "table_parity_ready": true,
+            "embedding_identity_parity": true,
+            "lifecycle_parity": true,
+            "incremental_watermark_parity": true,
             "blocker_codes": []
         })
     }

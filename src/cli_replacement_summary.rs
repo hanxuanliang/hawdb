@@ -59,6 +59,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let dual_engine_evidence_consistent = dual_engine_evidence.consistent;
     let search_projection_evidence = search_projection_evidence_summary(bundle);
     let search_projection_evidence_ready = search_projection_evidence.ready;
+    let search_projection_shadow_evidence = search_projection_shadow_evidence_summary(bundle);
+    let search_projection_shadow_evidence_ready = search_projection_shadow_evidence.ready;
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
     let production_cutover_ready = migration_gate_decision == Some("ready")
@@ -71,6 +73,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && dual_engine_evidence_ready == Some(true)
         && dual_engine_evidence_consistent
         && search_projection_evidence_ready
+        && search_projection_shadow_evidence_ready
         && !background_graph_delta_evidence_missing
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
@@ -94,6 +97,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_ready,
             dual_engine_evidence_consistent,
             search_projection_evidence_ready,
+            search_projection_shadow_evidence_ready,
             background_graph_delta_evidence_missing,
         },
     );
@@ -118,6 +122,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_ready,
             dual_engine_evidence_consistent,
             search_projection_evidence_ready,
+            search_projection_shadow_evidence_ready,
             background_graph_delta_evidence_missing,
             production_cutover_ready,
         },
@@ -166,6 +171,20 @@ pub fn nowledge_replacement_summary_json_with_options(
             "incremental_update_ready": search_projection_evidence.incremental_update_ready,
             "source_chunk_ready": search_projection_evidence.source_chunk_ready,
             "blocker_codes": search_projection_evidence.blocker_codes,
+        },
+        "search_projection_shadow_evidence": {
+            "present": search_projection_shadow_evidence.present,
+            "ready": search_projection_shadow_evidence.ready,
+            "primary_ready": search_projection_shadow_evidence.primary_ready,
+            "shadow_ready": search_projection_shadow_evidence.shadow_ready,
+            "document_count_parity": search_projection_shadow_evidence.document_count_parity,
+            "table_parity_ready": search_projection_shadow_evidence.table_parity_ready,
+            "embedding_identity_parity": search_projection_shadow_evidence.embedding_identity_parity,
+            "lifecycle_parity": search_projection_shadow_evidence.lifecycle_parity,
+            "incremental_watermark_parity": search_projection_shadow_evidence.incremental_watermark_parity,
+            "primary_engine": search_projection_shadow_evidence.primary_engine,
+            "shadow_engine": search_projection_shadow_evidence.shadow_engine,
+            "blocker_codes": search_projection_shadow_evidence.blocker_codes,
         },
         "cutover_evidence": {
             "eligible": cutover_evidence_eligible,
@@ -343,6 +362,7 @@ struct ReplacementReadinessInputs<'a> {
     dual_engine_evidence_ready: Option<bool>,
     dual_engine_evidence_consistent: bool,
     search_projection_evidence_ready: bool,
+    search_projection_shadow_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
 }
 
@@ -360,6 +380,7 @@ struct NextActionInputs<'a> {
     dual_engine_evidence_ready: Option<bool>,
     dual_engine_evidence_consistent: bool,
     search_projection_evidence_ready: bool,
+    search_projection_shadow_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
     production_cutover_ready: bool,
 }
@@ -401,6 +422,21 @@ struct SearchProjectionEvidenceSummary {
     metadata_repair_marker_ready: Option<bool>,
     incremental_update_ready: Option<bool>,
     source_chunk_ready: Option<bool>,
+    blocker_codes: serde_json::Value,
+}
+
+struct SearchProjectionShadowEvidenceSummary<'a> {
+    present: bool,
+    ready: bool,
+    primary_ready: Option<bool>,
+    shadow_ready: Option<bool>,
+    document_count_parity: Option<bool>,
+    table_parity_ready: Option<bool>,
+    embedding_identity_parity: Option<bool>,
+    lifecycle_parity: Option<bool>,
+    incremental_watermark_parity: Option<bool>,
+    primary_engine: Option<&'a str>,
+    shadow_engine: Option<&'a str>,
     blocker_codes: serde_json::Value,
 }
 
@@ -552,6 +588,54 @@ fn search_projection_evidence_summary(
     }
 }
 
+fn search_projection_shadow_evidence_summary(
+    bundle: &serde_json::Value,
+) -> SearchProjectionShadowEvidenceSummary<'_> {
+    let path = if json_get_path(bundle, &["search_projection_shadow_evidence"]).is_some() {
+        &["search_projection_shadow_evidence"][..]
+    } else {
+        &["cutover_evidence", "search_projection_shadow_evidence"][..]
+    };
+    let present = json_get_path(bundle, path).is_some();
+    let primary_ready = json_get_bool_path_from_dynamic(bundle, path, "primary_ready");
+    let shadow_ready = json_get_bool_path_from_dynamic(bundle, path, "shadow_ready");
+    let document_count_parity =
+        json_get_bool_path_from_dynamic(bundle, path, "document_count_parity");
+    let table_parity_ready = {
+        let mut table_parity_path = path.to_vec();
+        table_parity_path.extend(["table_parity", "ready"]);
+        json_get_bool_path(bundle, &table_parity_path)
+            .or_else(|| json_get_bool_path_from_dynamic(bundle, path, "table_parity_ready"))
+    };
+    let embedding_identity_parity =
+        json_get_bool_path_from_dynamic(bundle, path, "embedding_identity_parity");
+    let lifecycle_parity = json_get_bool_path_from_dynamic(bundle, path, "lifecycle_parity");
+    let incremental_watermark_parity =
+        json_get_bool_path_from_dynamic(bundle, path, "incremental_watermark_parity");
+    let ready = present
+        && primary_ready == Some(true)
+        && shadow_ready == Some(true)
+        && document_count_parity == Some(true)
+        && table_parity_ready == Some(true)
+        && embedding_identity_parity == Some(true)
+        && lifecycle_parity == Some(true)
+        && incremental_watermark_parity == Some(true);
+    SearchProjectionShadowEvidenceSummary {
+        present,
+        ready,
+        primary_ready,
+        shadow_ready,
+        document_count_parity,
+        table_parity_ready,
+        embedding_identity_parity,
+        lifecycle_parity,
+        incremental_watermark_parity,
+        primary_engine: json_get_str_path_from_dynamic(bundle, path, "primary_engine"),
+        shadow_engine: json_get_str_path_from_dynamic(bundle, path, "shadow_engine"),
+        blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
+    }
+}
+
 fn json_get_array_path_from_dynamic(
     value: &serde_json::Value,
     base_path: &[&str],
@@ -596,6 +680,9 @@ fn nowledge_replacement_blocking_categories(
     }
     if !inputs.search_projection_evidence_ready {
         categories.insert("search_projection_evidence".to_string());
+    }
+    if !inputs.search_projection_shadow_evidence_ready {
+        categories.insert("search_projection_shadow_evidence".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
@@ -750,6 +837,24 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
+    if !inputs.search_projection_shadow_evidence_ready {
+        actions.push(next_action(
+            "run_search_projection_shadow_evidence",
+            "LanceDB/Skein search projection side-by-side evidence is missing or not ready",
+            [
+                "search_projection_shadow_evidence.present",
+                "search_projection_shadow_evidence.ready",
+                "search_projection_shadow_evidence.primary_ready",
+                "search_projection_shadow_evidence.shadow_ready",
+                "search_projection_shadow_evidence.document_count_parity",
+                "search_projection_shadow_evidence.table_parity.ready",
+                "search_projection_shadow_evidence.embedding_identity_parity",
+                "search_projection_shadow_evidence.lifecycle_parity",
+                "search_projection_shadow_evidence.incremental_watermark_parity",
+                "search_projection_shadow_evidence.blocker_codes",
+            ],
+        ));
+    }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
     {
@@ -864,6 +969,17 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     } else if !search_projection_evidence_summary(bundle).ready {
         missing.push("search_projection_evidence_ready".to_string());
     }
+    if bundle.get("search_projection_shadow_evidence").is_none()
+        && json_get_path(
+            bundle,
+            &["cutover_evidence", "search_projection_shadow_evidence"],
+        )
+        .is_none()
+    {
+        missing.push("search_projection_shadow_evidence".to_string());
+    } else if !search_projection_shadow_evidence_summary(bundle).ready {
+        missing.push("search_projection_shadow_evidence_ready".to_string());
+    }
     if bundle.get("shadow_run").is_none() {
         missing.push("shadow_run".to_string());
     }
@@ -914,6 +1030,12 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
         &["contract_evidence", "required_contract_blockers"][..],
         &["full_contract_blockers"][..],
         &["required_contract_blockers"][..],
+        &["search_projection_shadow_evidence", "blocker_codes"][..],
+        &[
+            "cutover_evidence",
+            "search_projection_shadow_evidence",
+            "blocker_codes",
+        ][..],
     ] {
         for blocker in json_get_string_array_path(bundle, path) {
             blockers.insert(blocker);
@@ -1037,6 +1159,7 @@ mod tests {
                 "dual_engine_evidence",
                 "previous_wrapper_contract",
                 "search_projection_evidence",
+                "search_projection_shadow_evidence",
                 "shadow_parity"
             ])
         );
@@ -1136,6 +1259,23 @@ mod tests {
             6
         );
         assert_eq!(
+            summary["search_projection_shadow_evidence"]["present"],
+            true
+        );
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], true);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["primary_engine"],
+            "lancedb"
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["shadow_engine"],
+            "skein"
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["table_parity_ready"],
+            true
+        );
+        assert_eq!(
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
@@ -1210,6 +1350,83 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "search_projection_evidence"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_search_projection_shadow_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("search_projection_shadow_evidence");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["present"],
+            false
+        );
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_shadow_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_shadow_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "run_search_projection_shadow_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| {
+                            field == "search_projection_shadow_evidence.table_parity.ready"
+                        })
+            }));
+    }
+
+    #[test]
+    fn replacement_summary_recomputes_search_projection_shadow_evidence_readiness() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["table_parity"]["ready"] =
+            serde_json::json!(false);
+        bundle["search_projection_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["table_parity_mismatch"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["table_parity_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["blocker_codes"],
+            serde_json::json!(["table_parity_mismatch"])
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_shadow_evidence_ready"));
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_shadow_evidence"));
     }
 
     #[test]
@@ -1655,6 +1872,7 @@ mod tests {
                 "previous_wrapper_contract",
                 "query_family_readiness",
                 "search_projection_evidence",
+                "search_projection_shadow_evidence",
                 "shadow_parity",
                 "storage_recovery"
             ])
@@ -1668,6 +1886,7 @@ mod tests {
                 "full_contract_evidence",
                 "dual_engine_evidence",
                 "search_projection_evidence",
+                "search_projection_shadow_evidence",
                 "shadow_run",
                 "shadow_ready"
             ])
@@ -1767,6 +1986,22 @@ mod tests {
                         "search_projection_evidence.incremental_update_ready",
                         "search_projection_evidence.source_chunk_ready",
                         "search_projection_evidence.blocker_codes"
+                    ]
+                },
+                {
+                    "action": "run_search_projection_shadow_evidence",
+                    "reason": "LanceDB/Skein search projection side-by-side evidence is missing or not ready",
+                    "evidence_fields": [
+                        "search_projection_shadow_evidence.present",
+                        "search_projection_shadow_evidence.ready",
+                        "search_projection_shadow_evidence.primary_ready",
+                        "search_projection_shadow_evidence.shadow_ready",
+                        "search_projection_shadow_evidence.document_count_parity",
+                        "search_projection_shadow_evidence.table_parity.ready",
+                        "search_projection_shadow_evidence.embedding_identity_parity",
+                        "search_projection_shadow_evidence.lifecycle_parity",
+                        "search_projection_shadow_evidence.incremental_watermark_parity",
+                        "search_projection_shadow_evidence.blocker_codes"
                     ]
                 },
                 {
@@ -1883,6 +2118,21 @@ mod tests {
                 "metadata_repair_marker_ready": true,
                 "incremental_update_ready": true,
                 "source_chunk_ready": true,
+                "blocker_codes": []
+            },
+            "search_projection_shadow_evidence": {
+                "ready": true,
+                "primary_engine": "lancedb",
+                "shadow_engine": "skein",
+                "primary_ready": true,
+                "shadow_ready": true,
+                "document_count_parity": true,
+                "table_parity": {
+                    "ready": true
+                },
+                "embedding_identity_parity": true,
+                "lifecycle_parity": true,
+                "incremental_watermark_parity": true,
                 "blocker_codes": []
             },
             "previous_wrapper_contract_evidence": {
