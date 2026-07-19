@@ -70,9 +70,9 @@ use super::{
     KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeThreadSyncMetadataRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -10010,6 +10010,72 @@ fn thread_identity_read_rejects_empty_key() {
         })
         .unwrap_err();
     assert!(error.to_string().contains("non-empty identity key"));
+}
+
+#[test]
+fn reads_thread_sync_metadata_for_nowledge_repo_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread_a', title: 'Alpha', source: 'codex', project: 'graph', workspace: 'local', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread_b'})").unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
+            id: "thread_a".to_string(),
+        })
+        .unwrap();
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.id, "thread_a");
+    assert!(output.thread_node_id.is_some());
+    assert!(output.found_thread);
+    assert_eq!(output.title, "Alpha");
+    assert_eq!(output.source, "codex");
+    assert_eq!(output.project, "graph");
+    assert_eq!(output.workspace, "local");
+    assert_eq!(output.space_id, "");
+
+    let defaults = db
+        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
+            id: "thread_b".to_string(),
+        })
+        .unwrap();
+    assert!(defaults.found_thread);
+    assert_eq!(defaults.title, "");
+    assert_eq!(defaults.source, "");
+    assert_eq!(defaults.project, "");
+    assert_eq!(defaults.workspace, "");
+    assert_eq!(defaults.space_id, "default");
+
+    let missing = db
+        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
+            id: "missing_thread".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found_thread);
+    assert_eq!(missing.thread_node_id, None);
+    assert_eq!(missing.space_id, "default");
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let tx = db.begin_read_transaction();
+    db.query("MATCH (t:Thread {id: 'thread_a'}) SET t.title = 'Changed'")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
+            id: "thread_a".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.title, "Alpha");
+}
+
+#[test]
+fn thread_sync_metadata_read_rejects_empty_thread_id() {
+    let db = Database::new();
+    let error = db
+        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest { id: String::new() })
+        .unwrap_err();
+    assert!(error.to_string().contains("non-empty thread id"));
 }
 
 #[test]

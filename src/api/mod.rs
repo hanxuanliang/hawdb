@@ -2802,6 +2802,24 @@ pub struct KnowledgeThreadIdentityOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadSyncMetadataRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadSyncMetadataOutput {
+    pub graph_commit_epoch: u64,
+    pub id: String,
+    pub thread_node_id: Option<u64>,
+    pub found_thread: bool,
+    pub title: String,
+    pub source: String,
+    pub project: String,
+    pub workspace: String,
+    pub space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadDistillationCandidateRequest {
     pub normalized_space_id: String,
     pub source: Option<String>,
@@ -5641,6 +5659,13 @@ impl Database {
         request: &KnowledgeThreadIdentityRequest,
     ) -> Result<KnowledgeThreadIdentityOutput> {
         knowledge_thread_identity_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_sync_metadata(
+        &self,
+        request: &KnowledgeThreadSyncMetadataRequest,
+    ) -> Result<KnowledgeThreadSyncMetadataOutput> {
+        knowledge_thread_sync_metadata_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_distillation_candidates(
@@ -11444,6 +11469,13 @@ fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn coalesced_string_property(node: &NodeRecord, property: &str, fallback: &str) -> String {
+    node.properties
+        .get(property)
+        .map(value_to_external_id)
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 fn integer_property(node: &NodeRecord, property: &str) -> Option<i64> {
     match node.properties.get(property) {
         Some(Value::Int(value)) => Some(*value),
@@ -13173,6 +13205,52 @@ fn validate_knowledge_thread_identity_request(
     if request.identity_key.is_empty() {
         return Err(SkeinError::Semantic(
             "knowledge thread identity read requires a non-empty identity key".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_thread_sync_metadata_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadSyncMetadataRequest,
+) -> Result<KnowledgeThreadSyncMetadataOutput> {
+    validate_knowledge_thread_sync_metadata_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(thread) = seed_node_by_label_and_external_id(catalog, store, "Thread", &request.id)
+    else {
+        return Ok(KnowledgeThreadSyncMetadataOutput {
+            graph_commit_epoch,
+            id: request.id.clone(),
+            thread_node_id: None,
+            found_thread: false,
+            title: String::new(),
+            source: String::new(),
+            project: String::new(),
+            workspace: String::new(),
+            space_id: "default".to_string(),
+        });
+    };
+
+    Ok(KnowledgeThreadSyncMetadataOutput {
+        graph_commit_epoch,
+        id: request.id.clone(),
+        thread_node_id: Some(thread.id.0),
+        found_thread: true,
+        title: coalesced_string_property(thread, "title", ""),
+        source: coalesced_string_property(thread, "source", ""),
+        project: coalesced_string_property(thread, "project", ""),
+        workspace: coalesced_string_property(thread, "workspace", ""),
+        space_id: coalesced_string_property(thread, "space_id", "default"),
+    })
+}
+
+fn validate_knowledge_thread_sync_metadata_request(
+    request: &KnowledgeThreadSyncMetadataRequest,
+) -> Result<()> {
+    if request.id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread sync metadata read requires a non-empty thread id".to_string(),
         ));
     }
     Ok(())
@@ -21160,6 +21238,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_thread_identity(request)
     }
 
+    pub fn knowledge_thread_sync_metadata(
+        &self,
+        request: &KnowledgeThreadSyncMetadataRequest,
+    ) -> Result<KnowledgeThreadSyncMetadataOutput> {
+        self.db.knowledge_thread_sync_metadata(request)
+    }
+
     pub fn knowledge_thread_distillation_candidates(
         &self,
         request: &KnowledgeThreadDistillationCandidateRequest,
@@ -22057,6 +22142,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeThreadIdentityRequest,
     ) -> Result<KnowledgeThreadIdentityOutput> {
         knowledge_thread_identity_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_sync_metadata(
+        &self,
+        request: &KnowledgeThreadSyncMetadataRequest,
+    ) -> Result<KnowledgeThreadSyncMetadataOutput> {
+        knowledge_thread_sync_metadata_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

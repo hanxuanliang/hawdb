@@ -182,7 +182,9 @@ denormalized message-count refreshes are exposed as a typed batch for Nowledge
 `message_count` writes with optional timestamp stamping and preserve-newer
 `updated_at` behavior. ThreadIdentity exact-id resolution is exposed as a typed
 `knowledge_thread_identity` API for Nowledge legacy identity lookup without
-WAL writes.
+WAL writes. Thread sync metadata reads are exposed as a typed
+`knowledge_thread_sync_metadata` API for exact physical Thread ids and
+Cypher-compatible `COALESCE` fallbacks without WAL writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches

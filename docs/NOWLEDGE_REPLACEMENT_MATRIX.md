@@ -357,6 +357,12 @@ ThreadIdentity exact resolution is covered by
 `ThreadIdentity` by external id, returns the Nowledge repo fields
 `thread_node_id`, `thread_id`, normalized/raw space, source, identity node id,
 missing-identity state, supports pinned read snapshots, and does not write WAL.
+Thread sync metadata reads are covered by
+`Database::knowledge_thread_sync_metadata`. The typed read resolves one Thread
+by physical `id`, returns title/source/project/workspace/space strings with
+the same `COALESCE(..., '')` and `COALESCE(space_id, 'default')` fallback
+semantics as the Nowledge repo query, reports missing-Thread state, supports
+pinned read snapshots, and does not write WAL.
 Label lifecycle writes are covered by a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names
