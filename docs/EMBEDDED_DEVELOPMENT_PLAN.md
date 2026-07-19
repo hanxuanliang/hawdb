@@ -164,8 +164,11 @@ as a typed batch for Nowledge `use_count`, optional `success_rate`,
 `last_activity_at`, `updated_at`, and `metadata` writes. Skill lifecycle and
 write-state updates are exposed as a typed batch for Nowledge stage changes,
 rejections, promotions, compiled metadata, draft bundle writes, content hashes,
-and `updated_at` stamping. Thread metadata updates are exposed as a typed batch
-for Nowledge `metadata` writes with optional `updated_at` stamping. Thread
+and `updated_at` stamping. Skill synthesized-memory evidence reads are exposed
+as a typed `knowledge_skill_memories` API for id-filtered and stage-filtered
+`SYNTHESIZED_FROM` Memory lists with explicit created-at ordering. Thread
+metadata updates are exposed as a typed batch for Nowledge `metadata` writes
+with optional `updated_at` stamping. Thread
 denormalized message-count refreshes are exposed as a typed batch for Nowledge
 `message_count` writes with optional timestamp stamping and preserve-newer
 `updated_at` behavior.
@@ -953,6 +956,7 @@ skill synthesized memory id reads,
 skill stage projection, active, and builder list reads,
 skill detail reads,
 skill synthesized memory direct-id and detail reads,
+typed Skill synthesized-memory evidence reads,
 skill metadata and version reads, metadata writes, and usage-stat writes,
 learning memory latest reads,
 source parsed path list reads,

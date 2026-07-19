@@ -1998,6 +1998,43 @@ pub struct KnowledgeSkillLifecycleBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeSkillMemoryListOrder {
+    CreatedAtAsc,
+    CreatedAtDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillMemoryListRequest {
+    pub skill_id: Option<String>,
+    pub stages: Vec<String>,
+    pub limit: usize,
+    pub order: KnowledgeSkillMemoryListOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillMemoryRow {
+    pub skill_id: Option<String>,
+    pub skill_node_id: u64,
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub relationship_id: u64,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub unit_type: Option<String>,
+    pub created_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillMemoryListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSkillMemoryRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub matched_skill_count: usize,
+    pub missing_skill_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMetadataUpdate {
     pub thread_id: String,
@@ -4571,6 +4608,13 @@ impl Database {
         request: &KnowledgeSkillLifecycleBatchRequest,
     ) -> Result<KnowledgeSkillLifecycleBatchOutput> {
         update_knowledge_skill_lifecycle_batch_for(self, request)
+    }
+
+    pub fn knowledge_skill_memories(
+        &self,
+        request: &KnowledgeSkillMemoryListRequest,
+    ) -> Result<KnowledgeSkillMemoryListOutput> {
+        knowledge_skill_memories_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_thread_metadata_batch(
@@ -9043,6 +9087,187 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
         (Value::Float(left), Value::Int(right)) => *left > (*right as f64),
         (Value::String(left), Value::String(right)) => left > right,
         _ => false,
+    }
+}
+
+fn knowledge_skill_memories_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSkillMemoryListRequest,
+) -> Result<KnowledgeSkillMemoryListOutput> {
+    validate_knowledge_skill_memory_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let skill_nodes = skill_memory_seed_nodes(catalog, store, request);
+    let matched_skill_count = skill_nodes.len();
+    let mut missing_skill_count = 0;
+
+    if request.skill_id.is_some() && skill_nodes.is_empty() {
+        missing_skill_count = 1;
+    }
+
+    let mut rows = skill_nodes
+        .into_iter()
+        .flat_map(|skill| skill_memory_rows(catalog, store, skill))
+        .collect::<Vec<_>>();
+    sort_skill_memory_rows(&mut rows, request.order);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeSkillMemoryListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        matched_skill_count,
+        missing_skill_count,
+    })
+}
+
+fn validate_knowledge_skill_memory_request(
+    request: &KnowledgeSkillMemoryListRequest,
+) -> Result<()> {
+    let has_skill_id = match request.skill_id.as_ref() {
+        Some(skill_id) if skill_id.is_empty() => {
+            return Err(SkeinError::Semantic(
+                "knowledge skill memory read requires a non-empty skill id".to_string(),
+            ));
+        }
+        Some(_) => true,
+        None => false,
+    };
+    if request.stages.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge skill memory read requires non-empty stages".to_string(),
+        ));
+    }
+    let has_stages = !request.stages.is_empty();
+    if has_skill_id == has_stages {
+        return Err(SkeinError::Semantic(
+            "knowledge skill memory read requires exactly one skill id or stage filter".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn skill_memory_seed_nodes<'a>(
+    catalog: &Catalog,
+    store: &'a GraphStore,
+    request: &KnowledgeSkillMemoryListRequest,
+) -> Vec<&'a NodeRecord> {
+    if let Some(skill_id) = request.skill_id.as_ref() {
+        return seed_node_by_label_and_external_id(catalog, store, "Skill", skill_id)
+            .into_iter()
+            .collect();
+    }
+
+    let Some(skill_label_id) = catalog.label_id("Skill") else {
+        return Vec::new();
+    };
+    let stages = request.stages.iter().collect::<BTreeSet<_>>();
+    let mut nodes = store
+        .scan_nodes(Some(skill_label_id))
+        .filter(|node| {
+            node.properties
+                .get("stage")
+                .map(value_to_external_id)
+                .as_ref()
+                .is_some_and(|stage| stages.contains(stage))
+        })
+        .collect::<Vec<_>>();
+    nodes.sort_by(|left, right| {
+        node_external_id(left)
+            .cmp(&node_external_id(right))
+            .then_with(|| left.id.0.cmp(&right.id.0))
+    });
+    nodes
+}
+
+fn skill_memory_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    skill: &NodeRecord,
+) -> Vec<KnowledgeSkillMemoryRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
+        return Vec::new();
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    store
+        .outgoing_relationships(skill.id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .map(|memory| skill_memory_row(skill, memory, relationship))
+        })
+        .collect()
+}
+
+fn skill_memory_row(
+    skill: &NodeRecord,
+    memory: &NodeRecord,
+    relationship: &RelRecord,
+) -> KnowledgeSkillMemoryRow {
+    KnowledgeSkillMemoryRow {
+        skill_id: node_external_id(skill),
+        skill_node_id: skill.id.0,
+        memory_id: node_external_id(memory),
+        memory_node_id: memory.id.0,
+        relationship_id: relationship.id.0,
+        title: string_property(memory, "title"),
+        content: string_property(memory, "content"),
+        unit_type: string_property(memory, "unit_type"),
+        created_at: memory.properties.get("created_at").cloned(),
+    }
+}
+
+fn sort_skill_memory_rows(
+    rows: &mut [KnowledgeSkillMemoryRow],
+    order: KnowledgeSkillMemoryListOrder,
+) {
+    rows.sort_by(|left, right| {
+        compare_skill_memory_created_at(&left.created_at, &right.created_at, order)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.skill_id.cmp(&right.skill_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+}
+
+fn compare_skill_memory_created_at(
+    left: &Option<Value>,
+    right: &Option<Value>,
+    order: KnowledgeSkillMemoryListOrder,
+) -> std::cmp::Ordering {
+    let base = match (left, right) {
+        (Some(left), Some(right)) => compare_skill_memory_values(left, right),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    };
+    match order {
+        KnowledgeSkillMemoryListOrder::CreatedAtAsc => base,
+        KnowledgeSkillMemoryListOrder::CreatedAtDesc => {
+            if left.is_some() && right.is_some() {
+                base.reverse()
+            } else {
+                base
+            }
+        }
+    }
+}
+
+fn compare_skill_memory_values(left: &Value, right: &Value) -> std::cmp::Ordering {
+    match (left, right) {
+        (Value::Int(left), Value::Int(right)) => left.cmp(right),
+        (Value::Float(left), Value::Float(right)) => left.total_cmp(right),
+        (Value::Int(left), Value::Float(right)) => (*left as f64).total_cmp(right),
+        (Value::Float(left), Value::Int(right)) => left.total_cmp(&(*right as f64)),
+        (Value::String(left), Value::String(right)) => left.cmp(right),
+        _ => value_to_external_id(left).cmp(&value_to_external_id(right)),
     }
 }
 
@@ -16181,6 +16406,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSkillLifecycleBatchRequest,
     ) -> Result<KnowledgeSkillLifecycleBatchOutput> {
         self.db.update_knowledge_skill_lifecycle_batch(request)
+    }
+
+    pub fn knowledge_skill_memories(
+        &self,
+        request: &KnowledgeSkillMemoryListRequest,
+    ) -> Result<KnowledgeSkillMemoryListOutput> {
+        self.db.knowledge_skill_memories(request)
     }
 
     pub fn update_knowledge_thread_metadata_batch(

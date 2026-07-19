@@ -43,12 +43,13 @@ use super::{
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
     KnowledgeScopedSubgraphRequest, KnowledgeSkillLifecycleBatchRequest,
-    KnowledgeSkillLifecycleUpdate, KnowledgeSkillUsageStatsBatchRequest,
-    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceIdListRequest,
-    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate,
-    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
-    KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeSkillLifecycleUpdate, KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
+    KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
+    KnowledgeSourceIdListRequest, KnowledgeSourceLifecycleBatchRequest,
+    KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
+    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
+    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
+    KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -6662,6 +6663,140 @@ fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         );
     }
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_skill_memories_for_nowledge_evidence_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'skill_active', stage: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'skill_draft', stage: 'draft'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A', content: 'Alpha', unit_type: 'note', created_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B', content: 'Beta', unit_type: 'fact', created_at: 10})")
+        .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'memory_c', title: 'Memory C', content: 'Gamma', created_at: 30})",
+    )
+    .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_active'}), (m:Memory {id: 'memory_a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_active'}), (m:Memory {id: 'memory_b'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (s:Skill {id: 'skill_draft'}), (m:Memory {id: 'memory_c'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let asc = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: Some("skill_active".to_string()),
+            stages: Vec::new(),
+            limit: 0,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        })
+        .unwrap();
+
+    assert_eq!(asc.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(asc.matched_skill_count, 1);
+    assert_eq!(asc.missing_skill_count, 0);
+    assert_eq!(asc.matched_count, 2);
+    assert_eq!(asc.returned_count, 2);
+    assert_eq!(asc.rows[0].skill_id.as_deref(), Some("skill_active"));
+    assert_eq!(asc.rows[0].memory_id.as_deref(), Some("memory_b"));
+    assert_ne!(asc.rows[0].skill_node_id, asc.rows[0].memory_node_id);
+    assert_eq!(asc.rows[0].title.as_deref(), Some("Memory B"));
+    assert_eq!(asc.rows[0].content.as_deref(), Some("Beta"));
+    assert_eq!(asc.rows[0].unit_type.as_deref(), Some("fact"));
+    assert_eq!(asc.rows[0].created_at, Some(Value::Int(10)));
+    assert_eq!(asc.rows[1].memory_id.as_deref(), Some("memory_a"));
+
+    let desc_limited = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: Some("skill_active".to_string()),
+            stages: Vec::new(),
+            limit: 1,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        })
+        .unwrap();
+    assert_eq!(desc_limited.matched_count, 2);
+    assert_eq!(desc_limited.returned_count, 1);
+    assert_eq!(desc_limited.rows[0].memory_id.as_deref(), Some("memory_a"));
+
+    let active_stage = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: None,
+            stages: vec!["active".to_string()],
+            limit: 0,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        })
+        .unwrap();
+    assert_eq!(active_stage.matched_skill_count, 1);
+    assert_eq!(active_stage.matched_count, 2);
+    assert!(active_stage
+        .rows
+        .iter()
+        .all(|row| row.skill_id.as_deref() == Some("skill_active")));
+
+    let missing = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: Some("missing".to_string()),
+            stages: Vec::new(),
+            limit: 10,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        })
+        .unwrap();
+    assert_eq!(missing.matched_skill_count, 0);
+    assert_eq!(missing.missing_skill_count, 1);
+    assert_eq!(missing.matched_count, 0);
+    assert_eq!(missing.returned_count, 0);
+    assert!(missing.rows.is_empty());
+}
+
+#[test]
+fn skill_memory_read_rejects_invalid_filters() {
+    let db = Database::new();
+
+    let empty_skill_error = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: Some(String::new()),
+            stages: Vec::new(),
+            limit: 10,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        })
+        .unwrap_err();
+    assert!(empty_skill_error.to_string().contains("non-empty skill id"));
+
+    let empty_stage_error = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: None,
+            stages: vec![String::new()],
+            limit: 10,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        })
+        .unwrap_err();
+    assert!(empty_stage_error.to_string().contains("non-empty stages"));
+
+    let broad_error = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: None,
+            stages: Vec::new(),
+            limit: 10,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        })
+        .unwrap_err();
+    assert!(broad_error.to_string().contains("exactly one"));
+
+    let mixed_error = db
+        .knowledge_skill_memories(&KnowledgeSkillMemoryListRequest {
+            skill_id: Some("skill_1".to_string()),
+            stages: vec!["active".to_string()],
+            limit: 10,
+            order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        })
+        .unwrap_err();
+    assert!(mixed_error.to_string().contains("exactly one"));
 }
 
 #[test]

@@ -210,6 +210,13 @@ write origin, and `updated_at` stamping. The wrapper validates Skill ids,
 non-empty stages, and non-empty write origins before WAL, reports missing,
 idless, and duplicate rows without writing, and commits eligible Skill rows
 through one grouped WAL batch.
+Skill evidence-memory reads are covered by `Database::knowledge_skill_memories`.
+The typed read requires either one Skill id or a non-empty stage filter, scans
+outgoing `SYNTHESIZED_FROM` edges to Memory nodes, returns Memory id/title/
+content/unit type/created-at fields plus Skill and relationship identities,
+supports `created_at` ascending or descending ordering with bounded limits,
+reports matched/missing Skill counts and the graph commit epoch, and does not
+write WAL.
 Thread metadata writes are covered by a typed batch for Nowledge `metadata`
 updates with optional `updated_at` stamping. The wrapper validates Thread ids
 before WAL, reports missing, idless, and duplicate rows without writing, keeps
