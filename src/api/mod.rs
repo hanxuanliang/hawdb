@@ -3808,6 +3808,37 @@ pub struct KnowledgeThreadCompactedMemoryListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactedMemoryProjectedListRequest {
+    pub list: KnowledgeThreadCompactedMemoryListRequest,
+    pub memory_property_names: Vec<String>,
+    pub relationship_property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactedMemoryProjectedRow {
+    pub thread_id: Option<String>,
+    pub thread_node_id: u64,
+    pub thread_logical_id: Option<String>,
+    pub relationship_id: u64,
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub memory_properties: BTreeMap<String, Value>,
+    pub relationship_properties: BTreeMap<String, Value>,
+    pub normalized_space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadCompactedMemoryProjectedListOutput {
+    pub graph_commit_epoch: u64,
+    pub thread_id: String,
+    pub thread_node_id: Option<u64>,
+    pub found: bool,
+    pub rows: Vec<KnowledgeThreadCompactedMemoryProjectedRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadCompactionLinkRequest {
     pub thread_id: String,
     pub memory_id: String,
@@ -7010,6 +7041,13 @@ impl Database {
         request: &KnowledgeThreadCompactedMemoryListRequest,
     ) -> Result<KnowledgeThreadCompactedMemoryListOutput> {
         knowledge_thread_compacted_memories_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_compacted_memory_projected_list(
+        &self,
+        request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
+    ) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
+        knowledge_thread_compacted_memory_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn create_knowledge_thread_compaction_link(
@@ -17914,6 +17952,54 @@ fn knowledge_thread_compacted_memories_for(
     })
 }
 
+fn knowledge_thread_compacted_memory_projected_list_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
+) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
+    validate_thread_compacted_memory_projected_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(thread) = thread_node_by_identity(
+        catalog,
+        store,
+        &request.list.identity_property,
+        &request.list.thread_id,
+    ) else {
+        return Ok(KnowledgeThreadCompactedMemoryProjectedListOutput {
+            graph_commit_epoch,
+            thread_id: request.list.thread_id.clone(),
+            thread_node_id: None,
+            found: false,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = thread_compacted_memory_projected_rows(
+        catalog,
+        store,
+        thread.id,
+        &request.memory_property_names,
+        &request.relationship_property_names,
+    );
+    let matched_count = rows.len();
+    if request.list.limit > 0 {
+        rows.truncate(request.list.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeThreadCompactedMemoryProjectedListOutput {
+        graph_commit_epoch,
+        thread_id: request.list.thread_id.clone(),
+        thread_node_id: Some(thread.id.0),
+        found: true,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
 fn create_knowledge_thread_compaction_link_for(
     db: &mut Database,
     request: &KnowledgeThreadCompactionLinkRequest,
@@ -18039,6 +18125,24 @@ fn validate_thread_compacted_memory_request(
     Ok(())
 }
 
+fn validate_thread_compacted_memory_projected_request(
+    request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
+) -> Result<()> {
+    validate_thread_compacted_memory_request(&request.list)?;
+    if request.memory_property_names.iter().any(String::is_empty)
+        || request
+            .relationship_property_names
+            .iter()
+            .any(String::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge thread compacted memory projected read requires non-empty property names"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn thread_node_by_identity<'a>(
     catalog: &Catalog,
     store: &'a GraphStore,
@@ -18091,6 +18195,83 @@ fn thread_compacted_memory_rows(
             .then_with(|| left.relationship_id.cmp(&right.relationship_id))
     });
     rows
+}
+
+fn thread_compacted_memory_projected_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    thread_node_id: NodeId,
+    memory_property_names: &[String],
+    relationship_property_names: &[String],
+) -> Vec<KnowledgeThreadCompactedMemoryProjectedRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
+        return Vec::new();
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    let Some(thread) = store.node(thread_node_id) else {
+        return Vec::new();
+    };
+    let mut rows = store
+        .outgoing_relationships(thread_node_id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .map(|memory| {
+                    (
+                        thread_compacted_memory_projected_row(
+                            thread,
+                            memory,
+                            relationship,
+                            memory_property_names,
+                            relationship_property_names,
+                        ),
+                        memory.properties.get("importance").cloned(),
+                        memory.properties.get("created_at").cloned(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_optional_values_desc(left.1.as_ref(), right.1.as_ref())
+            .then_with(|| {
+                compare_skill_memory_created_at(
+                    &left.2,
+                    &right.2,
+                    KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+                )
+            })
+            .then_with(|| left.0.memory_id.cmp(&right.0.memory_id))
+            .then_with(|| left.0.relationship_id.cmp(&right.0.relationship_id))
+    });
+    rows.into_iter()
+        .map(|(row, _importance, _created_at)| row)
+        .collect()
+}
+
+fn thread_compacted_memory_projected_row(
+    thread: &NodeRecord,
+    memory: &NodeRecord,
+    relationship: &RelRecord,
+    memory_property_names: &[String],
+    relationship_property_names: &[String],
+) -> KnowledgeThreadCompactedMemoryProjectedRow {
+    KnowledgeThreadCompactedMemoryProjectedRow {
+        thread_id: node_external_id(thread),
+        thread_node_id: thread.id.0,
+        thread_logical_id: string_property(thread, "thread_id"),
+        relationship_id: relationship.id.0,
+        memory_id: node_external_id(memory),
+        memory_node_id: memory.id.0,
+        memory_properties: projected_properties(&memory.properties, memory_property_names),
+        relationship_properties: projected_properties(
+            &relationship.properties,
+            relationship_property_names,
+        ),
+        normalized_space_id: normalized_node_space_id(memory),
+    }
 }
 
 fn thread_compacted_memory_row(
@@ -27073,6 +27254,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_thread_compacted_memories(request)
     }
 
+    pub fn knowledge_thread_compacted_memory_projected_list(
+        &self,
+        request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
+    ) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
+        self.db
+            .knowledge_thread_compacted_memory_projected_list(request)
+    }
+
     pub fn create_knowledge_thread_compaction_link(
         &mut self,
         request: &KnowledgeThreadCompactionLinkRequest,
@@ -28117,6 +28306,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeThreadMetaLookupRequest,
     ) -> Result<KnowledgeThreadMetaLookupOutput> {
         knowledge_thread_meta_lookup_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_compacted_memory_projected_list(
+        &self,
+        request: &KnowledgeThreadCompactedMemoryProjectedListRequest,
+    ) -> Result<KnowledgeThreadCompactedMemoryProjectedListOutput> {
+        knowledge_thread_compacted_memory_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

@@ -87,18 +87,19 @@ use super::{
     KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSourceVersionLookupRequest,
     KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
-    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
-    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder,
-    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
-    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
-    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
-    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
-    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
-    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
-    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeThreadCompactedMemoryProjectedListRequest, KnowledgeThreadCompactionLinkRequest,
+    KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
+    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
+    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
+    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
+    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
+    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
+    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
+    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
+    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -13932,6 +13933,161 @@ fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
     assert_eq!(missing.thread_node_id, None);
     assert_eq!(missing.matched_count, 0);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn projects_thread_compacted_memory_fields_for_nowledge_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'projected_thread_a', thread_id: 'projected_logical_a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_memory_a', title: 'Projected Alpha', content: 'alpha body', importance: 0.8, created_at: 10, space_id: '', future_field: 'future-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_memory_b', title: 'Projected Beta', content: 'beta body', importance: 0.4, created_at: 20, space_id: 'team', future_field: 'future-b'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_a'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'manual', created_at: 100, future_edge_field: 'edge-a'}]->(m)")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_b'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'auto', created_at: 90, future_edge_field: 'edge-b'}]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query("CREATE (:Memory {id: 'projected_memory_c', title: 'Projected Gamma', importance: 2.0, created_at: 30, future_field: 'future-c'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_c'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'late', created_at: 110, future_edge_field: 'edge-c'}]->(m)")
+        .unwrap();
+
+    let projected = db
+        .knowledge_thread_compacted_memory_projected_list(
+            &KnowledgeThreadCompactedMemoryProjectedListRequest {
+                list: KnowledgeThreadCompactedMemoryListRequest {
+                    thread_id: "projected_thread_a".to_string(),
+                    identity_property: "id".to_string(),
+                    limit: 2,
+                },
+                memory_property_names: vec![
+                    "title".to_string(),
+                    "future_field".to_string(),
+                    "space_id".to_string(),
+                    "title".to_string(),
+                ],
+                relationship_property_names: vec![
+                    "compaction_method".to_string(),
+                    "future_edge_field".to_string(),
+                ],
+            },
+        )
+        .unwrap();
+
+    assert!(projected.found);
+    assert_eq!(projected.thread_node_id, Some(0));
+    assert_eq!(projected.matched_count, 3);
+    assert_eq!(projected.returned_count, 2);
+    assert_eq!(
+        projected
+            .rows
+            .iter()
+            .map(|row| row.memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("projected_memory_c"), Some("projected_memory_a")]
+    );
+    assert_eq!(
+        projected.rows[0].memory_properties.get("future_field"),
+        Some(&Value::String("future-c".to_string()))
+    );
+    assert_eq!(
+        projected.rows[1].memory_properties.get("title"),
+        Some(&Value::String("Projected Alpha".to_string()))
+    );
+    assert_eq!(projected.rows[1].normalized_space_id, "default");
+    assert!(!projected.rows[1]
+        .memory_properties
+        .contains_key("importance"));
+    assert_eq!(
+        projected.rows[1]
+            .relationship_properties
+            .get("future_edge_field"),
+        Some(&Value::String("edge-a".to_string()))
+    );
+
+    let snapshot_projected = snapshot
+        .knowledge_thread_compacted_memory_projected_list(
+            &KnowledgeThreadCompactedMemoryProjectedListRequest {
+                list: KnowledgeThreadCompactedMemoryListRequest {
+                    thread_id: "projected_logical_a".to_string(),
+                    identity_property: "thread_id".to_string(),
+                    limit: 10,
+                },
+                memory_property_names: vec!["title".to_string()],
+                relationship_property_names: vec!["compaction_method".to_string()],
+            },
+        )
+        .unwrap();
+    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_projected.matched_count, 2);
+    assert_eq!(
+        snapshot_projected
+            .rows
+            .iter()
+            .map(|row| row.memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("projected_memory_a"), Some("projected_memory_b")]
+    );
+    assert!(!snapshot_projected.rows[0]
+        .memory_properties
+        .contains_key("created_at"));
+}
+
+#[test]
+fn thread_compacted_memory_projected_read_rejects_empty_property_names_without_wal() {
+    let path = unique_test_dir("thread_compacted_memory_projected_empty_property_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Thread {id: 'projected_thread_wal'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_memory_wal'})")
+        .unwrap();
+    db.query("MATCH (t:Thread {id: 'projected_thread_wal'}), (m:Memory {id: 'projected_memory_wal'}) CREATE (t)-[:COMPACTS_TO]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let memory_property_error = db
+        .knowledge_thread_compacted_memory_projected_list(
+            &KnowledgeThreadCompactedMemoryProjectedListRequest {
+                list: KnowledgeThreadCompactedMemoryListRequest {
+                    thread_id: "projected_thread_wal".to_string(),
+                    identity_property: "id".to_string(),
+                    limit: 10,
+                },
+                memory_property_names: vec![String::new()],
+                relationship_property_names: Vec::new(),
+            },
+        )
+        .unwrap_err();
+    assert!(memory_property_error
+        .to_string()
+        .contains("non-empty property names"));
+
+    let relationship_property_error = db
+        .knowledge_thread_compacted_memory_projected_list(
+            &KnowledgeThreadCompactedMemoryProjectedListRequest {
+                list: KnowledgeThreadCompactedMemoryListRequest {
+                    thread_id: "projected_thread_wal".to_string(),
+                    identity_property: "id".to_string(),
+                    limit: 10,
+                },
+                memory_property_names: Vec::new(),
+                relationship_property_names: vec![String::new()],
+            },
+        )
+        .unwrap_err();
+    assert!(relationship_property_error
+        .to_string()
+        .contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
 }
 
 #[test]

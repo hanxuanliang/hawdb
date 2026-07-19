@@ -213,6 +213,8 @@ pub use api::{
     KnowledgeSynthesizedSourceCoverageRow, KnowledgeSynthesizedSourceIdsOutput,
     KnowledgeSynthesizedSourceIdsRequest, KnowledgeSynthesizedSourceIdsRow,
     KnowledgeThreadCompactedMemoryListOutput, KnowledgeThreadCompactedMemoryListRequest,
+    KnowledgeThreadCompactedMemoryProjectedListOutput,
+    KnowledgeThreadCompactedMemoryProjectedListRequest, KnowledgeThreadCompactedMemoryProjectedRow,
     KnowledgeThreadCompactedMemoryRow, KnowledgeThreadCompactionLinkOutput,
     KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchOutput,
     KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDeleteBatchRow,

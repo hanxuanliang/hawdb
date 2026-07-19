@@ -591,6 +591,12 @@ Thread compacted-memory reads are available as
 count/id-list/summary/full-row read shapes by physical `id` or logical
 `thread_id`, with Memory display/rank/reindex/review/temporal/access fields,
 relationship metadata, bounded limits, and no WAL writes.
+Field-extensible Thread compacted-memory reads are available as
+`Database::knowledge_thread_compacted_memory_projected_list`, covering the same
+bounded `COMPACTS_TO` adjacency shape while projecting only caller-allowlisted
+Memory and relationship fields. Ordering remains driven by internal Memory
+importance and created-at keys, so Nowledge can add compacted-memory detail
+fields without widening the fixed row or scanning outside the target Thread.
 Memory compacting-Thread reads are available as
 `Database::knowledge_memory_compacting_threads`, covering Nowledge Memory id to
 Thread id/source/metadata reads over incoming `COMPACTS_TO` relationships with
