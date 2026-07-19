@@ -4907,6 +4907,41 @@ pub struct KnowledgeSourceReferenceRelationshipCleanupOutput {
     pub deleted_relationship_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceEntityListRequest {
+    pub source_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceEntityRow {
+    pub entity_id: Option<String>,
+    pub node_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceEntityListOutput {
+    pub graph_commit_epoch: u64,
+    pub source_reference: String,
+    pub rows: Vec<KnowledgeSourceReferenceEntityRow>,
+    pub matched_relationship_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceRelationshipCountRequest {
+    pub entity_id: String,
+    pub excluded_source_reference: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceReferenceRelationshipCountOutput {
+    pub graph_commit_epoch: u64,
+    pub entity_id: String,
+    pub entity_node_id: Option<u64>,
+    pub found_entity: bool,
+    pub relationship_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeEntity {
     pub node_id: u64,
@@ -6258,6 +6293,20 @@ impl Database {
         request: &KnowledgeMemoryEvolvesLatestRequest,
     ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
         knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_reference_entities(
+        &self,
+        request: &KnowledgeSourceReferenceEntityListRequest,
+    ) -> Result<KnowledgeSourceReferenceEntityListOutput> {
+        knowledge_source_reference_entities_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_reference_relationship_count(
+        &self,
+        request: &KnowledgeSourceReferenceRelationshipCountRequest,
+    ) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
+        knowledge_source_reference_relationship_count_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_crystals(
@@ -22130,17 +22179,184 @@ struct KnowledgeSourceReferenceRelationshipDeleteCandidate {
     target_external_id: Option<String>,
 }
 
+fn knowledge_source_reference_entities_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceReferenceEntityListRequest,
+) -> Result<KnowledgeSourceReferenceEntityListOutput> {
+    validate_source_reference(&request.source_reference, "source-reference entity read")?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(rel_type_id) = catalog.rel_type_id("RELATES_TO") else {
+        return Ok(KnowledgeSourceReferenceEntityListOutput {
+            graph_commit_epoch,
+            source_reference: request.source_reference.clone(),
+            rows: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return Ok(KnowledgeSourceReferenceEntityListOutput {
+            graph_commit_epoch,
+            source_reference: request.source_reference.clone(),
+            rows: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut matched_relationship_count = 0;
+    let mut entity_node_ids = BTreeSet::new();
+    for relationship in store.scan_relationships(Some(rel_type_id)) {
+        if !relationship_source_reference_equals(relationship, &request.source_reference) {
+            continue;
+        }
+        matched_relationship_count += 1;
+        for node_id in [relationship.source, relationship.target] {
+            if store
+                .node(node_id)
+                .is_some_and(|node| node.labels.contains(&entity_label_id))
+            {
+                entity_node_ids.insert(node_id);
+            }
+        }
+    }
+
+    let mut rows = entity_node_ids
+        .into_iter()
+        .filter_map(|node_id| {
+            store
+                .node(node_id)
+                .map(|node| KnowledgeSourceReferenceEntityRow {
+                    entity_id: node_external_id(node),
+                    node_id: node.id.0,
+                })
+        })
+        .collect::<Vec<_>>();
+    sort_source_reference_entity_rows(&mut rows);
+    let returned_count = rows.len();
+
+    Ok(KnowledgeSourceReferenceEntityListOutput {
+        graph_commit_epoch,
+        source_reference: request.source_reference.clone(),
+        rows,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
+fn knowledge_source_reference_relationship_count_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceReferenceRelationshipCountRequest,
+) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
+    if request.entity_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source-reference relationship count requires a non-empty entity id"
+                .to_string(),
+        ));
+    }
+    validate_source_reference(
+        &request.excluded_source_reference,
+        "source-reference relationship count",
+    )?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(entity) =
+        seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id)
+    else {
+        return Ok(KnowledgeSourceReferenceRelationshipCountOutput {
+            graph_commit_epoch,
+            entity_id: request.entity_id.clone(),
+            entity_node_id: None,
+            found_entity: false,
+            relationship_count: 0,
+        });
+    };
+    let Some(rel_type_id) = catalog.rel_type_id("RELATES_TO") else {
+        return Ok(KnowledgeSourceReferenceRelationshipCountOutput {
+            graph_commit_epoch,
+            entity_id: request.entity_id.clone(),
+            entity_node_id: Some(entity.id.0),
+            found_entity: true,
+            relationship_count: 0,
+        });
+    };
+
+    let incident_count = store
+        .scan_relationships(Some(rel_type_id))
+        .filter(|relationship| {
+            (relationship.source == entity.id || relationship.target == entity.id)
+                && relationship_source_reference_is_counted(
+                    relationship,
+                    &request.excluded_source_reference,
+                )
+        })
+        .count();
+    let incoming_count = store
+        .incoming_relationships(entity.id, rel_type_id)
+        .filter(|relationship| {
+            relationship_source_reference_is_counted(
+                relationship,
+                &request.excluded_source_reference,
+            )
+        })
+        .count();
+
+    Ok(KnowledgeSourceReferenceRelationshipCountOutput {
+        graph_commit_epoch,
+        entity_id: request.entity_id.clone(),
+        entity_node_id: Some(entity.id.0),
+        found_entity: true,
+        relationship_count: incident_count + incoming_count,
+    })
+}
+
+fn validate_source_reference(source_reference: &str, operation: &str) -> Result<()> {
+    if source_reference.trim().is_empty() {
+        return Err(SkeinError::Semantic(format!(
+            "knowledge {operation} requires a non-empty source_reference"
+        )));
+    }
+    Ok(())
+}
+
+fn relationship_source_reference_equals(relationship: &RelRecord, source_reference: &str) -> bool {
+    relationship
+        .properties
+        .get("source_reference")
+        .is_some_and(|value| value_to_external_id(value) == source_reference)
+}
+
+fn relationship_source_reference_is_counted(
+    relationship: &RelRecord,
+    excluded_source_reference: &str,
+) -> bool {
+    match relationship.properties.get("source_reference") {
+        Some(Value::Null) | None => true,
+        Some(value) => {
+            let source_reference = value_to_external_id(value);
+            source_reference != excluded_source_reference || source_reference.is_empty()
+        }
+    }
+}
+
+fn sort_source_reference_entity_rows(rows: &mut [KnowledgeSourceReferenceEntityRow]) {
+    rows.sort_by(|left, right| {
+        left.entity_id
+            .cmp(&right.entity_id)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+}
+
 fn delete_knowledge_source_reference_relationships_for(
     db: &mut Database,
     request: &KnowledgeSourceReferenceRelationshipCleanupRequest,
 ) -> Result<KnowledgeSourceReferenceRelationshipCleanupOutput> {
     db.ensure_writable()?;
-    if request.source_reference.trim().is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge source-reference relationship cleanup requires a non-empty source_reference"
-                .to_string(),
-        ));
-    }
+    validate_source_reference(
+        &request.source_reference,
+        "source-reference relationship cleanup",
+    )?;
 
     let graph_commit_epoch_before = db.store.commit_epoch();
     let Some(rel_type_id) = db.catalog.rel_type_id("RELATES_TO") else {
@@ -25059,6 +25275,21 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_evolves_latest(request)
     }
 
+    pub fn knowledge_source_reference_entities(
+        &self,
+        request: &KnowledgeSourceReferenceEntityListRequest,
+    ) -> Result<KnowledgeSourceReferenceEntityListOutput> {
+        self.db.knowledge_source_reference_entities(request)
+    }
+
+    pub fn knowledge_source_reference_relationship_count(
+        &self,
+        request: &KnowledgeSourceReferenceRelationshipCountRequest,
+    ) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
+        self.db
+            .knowledge_source_reference_relationship_count(request)
+    }
+
     pub fn knowledge_crystals(
         &self,
         request: &KnowledgeCrystalListRequest,
@@ -26389,6 +26620,20 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEvolvesLatestRequest,
     ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
         knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_reference_entities(
+        &self,
+        request: &KnowledgeSourceReferenceEntityListRequest,
+    ) -> Result<KnowledgeSourceReferenceEntityListOutput> {
+        knowledge_source_reference_entities_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_reference_relationship_count(
+        &self,
+        request: &KnowledgeSourceReferenceRelationshipCountRequest,
+    ) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
+        knowledge_source_reference_relationship_count_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_crystals(

@@ -77,23 +77,25 @@ use super::{
     KnowledgeSourceMemoryListRequest, KnowledgeSourceMetadataBatchRequest,
     KnowledgeSourceMetadataUpdate, KnowledgeSourceParsedCreate,
     KnowledgeSourceParsedCreateBatchRequest, KnowledgeSourceParsedMetadataBatchRequest,
-    KnowledgeSourceParsedMetadataUpdate, KnowledgeSourceReferenceRelationshipCleanupRequest,
-    KnowledgeSourceRequest, KnowledgeSourceRevisionCreate,
-    KnowledgeSourceRevisionCreateBatchRequest, KnowledgeSourceVersionLookupRequest,
-    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
-    KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
-    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
-    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder,
-    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
-    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
-    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
-    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
-    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
-    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
-    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeSourceParsedMetadataUpdate, KnowledgeSourceReferenceEntityListRequest,
+    KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSourceReferenceRelationshipCountRequest, KnowledgeSourceRequest,
+    KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
+    KnowledgeSourceVersionLookupRequest, KnowledgeSubgraphRequest,
+    KnowledgeSynthesizedSourceCoverageRequest, KnowledgeSynthesizedSourceIdsRequest,
+    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadCompactionLinkRequest,
+    KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
+    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
+    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
+    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
+    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
+    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
+    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
+    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
+    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -20127,6 +20129,134 @@ fn typed_knowledge_relationship_batch_delete_persists_as_one_wal_batch_and_repla
         });
         assert_eq!(output.relationship_count, 0);
     }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_source_reference_entities_for_nowledge_delete_flow() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_b'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_c'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_d'})").unwrap();
+    db.query("MATCH (a:Entity {id: 'entity_a'}), (b:Entity {id: 'entity_b'}) CREATE (a)-[:RELATES_TO {source_reference: 'source_1'}]->(b)")
+        .unwrap();
+    db.query("MATCH (c:Entity {id: 'entity_c'}), (a:Entity {id: 'entity_a'}) CREATE (c)-[:RELATES_TO {source_reference: 'source_1'}]->(a)")
+        .unwrap();
+    db.query("MATCH (a:Entity {id: 'entity_a'}), (d:Entity {id: 'entity_d'}) CREATE (a)-[:RELATES_TO {source_reference: 'other'}]->(d)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_source_reference_entities(&KnowledgeSourceReferenceEntityListRequest {
+            source_reference: "source_1".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.matched_relationship_count, 2);
+    assert_eq!(output.returned_count, 3);
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| row.entity_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["entity_a", "entity_b", "entity_c"]
+    );
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let snapshot = db.begin_read_transaction();
+    db.query("CREATE (:Entity {id: 'entity_e'})").unwrap();
+    db.query("MATCH (e:Entity {id: 'entity_e'}), (a:Entity {id: 'entity_a'}) CREATE (e)-[:RELATES_TO {source_reference: 'source_1'}]->(a)")
+        .unwrap();
+    let snapshot_output = snapshot
+        .knowledge_source_reference_entities(&KnowledgeSourceReferenceEntityListRequest {
+            source_reference: "source_1".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot_output.returned_count, 3);
+}
+
+#[test]
+fn counts_source_reference_relationships_for_nowledge_delete_guard() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'entity'})").unwrap();
+    db.query("CREATE (:Entity {id: 'out'})").unwrap();
+    db.query("CREATE (:Entity {id: 'in-empty'})").unwrap();
+    db.query("CREATE (:Entity {id: 'in-excluded'})").unwrap();
+    db.query("CREATE (:Entity {id: 'null-source'})").unwrap();
+    db.query("MATCH (e:Entity {id: 'entity'}), (out:Entity {id: 'out'}) CREATE (e)-[:RELATES_TO {source_reference: 'other-source'}]->(out)")
+        .unwrap();
+    db.query("MATCH (incoming:Entity {id: 'in-empty'}), (e:Entity {id: 'entity'}) CREATE (incoming)-[:RELATES_TO {source_reference: ''}]->(e)")
+        .unwrap();
+    db.query("MATCH (incoming:Entity {id: 'in-excluded'}), (e:Entity {id: 'entity'}) CREATE (incoming)-[:RELATES_TO {source_reference: 'excluded-source'}]->(e)")
+        .unwrap();
+    db.query("MATCH (e:Entity {id: 'entity'}), (target:Entity {id: 'null-source'}) CREATE (e)-[:RELATES_TO]->(target)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_source_reference_relationship_count(
+            &KnowledgeSourceReferenceRelationshipCountRequest {
+                entity_id: "entity".to_string(),
+                excluded_source_reference: "excluded-source".to_string(),
+            },
+        )
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert!(output.found_entity);
+    assert_eq!(output.relationship_count, 4);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let missing = db
+        .knowledge_source_reference_relationship_count(
+            &KnowledgeSourceReferenceRelationshipCountRequest {
+                entity_id: "missing".to_string(),
+                excluded_source_reference: "excluded-source".to_string(),
+            },
+        )
+        .unwrap();
+    assert!(!missing.found_entity);
+    assert_eq!(missing.relationship_count, 0);
+}
+
+#[test]
+fn source_reference_delete_reads_reject_empty_inputs_without_wal() {
+    let path = unique_test_dir("source_reference_delete_reads_empty_inputs");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Entity {id: 'entity_1'})-[:RELATES_TO {source_reference: 'source_1'}]->(:Entity {id: 'entity_2'})")
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let entities_error = db
+        .knowledge_source_reference_entities(&KnowledgeSourceReferenceEntityListRequest {
+            source_reference: String::new(),
+        })
+        .unwrap_err();
+    assert!(entities_error
+        .to_string()
+        .contains("non-empty source_reference"));
+
+    let count_error = db
+        .knowledge_source_reference_relationship_count(
+            &KnowledgeSourceReferenceRelationshipCountRequest {
+                entity_id: "entity_1".to_string(),
+                excluded_source_reference: " ".to_string(),
+            },
+        )
+        .unwrap_err();
+    assert!(count_error
+        .to_string()
+        .contains("non-empty source_reference"));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
     std::fs::remove_dir_all(path).unwrap();
 }
 

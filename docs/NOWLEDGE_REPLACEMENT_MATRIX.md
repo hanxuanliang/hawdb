@@ -655,6 +655,13 @@ memory/source delete flows. `Database::delete_knowledge_source_reference_relatio
 scans only `RELATES_TO.source_reference`, rejects empty references before WAL,
 preserves endpoint Entity nodes, and commits eligible relationship deletes
 through one grouped WAL batch.
+The delete-flow read guards are also covered by typed APIs:
+`Database::knowledge_source_reference_entities` returns distinct Entity
+endpoints for one `RELATES_TO.source_reference`, while
+`Database::knowledge_source_reference_relationship_count` preserves the
+Nowledge orphan/delete guard count shape for one Entity id and excluded source
+reference, including the historical incoming-edge double-counting from the
+current Cypher shape, without writing WAL.
 Entity-to-Community membership writes are covered by
 `Database::create_knowledge_community_memberships_batch` for the Nowledge
 entity lifecycle `BELONGS_TO` creation shape. The wrapper validates non-empty
