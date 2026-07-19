@@ -25,6 +25,16 @@ fn main() {
             trace.selected_plan_fingerprint
         })
         .collect::<Vec<_>>();
+    let summaries = cases
+        .iter()
+        .zip(expected.iter())
+        .map(|(case, expected_fingerprint)| {
+            let (_, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
+            assert_trace(case, &trace);
+            assert_eq!(&trace.selected_plan_fingerprint, expected_fingerprint);
+            optimizer_smoke_case_summary(case, &trace)
+        })
+        .collect::<Vec<_>>();
 
     let start = Instant::now();
     for _ in 0..ITERATIONS {
@@ -41,6 +51,7 @@ fn main() {
         elapsed.as_millis(),
         expected.join("|")
     );
+    println!("optimizer_smoke_summaries {}", summaries.join(" | "));
 
     let budgeted = CascadesOptimizer::new(OptimizerConfig { max_groups: 2 });
     let (_, budgeted_trace) = budgeted.optimize_with_catalog(&cases[0].logical, &cases[0].catalog);
@@ -49,6 +60,39 @@ fn main() {
         .iter()
         .any(|warning| warning.contains("optimizer memo budget exceeded")));
     assert_eq!(budgeted_trace.selected_plan_cost, cases[0].expected_cost);
+}
+
+fn optimizer_smoke_case_summary(
+    case: &OptimizerSmokeCase,
+    trace: &skein::optimizer::OptimizerTrace,
+) -> String {
+    format!(
+        "case={} groups={} rows={} cost={} operators={} classes={} fingerprint={}",
+        case.name,
+        trace.groups,
+        trace.selected_plan_cost.estimated_rows,
+        trace.selected_plan_cost.cost,
+        stable_counts(&trace.selected_plan_operator_counts),
+        stable_counts(&trace.selected_plan_class_counts),
+        stable_fingerprint_summary(&trace.selected_plan_fingerprint)
+    )
+}
+
+fn stable_counts(counts: &BTreeMap<String, usize>) -> String {
+    counts
+        .iter()
+        .map(|(name, count)| format!("{name}:{count}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn stable_fingerprint_summary(fingerprint: &str) -> String {
+    const LIMIT: usize = 96;
+    if fingerprint.len() <= LIMIT {
+        fingerprint.to_string()
+    } else {
+        format!("{}...", &fingerprint[..LIMIT])
+    }
 }
 
 struct OptimizerSmokeCase {
