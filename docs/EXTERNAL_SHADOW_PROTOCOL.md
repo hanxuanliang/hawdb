@@ -664,7 +664,11 @@ bundle lacks eligible `cutover_evidence`, `production_replacement_per_million`
 is `0` even when scanner coverage and shadow matched ratios are complete. If
 the bundle includes `dual_engine_evidence`, the summary copies it into the
 release-facing output and also requires `dual_engine_evidence.ready == true`
-for production readiness. With `--require-production-ready`, the command exits
+for production readiness. The summary also preserves cutover storage/background
+evidence, including background search-projection graph-delta aggregate counts,
+operation totals, and max complete-through graph commit epoch, so release notes
+do not need to parse raw ranked maintenance items. With
+`--require-production-ready`, the command exits
 with an error unless the summary reports `production_cutover_ready: true`.
 `--compact` omits the potentially large `replacement_readiness_by_query_family`
 and `blockers` arrays while retaining aggregate family counts, blocked family

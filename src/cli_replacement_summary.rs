@@ -133,6 +133,13 @@ pub fn nowledge_replacement_summary_json_with_options(
             "background_maintenance_required": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_required"]),
             "background_maintenance_ready": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_ready"]),
             "background_maintenance_protocol_matches": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_protocol_matches"]),
+            "background_maintenance_executable_search_projection_graph_delta_count": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_executable_search_projection_graph_delta_count"]),
+            "background_maintenance_admitted_search_projection_graph_delta_count": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_admitted_search_projection_graph_delta_count"]),
+            "background_maintenance_deferred_search_projection_graph_delta_count": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_deferred_search_projection_graph_delta_count"]),
+            "background_maintenance_rejected_search_projection_graph_delta_count": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_rejected_search_projection_graph_delta_count"]),
+            "background_maintenance_executable_search_projection_graph_delta_operations": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_executable_search_projection_graph_delta_operations"]),
+            "background_maintenance_admitted_search_projection_graph_delta_operations": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_admitted_search_projection_graph_delta_operations"]),
+            "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": json_get_u64_path(bundle, &["cutover_evidence", "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"]),
             "background_maintenance_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "background_maintenance_blocker_codes"]),
             "replacement_readiness_min_per_million": json_get_u64_path(bundle, &["cutover_evidence", "replacement_readiness_min_per_million"]),
         },
@@ -486,6 +493,8 @@ fn nowledge_replacement_next_actions(
             [
                 "cutover_evidence.background_maintenance_present",
                 "cutover_evidence.background_maintenance_ready",
+                "cutover_evidence.background_maintenance_executable_search_projection_graph_delta_count",
+                "cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count",
                 "cutover_evidence.background_maintenance_blocker_codes",
             ],
         ));
@@ -716,6 +725,36 @@ mod tests {
         assert_eq!(
             summary["cutover_evidence"]["background_maintenance_protocol_matches"],
             true
+        );
+        assert_eq!(
+            summary["cutover_evidence"]
+                ["background_maintenance_executable_search_projection_graph_delta_count"],
+            2
+        );
+        assert_eq!(
+            summary["cutover_evidence"]
+                ["background_maintenance_admitted_search_projection_graph_delta_count"],
+            1
+        );
+        assert_eq!(
+            summary["cutover_evidence"]
+                ["background_maintenance_deferred_search_projection_graph_delta_count"],
+            1
+        );
+        assert_eq!(
+            summary["cutover_evidence"]
+                ["background_maintenance_executable_search_projection_graph_delta_operations"],
+            8
+        );
+        assert_eq!(
+            summary["cutover_evidence"]
+                ["background_maintenance_admitted_search_projection_graph_delta_operations"],
+            3
+        );
+        assert_eq!(
+            summary["cutover_evidence"]
+                ["background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch"],
+            42
         );
         assert_eq!(summary["previous_wrapper_contract_evidence"]["ready"], true);
         assert_eq!(
@@ -1079,6 +1118,8 @@ mod tests {
                     "evidence_fields": [
                         "cutover_evidence.background_maintenance_present",
                         "cutover_evidence.background_maintenance_ready",
+                        "cutover_evidence.background_maintenance_executable_search_projection_graph_delta_count",
+                        "cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count",
                         "cutover_evidence.background_maintenance_blocker_codes"
                     ]
                 }
@@ -1125,6 +1166,13 @@ mod tests {
                 "background_maintenance_present": true,
                 "background_maintenance_ready": true,
                 "background_maintenance_protocol_matches": true,
+                "background_maintenance_executable_search_projection_graph_delta_count": 2,
+                "background_maintenance_admitted_search_projection_graph_delta_count": 1,
+                "background_maintenance_deferred_search_projection_graph_delta_count": 1,
+                "background_maintenance_rejected_search_projection_graph_delta_count": 0,
+                "background_maintenance_executable_search_projection_graph_delta_operations": 8,
+                "background_maintenance_admitted_search_projection_graph_delta_operations": 3,
+                "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 42,
                 "background_maintenance_blocker_codes": [],
                 "background_maintenance_blockers": [],
                 "replacement_readiness_min_per_million": 1_000_000,
