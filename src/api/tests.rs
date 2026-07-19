@@ -63,8 +63,9 @@ use super::{
     KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
     KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
-    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadDistillationCandidateRequest,
-    KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
+    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadListOrder,
+    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -5444,6 +5445,103 @@ fn synthesized_source_coverage_rejects_invalid_request() {
     assert!(zero_covered_error
         .to_string()
         .contains("positive covered count"));
+}
+
+#[test]
+fn reads_synthesized_source_ids_for_feed_collection_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'collect-crystal-alpha', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'collect-crystal-beta', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'collect-source-one'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'collect-source-two'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'collect-source-node-skip'})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Memory {id: 'collect-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Memory {id: 'collect-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Memory {id: 'collect-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM {duplicate: true}]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'collect-crystal-alpha'}), (s:Source {id: 'collect-source-node-skip'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'collect-crystal-beta'}), (s:Memory {id: 'collect-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
+            crystal_memory_ids: vec![
+                "missing-crystal".to_string(),
+                "collect-crystal-alpha".to_string(),
+                "collect-crystal-beta".to_string(),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.found_crystal_count, 2);
+    assert_eq!(output.missing_crystal_count, 1);
+    assert_eq!(output.returned_count, 3);
+    assert!(!output.rows[0].found_crystal);
+    assert_eq!(output.rows[0].crystal_memory_id, "missing-crystal");
+    assert_eq!(output.rows[0].crystal_node_id, None);
+    assert!(output.rows[0].source_memory_ids.is_empty());
+    assert_eq!(output.rows[1].crystal_memory_id, "collect-crystal-alpha");
+    assert!(output.rows[1].found_crystal);
+    assert_eq!(
+        output.rows[1].source_memory_ids,
+        vec![
+            "collect-source-one".to_string(),
+            "collect-source-two".to_string()
+        ]
+    );
+    assert_eq!(output.rows[2].crystal_memory_id, "collect-crystal-beta");
+    assert_eq!(
+        output.rows[2].source_memory_ids,
+        vec!["collect-source-two".to_string()]
+    );
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let tx = db.begin_read_transaction();
+    db.query("MATCH (c:Memory {id: 'collect-crystal-beta'}), (s:Memory {id: 'collect-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
+            crystal_memory_ids: vec!["collect-crystal-beta".to_string()],
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(
+        snapshot.rows[0].source_memory_ids,
+        vec!["collect-source-two".to_string()]
+    );
+}
+
+#[test]
+fn synthesized_source_ids_rejects_invalid_request() {
+    let db = Database::new();
+
+    let empty_ids_error = db
+        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
+            crystal_memory_ids: Vec::new(),
+        })
+        .unwrap_err();
+    assert!(empty_ids_error
+        .to_string()
+        .contains("non-empty crystal memory ids"));
+
+    let empty_id_error = db
+        .knowledge_synthesized_source_ids(&KnowledgeSynthesizedSourceIdsRequest {
+            crystal_memory_ids: vec![String::new()],
+        })
+        .unwrap_err();
+    assert!(empty_id_error
+        .to_string()
+        .contains("non-empty crystal memory ids"));
 }
 
 #[test]

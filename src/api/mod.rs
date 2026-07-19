@@ -1840,6 +1840,28 @@ pub struct KnowledgeSynthesizedSourceCoverageOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSynthesizedSourceIdsRequest {
+    pub crystal_memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSynthesizedSourceIdsRow {
+    pub crystal_memory_id: String,
+    pub crystal_node_id: Option<u64>,
+    pub found_crystal: bool,
+    pub source_memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSynthesizedSourceIdsOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSynthesizedSourceIdsRow>,
+    pub found_crystal_count: usize,
+    pub missing_crystal_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityCreateRequest {
     pub label: String,
     pub external_id: String,
@@ -5279,6 +5301,13 @@ impl Database {
         request: &KnowledgeSynthesizedSourceCoverageRequest,
     ) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
         knowledge_synthesized_source_coverage_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_synthesized_source_ids(
+        &self,
+        request: &KnowledgeSynthesizedSourceIdsRequest,
+    ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
+        knowledge_synthesized_source_ids_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_entity(
@@ -9026,6 +9055,88 @@ fn sort_synthesized_source_coverage_rows(rows: &mut [KnowledgeSynthesizedSourceC
             .cmp(&right.crystal_memory_id)
             .then_with(|| left.crystal_node_id.cmp(&right.crystal_node_id))
     });
+}
+
+fn knowledge_synthesized_source_ids_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSynthesizedSourceIdsRequest,
+) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
+    validate_knowledge_synthesized_source_ids_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let mut rows = Vec::new();
+    let mut found_crystal_count = 0;
+    let mut missing_crystal_count = 0;
+
+    for crystal_memory_id in &request.crystal_memory_ids {
+        let Some(crystal) =
+            seed_node_by_label_and_external_id(catalog, store, "Memory", crystal_memory_id)
+        else {
+            missing_crystal_count += 1;
+            rows.push(KnowledgeSynthesizedSourceIdsRow {
+                crystal_memory_id: crystal_memory_id.clone(),
+                crystal_node_id: None,
+                found_crystal: false,
+                source_memory_ids: Vec::new(),
+            });
+            continue;
+        };
+
+        found_crystal_count += 1;
+        rows.push(KnowledgeSynthesizedSourceIdsRow {
+            crystal_memory_id: crystal_memory_id.clone(),
+            crystal_node_id: Some(crystal.id.0),
+            found_crystal: true,
+            source_memory_ids: synthesized_source_ids_for_crystal(catalog, store, crystal),
+        });
+    }
+
+    let returned_count = rows.len();
+    Ok(KnowledgeSynthesizedSourceIdsOutput {
+        graph_commit_epoch,
+        rows,
+        found_crystal_count,
+        missing_crystal_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_synthesized_source_ids_request(
+    request: &KnowledgeSynthesizedSourceIdsRequest,
+) -> Result<()> {
+    if request.crystal_memory_ids.is_empty()
+        || request.crystal_memory_ids.iter().any(String::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge synthesized source ids requires non-empty crystal memory ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn synthesized_source_ids_for_crystal(
+    catalog: &Catalog,
+    store: &GraphStore,
+    crystal: &NodeRecord,
+) -> Vec<String> {
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
+        return Vec::new();
+    };
+
+    store
+        .outgoing_relationships(crystal.id, synthesized_from_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|node| node.labels.contains(&memory_label_id))
+                .and_then(node_external_id)
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
 }
 
 enum KnowledgeScopedEntityMatch {
@@ -20340,6 +20451,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_synthesized_source_coverage(request)
     }
 
+    pub fn knowledge_synthesized_source_ids(
+        &self,
+        request: &KnowledgeSynthesizedSourceIdsRequest,
+    ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
+        self.db.knowledge_synthesized_source_ids(request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -21416,6 +21534,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSynthesizedSourceCoverageRequest,
     ) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
         knowledge_synthesized_source_coverage_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_synthesized_source_ids(
+        &self,
+        request: &KnowledgeSynthesizedSourceIdsRequest,
+    ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
+        knowledge_synthesized_source_ids_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

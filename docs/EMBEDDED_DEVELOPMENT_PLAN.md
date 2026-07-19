@@ -595,7 +595,10 @@ Nowledge feed reads support the bounded synthesized-source aggregation
 `MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) WHERE c.id IN $ids WITH c, COLLECT(DISTINCT s.id) AS source_ids RETURN c.id, source_ids`
 as a direct group-by-property plus collected-property list. General `WITH`
 projection chains and general `COLLECT` expressions remain outside this
-bounded subset.
+bounded subset. The same feed hydration shape is also available as the typed
+`Database::knowledge_synthesized_source_ids` read, which accepts bounded
+crystal Memory ids, returns one ordered row per requested id with distinct
+sorted source Memory ids, reports missing crystals, and does not write WAL.
 Nowledge synthesized-source coverage lookups also support the bounded grouped
 aggregate filter shape
 `WITH c.id AS cid, count(DISTINCT s.id) AS covered WHERE covered = $n RETURN cid LIMIT 1`
