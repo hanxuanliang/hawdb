@@ -23,7 +23,8 @@ use super::{
     KnowledgeMemoryAccessTouch, KnowledgeMemoryEntityListRequest,
     KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
-    KnowledgeMemoryListRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeMemoryListRequest, KnowledgeMemorySourceAttributionRequest,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -6275,6 +6276,156 @@ fn source_list_rejects_unbounded_or_empty_filters() {
     assert!(empty_marker
         .to_string()
         .contains("non-empty metadata marker"));
+}
+
+#[test]
+fn reads_memory_source_attributions_for_nowledge_bulk_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha Source', source_type: 'file', file_path: '/tmp/a.md'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta Source', source_type: 'web'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory Alpha', content: 'Alpha content for source attribution detail', unit_type: 'fact', importance: 0.7, pagerank_score: 0.9, community_id: 'c1', space_id: '', source: 'agent', created_at: 10, updated_at: 20, event_start: 1, event_end: 2})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b', content: 'Beta content without title', unit_type: 'note', importance: 0.4, space_id: 'archive', created_at: 30})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', created_at: 100}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v1', created_at: 90}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_b'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 3}]->(s)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let by_memory = db
+        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
+            memory_ids: vec!["memory_a".to_string(), "missing".to_string()],
+            source_ids: Vec::new(),
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(by_memory.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(by_memory.matched_count, 2);
+    assert_eq!(by_memory.returned_count, 2);
+    assert_eq!(by_memory.missing_memory_ids, vec!["missing".to_string()]);
+    assert_eq!(by_memory.missing_source_ids, Vec::<String>::new());
+    assert_eq!(by_memory.rows[0].source_id.as_deref(), Some("source_a"));
+    assert_eq!(by_memory.rows[0].memory_id.as_deref(), Some("memory_a"));
+    assert_eq!(by_memory.rows[0].memory_display_title, "Memory Alpha");
+    assert_eq!(
+        by_memory.rows[0].memory_title.as_deref(),
+        Some("Memory Alpha")
+    );
+    assert_eq!(
+        by_memory.rows[0].memory_content.as_deref(),
+        Some("Alpha content for source attribution detail")
+    );
+    assert_eq!(
+        by_memory.rows[0].memory_content_preview.as_deref(),
+        Some("Alpha content for source attribution detail")
+    );
+    assert_eq!(by_memory.rows[0].memory_unit_type.as_deref(), Some("fact"));
+    assert_eq!(by_memory.rows[0].memory_importance, Some(Value::Float(0.7)));
+    assert_eq!(
+        by_memory.rows[0].memory_pagerank_score,
+        Some(Value::Float(0.9))
+    );
+    assert_eq!(
+        by_memory.rows[0].memory_community_id,
+        Some(Value::String("c1".to_string()))
+    );
+    assert_eq!(by_memory.rows[0].memory_raw_space_id, None);
+    assert_eq!(by_memory.rows[0].memory_normalized_space_id, "default");
+    assert_eq!(by_memory.rows[0].memory_source.as_deref(), Some("agent"));
+    assert_eq!(by_memory.rows[0].memory_created_at, Some(Value::Int(10)));
+    assert_eq!(by_memory.rows[0].memory_updated_at, Some(Value::Int(20)));
+    assert_eq!(by_memory.rows[0].memory_event_start, Some(Value::Int(1)));
+    assert_eq!(by_memory.rows[0].memory_event_end, Some(Value::Int(2)));
+    assert_eq!(
+        by_memory.rows[0].source_original_name.as_deref(),
+        Some("Alpha Source")
+    );
+    assert_eq!(by_memory.rows[0].source_type.as_deref(), Some("file"));
+    assert_eq!(
+        by_memory.rows[0].source_file_path.as_deref(),
+        Some("/tmp/a.md")
+    );
+    assert_eq!(by_memory.rows[0].chunk_index, Some(2));
+    assert_eq!(by_memory.rows[0].chunk_range.as_deref(), Some("10..20"));
+    assert_eq!(by_memory.rows[0].source_version.as_deref(), Some("v1"));
+    assert_eq!(
+        by_memory.rows[0].relationship_created_at,
+        Some(Value::Int(100))
+    );
+    assert_eq!(by_memory.rows[1].source_id.as_deref(), Some("source_b"));
+
+    let by_source = db
+        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
+            memory_ids: Vec::new(),
+            source_ids: vec!["source_a".to_string(), "missing_source".to_string()],
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(by_source.matched_count, 2);
+    assert_eq!(by_source.returned_count, 1);
+    assert_eq!(
+        by_source.missing_source_ids,
+        vec!["missing_source".to_string()]
+    );
+    assert_eq!(by_source.rows[0].source_id.as_deref(), Some("source_a"));
+    assert_eq!(by_source.rows[0].memory_id.as_deref(), Some("memory_a"));
+
+    let combined = db
+        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
+            memory_ids: vec!["memory_b".to_string()],
+            source_ids: vec!["source_a".to_string()],
+            limit: 10,
+        })
+        .unwrap();
+    assert_eq!(combined.matched_count, 1);
+    assert_eq!(combined.rows[0].memory_id.as_deref(), Some("memory_b"));
+    assert_eq!(
+        combined.rows[0].memory_display_title,
+        "Beta content without title"
+    );
+    assert_eq!(
+        combined.rows[0].memory_raw_space_id.as_deref(),
+        Some("archive")
+    );
+    assert_eq!(combined.rows[0].memory_normalized_space_id, "archive");
+    assert_eq!(combined.rows[0].chunk_index, Some(1));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn memory_source_attribution_rejects_unbounded_or_empty_filters() {
+    let db = Database::new();
+
+    let unbounded = db
+        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest::default())
+        .unwrap_err();
+    assert!(unbounded
+        .to_string()
+        .contains("requires memory ids or source ids"));
+
+    let empty_memory_id = db
+        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
+            memory_ids: vec![String::new()],
+            source_ids: Vec::new(),
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(empty_memory_id.to_string().contains("non-empty memory ids"));
+
+    let empty_source_id = db
+        .knowledge_memory_source_attributions(&KnowledgeMemorySourceAttributionRequest {
+            memory_ids: Vec::new(),
+            source_ids: vec![String::new()],
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(empty_source_id.to_string().contains("non-empty source ids"));
 }
 
 #[test]

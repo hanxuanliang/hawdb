@@ -429,6 +429,11 @@ Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with
 chunk metadata ordering and no WAL writes.
+Bulk Memory/Source attribution reads are available as
+`Database::knowledge_memory_source_attributions`, covering Nowledge Memory id to
+Source id reads and Source id to Memory summary/library rows over
+`SOURCED_FROM`, with bounded filters, missing-id reporting, Memory display/rank
+fields, chunk metadata, and no WAL writes.
 Bounded Source list and summary reads are available as
 `Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
 overview ranking, parsed-path list, lifecycle attention, and metadata-marker

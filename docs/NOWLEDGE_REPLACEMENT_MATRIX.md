@@ -193,6 +193,12 @@ edges, returns Memory id/title/content/unit type/confidence plus chunk
 index/range/source version/created-at relationship metadata ordered by chunk
 index and Memory id, supports bounded limits, reports found/matched/returned
 counts and the graph commit epoch, and does not write WAL.
+Bulk Memory/Source attribution reads are covered by
+`Database::knowledge_memory_source_attributions`. The typed read scans
+`SOURCED_FROM` edges by bounded Memory ids, Source ids, or both, returning
+Memory and Source endpoint ids, relationship ids, chunk metadata, Source display
+fields, Memory display title/content preview/rank/community/space/source/time
+fields, missing-id reporting, bounded limits, and no WAL writes.
 Memory lifecycle metadata writes are covered by a typed batch for the Nowledge
 `metadata`, `is_latest`, `lifecycle_state`, and `updated_at` update shape. The
 wrapper validates Memory ids and non-empty lifecycle states before WAL, reports

@@ -2007,6 +2007,54 @@ pub struct KnowledgeSourceMemoryListOutput {
     pub returned_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeMemorySourceAttributionRequest {
+    pub memory_ids: Vec<String>,
+    pub source_ids: Vec<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemorySourceAttributionRow {
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub source_id: Option<String>,
+    pub source_node_id: u64,
+    pub relationship_id: u64,
+    pub memory_display_title: String,
+    pub memory_title: Option<String>,
+    pub memory_content_preview: Option<String>,
+    pub memory_content: Option<String>,
+    pub memory_unit_type: Option<String>,
+    pub memory_importance: Option<Value>,
+    pub memory_pagerank_score: Option<Value>,
+    pub memory_community_id: Option<Value>,
+    pub memory_raw_space_id: Option<String>,
+    pub memory_normalized_space_id: String,
+    pub memory_source: Option<String>,
+    pub memory_created_at: Option<Value>,
+    pub memory_updated_at: Option<Value>,
+    pub memory_event_start: Option<Value>,
+    pub memory_event_end: Option<Value>,
+    pub source_original_name: Option<String>,
+    pub source_type: Option<String>,
+    pub source_file_path: Option<String>,
+    pub chunk_index: Option<i64>,
+    pub chunk_range: Option<String>,
+    pub source_version: Option<String>,
+    pub relationship_created_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemorySourceAttributionOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemorySourceAttributionRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_memory_ids: Vec<String>,
+    pub missing_source_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryLifecycleUpdate {
     pub memory_id: String,
@@ -4825,6 +4873,13 @@ impl Database {
         request: &KnowledgeSourceMemoryListRequest,
     ) -> Result<KnowledgeSourceMemoryListOutput> {
         knowledge_source_memories_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_source_attributions(
+        &self,
+        request: &KnowledgeMemorySourceAttributionRequest,
+    ) -> Result<KnowledgeMemorySourceAttributionOutput> {
+        knowledge_memory_source_attributions_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(
@@ -8979,6 +9034,198 @@ fn source_memory_row(memory: &NodeRecord, relationship: &RelRecord) -> Knowledge
     }
 }
 
+fn knowledge_memory_source_attributions_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemorySourceAttributionRequest,
+) -> Result<KnowledgeMemorySourceAttributionOutput> {
+    validate_knowledge_memory_source_attribution_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
+        return Ok(KnowledgeMemorySourceAttributionOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: request.memory_ids.clone(),
+            missing_source_ids: request.source_ids.clone(),
+        });
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemorySourceAttributionOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: request.memory_ids.clone(),
+            missing_source_ids: request.source_ids.clone(),
+        });
+    };
+    let Some(source_label_id) = catalog.label_id("Source") else {
+        return Ok(KnowledgeMemorySourceAttributionOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: request.memory_ids.clone(),
+            missing_source_ids: request.source_ids.clone(),
+        });
+    };
+
+    let requested_memory_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let requested_source_ids = request.source_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut seen_memory_ids = BTreeSet::new();
+    let mut seen_source_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_relationships(Some(rel_type_id))
+        .filter_map(|relationship| {
+            let memory = store.node(relationship.source)?;
+            let source = store.node(relationship.target)?;
+            if !memory.labels.contains(&memory_label_id)
+                || !source.labels.contains(&source_label_id)
+            {
+                return None;
+            }
+            let memory_id = node_external_id(memory);
+            let source_id = node_external_id(source);
+            if !requested_memory_ids.is_empty()
+                && !memory_id
+                    .as_ref()
+                    .is_some_and(|memory_id| requested_memory_ids.contains(memory_id))
+            {
+                return None;
+            }
+            if !requested_source_ids.is_empty()
+                && !source_id
+                    .as_ref()
+                    .is_some_and(|source_id| requested_source_ids.contains(source_id))
+            {
+                return None;
+            }
+            if let Some(memory_id) = &memory_id {
+                seen_memory_ids.insert(memory_id.clone());
+            }
+            if let Some(source_id) = &source_id {
+                seen_source_ids.insert(source_id.clone());
+            }
+            Some(memory_source_attribution_row(memory, source, relationship))
+        })
+        .collect::<Vec<_>>();
+
+    rows.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    let missing_memory_ids = request
+        .memory_ids
+        .iter()
+        .filter(|memory_id| !seen_memory_ids.contains(*memory_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let missing_source_ids = request
+        .source_ids
+        .iter()
+        .filter(|source_id| !seen_source_ids.contains(*source_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeMemorySourceAttributionOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_memory_ids,
+        missing_source_ids,
+    })
+}
+
+fn validate_knowledge_memory_source_attribution_request(
+    request: &KnowledgeMemorySourceAttributionRequest,
+) -> Result<()> {
+    if request
+        .memory_ids
+        .iter()
+        .any(|memory_id| memory_id.is_empty())
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge memory source attribution read requires non-empty memory ids".to_string(),
+        ));
+    }
+    if request
+        .source_ids
+        .iter()
+        .any(|source_id| source_id.is_empty())
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge memory source attribution read requires non-empty source ids".to_string(),
+        ));
+    }
+    if request.memory_ids.is_empty() && request.source_ids.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory source attribution read requires memory ids or source ids"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn memory_source_attribution_row(
+    memory: &NodeRecord,
+    source: &NodeRecord,
+    relationship: &RelRecord,
+) -> KnowledgeMemorySourceAttributionRow {
+    let memory_title = string_property(memory, "title");
+    let memory_content = string_property(memory, "content");
+    let memory_content_preview = memory_content
+        .as_ref()
+        .map(|content| truncate_chars(content, 200));
+    let memory_display_title = memory_title
+        .clone()
+        .or_else(|| {
+            memory_content
+                .as_ref()
+                .map(|content| truncate_chars(content, 60))
+        })
+        .unwrap_or_default();
+    KnowledgeMemorySourceAttributionRow {
+        memory_id: node_external_id(memory),
+        memory_node_id: memory.id.0,
+        source_id: node_external_id(source),
+        source_node_id: source.id.0,
+        relationship_id: relationship.id.0,
+        memory_display_title,
+        memory_title,
+        memory_content_preview,
+        memory_content,
+        memory_unit_type: string_property(memory, "unit_type"),
+        memory_importance: memory.properties.get("importance").cloned(),
+        memory_pagerank_score: memory.properties.get("pagerank_score").cloned(),
+        memory_community_id: memory.properties.get("community_id").cloned(),
+        memory_raw_space_id: string_property(memory, "space_id"),
+        memory_normalized_space_id: normalized_node_space_id(memory),
+        memory_source: string_property(memory, "source"),
+        memory_created_at: memory.properties.get("created_at").cloned(),
+        memory_updated_at: memory.properties.get("updated_at").cloned(),
+        memory_event_start: memory.properties.get("event_start").cloned(),
+        memory_event_end: memory.properties.get("event_end").cloned(),
+        source_original_name: string_property(source, "original_name"),
+        source_type: string_property(source, "source_type"),
+        source_file_path: string_property(source, "file_path"),
+        chunk_index: relationship_integer_property(relationship, "chunk_index"),
+        chunk_range: relationship_string_property(relationship, "chunk_range"),
+        source_version: relationship_string_property(relationship, "source_version"),
+        relationship_created_at: relationship.properties.get("created_at").cloned(),
+    }
+}
+
 fn relationship_string_property(relationship: &RelRecord, property: &str) -> Option<String> {
     relationship
         .properties
@@ -9028,6 +9275,10 @@ fn integer_property(node: &NodeRecord, property: &str) -> Option<i64> {
         Some(Value::Int(value)) => Some(*value),
         _ => None,
     }
+}
+
+fn truncate_chars(value: &str, max_chars: usize) -> String {
+    value.chars().take(max_chars).collect()
 }
 
 fn update_knowledge_memory_lifecycle_batch_for(
@@ -17626,6 +17877,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSourceMemoryListRequest,
     ) -> Result<KnowledgeSourceMemoryListOutput> {
         self.db.knowledge_source_memories(request)
+    }
+
+    pub fn knowledge_memory_source_attributions(
+        &self,
+        request: &KnowledgeMemorySourceAttributionRequest,
+    ) -> Result<KnowledgeMemorySourceAttributionOutput> {
+        self.db.knowledge_memory_source_attributions(request)
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(
