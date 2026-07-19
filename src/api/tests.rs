@@ -340,6 +340,35 @@ fn nowledge_graph_adapter_runs_parameterized_query_explain_and_transaction() {
         .unwrap();
     assert!(explain.plan.contains("ProjectExec"));
     assert!(explain.trace.selected_plan.contains("ProjectExec"));
+    assert_eq!(
+        explain.work_request,
+        WorkRequest::foreground(WorkClass::Query, 1)
+    );
+
+    let hinted_work = adapter
+        .query_work_request(&NowledgeGraphStatement {
+            cypher: "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
+                     system.estimated_operations = 64 MATCH (m:Memory) RETURN m.id AS id"
+                .to_string(),
+            parameters: BTreeMap::new(),
+        })
+        .unwrap();
+    assert_eq!(
+        hinted_work,
+        WorkRequest::background(WorkClass::Analytics, 64)
+    );
+    let hinted_explain = adapter
+        .explain(&NowledgeGraphStatement {
+            cypher: "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
+                     system.estimated_operations = 64 MATCH (m:Memory) RETURN m.id AS id"
+                .to_string(),
+            parameters: BTreeMap::new(),
+        })
+        .unwrap();
+    assert_eq!(
+        hinted_explain.work_request,
+        WorkRequest::background(WorkClass::Analytics, 64)
+    );
 }
 
 #[test]
@@ -25066,6 +25095,10 @@ fn explains_query_with_optimizer_trace() {
         output.trace.selected_plan_fingerprint,
         output.physical_plan.fingerprint()
     );
+    assert_eq!(
+        output.work_request,
+        WorkRequest::foreground(WorkClass::Query, 1)
+    );
     assert!(output
         .trace
         .selected_plan_fingerprint
@@ -25075,6 +25108,23 @@ fn explains_query_with_optimizer_trace() {
         .decisions
         .iter()
         .any(|decision| decision.contains("choose IndexNodeSeek")));
+}
+
+#[test]
+fn explain_query_reports_effective_resource_hints() {
+    let db = Database::new();
+    let output = db
+        .explain_query(
+            "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
+             system.estimated_operations = 64 MATCH (m:Memory) RETURN m.id AS id",
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.work_request,
+        WorkRequest::background(WorkClass::Analytics, 64)
+    );
+    assert!(output.trace.selected_plan.contains("ProjectExec"));
 }
 
 #[test]

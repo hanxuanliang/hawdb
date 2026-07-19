@@ -773,7 +773,8 @@ Required test suites:
 - deterministic optimizer trace tests
 - read-only parameterized `explain-json` CLI smoke tests for structured
   optimizer search mode, plan-cache hit/miss/disabled/bypass/eviction stats,
-  and selected-plan operator/class summaries
+  selected-plan operator/class summaries, and effective query `WorkRequest`
+  observability
 - transaction commit/rollback tests
 - WAL recovery and checkpoint tests
 - internal Nowledge-shaped compatibility fixtures against the Skein facade

@@ -3803,6 +3803,11 @@ fn explain_output_json(
         "selected_plan_properties": physical_properties_json(&output.trace.selected_plan_properties),
         "selected_plan_operator_counts": output.trace.selected_plan_operator_counts,
         "selected_plan_class_counts": output.trace.selected_plan_class_counts,
+        "work_request": {
+            "priority": output.work_request.priority.as_str(),
+            "class": output.work_request.class.as_str(),
+            "estimated_operations": output.work_request.estimated_operations,
+        },
         "plan_cache_stats": {
             "max_entries": plan_cache_stats.max_entries,
             "entries": plan_cache_stats.entries,
@@ -3970,7 +3975,7 @@ mod tests {
         CompatibilityShadowCheckReport, CompatibilityShadowReport, CompatibilityShadowStatus,
         Database, ExternalShadowReady, GraphLightningBootstrapManifest,
         GraphLightningGraphStreamValidation, PlanCacheStats, RecoveryMode, StorageRecoveryReport,
-        Value,
+        Value, WorkClass, WorkRequest,
     };
     use std::collections::BTreeMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -4934,6 +4939,7 @@ mod tests {
                 variable: "m".to_string(),
                 label: "Memory".to_string(),
             },
+            work_request: WorkRequest::background(WorkClass::Analytics, 64),
             trace: OptimizerTrace {
                 groups: 1,
                 search_mode: skein::optimizer::SearchMode::Memo,
@@ -5003,6 +5009,9 @@ mod tests {
         assert_eq!(json["selected_plan_properties"]["ordering"][0], "title asc");
         assert_eq!(json["selected_plan_operator_counts"]["SeqNodeScan"], 1);
         assert_eq!(json["selected_plan_class_counts"]["access"], 1);
+        assert_eq!(json["work_request"]["priority"], "background");
+        assert_eq!(json["work_request"]["class"], "analytics");
+        assert_eq!(json["work_request"]["estimated_operations"], 64);
         assert_eq!(json["plan_cache_stats"]["max_entries"], 128);
         assert_eq!(json["plan_cache_stats"]["entries"], 1);
         assert_eq!(json["plan_cache_stats"]["hits"], 2);

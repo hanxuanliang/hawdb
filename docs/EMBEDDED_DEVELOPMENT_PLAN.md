@@ -1510,9 +1510,10 @@ Current implemented slice:
 - `skein explain-json [--params-json <json-object>] <database-path> <cypher>`
   opens the database read-only and prints the selected plan, fingerprint,
   optimizer search mode, recursive cost, cost breakdown, typed parameter echo,
-  warnings, decisions, structured operator/class histograms, plan-cache
+  effective `WorkRequest` from `SET system.*` defaults or `CYPHER system.*`
+  hints, warnings, decisions, structured operator/class histograms, plan-cache
   hit/miss/eviction counters, and typed rule events as stable JSON for
-  migration gates and CI artifacts;
+  migration gates, resource-scheduling dashboards, and CI artifacts;
   legacy decision strings remain for compatibility, while `rule_events` exposes
   `rule`, `outcome`, and `detail` fields for implementation-rule diagnostics
   without parsing English explain text

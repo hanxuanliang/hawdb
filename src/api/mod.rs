@@ -215,6 +215,7 @@ pub struct NowledgeGraphStatement {
 pub struct NowledgeGraphExplainOutput {
     pub plan: String,
     pub trace: OptimizerTrace,
+    pub work_request: WorkRequest,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5417,6 +5418,7 @@ pub struct KnowledgeGraphContextPath {
 pub struct ExplainOutput {
     pub physical_plan: PhysicalPlan,
     pub trace: OptimizerTrace,
+    pub work_request: WorkRequest,
 }
 
 #[derive(Debug)]
@@ -5660,12 +5662,13 @@ impl Database {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
-        query_work_request_for_statement(&self.system_variables, &statement)?;
+        let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
         let (physical_plan, trace) =
             self.optimized_query_plan(cypher_text, &statement, parameters)?;
         Ok(ExplainOutput {
             physical_plan,
             trace,
+            work_request,
         })
     }
 
@@ -28618,6 +28621,7 @@ impl<'a> NowledgeGraphAdapter<'a> {
         Ok(NowledgeGraphExplainOutput {
             plan: output.physical_plan.explain(0),
             trace: output.trace,
+            work_request: output.work_request,
         })
     }
 
@@ -30113,7 +30117,8 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
-        query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
+        let work_request =
+            query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
         let (physical_plan, trace) =
             self.optimized_query_plan(cypher_text, &statement, parameters)?;
         if executor::is_mutation_plan(&physical_plan)? {
@@ -30124,6 +30129,7 @@ impl DatabaseReadTransaction {
         Ok(ExplainOutput {
             physical_plan,
             trace,
+            work_request,
         })
     }
 
