@@ -290,6 +290,13 @@ jobs:
             "engine_kind": "previous_wrapper",
             "wrapper_identity": "nowledge-previous-wrapper:ci-smoke",
             "primary_only_checks": 0,
+            "dual_engine_evidence": {
+              "ready": false,
+              "primary_check_count": 2,
+              "shadow_check_count": 2,
+              "matched_check_count": 1,
+              "primary_only_check_count": 1
+            },
             "blocker_codes": []
           }
           JSON
@@ -371,6 +378,8 @@ jobs:
           assert report["failed_checks"] == ["adapter_smoke", "migration_gate", "replacement_summary"]
           assert checks["adapter_smoke"]["failed_evidence_fields"] == ["dual_engine_evidence.ready"]
           assert report["release_summary"]["wrapper_identity"] == "nowledge-previous-wrapper:ci-smoke"
+          assert report["release_summary"]["adapter_dual_engine_ready"] is False
+          assert report["release_summary"]["adapter_dual_engine_primary_only_check_count"] == 1
           assert report["release_summary"]["production_replacement_per_million"] == 0
           assert report["release_summary"]["background_maintenance_executable_search_projection_graph_delta_count"] >= 1
           assert report["release_summary"]["background_maintenance_admitted_search_projection_graph_delta_count"] >= 1

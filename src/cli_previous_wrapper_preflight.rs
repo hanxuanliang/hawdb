@@ -367,6 +367,11 @@ fn previous_wrapper_preflight_release_summary(
         "adapter_smoke_ready": bool_path(adapter_smoke, &["adapter_smoke_ready"]),
         "adapter_request_count": u64_path(adapter_smoke, &["request_count"]),
         "adapter_primary_only_checks": u64_path(adapter_smoke, &["primary_only_checks"]),
+        "adapter_dual_engine_ready": bool_path(adapter_smoke, &["dual_engine_evidence", "ready"]),
+        "adapter_dual_engine_primary_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "primary_check_count"]),
+        "adapter_dual_engine_shadow_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "shadow_check_count"]),
+        "adapter_dual_engine_matched_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "matched_check_count"]),
+        "adapter_dual_engine_primary_only_check_count": u64_path(adapter_smoke, &["dual_engine_evidence", "primary_only_check_count"]),
         "migration_gate_decision": str_path(migration_gate, &["migration_gate", "decision"]),
         "cutover_decision": str_path(migration_gate, &["cutover", "decision"]),
         "cutover_eligible": bool_path(migration_gate, &["cutover_evidence", "eligible"]),
@@ -500,6 +505,11 @@ mod tests {
                 "adapter_smoke_ready": true,
                 "adapter_request_count": 4,
                 "adapter_primary_only_checks": 0,
+                "adapter_dual_engine_ready": true,
+                "adapter_dual_engine_primary_check_count": 2,
+                "adapter_dual_engine_shadow_check_count": 2,
+                "adapter_dual_engine_matched_check_count": 2,
+                "adapter_dual_engine_primary_only_check_count": 0,
                 "migration_gate_decision": "ready",
                 "cutover_decision": "ready",
                 "cutover_eligible": true,
@@ -807,7 +817,11 @@ mod tests {
                 "primary_only_checks": 0,
                 "request_count": 4,
                 "dual_engine_evidence": {
-                    "ready": true
+                    "ready": true,
+                    "primary_check_count": 2,
+                    "shadow_check_count": 2,
+                    "matched_check_count": 2,
+                    "primary_only_check_count": 0
                 },
                 "blocker_codes": []
             })),
