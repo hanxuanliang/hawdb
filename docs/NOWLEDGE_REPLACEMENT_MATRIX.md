@@ -351,6 +351,11 @@ handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_can
 handles canonical backfill scans, and `Database::knowledge_label_usage` plus
 `Database::knowledge_label_canonical_usage` expose single-row and canonical
 usage rows with `HAS_LABEL` counts over any source node type.
+`Database::knowledge_label_memory_distribution` covers the Nowledge label
+distribution and OKF label-row stats shapes by counting distinct Memory nodes
+per Label over `HAS_LABEL`, de-duplicating repeated edges, sorting by
+Memory-count descending then label name ascending, supporting offset/limit, and
+not writing WAL.
 Endpoint-known `HAS_LABEL` assignment reads are covered by
 `Database::knowledge_entity_labels` for Nowledge Memory, Source, Entity, and
 other id-bearing graph identities. The typed read validates the entity label

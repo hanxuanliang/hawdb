@@ -27,13 +27,13 @@ use super::{
     KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
-    KnowledgeLabelLifecycleUpdate, KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest,
-    KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
-    KnowledgeMemoryCompactingThreadListRequest, KnowledgeMemoryEntityListRequest,
-    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
-    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
-    KnowledgeMemoryListRequest, KnowledgeMemorySourceAttributionRequest,
-    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
+    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
+    KnowledgeMemoryAccessTouch, KnowledgeMemoryCompactingThreadListRequest,
+    KnowledgeMemoryEntityListRequest, KnowledgeMemoryLatestBatchRequest,
+    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
+    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
+    KnowledgeMemorySourceAttributionRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -9874,6 +9874,70 @@ fn reads_label_usage_rows_for_nowledge_label_apis() {
     assert_eq!(list.rows[0].usage_count, 2);
     assert_eq!(list.rows[1].label_id.as_deref(), Some("beta"));
     assert_eq!(list.rows[1].usage_count, 0);
+}
+
+#[test]
+fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'alpha', name: 'Alpha'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'beta', name: 'Beta'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'gamma', name: 'Gamma'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_one'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_two'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_three'})").unwrap();
+    db.query("CREATE (:Source {id: 'source_one'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_one'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_one'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL {source: 'duplicate'}]->(l)")
+        .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_two'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_three'}), (l:Label {id: 'beta'}) CREATE (m)-[:HAS_LABEL]->(l)")
+        .unwrap();
+    db.query(
+        "MATCH (s:Source {id: 'source_one'}), (l:Label {id: 'gamma'}) CREATE (s)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let all = db.knowledge_label_memory_distribution(&KnowledgeLabelMemoryDistributionRequest {
+        offset: 0,
+        limit: 0,
+    });
+
+    assert_eq!(all.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(all.matched_count, 2);
+    assert_eq!(all.returned_count, 2);
+    assert_eq!(
+        all.rows
+            .iter()
+            .map(|row| (
+                row.label_id.as_deref().unwrap(),
+                row.label_name.as_deref().unwrap(),
+                row.memory_count
+            ))
+            .collect::<Vec<_>>(),
+        vec![("alpha", "Alpha", 2), ("beta", "Beta", 1)]
+    );
+
+    let page = db.knowledge_label_memory_distribution(&KnowledgeLabelMemoryDistributionRequest {
+        offset: 1,
+        limit: 1,
+    });
+
+    assert_eq!(page.matched_count, 2);
+    assert_eq!(page.returned_count, 1);
+    assert_eq!(page.rows[0].label_id.as_deref(), Some("beta"));
+    assert_eq!(page.rows[0].label_name.as_deref(), Some("Beta"));
+    assert_eq!(page.rows[0].memory_count, 1);
 }
 
 #[test]

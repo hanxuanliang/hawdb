@@ -399,7 +399,11 @@ label list surfaces are available as typed APIs:
 `Database::knowledge_label_usage`, and
 `Database::knowledge_label_canonical_usage`. They scan only `Label` nodes,
 validate non-empty lookup filters, and compute `HAS_LABEL` usage counts over
-any source node type.
+any source node type. Label Memory distribution reads are available as
+`Database::knowledge_label_memory_distribution`, covering Nowledge
+`COUNT(DISTINCT m)` label stats and OKF label row shapes with Memory-only
+counts, duplicate edge de-duplication, offset/limit pagination, and no WAL
+writes.
 Endpoint-known label assignment reads are also available as
 `Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
 bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher

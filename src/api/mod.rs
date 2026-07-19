@@ -2874,6 +2874,12 @@ pub struct KnowledgeLabelUsageListRequest {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelMemoryDistributionRequest {
+    pub offset: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeLabelUsageRow {
     pub label_id: Option<String>,
     pub node_id: u64,
@@ -2897,6 +2903,22 @@ pub struct KnowledgeLabelUsageOutput {
 pub struct KnowledgeLabelUsageListOutput {
     pub graph_commit_epoch: u64,
     pub rows: Vec<KnowledgeLabelUsageRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelMemoryDistributionRow {
+    pub label_id: Option<String>,
+    pub label_node_id: u64,
+    pub label_name: Option<String>,
+    pub memory_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelMemoryDistributionOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeLabelMemoryDistributionRow>,
     pub matched_count: usize,
     pub returned_count: usize,
 }
@@ -5496,6 +5518,13 @@ impl Database {
         request: &KnowledgeLabelUsageListRequest,
     ) -> KnowledgeLabelUsageListOutput {
         knowledge_label_canonical_usage_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_label_memory_distribution(
+        &self,
+        request: &KnowledgeLabelMemoryDistributionRequest,
+    ) -> KnowledgeLabelMemoryDistributionOutput {
+        knowledge_label_memory_distribution_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_entity_labels(
@@ -13152,6 +13181,96 @@ fn knowledge_label_canonical_usage_for(
     label_usage_list_output(catalog, store, graph_commit_epoch, rows, request.limit)
 }
 
+fn knowledge_label_memory_distribution_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeLabelMemoryDistributionRequest,
+) -> KnowledgeLabelMemoryDistributionOutput {
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return empty_label_memory_distribution_output(graph_commit_epoch);
+    };
+    let Some(label_label_id) = catalog.label_id("Label") else {
+        return empty_label_memory_distribution_output(graph_commit_epoch);
+    };
+    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return empty_label_memory_distribution_output(graph_commit_epoch);
+    };
+
+    let mut memory_ids_by_label = BTreeMap::<NodeId, BTreeSet<NodeId>>::new();
+    for memory in store.scan_nodes(Some(memory_label_id)) {
+        for relationship in store.outgoing_relationships(memory.id, has_label_type_id) {
+            let Some(label) = store
+                .node(relationship.target)
+                .filter(|node| node.labels.contains(&label_label_id))
+            else {
+                continue;
+            };
+            memory_ids_by_label
+                .entry(label.id)
+                .or_default()
+                .insert(memory.id);
+        }
+    }
+
+    let mut rows = memory_ids_by_label
+        .into_iter()
+        .filter_map(|(label_node_id, memory_ids)| {
+            store
+                .node(label_node_id)
+                .map(|label| knowledge_label_memory_distribution_row(label, memory_ids.len()))
+        })
+        .collect::<Vec<_>>();
+    sort_label_memory_distribution_rows(&mut rows);
+    let matched_count = rows.len();
+    let mut rows = rows.into_iter().skip(request.offset).collect::<Vec<_>>();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    KnowledgeLabelMemoryDistributionOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    }
+}
+
+fn empty_label_memory_distribution_output(
+    graph_commit_epoch: u64,
+) -> KnowledgeLabelMemoryDistributionOutput {
+    KnowledgeLabelMemoryDistributionOutput {
+        graph_commit_epoch,
+        rows: Vec::new(),
+        matched_count: 0,
+        returned_count: 0,
+    }
+}
+
+fn knowledge_label_memory_distribution_row(
+    label: &NodeRecord,
+    memory_count: usize,
+) -> KnowledgeLabelMemoryDistributionRow {
+    KnowledgeLabelMemoryDistributionRow {
+        label_id: node_external_id(label),
+        label_node_id: label.id.0,
+        label_name: node_string_property(label, "name"),
+        memory_count,
+    }
+}
+
+fn sort_label_memory_distribution_rows(rows: &mut [KnowledgeLabelMemoryDistributionRow]) {
+    rows.sort_by(|left, right| {
+        right
+            .memory_count
+            .cmp(&left.memory_count)
+            .then_with(|| left.label_name.cmp(&right.label_name))
+            .then_with(|| left.label_id.cmp(&right.label_id))
+            .then_with(|| left.label_node_id.cmp(&right.label_node_id))
+    });
+}
+
 fn knowledge_entity_labels_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -20341,6 +20460,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeLabelUsageListRequest,
     ) -> KnowledgeLabelUsageListOutput {
         self.db.knowledge_label_canonical_usage(request)
+    }
+
+    pub fn knowledge_label_memory_distribution(
+        &self,
+        request: &KnowledgeLabelMemoryDistributionRequest,
+    ) -> KnowledgeLabelMemoryDistributionOutput {
+        self.db.knowledge_label_memory_distribution(request)
     }
 
     pub fn knowledge_entity_labels(
