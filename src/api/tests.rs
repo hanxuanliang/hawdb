@@ -28,14 +28,15 @@ use super::{
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
-    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryCompactingThreadListRequest,
-    KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
-    KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEntityListRequest,
-    KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryLabelDeleteRequest,
-    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
-    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
-    KnowledgeMemoryListRequest, KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataUpdate,
+    KnowledgeLabelMemoryTransferRequest, KnowledgeLabelUsageListRequest,
+    KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryCompactingThreadListRequest, KnowledgeMemoryContentBatchRequest,
+    KnowledgeMemoryContentUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
+    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesLatestRequest,
+    KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLatestBatchRequest,
+    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
+    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
+    KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataUpdate,
     KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
@@ -13967,6 +13968,188 @@ fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
     assert_eq!(page.rows[0].label_id.as_deref(), Some("beta"));
     assert_eq!(page.rows[0].label_name.as_deref(), Some("Beta"));
     assert_eq!(page.rows[0].memory_count, 1);
+}
+
+#[test]
+fn transfers_label_memory_edges_for_nowledge_label_merge_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'source_label'})").unwrap();
+    db.query("CREATE (:Label {id: 'target_label'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_create'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_existing'})")
+        .unwrap();
+    db.query("CREATE (:Memory {title: 'Idless memory'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_create'}), (l:Label {id: 'source_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_create'}), (l:Label {id: 'source_label'}) CREATE (m)-[:HAS_LABEL {duplicate: true}]->(l)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_existing'}), (l:Label {id: 'source_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_existing'}), (l:Label {id: 'target_label'}) CREATE (m)-[:HAS_LABEL {assigned_by: 'existing'}]->(l)")
+        .unwrap();
+    let idless = db
+        .query("MATCH (m:Memory) WHERE m.title = 'Idless memory' RETURN id(m) AS id")
+        .unwrap();
+    let idless_memory_node_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => NodeId(*id as u64),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+    let source_label = db
+        .query("MATCH (l:Label {id: 'source_label'}) RETURN id(l) AS id")
+        .unwrap();
+    let source_label_node_id = match source_label.rows[0].get("id").unwrap() {
+        Value::Int(id) => NodeId(*id as u64),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+    db.store
+        .create_relationship(
+            &mut db.catalog,
+            idless_memory_node_id,
+            source_label_node_id,
+            "HAS_LABEL",
+            BTreeMap::new(),
+        )
+        .unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let output = db
+        .transfer_knowledge_label_memory_edges(&KnowledgeLabelMemoryTransferRequest {
+            source_label_id: "source_label".to_string(),
+            target_label_id: "target_label".to_string(),
+            created_at: Value::Int(100),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, graph_commit_epoch_before);
+    assert_eq!(
+        output.graph_commit_epoch_after,
+        graph_commit_epoch_before + 1
+    );
+    assert!(output.found_source_label);
+    assert!(output.found_target_label);
+    assert_eq!(output.matched_memory_count, 3);
+    assert_eq!(output.created_count, 1);
+    assert_eq!(output.already_exists_count, 1);
+    assert_eq!(output.non_writable_count, 1);
+    assert!(output
+        .rows
+        .iter()
+        .any(|row| row.memory_id.as_deref() == Some("memory_create") && row.created));
+    assert!(output
+        .rows
+        .iter()
+        .any(|row| row.memory_id.as_deref() == Some("memory_existing") && row.already_exists));
+    assert!(output.rows.iter().any(|row| row.non_writable));
+
+    let target_edges = db
+        .query(
+            "MATCH (:Memory)-[r:HAS_LABEL]->(:Label {id: 'target_label'}) RETURN COUNT(r) AS total",
+        )
+        .unwrap();
+    assert_eq!(target_edges.rows[0].get("total"), Some(&Value::Int(2)));
+    let created_props = db
+        .query("MATCH (:Memory {id: 'memory_create'})-[r:HAS_LABEL]->(:Label {id: 'target_label'}) RETURN r.assigned_by AS assigned_by, r.created_at AS created_at, r.properties AS properties")
+        .unwrap();
+    assert_eq!(
+        created_props.rows[0].get("assigned_by"),
+        Some(&Value::String("label_merge".to_string()))
+    );
+    assert_eq!(
+        created_props.rows[0].get("created_at"),
+        Some(&Value::Int(100))
+    );
+    assert_eq!(
+        created_props.rows[0].get("properties"),
+        Some(&Value::String("{}".to_string()))
+    );
+
+    let missing = db
+        .transfer_knowledge_label_memory_edges(&KnowledgeLabelMemoryTransferRequest {
+            source_label_id: "missing".to_string(),
+            target_label_id: "target_label".to_string(),
+            created_at: Value::Int(200),
+        })
+        .unwrap();
+    assert!(!missing.found_source_label);
+    assert!(missing.found_target_label);
+    assert_eq!(missing.matched_memory_count, 0);
+    assert_eq!(
+        missing.graph_commit_epoch_after,
+        output.graph_commit_epoch_after
+    );
+}
+
+#[test]
+fn label_memory_transfer_rejects_empty_ids_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'source_label'})").unwrap();
+    db.query("CREATE (:Label {id: 'target_label'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let empty_source = db
+        .transfer_knowledge_label_memory_edges(&KnowledgeLabelMemoryTransferRequest {
+            source_label_id: String::new(),
+            target_label_id: "target_label".to_string(),
+            created_at: Value::Int(1),
+        })
+        .unwrap_err();
+    assert!(empty_source
+        .to_string()
+        .contains("non-empty source label id"));
+
+    let empty_target = db
+        .transfer_knowledge_label_memory_edges(&KnowledgeLabelMemoryTransferRequest {
+            source_label_id: "source_label".to_string(),
+            target_label_id: String::new(),
+            created_at: Value::Int(1),
+        })
+        .unwrap_err();
+    assert!(empty_target
+        .to_string()
+        .contains("non-empty target label id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_label_memory_transfer_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_label_memory_transfer_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Label {id: 'source_label'})").unwrap();
+        db.query("CREATE (:Label {id: 'target_label'})").unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+        db.query("CREATE (:Memory {id: 'memory_2'})").unwrap();
+        db.query("MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'source_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
+            .unwrap();
+        db.query("MATCH (m:Memory {id: 'memory_2'}), (l:Label {id: 'source_label'}) CREATE (m)-[:HAS_LABEL]->(l)")
+            .unwrap();
+        let batch_count_before_transfer = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.transfer_knowledge_label_memory_edges(&KnowledgeLabelMemoryTransferRequest {
+            source_label_id: "source_label".to_string(),
+            target_label_id: "target_label".to_string(),
+            created_at: Value::Int(10),
+        })
+        .unwrap();
+        let batch_count_after_transfer = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_transfer, batch_count_before_transfer + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("create_rel"));
+    {
+        let mut db = Database::open(&path).unwrap();
+        let target_edges = db
+            .query("MATCH (:Memory)-[r:HAS_LABEL]->(:Label {id: 'target_label'}) RETURN COUNT(r) AS total")
+            .unwrap();
+        assert_eq!(target_edges.rows[0].get("total"), Some(&Value::Int(2)));
+    }
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

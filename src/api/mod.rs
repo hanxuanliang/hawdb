@@ -3763,6 +3763,40 @@ pub struct KnowledgeMemoryLabelDeleteOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelMemoryTransferRequest {
+    pub source_label_id: String,
+    pub target_label_id: String,
+    pub created_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelMemoryTransferRow {
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub relationship_id: Option<u64>,
+    pub created: bool,
+    pub already_exists: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelMemoryTransferOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub source_label_id: String,
+    pub target_label_id: String,
+    pub source_label_node_id: Option<u64>,
+    pub target_label_node_id: Option<u64>,
+    pub found_source_label: bool,
+    pub found_target_label: bool,
+    pub rows: Vec<KnowledgeLabelMemoryTransferRow>,
+    pub matched_memory_count: usize,
+    pub created_count: usize,
+    pub already_exists_count: usize,
+    pub non_writable_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityLabelListRequest {
     pub entity_label: String,
     pub external_ids: Vec<String>,
@@ -6588,6 +6622,13 @@ impl Database {
         request: &KnowledgeMemoryLabelDeleteRequest,
     ) -> Result<KnowledgeMemoryLabelDeleteOutput> {
         delete_knowledge_memory_labels_for(self, request)
+    }
+
+    pub fn transfer_knowledge_label_memory_edges(
+        &mut self,
+        request: &KnowledgeLabelMemoryTransferRequest,
+    ) -> Result<KnowledgeLabelMemoryTransferOutput> {
+        transfer_knowledge_label_memory_edges_for(self, request)
     }
 
     pub fn knowledge_entity_labels(
@@ -17286,6 +17327,232 @@ fn memory_label_relationship_ids(
     relationship_ids
 }
 
+fn transfer_knowledge_label_memory_edges_for(
+    db: &mut Database,
+    request: &KnowledgeLabelMemoryTransferRequest,
+) -> Result<KnowledgeLabelMemoryTransferOutput> {
+    db.ensure_writable()?;
+    validate_knowledge_label_memory_transfer_request(request)?;
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let source_label = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        "Label",
+        request.source_label_id.as_str(),
+    );
+    let target_label = seed_node_by_label_and_external_id(
+        &db.catalog,
+        &db.store,
+        "Label",
+        request.target_label_id.as_str(),
+    );
+    let source_label_node_id = source_label.map(|node| node.id.0);
+    let target_label_node_id = target_label.map(|node| node.id.0);
+    let (Some(source_label), Some(target_label)) = (source_label, target_label) else {
+        return Ok(knowledge_label_memory_transfer_empty_output(
+            request,
+            graph_commit_epoch_before,
+            source_label_node_id,
+            target_label_node_id,
+            source_label.is_some(),
+            target_label.is_some(),
+        ));
+    };
+    if !node_has_external_id_property(source_label, request.source_label_id.as_str())
+        || !node_has_external_id_property(target_label, request.target_label_id.as_str())
+    {
+        return Ok(KnowledgeLabelMemoryTransferOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            source_label_id: request.source_label_id.clone(),
+            target_label_id: request.target_label_id.clone(),
+            source_label_node_id,
+            target_label_node_id,
+            found_source_label: true,
+            found_target_label: true,
+            rows: Vec::new(),
+            matched_memory_count: 0,
+            created_count: 0,
+            already_exists_count: 0,
+            non_writable_count: 1,
+        });
+    }
+
+    let memory_candidates =
+        source_label_memory_transfer_candidates(&db.catalog, &db.store, source_label.id);
+    if memory_candidates.is_empty() {
+        return Ok(knowledge_label_memory_transfer_empty_output(
+            request,
+            graph_commit_epoch_before,
+            source_label_node_id,
+            target_label_node_id,
+            true,
+            true,
+        ));
+    }
+
+    let mut rows = Vec::with_capacity(memory_candidates.len());
+    let mut upserts = Vec::new();
+    let mut upsert_row_indexes = Vec::new();
+    let mut non_writable_count = 0;
+    for memory in memory_candidates {
+        let memory_id = node_external_id(memory);
+        if !memory_id
+            .as_deref()
+            .is_some_and(|memory_id| node_has_external_id_property(memory, memory_id))
+        {
+            non_writable_count += 1;
+            rows.push(KnowledgeLabelMemoryTransferRow {
+                memory_id,
+                memory_node_id: memory.id.0,
+                relationship_id: None,
+                created: false,
+                already_exists: false,
+                non_writable: true,
+            });
+            continue;
+        }
+        let row_index = rows.len();
+        let memory_id = memory_id.expect("memory external id was validated");
+        upsert_row_indexes.push(row_index);
+        upserts.push(KnowledgeRelationshipUpsertRequest {
+            source: KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: memory_id.clone(),
+            },
+            target: KnowledgeEntityRequest {
+                label: "Label".to_string(),
+                external_id: request.target_label_id.clone(),
+            },
+            relationship_type: "HAS_LABEL".to_string(),
+            create_properties: BTreeMap::from([
+                (
+                    "assigned_by".to_string(),
+                    Value::String("label_merge".to_string()),
+                ),
+                ("created_at".to_string(), request.created_at.clone()),
+                ("properties".to_string(), Value::String("{}".to_string())),
+            ]),
+        });
+        rows.push(KnowledgeLabelMemoryTransferRow {
+            memory_id: Some(memory_id),
+            memory_node_id: memory.id.0,
+            relationship_id: None,
+            created: false,
+            already_exists: false,
+            non_writable: false,
+        });
+    }
+
+    let mut created_count = 0;
+    let mut already_exists_count = 0;
+    if !upserts.is_empty() {
+        let output = upsert_knowledge_relationship_batch_for(
+            db,
+            &KnowledgeRelationshipUpsertBatchRequest { upserts },
+        )?;
+        for (upsert_row, transfer_row_index) in output.rows.iter().zip(upsert_row_indexes) {
+            let row = &mut rows[transfer_row_index];
+            row.relationship_id = upsert_row.relationship_id;
+            row.created = upsert_row.created;
+            row.already_exists = upsert_row.already_exists;
+            row.non_writable = upsert_row.non_writable;
+            if upsert_row.created {
+                created_count += 1;
+            }
+            if upsert_row.already_exists {
+                already_exists_count += 1;
+            }
+            if upsert_row.non_writable {
+                non_writable_count += 1;
+            }
+        }
+    }
+
+    Ok(KnowledgeLabelMemoryTransferOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        source_label_id: request.source_label_id.clone(),
+        target_label_id: request.target_label_id.clone(),
+        source_label_node_id,
+        target_label_node_id,
+        found_source_label: true,
+        found_target_label: true,
+        matched_memory_count: rows.len(),
+        rows,
+        created_count,
+        already_exists_count,
+        non_writable_count,
+    })
+}
+
+fn validate_knowledge_label_memory_transfer_request(
+    request: &KnowledgeLabelMemoryTransferRequest,
+) -> Result<()> {
+    if request.source_label_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge label memory transfer requires a non-empty source label id".to_string(),
+        ));
+    }
+    if request.target_label_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge label memory transfer requires a non-empty target label id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_label_memory_transfer_empty_output(
+    request: &KnowledgeLabelMemoryTransferRequest,
+    graph_commit_epoch: u64,
+    source_label_node_id: Option<u64>,
+    target_label_node_id: Option<u64>,
+    found_source_label: bool,
+    found_target_label: bool,
+) -> KnowledgeLabelMemoryTransferOutput {
+    KnowledgeLabelMemoryTransferOutput {
+        graph_commit_epoch_before: graph_commit_epoch,
+        graph_commit_epoch_after: graph_commit_epoch,
+        source_label_id: request.source_label_id.clone(),
+        target_label_id: request.target_label_id.clone(),
+        source_label_node_id,
+        target_label_node_id,
+        found_source_label,
+        found_target_label,
+        rows: Vec::new(),
+        matched_memory_count: 0,
+        created_count: 0,
+        already_exists_count: 0,
+        non_writable_count: 0,
+    }
+}
+
+fn source_label_memory_transfer_candidates<'a>(
+    catalog: &Catalog,
+    store: &'a GraphStore,
+    source_label_node_id: NodeId,
+) -> Vec<&'a NodeRecord> {
+    let Some(has_label_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return Vec::new();
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    let mut seen_memory_ids = BTreeSet::new();
+    let mut memories = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| {
+            store
+                .outgoing_relationships(memory.id, has_label_type_id)
+                .any(|relationship| relationship.target == source_label_node_id)
+        })
+        .filter(|memory| seen_memory_ids.insert(memory.id))
+        .collect::<Vec<_>>();
+    memories.sort_by_key(|memory| memory.id.0);
+    memories
+}
+
 fn empty_label_memory_distribution_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeLabelMemoryDistributionOutput {
@@ -24742,6 +25009,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryLabelDeleteRequest,
     ) -> Result<KnowledgeMemoryLabelDeleteOutput> {
         self.db.delete_knowledge_memory_labels(request)
+    }
+
+    pub fn transfer_knowledge_label_memory_edges(
+        &mut self,
+        request: &KnowledgeLabelMemoryTransferRequest,
+    ) -> Result<KnowledgeLabelMemoryTransferOutput> {
+        self.db.transfer_knowledge_label_memory_edges(request)
     }
 
     pub fn knowledge_entity_labels(

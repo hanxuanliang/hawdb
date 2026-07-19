@@ -540,6 +540,13 @@ edge deletes and all-label deletes for one Memory, validates ids before WAL,
 reports missing or projected-idless endpoints without writing, keeps empty
 cleanup read-only, and commits eligible relationship deletes through one
 grouped WAL batch.
+Label merge transfer writes are covered by
+`Database::transfer_knowledge_label_memory_edges`. The typed facade fixes the
+Nowledge source-label to target-label Memory transfer shape, scans Memory nodes
+that already have the source `HAS_LABEL` edge, de-duplicates repeated source
+edges, skips projected-idless Memory rows without writing, and idempotently
+MERGEs the target `HAS_LABEL` edge with create-only `assigned_by`,
+`created_at`, and `properties` fields through one grouped WAL batch.
 Label canonical and usage reads are covered by typed APIs for Nowledge label
 merge and list surfaces. `Database::lookup_knowledge_labels_by_canonical_name`
 handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_canonical_name`

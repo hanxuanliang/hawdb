@@ -465,7 +465,10 @@ counts, duplicate edge de-duplication, offset/limit pagination, and no WAL
 writes. Memory label cleanup writes are available as
 `Database::delete_knowledge_memory_labels`, covering exact
 `(:Memory)-[:HAS_LABEL]->(:Label)` edge removal and all-label edge cleanup for
-one Memory through grouped WAL-backed relationship deletes.
+one Memory through grouped WAL-backed relationship deletes. Label merge
+transfer writes are available as `Database::transfer_knowledge_label_memory_edges`,
+covering source-label to target-label Memory retargeting with idempotent
+target `HAS_LABEL` creation.
 Endpoint-known label assignment reads are also available as
 `Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
 bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
