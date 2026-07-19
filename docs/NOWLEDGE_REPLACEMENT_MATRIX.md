@@ -184,6 +184,14 @@ chunk counts before WAL, applies optional current-state filtering, reports
 missing/idless/duplicate rows without writing, writes `lifecycle_state`,
 optional `chunk_count`, and `updated_at`, and commits eligible Source rows
 through one grouped WAL batch.
+Source parsed metadata writes are covered by
+`Database::update_knowledge_source_parsed_metadata_batch` for Nowledge parser
+completion updates. The wrapper marks the Source as `parsed`, writes summary,
+checksum, size, timestamp, and the optional parsed/file/name/mime/url/metadata
+fields used by current parser call sites, validates Source ids, non-empty
+checksums, and non-negative sizes before WAL, reports missing/idless/duplicate
+rows without writing, and commits eligible Source rows through one grouped WAL
+batch.
 Source operational reads are covered by typed APIs for Nowledge source detail,
 source count, extracted-source id list, and normalized-space id list paths.
 `Database::knowledge_source` returns the Source identity, display fields,

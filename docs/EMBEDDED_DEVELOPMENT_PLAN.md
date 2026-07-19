@@ -156,7 +156,8 @@ The typed knowledge facade also covers endpoint-known entity lookup,
 create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
 normalized-space batch moves, memory access/click-dwell touches, ordered batch
 mutation, source memory-count adjustments, source lifecycle updates, source
-detail/count/id-list reads, and grouped WAL commits for eligible lifecycle rows.
+parsed metadata updates, source detail/count/id-list reads, and grouped WAL
+commits for eligible lifecycle/parser rows.
 Memory content/edit updates are exposed as a typed batch for Nowledge content,
 title, semantic field, scoring, source, normalized-space, review status,
 extraction method, and `reindex_needed` writes.
@@ -537,6 +538,11 @@ Bulk Memory/Source attribution reads are available as
 Source id reads and Source id to Memory summary/library rows over
 `SOURCED_FROM`, with bounded filters, missing-id reporting, Memory display/rank
 fields, chunk metadata, and no WAL writes.
+Source parser completion metadata writes are available as
+`Database::update_knowledge_source_parsed_metadata_batch`, covering the
+Nowledge parsed-state update shapes for parsed paths, file/url metadata,
+summary, checksum, size, timestamps, and optional metadata through one grouped
+WAL batch.
 Bounded Source list and summary reads are available as
 `Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
 overview ranking, parsed-path list, lifecycle attention, and metadata-marker
