@@ -70,18 +70,19 @@ use super::{
     KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
     KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
     KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
-    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
-    KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
-    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityRequest,
-    KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
-    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
-    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
+    KnowledgeSourceVersionLookupRequest, KnowledgeSubgraphRequest,
+    KnowledgeSynthesizedSourceCoverageRequest, KnowledgeSynthesizedSourceIdsRequest,
+    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadDistillationCandidateRequest,
+    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
+    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
+    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
+    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
+    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
+    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -8459,6 +8460,231 @@ fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("memory_count"),
             Some(&Some(Value::Int(0)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn reads_source_latest_version_for_nowledge_version_lookups() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source-v1', original_name: 'Doc.md', sha256: 'sha-a', space_id: 'default', version: 1, created_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source-v3', original_name: 'Doc.md', sha256: 'sha-b', space_id: 'default', version: 3, created_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source-v2-other', original_name: 'Doc.md', sha256: 'sha-a', space_id: 'archive', version: 2, created_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source-sha-v4', original_name: 'Other.md', sha256: 'sha-a', space_id: 'default', version: 4, created_at: 40})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let by_name = db
+        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
+            original_name: Some("Doc.md".to_string()),
+            sha256: None,
+            space_id: "default".to_string(),
+        })
+        .unwrap();
+    assert_eq!(by_name.graph_commit_epoch, graph_commit_epoch);
+    assert!(by_name.found);
+    assert_eq!(by_name.source_id.as_deref(), Some("source-v3"));
+    assert_eq!(by_name.version, Some(3));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let by_sha = db
+        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
+            original_name: None,
+            sha256: Some("sha-a".to_string()),
+            space_id: "default".to_string(),
+        })
+        .unwrap();
+    assert!(by_sha.found);
+    assert_eq!(by_sha.source_id.as_deref(), Some("source-sha-v4"));
+    assert_eq!(by_sha.version, Some(4));
+    assert_eq!(
+        by_sha.row.unwrap().original_name.as_deref(),
+        Some("Other.md")
+    );
+
+    let missing = db
+        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
+            original_name: Some("Missing.md".to_string()),
+            sha256: None,
+            space_id: "default".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found);
+    assert_eq!(missing.source_id, None);
+}
+
+#[test]
+fn source_latest_version_rejects_ambiguous_lookup() {
+    let db = Database::new();
+    let error = db
+        .knowledge_source_latest_version(&KnowledgeSourceVersionLookupRequest {
+            original_name: Some("Doc.md".to_string()),
+            sha256: Some("sha-a".to_string()),
+            space_id: "default".to_string(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("exactly one"));
+    assert_eq!(db.store.commit_epoch(), 0);
+}
+
+#[test]
+fn creates_source_revision_batch_for_nowledge_revision_edges() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'newer', version: 2})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'older', version: 1})")
+        .unwrap();
+    db.query("CREATE (:Source {original_name: 'Idless Source'})")
+        .unwrap();
+    let idless = db
+        .query("MATCH (s:Source) WHERE s.original_name = 'Idless Source' RETURN id(s) AS id")
+        .unwrap();
+    let idless_source_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+
+    let output = db
+        .create_knowledge_source_revision_batch(&KnowledgeSourceRevisionCreateBatchRequest {
+            creates: vec![
+                KnowledgeSourceRevisionCreate {
+                    newer_source_id: "newer".to_string(),
+                    older_source_id: "older".to_string(),
+                    created_at: Value::String("2026-07-19T12:00:00Z".to_string()),
+                },
+                KnowledgeSourceRevisionCreate {
+                    newer_source_id: "newer".to_string(),
+                    older_source_id: "missing".to_string(),
+                    created_at: Value::String("2026-07-19T12:01:00Z".to_string()),
+                },
+                KnowledgeSourceRevisionCreate {
+                    newer_source_id: idless_source_id,
+                    older_source_id: "older".to_string(),
+                    created_at: Value::String("2026-07-19T12:02:00Z".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 3);
+    assert_eq!(output.graph_commit_epoch_after, 4);
+    assert_eq!(output.rows.len(), 3);
+    assert_eq!(output.matched_count, 1);
+    assert_eq!(output.missing_endpoint_count, 1);
+    assert_eq!(output.non_writable_count, 1);
+    assert_eq!(output.created_relationship_count, 1);
+    assert!(output.rows[0].matched);
+    assert!(!output.rows[1].matched);
+    assert!(output.rows[2].non_writable);
+
+    let rows = db
+        .query("MATCH (newer:Source)-[r:REVISED_AS]->(older:Source) RETURN newer.id, older.id, r.diff_summary, r.sections_changed, r.revision_type, r.detected_by, r.created_at")
+        .unwrap();
+    assert_eq!(rows.rows.len(), 1);
+    assert_eq!(
+        rows.rows[0].get("newer.id"),
+        Some(&Value::String("newer".to_string()))
+    );
+    assert_eq!(
+        rows.rows[0].get("older.id"),
+        Some(&Value::String("older".to_string()))
+    );
+    assert_eq!(
+        rows.rows[0].get("r.diff_summary"),
+        Some(&Value::String(String::new()))
+    );
+    assert_eq!(
+        rows.rows[0].get("r.sections_changed"),
+        Some(&Value::String("[]".to_string()))
+    );
+    assert_eq!(
+        rows.rows[0].get("r.revision_type"),
+        Some(&Value::String("update".to_string()))
+    );
+    assert_eq!(
+        rows.rows[0].get("r.detected_by"),
+        Some(&Value::String("filename_match".to_string()))
+    );
+    assert_eq!(
+        rows.rows[0].get("r.created_at"),
+        Some(&Value::String("2026-07-19T12:00:00Z".to_string()))
+    );
+}
+
+#[test]
+fn source_revision_create_batch_rejects_empty_ids_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'newer'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .create_knowledge_source_revision_batch(&KnowledgeSourceRevisionCreateBatchRequest {
+            creates: vec![KnowledgeSourceRevisionCreate {
+                newer_source_id: "newer".to_string(),
+                older_source_id: String::new(),
+                created_at: Value::String("2026-07-19T12:00:00Z".to_string()),
+            }],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("older source id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_source_revision_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_source_revision_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Source {id: 'newer-1'})").unwrap();
+        db.query("CREATE (:Source {id: 'older-1'})").unwrap();
+        db.query("CREATE (:Source {id: 'newer-2'})").unwrap();
+        db.query("CREATE (:Source {id: 'older-2'})").unwrap();
+        let batch_count_before_create = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.create_knowledge_source_revision_batch(&KnowledgeSourceRevisionCreateBatchRequest {
+            creates: vec![
+                KnowledgeSourceRevisionCreate {
+                    newer_source_id: "newer-1".to_string(),
+                    older_source_id: "older-1".to_string(),
+                    created_at: Value::String("2026-07-19T12:00:00Z".to_string()),
+                },
+                KnowledgeSourceRevisionCreate {
+                    newer_source_id: "newer-2".to_string(),
+                    older_source_id: "older-2".to_string(),
+                    created_at: Value::String("2026-07-19T12:01:00Z".to_string()),
+                },
+            ],
+        })
+        .unwrap();
+        let batch_count_after_create = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_create, batch_count_before_create + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("\tbatch\t"));
+    {
+        let mut db = Database::open(&path).unwrap();
+        let rows = db
+            .query("MATCH (newer:Source)-[r:REVISED_AS]->(older:Source) RETURN newer.id, older.id, r.created_at ORDER BY newer.id")
+            .unwrap();
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(
+            rows.rows[0].get("newer.id"),
+            Some(&Value::String("newer-1".to_string()))
+        );
+        assert_eq!(
+            rows.rows[1].get("older.id"),
+            Some(&Value::String("older-2".to_string()))
         );
     }
     std::fs::remove_dir_all(path).unwrap();

@@ -201,6 +201,15 @@ empty error messages, validates ids, type/name/mime/parsed-path/checksum/space,
 non-negative sizes, and positive versions before WAL, reports existing or
 duplicate Source ids, and commits eligible Source nodes through one grouped WAL
 batch.
+Source version lookups and revision edges are covered by typed Source APIs for
+the Nowledge same-name/same-space latest-version read, same-checksum/same-space
+latest Source read, and `REVISED_AS` edge creation. The lookup API requires
+exactly one original-name or checksum key, orders by `version DESC`, returns a
+bounded Source projection without WAL writes, and reports graph commit epoch.
+The revision create wrapper validates endpoint ids before WAL, resolves exact
+Source endpoints, reports missing or idless endpoints without writing, creates
+the fixed `REVISED_AS` properties used by Nowledge, and commits eligible
+revision edges through one grouped WAL batch.
 Source operational reads are covered by typed APIs for Nowledge source detail,
 source count, extracted-source id list, and normalized-space id list paths.
 `Database::knowledge_source` returns the Source identity, display fields,

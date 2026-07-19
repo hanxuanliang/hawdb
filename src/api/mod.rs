@@ -2415,6 +2415,56 @@ pub struct KnowledgeSourceParsedCreateBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceVersionLookupRequest {
+    pub original_name: Option<String>,
+    pub sha256: Option<String>,
+    pub space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceVersionLookupOutput {
+    pub graph_commit_epoch: u64,
+    pub found: bool,
+    pub source_id: Option<String>,
+    pub node_id: Option<u64>,
+    pub version: Option<i64>,
+    pub row: Option<KnowledgeSourceListRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceRevisionCreate {
+    pub newer_source_id: String,
+    pub older_source_id: String,
+    pub created_at: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceRevisionCreateBatchRequest {
+    pub creates: Vec<KnowledgeSourceRevisionCreate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceRevisionCreateBatchRow {
+    pub newer_source_id: String,
+    pub older_source_id: String,
+    pub newer_node_id: Option<u64>,
+    pub older_node_id: Option<u64>,
+    pub matched: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceRevisionCreateBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceRevisionCreateBatchRow>,
+    pub matched_count: usize,
+    pub missing_endpoint_count: usize,
+    pub non_writable_count: usize,
+    pub created_relationship_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRequest {
     pub source_id: String,
 }
@@ -5982,6 +6032,20 @@ impl Database {
         request: &KnowledgeSourceParsedCreateBatchRequest,
     ) -> Result<KnowledgeSourceParsedCreateBatchOutput> {
         create_knowledge_source_parsed_batch_for(self, request)
+    }
+
+    pub fn knowledge_source_latest_version(
+        &self,
+        request: &KnowledgeSourceVersionLookupRequest,
+    ) -> Result<KnowledgeSourceVersionLookupOutput> {
+        knowledge_source_latest_version_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn create_knowledge_source_revision_batch(
+        &mut self,
+        request: &KnowledgeSourceRevisionCreateBatchRequest,
+    ) -> Result<KnowledgeSourceRevisionCreateBatchOutput> {
+        create_knowledge_source_revision_batch_for(self, request)
     }
 
     pub fn knowledge_source(
@@ -12199,6 +12263,180 @@ fn knowledge_source_parsed_entity_create(
             ("created_at".to_string(), create.created_at.clone()),
             ("updated_at".to_string(), create.updated_at.clone()),
             ("metadata".to_string(), create.metadata.clone()),
+        ]),
+    }
+}
+
+fn knowledge_source_latest_version_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceVersionLookupRequest,
+) -> Result<KnowledgeSourceVersionLookupOutput> {
+    validate_knowledge_source_version_lookup(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(source_label_id) = catalog.label_id("Source") else {
+        return Ok(KnowledgeSourceVersionLookupOutput {
+            graph_commit_epoch,
+            found: false,
+            source_id: None,
+            node_id: None,
+            version: None,
+            row: None,
+        });
+    };
+
+    let mut rows = store
+        .scan_nodes(Some(source_label_id))
+        .filter(|node| source_matches_version_lookup(node, request))
+        .map(|node| knowledge_source_list_row(catalog, store, node))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .version
+            .cmp(&left.version)
+            .then_with(|| left.source_id.cmp(&right.source_id))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let row = rows.into_iter().next();
+
+    Ok(KnowledgeSourceVersionLookupOutput {
+        graph_commit_epoch,
+        found: row.is_some(),
+        source_id: row.as_ref().and_then(|row| row.source_id.clone()),
+        node_id: row.as_ref().map(|row| row.node_id),
+        version: row.as_ref().map(|row| row.version),
+        row,
+    })
+}
+
+fn validate_knowledge_source_version_lookup(
+    request: &KnowledgeSourceVersionLookupRequest,
+) -> Result<()> {
+    let has_original_name = match request.original_name.as_deref() {
+        Some("") => {
+            return Err(SkeinError::Semantic(
+                "knowledge source version lookup requires a non-empty original name".to_string(),
+            ));
+        }
+        Some(_) => true,
+        None => false,
+    };
+    let has_sha256 = match request.sha256.as_deref() {
+        Some("") => {
+            return Err(SkeinError::Semantic(
+                "knowledge source version lookup requires a non-empty sha256".to_string(),
+            ));
+        }
+        Some(_) => true,
+        None => false,
+    };
+    if has_original_name == has_sha256 {
+        return Err(SkeinError::Semantic(
+            "knowledge source version lookup requires exactly one original name or sha256"
+                .to_string(),
+        ));
+    }
+    if request.space_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source version lookup requires a non-empty space id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn source_matches_version_lookup(
+    node: &NodeRecord,
+    request: &KnowledgeSourceVersionLookupRequest,
+) -> bool {
+    if string_property(node, "space_id").as_deref() != Some(request.space_id.as_str()) {
+        return false;
+    }
+    if let Some(original_name) = request.original_name.as_deref() {
+        return string_property(node, "original_name").as_deref() == Some(original_name);
+    }
+    if let Some(sha256) = request.sha256.as_deref() {
+        return string_property(node, "sha256").as_deref() == Some(sha256);
+    }
+    false
+}
+
+fn create_knowledge_source_revision_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSourceRevisionCreateBatchRequest,
+) -> Result<KnowledgeSourceRevisionCreateBatchOutput> {
+    for create in &request.creates {
+        if create.newer_source_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge source revision create requires a non-empty newer source id".to_string(),
+            ));
+        }
+        if create.older_source_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge source revision create requires a non-empty older source id".to_string(),
+            ));
+        }
+    }
+
+    let creates = request
+        .creates
+        .iter()
+        .map(knowledge_source_revision_relationship_create)
+        .collect::<Vec<_>>();
+    let output = create_knowledge_relationship_batch_for(
+        db,
+        &KnowledgeRelationshipCreateBatchRequest { creates },
+    )?;
+
+    Ok(KnowledgeSourceRevisionCreateBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeSourceRevisionCreateBatchRow {
+                newer_source_id: row.source.external_id,
+                older_source_id: row.target.external_id,
+                newer_node_id: row.source_node_id,
+                older_node_id: row.target_node_id,
+                matched: row.matched,
+                non_writable: row.non_writable,
+            })
+            .collect(),
+        matched_count: output.matched_count,
+        missing_endpoint_count: output.missing_endpoint_count,
+        non_writable_count: output.non_writable_count,
+        created_relationship_count: output.created_relationship_count,
+    })
+}
+
+fn knowledge_source_revision_relationship_create(
+    create: &KnowledgeSourceRevisionCreate,
+) -> KnowledgeRelationshipCreateRequest {
+    KnowledgeRelationshipCreateRequest {
+        source: KnowledgeEntityRequest {
+            label: "Source".to_string(),
+            external_id: create.newer_source_id.clone(),
+        },
+        target: KnowledgeEntityRequest {
+            label: "Source".to_string(),
+            external_id: create.older_source_id.clone(),
+        },
+        relationship_type: "REVISED_AS".to_string(),
+        properties: BTreeMap::from([
+            ("diff_summary".to_string(), Value::String(String::new())),
+            (
+                "sections_changed".to_string(),
+                Value::String("[]".to_string()),
+            ),
+            (
+                "revision_type".to_string(),
+                Value::String("update".to_string()),
+            ),
+            (
+                "detected_by".to_string(),
+                Value::String("filename_match".to_string()),
+            ),
+            ("created_at".to_string(), create.created_at.clone()),
         ]),
     }
 }
@@ -23037,6 +23275,20 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSourceParsedCreateBatchRequest,
     ) -> Result<KnowledgeSourceParsedCreateBatchOutput> {
         self.db.create_knowledge_source_parsed_batch(request)
+    }
+
+    pub fn knowledge_source_latest_version(
+        &self,
+        request: &KnowledgeSourceVersionLookupRequest,
+    ) -> Result<KnowledgeSourceVersionLookupOutput> {
+        self.db.knowledge_source_latest_version(request)
+    }
+
+    pub fn create_knowledge_source_revision_batch(
+        &mut self,
+        request: &KnowledgeSourceRevisionCreateBatchRequest,
+    ) -> Result<KnowledgeSourceRevisionCreateBatchOutput> {
+        self.db.create_knowledge_source_revision_batch(request)
     }
 
     pub fn knowledge_source(

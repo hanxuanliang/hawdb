@@ -157,7 +157,8 @@ create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
 normalized-space batch moves, memory access/click-dwell touches, ordered batch
 mutation, source memory-count adjustments, source lifecycle updates, source
 parsed metadata updates, parsed Source creates, source detail/count/id-list
-reads, and grouped WAL commits for eligible lifecycle/parser/create rows.
+reads, source version lookups, Source revision-edge creates, and grouped WAL
+commits for eligible lifecycle/parser/create/revision rows.
 Memory content/edit updates are exposed as a typed batch for Nowledge content,
 title, semantic field, scoring, source, normalized-space, review status,
 extraction method, and `reindex_needed` writes.
@@ -547,6 +548,11 @@ Parsed Source creation is available as
 `Database::create_knowledge_source_parsed_batch`, covering Nowledge markdown,
 URL, PDF, generic file, and markdown import create shapes with fixed parsed
 lifecycle defaults and one grouped WAL batch for eligible new Source nodes.
+Source version-chain operations are available as
+`Database::knowledge_source_latest_version` for Nowledge original-name/checksum
+latest-version reads without WAL writes and
+`Database::create_knowledge_source_revision_batch` for fixed-property
+`REVISED_AS` edge creation through one grouped WAL batch.
 Bounded Source list and summary reads are available as
 `Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
 overview ranking, parsed-path list, lifecycle attention, and metadata-marker
