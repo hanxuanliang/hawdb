@@ -260,6 +260,13 @@ and non-empty external id list, resolves each input identity in caller order,
 returns Label id/name/canonical-name/color/description rows sorted by label
 name/id/node id with optional per-entity limits, reports found/missing entity
 counts and the graph commit epoch, and does not write WAL.
+Induced edge-list reads are covered by `Database::knowledge_induced_edges` for
+Nowledge overview and MCP subgraph edge-list shapes. The typed read validates a
+non-empty external id set, scans canonical relationships whose source and
+target endpoint ids are both in that set, returns endpoint ids/node ids,
+relationship id/type, and `strength`/`confidence`/default weight, supports
+bounded limits, reports missing external ids and the graph commit epoch, and
+does not write WAL.
 PageRank score writes are covered by typed batches for Nowledge Memory and
 Entity `pagerank_score` persistence and clear operations. The wrapper accepts
 only finite non-negative scores for Memory/Entity identities, reports missing,

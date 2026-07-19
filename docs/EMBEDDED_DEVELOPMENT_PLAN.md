@@ -404,6 +404,10 @@ Endpoint-known label assignment reads are also available as
 `Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
 bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
 construction or WAL writes.
+Induced edge-list reads are available as `Database::knowledge_induced_edges`,
+covering Nowledge overview and MCP subgraph `MATCH (a)-[r]->(b) WHERE a.id IN
+$ids AND b.id IN $ids` shapes with relationship type and strength/confidence
+fallback projection and no WAL writes.
 Memory entity mention reads are available as
 `Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
 `MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
@@ -551,7 +555,9 @@ remains rejected. Anonymous relationship endpoints such as `()` and `(:Label)`
 are supported for Nowledge relationship-count reads. Untyped one-hop
 relationship reads such as `MATCH (a)-[r]->(b)` are supported for Nowledge
 overview edge queries, and `label(r)`/`type(r)` can project the bound
-relationship type. Nowledge-used `RETURN` projection fallbacks support
+relationship type; `Database::knowledge_induced_edges` provides the typed API
+for the id-set induced subgraph edge-list business shape. Nowledge-used
+`RETURN` projection fallbacks support
 `COALESCE(...)` and `LEFT(...)`, including nested forms such as
 `COALESCE(m.title, LEFT(COALESCE(m.content, ''), 60))`, and the same limited
 expression subset is available for Nowledge-used `ORDER BY COALESCE(...)`

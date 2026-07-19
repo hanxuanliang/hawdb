@@ -16,13 +16,14 @@ use super::{
     KnowledgeEntityLabelListRequest, KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest,
     KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode,
     KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest,
-    KnowledgeGraphPathDirection, KnowledgeLabelBackfillScanRequest,
-    KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
-    KnowledgeLabelLifecycleUpdate, KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest,
-    KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
-    KnowledgeMemoryEntityListRequest, KnowledgeMemoryLatestBatchRequest,
-    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
-    KnowledgeMemoryLifecycleUpdate, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeGraphPathDirection, KnowledgeInducedEdgeListRequest,
+    KnowledgeLabelBackfillScanRequest, KnowledgeLabelCanonicalLookupRequest,
+    KnowledgeLabelLifecycleBatchRequest, KnowledgeLabelLifecycleUpdate,
+    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
+    KnowledgeMemoryAccessTouch, KnowledgeMemoryEntityListRequest,
+    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
+    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -12883,6 +12884,93 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
             .map(String::as_str),
         Some("team")
     );
+}
+
+#[test]
+fn reads_induced_edges_for_nowledge_overview_and_subgraph_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_2'})").unwrap();
+    db.query("CREATE (:Source {id: 'source_outside'})").unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_1'}), (e:Entity {id: 'entity_1'}) CREATE (m)-[:MENTIONS {confidence: 0.8}]->(e)")
+        .unwrap();
+    db.query("MATCH (e1:Entity {id: 'entity_1'}), (e2:Entity {id: 'entity_2'}) CREATE (e1)-[:RELATES_TO {strength: 0.9}]->(e2)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_1'}), (e:Entity {id: 'entity_2'}) CREATE (m)-[:RELATES_TO]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_1'}), (s:Source {id: 'source_outside'}) CREATE (m)-[:SOURCED_FROM]->(s)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+            external_ids: vec![
+                "memory_1".to_string(),
+                "entity_1".to_string(),
+                "entity_2".to_string(),
+                "missing".to_string(),
+            ],
+            limit: 0,
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(output.matched_node_count, 3);
+    assert_eq!(output.missing_external_ids, vec!["missing".to_string()]);
+    assert_eq!(output.matched_count, 3);
+    assert_eq!(output.returned_count, 3);
+    assert_eq!(output.rows[0].source_id.as_deref(), Some("entity_1"));
+    assert_eq!(output.rows[0].target_id.as_deref(), Some("entity_2"));
+    assert_eq!(output.rows[0].relationship_type, "RELATES_TO");
+    assert_eq!(output.rows[0].strength, Value::Float(0.9));
+    assert_eq!(output.rows[1].source_id.as_deref(), Some("memory_1"));
+    assert_eq!(output.rows[1].target_id.as_deref(), Some("entity_1"));
+    assert_eq!(output.rows[1].relationship_type, "MENTIONS");
+    assert_eq!(output.rows[1].strength, Value::Float(0.8));
+    assert_eq!(output.rows[2].source_id.as_deref(), Some("memory_1"));
+    assert_eq!(output.rows[2].target_id.as_deref(), Some("entity_2"));
+    assert_eq!(output.rows[2].relationship_type, "RELATES_TO");
+    assert_eq!(output.rows[2].strength, Value::Float(0.5));
+
+    let limited = db
+        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+            external_ids: vec![
+                "memory_1".to_string(),
+                "entity_1".to_string(),
+                "entity_2".to_string(),
+            ],
+            limit: 2,
+        })
+        .unwrap();
+    assert_eq!(limited.matched_count, 3);
+    assert_eq!(limited.returned_count, 2);
+}
+
+#[test]
+fn induced_edge_read_rejects_empty_external_ids() {
+    let db = Database::new();
+
+    let empty_list_error = db
+        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+            external_ids: Vec::new(),
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(empty_list_error
+        .to_string()
+        .contains("non-empty external ids"));
+
+    let empty_id_error = db
+        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
+            external_ids: vec![String::new()],
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(empty_id_error
+        .to_string()
+        .contains("non-empty external ids"));
 }
 
 #[test]

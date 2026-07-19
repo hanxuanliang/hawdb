@@ -1227,6 +1227,33 @@ pub struct KnowledgeRelationshipsOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeInducedEdgeListRequest {
+    pub external_ids: Vec<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeInducedEdgeRow {
+    pub source_id: Option<String>,
+    pub source_node_id: u64,
+    pub target_id: Option<String>,
+    pub target_node_id: u64,
+    pub relationship_id: u64,
+    pub relationship_type: String,
+    pub strength: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeInducedEdgeListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeInducedEdgeRow>,
+    pub matched_node_count: usize,
+    pub missing_external_ids: Vec<String>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgePathRequest {
     pub source_label: String,
     pub source_external_id: String,
@@ -5028,6 +5055,13 @@ impl Database {
         request: &KnowledgeScopedRelationshipsRequest,
     ) -> KnowledgeRelationshipsOutput {
         knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_induced_edges(
+        &self,
+        request: &KnowledgeInducedEdgeListRequest,
+    ) -> Result<KnowledgeInducedEdgeListOutput> {
+        knowledge_induced_edges_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
@@ -15124,6 +15158,102 @@ fn node_by_label_property_external_id<'a>(
     })
 }
 
+fn knowledge_induced_edges_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeInducedEdgeListRequest,
+) -> Result<KnowledgeInducedEdgeListOutput> {
+    if request.external_ids.is_empty() || request.external_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge induced edge read requires non-empty external ids".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch = store.commit_epoch();
+    let requested_ids = request
+        .external_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut matched_external_ids = BTreeSet::new();
+    let mut matched_node_ids = BTreeSet::new();
+    for node in store.scan_nodes(None) {
+        if let Some(external_id) = node_external_id(node) {
+            if requested_ids.contains(&external_id) {
+                matched_external_ids.insert(external_id);
+                matched_node_ids.insert(node.id);
+            }
+        }
+    }
+    let mut missing_external_ids = Vec::new();
+    let mut seen_missing = BTreeSet::new();
+    for external_id in &request.external_ids {
+        if !matched_external_ids.contains(external_id) && seen_missing.insert(external_id.clone()) {
+            missing_external_ids.push(external_id.clone());
+        }
+    }
+
+    let mut rows = store
+        .scan_relationships(None)
+        .filter(|relationship| {
+            matched_node_ids.contains(&relationship.source)
+                && matched_node_ids.contains(&relationship.target)
+        })
+        .filter_map(|relationship| induced_edge_row(catalog, store, relationship))
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.source_id
+            .cmp(&right.source_id)
+            .then_with(|| left.target_id.cmp(&right.target_id))
+            .then_with(|| left.relationship_type.cmp(&right.relationship_type))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeInducedEdgeListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_node_count: matched_node_ids.len(),
+        missing_external_ids,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn induced_edge_row(
+    catalog: &Catalog,
+    store: &GraphStore,
+    relationship: &RelRecord,
+) -> Option<KnowledgeInducedEdgeRow> {
+    let source = store.node(relationship.source)?;
+    let target = store.node(relationship.target)?;
+    Some(KnowledgeInducedEdgeRow {
+        source_id: node_external_id(source),
+        source_node_id: source.id.0,
+        target_id: node_external_id(target),
+        target_node_id: target.id.0,
+        relationship_id: relationship.id.0,
+        relationship_type: catalog
+            .rel_type_name(relationship.rel_type)
+            .unwrap_or("<unknown>")
+            .to_string(),
+        strength: relationship_strength_value(relationship),
+    })
+}
+
+fn relationship_strength_value(relationship: &RelRecord) -> Value {
+    relationship
+        .properties
+        .get("strength")
+        .or_else(|| relationship.properties.get("confidence"))
+        .cloned()
+        .unwrap_or(Value::Float(0.5))
+}
+
 fn context_path_for_relationship(
     catalog: &Catalog,
     store: &GraphStore,
@@ -16982,6 +17112,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeScopedRelationshipsRequest,
     ) -> KnowledgeRelationshipsOutput {
         self.db.knowledge_scoped_relationships(request)
+    }
+
+    pub fn knowledge_induced_edges(
+        &self,
+        request: &KnowledgeInducedEdgeListRequest,
+    ) -> Result<KnowledgeInducedEdgeListOutput> {
+        self.db.knowledge_induced_edges(request)
     }
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
