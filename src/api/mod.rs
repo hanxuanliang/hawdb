@@ -1826,6 +1826,28 @@ pub struct KnowledgeMemoryEvolvesRelationCountOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCrystalSynthesisCountRequest {
+    pub memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCrystalSynthesisCountRow {
+    pub memory_id: String,
+    pub node_id: u64,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryCrystalSynthesisCountOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryCrystalSynthesisCountRow>,
+    pub matched_memory_count: usize,
+    pub missing_memory_ids: Vec<String>,
+    pub matched_relationship_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryEvolvesNeighborRequest {
     pub memory_id: String,
     pub direction: KnowledgeNeighborDirection,
@@ -6765,6 +6787,13 @@ impl Database {
         knowledge_memory_evolves_relation_counts_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_crystal_synthesis_counts(
+        &self,
+        request: &KnowledgeMemoryCrystalSynthesisCountRequest,
+    ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
+        knowledge_memory_crystal_synthesis_counts_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_memory_evolves_neighbors(
         &self,
         request: &KnowledgeMemoryEvolvesNeighborRequest,
@@ -10921,6 +10950,123 @@ fn validate_knowledge_memory_evolves_relation_count_request(
     {
         return Err(SkeinError::Semantic(
             "knowledge memory evolves relation count read requires non-empty content relations"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_memory_crystal_synthesis_counts_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
+) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
+    validate_knowledge_memory_crystal_synthesis_count_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    if request.memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_memory_count: 0,
+            missing_memory_ids: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    }
+
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_memory_count: 0,
+            missing_memory_ids: deduplicated_strings_in_order(&request.memory_ids),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut matched_ids = BTreeSet::new();
+    let memories = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| {
+            node_external_id(memory).is_some_and(|memory_id| {
+                let matched = requested_ids.contains(&memory_id);
+                if matched {
+                    matched_ids.insert(memory_id);
+                }
+                matched
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let mut seen_missing = BTreeSet::new();
+    let missing_memory_ids = request
+        .memory_ids
+        .iter()
+        .filter(|memory_id| !matched_ids.contains(*memory_id))
+        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
+        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_memory_count: matched_ids.len(),
+            missing_memory_ids,
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut matched_relationship_count = 0;
+    let mut rows = Vec::new();
+    for memory in memories {
+        let count = store
+            .incoming_relationships(memory.id, synthesized_from_type_id)
+            .filter(|relationship| {
+                store
+                    .node(relationship.source)
+                    .filter(|crystal| crystal.labels.contains(&memory_label_id))
+                    .is_some_and(|crystal| boolean_property(crystal, "is_crystal") == Some(true))
+            })
+            .count();
+        matched_relationship_count += count;
+        if count > 0 {
+            if let Some(memory_id) = node_external_id(memory) {
+                rows.push(KnowledgeMemoryCrystalSynthesisCountRow {
+                    memory_id,
+                    node_id: memory.id.0,
+                    count,
+                });
+            }
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        left.memory_id
+            .cmp(&right.memory_id)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
+        graph_commit_epoch,
+        rows,
+        matched_memory_count: matched_ids.len(),
+        missing_memory_ids,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_memory_crystal_synthesis_count_request(
+    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
+) -> Result<()> {
+    if request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory crystal synthesis count read requires non-empty memory ids"
                 .to_string(),
         ));
     }
@@ -28027,6 +28173,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_evolves_relation_counts(request)
     }
 
+    pub fn knowledge_memory_crystal_synthesis_counts(
+        &self,
+        request: &KnowledgeMemoryCrystalSynthesisCountRequest,
+    ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
+        self.db.knowledge_memory_crystal_synthesis_counts(request)
+    }
+
     pub fn knowledge_memory_evolves_neighbors(
         &self,
         request: &KnowledgeMemoryEvolvesNeighborRequest,
@@ -29480,6 +29633,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEvolvesRelationCountRequest,
     ) -> Result<KnowledgeMemoryEvolvesRelationCountOutput> {
         knowledge_memory_evolves_relation_counts_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_crystal_synthesis_counts(
+        &self,
+        request: &KnowledgeMemoryCrystalSynthesisCountRequest,
+    ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
+        knowledge_memory_crystal_synthesis_counts_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_memory_evolves_neighbors(

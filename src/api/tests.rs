@@ -33,11 +33,11 @@ use super::{
     KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
     KnowledgeMemoryCompactingThreadListRequest,
     KnowledgeMemoryCompactingThreadProjectedListRequest, KnowledgeMemoryContentBatchRequest,
-    KnowledgeMemoryContentUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
-    KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
-    KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
-    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorCursor,
-    KnowledgeMemoryEvolvesProjectedSuccessorOrder,
+    KnowledgeMemoryContentUpdate, KnowledgeMemoryCrystalSynthesisCountRequest,
+    KnowledgeMemoryDedupReviewedBatchRequest, KnowledgeMemoryEntityListRequest,
+    KnowledgeMemoryEvolvesCreate, KnowledgeMemoryEvolvesCreateBatchRequest,
+    KnowledgeMemoryEvolvesLatestRequest, KnowledgeMemoryEvolvesNeighborRequest,
+    KnowledgeMemoryEvolvesProjectedSuccessorCursor, KnowledgeMemoryEvolvesProjectedSuccessorOrder,
     KnowledgeMemoryEvolvesProjectedSuccessorPageCursor,
     KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesRelationCountRequest,
     KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLabelTransferRequest,
@@ -5455,6 +5455,90 @@ fn memory_evolves_relation_counts_rejects_empty_fields_without_wal() {
     assert!(relation_error
         .to_string()
         .contains("non-empty content relations"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn counts_memory_crystal_synthesis_for_decay_scheduler_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'decay-base-a'})").unwrap();
+    db.query("CREATE (:Memory {id: 'decay-base-b'})").unwrap();
+    db.query("CREATE (:Memory {id: 'decay-crystal-a', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'decay-crystal-b', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'decay-non-crystal', is_crystal: false})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'decay-synthesis-source-skip'})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'decay-crystal-a'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'decay-crystal-b'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'decay-non-crystal'}), (m:Memory {id: 'decay-base-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (s:Source {id: 'decay-synthesis-source-skip'}), (m:Memory {id: 'decay-base-a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'decay-crystal-a'}), (m:Memory {id: 'decay-base-b'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query("MATCH (c:Memory {id: 'decay-crystal-b'}), (m:Memory {id: 'decay-base-b'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+
+    let counts = db
+        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
+            memory_ids: vec![
+                "decay-base-a".to_string(),
+                "missing-decay-base".to_string(),
+                "decay-base-b".to_string(),
+                "decay-base-a".to_string(),
+            ],
+        })
+        .unwrap();
+    assert_eq!(counts.graph_commit_epoch, db.store.commit_epoch());
+    assert_eq!(counts.matched_memory_count, 2);
+    assert_eq!(
+        counts.missing_memory_ids,
+        vec!["missing-decay-base".to_string()]
+    );
+    assert_eq!(counts.matched_relationship_count, 4);
+    assert_eq!(counts.returned_count, 2);
+    assert_eq!(counts.rows[0].memory_id, "decay-base-a");
+    assert_eq!(counts.rows[0].count, 2);
+    assert_eq!(counts.rows[1].memory_id, "decay-base-b");
+    assert_eq!(counts.rows[1].count, 2);
+
+    let snapshot_counts = snapshot
+        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
+            memory_ids: vec!["decay-base-b".to_string()],
+        })
+        .unwrap();
+    assert_eq!(snapshot_counts.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_counts.matched_relationship_count, 1);
+    assert_eq!(snapshot_counts.rows[0].count, 1);
+}
+
+#[test]
+fn memory_crystal_synthesis_counts_rejects_empty_ids_without_wal() {
+    let path = unique_test_dir("memory_crystal_synthesis_counts_empty_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'decay-base'})").unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .knowledge_memory_crystal_synthesis_counts(&KnowledgeMemoryCrystalSynthesisCountRequest {
+            memory_ids: vec![String::new()],
+        })
+        .unwrap_err();
+    assert!(error.to_string().contains("non-empty memory ids"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
     assert_eq!(
         std::fs::read_to_string(path.join("wal.skein")).unwrap(),

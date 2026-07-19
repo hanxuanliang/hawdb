@@ -418,6 +418,13 @@ ids, scans only matched Memory nodes, filters outgoing `EVOLVES` edges to
 Memory targets by caller-supplied relation names, returns one row per Memory
 with a positive count, reports missing Memory ids and full matched relationship
 counts, supports pinned read snapshots, and does not write WAL.
+Memory crystal synthesis count reads are covered by
+`Database::knowledge_memory_crystal_synthesis_counts`. The typed read covers the
+decay scheduler's incoming `SYNTHESIZED_FROM` count shape over requested source
+Memory ids, scans only matched Memory nodes, filters incoming `SYNTHESIZED_FROM`
+edges to `Memory` crystals with `is_crystal = true`, returns one row per Memory
+with a positive count, reports missing Memory ids and full matched relationship
+counts, supports pinned read snapshots, and does not write WAL.
 Memory EVOLVES neighbor reads are covered by
 `Database::knowledge_memory_evolves_neighbors`. The typed read covers the MCP
 outgoing and incoming `Memory-[:EVOLVES]-Memory` shapes, anchors by one physical
