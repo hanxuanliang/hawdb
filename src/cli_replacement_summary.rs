@@ -51,11 +51,14 @@ pub fn nowledge_replacement_summary_json_with_options(
             .unwrap_or(false);
     let dual_engine_evidence = dual_engine_evidence_summary(bundle);
     let dual_engine_evidence_ready = dual_engine_evidence.ready;
+    let background_graph_delta_evidence_missing =
+        background_maintenance_graph_delta_evidence_missing(bundle);
     let production_cutover_ready = migration_gate_decision == Some("ready")
         && cutover_decision == Some("ready")
         && cutover_evidence_eligible
         && previous_wrapper_contract_ready
         && dual_engine_evidence_ready != Some(false)
+        && !background_graph_delta_evidence_missing
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
         1_000_000
@@ -73,6 +76,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
             dual_engine_evidence_ready,
+            background_graph_delta_evidence_missing,
         },
     );
     let blockers = nowledge_replacement_blockers(bundle);
@@ -91,6 +95,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
             dual_engine_evidence_ready,
+            background_graph_delta_evidence_missing,
             production_cutover_ready,
         },
     );
@@ -276,6 +281,7 @@ struct ReplacementReadinessInputs<'a> {
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
     dual_engine_evidence_ready: Option<bool>,
+    background_graph_delta_evidence_missing: bool,
 }
 
 struct NextActionInputs<'a> {
@@ -287,6 +293,7 @@ struct NextActionInputs<'a> {
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
     dual_engine_evidence_ready: Option<bool>,
+    background_graph_delta_evidence_missing: bool,
     production_cutover_ready: bool,
 }
 
@@ -363,10 +370,11 @@ fn nowledge_replacement_blocking_categories(
         bundle,
         &["cutover_evidence", "background_maintenance_required"],
     ) == Some(true)
-        && json_get_bool_path(
+        && (json_get_bool_path(
             bundle,
             &["cutover_evidence", "background_maintenance_ready"],
         ) != Some(true)
+            || inputs.background_graph_delta_evidence_missing)
     {
         categories.insert("background_maintenance".to_string());
     }
@@ -482,14 +490,15 @@ fn nowledge_replacement_next_actions(
         bundle,
         &["cutover_evidence", "background_maintenance_required"],
     ) == Some(true)
-        && json_get_bool_path(
+        && (json_get_bool_path(
             bundle,
             &["cutover_evidence", "background_maintenance_ready"],
         ) != Some(true)
+            || inputs.background_graph_delta_evidence_missing)
     {
         actions.push(next_action(
             "attach_background_maintenance_report",
-            "required background maintenance QoS evidence is missing or blocked",
+            "required background maintenance QoS or graph-delta evidence is missing or blocked",
             [
                 "cutover_evidence.background_maintenance_present",
                 "cutover_evidence.background_maintenance_ready",
@@ -551,6 +560,9 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     {
         missing.push("background_maintenance".to_string());
     }
+    if background_maintenance_graph_delta_evidence_missing(bundle) {
+        missing.push("background_maintenance_search_projection_graph_delta".to_string());
+    }
     if bundle
         .get("replacement_readiness_by_query_family")
         .is_none()
@@ -567,6 +579,32 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
         missing.push("shadow_ready".to_string());
     }
     missing
+}
+
+fn background_maintenance_graph_delta_evidence_missing(bundle: &serde_json::Value) -> bool {
+    if json_get_bool_path(
+        bundle,
+        &["cutover_evidence", "background_maintenance_required"],
+    ) != Some(true)
+        || json_get_bool_path(
+            bundle,
+            &["cutover_evidence", "background_maintenance_present"],
+        ) != Some(true)
+    {
+        return false;
+    }
+
+    [
+        "background_maintenance_executable_search_projection_graph_delta_count",
+        "background_maintenance_admitted_search_projection_graph_delta_count",
+        "background_maintenance_deferred_search_projection_graph_delta_count",
+        "background_maintenance_rejected_search_projection_graph_delta_count",
+        "background_maintenance_executable_search_projection_graph_delta_operations",
+        "background_maintenance_admitted_search_projection_graph_delta_operations",
+        "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+    ]
+    .into_iter()
+    .any(|field| json_get_u64_path_from_dynamic(bundle, &["cutover_evidence"], field).is_none())
 }
 
 fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
@@ -772,6 +810,41 @@ mod tests {
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_graph_delta_aggregate_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["cutover_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("background_maintenance_admitted_search_projection_graph_delta_count");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "background_maintenance"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "background_maintenance_search_projection_graph_delta"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item["action"] == "attach_background_maintenance_report"
+                    && item["evidence_fields"].as_array().unwrap().iter().any(|field| {
+                        field
+                            == "cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count"
+                    })
+            }));
     }
 
     #[test]
@@ -1114,7 +1187,7 @@ mod tests {
                 },
                 {
                     "action": "attach_background_maintenance_report",
-                    "reason": "required background maintenance QoS evidence is missing or blocked",
+                    "reason": "required background maintenance QoS or graph-delta evidence is missing or blocked",
                     "evidence_fields": [
                         "cutover_evidence.background_maintenance_present",
                         "cutover_evidence.background_maintenance_ready",
