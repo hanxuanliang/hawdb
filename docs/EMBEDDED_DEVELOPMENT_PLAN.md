@@ -323,7 +323,11 @@ Kuzu/Ladybug store remains available while Skein runs as a sibling embedded
 graph store behind explicit adapter flags, shadow comparison, and per-surface
 cutover evidence. Replacement readiness is not permission to delete or replace
 the old database in place; old-store removal requires a later explicit cleanup
-phase after rollback and parity evidence exists.
+phase after rollback and parity evidence exists. The intended repository
+integration is to add Skein to the Nowledge Mem repository as a Git submodule,
+not to copy Skein source files into the Nowledge Mem tree; adapter code in
+Nowledge Mem should depend on that submodule boundary during shadowing and
+cutover.
 The embedded front door now includes a bounded exact physical-plan LFU cache for
 literal and parameterized query/explain paths. Cache keys include Cypher text,
 bound parameter values, graph commit epoch, and optimizer group budget; any

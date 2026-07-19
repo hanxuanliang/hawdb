@@ -2743,6 +2743,20 @@ pub struct KnowledgeSourceCountOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceSourcedMemoryCountRequest {
+    pub source_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceSourcedMemoryCountOutput {
+    pub graph_commit_epoch: u64,
+    pub source_id: String,
+    pub source_node_id: Option<u64>,
+    pub found: bool,
+    pub sourced_memory_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceMemoryListRequest {
     pub source_id: String,
     pub limit: usize,
@@ -6629,6 +6643,13 @@ impl Database {
             graph_commit_epoch: self.store.commit_epoch(),
             count: count_nodes_with_label(&self.catalog, &self.store, "Source"),
         }
+    }
+
+    pub fn knowledge_source_sourced_memory_count(
+        &self,
+        request: &KnowledgeSourceSourcedMemoryCountRequest,
+    ) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
+        knowledge_source_sourced_memory_count_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_source_memories(
@@ -14088,6 +14109,38 @@ fn source_memory_row(memory: &NodeRecord, relationship: &RelRecord) -> Knowledge
         source_version: relationship_string_property(relationship, "source_version"),
         created_at: relationship.properties.get("created_at").cloned(),
     }
+}
+
+fn knowledge_source_sourced_memory_count_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceSourcedMemoryCountRequest,
+) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
+    if request.source_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source sourced-memory count requires a non-empty source id".to_string(),
+        ));
+    }
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(source) =
+        seed_node_by_label_and_external_id(catalog, store, "Source", &request.source_id)
+    else {
+        return Ok(KnowledgeSourceSourcedMemoryCountOutput {
+            graph_commit_epoch,
+            source_id: request.source_id.clone(),
+            source_node_id: None,
+            found: false,
+            sourced_memory_count: 0,
+        });
+    };
+
+    Ok(KnowledgeSourceSourcedMemoryCountOutput {
+        graph_commit_epoch,
+        source_id: request.source_id.clone(),
+        source_node_id: Some(source.id.0),
+        found: true,
+        sourced_memory_count: source_sourced_memory_count(catalog, store, source.id),
+    })
 }
 
 fn knowledge_memory_source_attributions_for(
@@ -26029,6 +26082,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_source_count()
     }
 
+    pub fn knowledge_source_sourced_memory_count(
+        &self,
+        request: &KnowledgeSourceSourcedMemoryCountRequest,
+    ) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
+        self.db.knowledge_source_sourced_memory_count(request)
+    }
+
     pub fn knowledge_source_memories(
         &self,
         request: &KnowledgeSourceMemoryListRequest,
@@ -27115,6 +27175,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEvolvesLatestRequest,
     ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
         knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_sourced_memory_count(
+        &self,
+        request: &KnowledgeSourceSourcedMemoryCountRequest,
+    ) -> Result<KnowledgeSourceSourcedMemoryCountOutput> {
+        knowledge_source_sourced_memory_count_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_source_reference_entities(

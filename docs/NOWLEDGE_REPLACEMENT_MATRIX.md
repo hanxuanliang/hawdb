@@ -238,7 +238,10 @@ Source operational reads are covered by typed APIs for Nowledge source detail,
 source count, extracted-source id list, and normalized-space id list paths.
 `Database::knowledge_source` returns the Source identity, display fields,
 normalized space, lifecycle fields, size/count fields, timestamps, and
-`SOURCED_FROM` Memory count for one Source id. `Database::knowledge_source_ids`
+`SOURCED_FROM` Memory count for one Source id.
+`Database::knowledge_source_sourced_memory_count` exposes the same
+`SOURCED_FROM` fan-in count as a lightweight count-only read for Nowledge
+guards that do not need the full Source projection. `Database::knowledge_source_ids`
 returns sorted Source ids filtered by lifecycle state and/or normalized space
 with bounded limits, while `Database::knowledge_source_count` exposes the total
 Source node count. These reads report the graph commit epoch and do not write

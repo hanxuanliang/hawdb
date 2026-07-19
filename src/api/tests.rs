@@ -81,21 +81,21 @@ use super::{
     KnowledgeSourceReferenceRelationshipCleanupRequest,
     KnowledgeSourceReferenceRelationshipCountRequest, KnowledgeSourceRequest,
     KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
-    KnowledgeSourceVersionLookupRequest, KnowledgeSubgraphRequest,
-    KnowledgeSynthesizedSourceCoverageRequest, KnowledgeSynthesizedSourceIdsRequest,
-    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadCompactionLinkRequest,
-    KnowledgeThreadDeleteBatchRequest, KnowledgeThreadDistillationCandidateRequest,
-    KnowledgeThreadIdentityCascadeDeleteKeys, KnowledgeThreadIdentityDeleteRequest,
-    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
-    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMessageDeleteRequest, KnowledgeThreadMessageListRequest,
-    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSourceVersionLookupRequest,
+    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
+    KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
+    KnowledgeThreadCompactionLinkRequest, KnowledgeThreadDeleteBatchRequest,
+    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityCascadeDeleteKeys,
+    KnowledgeThreadIdentityDeleteRequest, KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder,
+    KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageDeleteRequest,
+    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
+    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
+    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
+    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -9555,6 +9555,78 @@ fn typed_source_revision_batch_persists_as_one_wal_batch_and_replays() {
             Some(&Value::String("older-2".to_string()))
         );
     }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn counts_source_sourced_memory_fan_in_for_nowledge_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
+    db.query("CREATE (:Source {id: 'source_b'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (e:Entity {id: 'entity_a'}), (s:Source {id: 'source_a'}) CREATE (e)-[:SOURCED_FROM]->(s)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
+            source_id: "source_a".to_string(),
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(output.source_id, "source_a");
+    assert!(output.found);
+    assert_eq!(output.source_node_id, Some(0));
+    assert_eq!(output.sourced_memory_count, 2);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let snapshot = db.begin_read_transaction();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_b'}) CREATE (m)-[:SOURCED_FROM]->(s)")
+        .unwrap();
+    let snapshot_output = snapshot
+        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
+            source_id: "source_b".to_string(),
+        })
+        .unwrap();
+    assert!(snapshot_output.found);
+    assert_eq!(snapshot_output.sourced_memory_count, 0);
+
+    let missing = db
+        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
+            source_id: "missing".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found);
+    assert_eq!(missing.sourced_memory_count, 0);
+}
+
+#[test]
+fn source_sourced_memory_count_rejects_empty_source_id_without_wal() {
+    let path = unique_test_dir("source_sourced_memory_count_empty_id");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .knowledge_source_sourced_memory_count(&KnowledgeSourceSourcedMemoryCountRequest {
+            source_id: String::new(),
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty source id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
     std::fs::remove_dir_all(path).unwrap();
 }
 
