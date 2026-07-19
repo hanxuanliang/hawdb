@@ -57,6 +57,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let dual_engine_evidence_present = dual_engine_evidence.present;
     let dual_engine_evidence_ready = dual_engine_evidence.ready;
     let dual_engine_evidence_consistent = dual_engine_evidence.consistent;
+    let search_projection_evidence = search_projection_evidence_summary(bundle);
+    let search_projection_evidence_ready = search_projection_evidence.ready;
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
     let production_cutover_ready = migration_gate_decision == Some("ready")
@@ -68,6 +70,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && dual_engine_evidence_present
         && dual_engine_evidence_ready == Some(true)
         && dual_engine_evidence_consistent
+        && search_projection_evidence_ready
         && !background_graph_delta_evidence_missing
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
@@ -90,6 +93,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_present,
             dual_engine_evidence_ready,
             dual_engine_evidence_consistent,
+            search_projection_evidence_ready,
             background_graph_delta_evidence_missing,
         },
     );
@@ -113,6 +117,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_present,
             dual_engine_evidence_ready,
             dual_engine_evidence_consistent,
+            search_projection_evidence_ready,
             background_graph_delta_evidence_missing,
             production_cutover_ready,
         },
@@ -144,6 +149,23 @@ pub fn nowledge_replacement_summary_json_with_options(
             "matched_check_count": dual_engine_evidence.matched_check_count,
             "primary_only_check_count": dual_engine_evidence.primary_only_check_count,
             "matched_per_million": dual_engine_evidence.matched_per_million,
+        },
+        "search_projection_evidence": {
+            "present": search_projection_evidence.present,
+            "ready": search_projection_evidence.ready,
+            "derived_projection": search_projection_evidence.derived_projection,
+            "all_tables_covered": search_projection_evidence.all_tables_covered,
+            "covered_table_count": search_projection_evidence.covered_table_count,
+            "required_table_count": search_projection_evidence.required_table_count,
+            "fts_ready": search_projection_evidence.fts_ready,
+            "vector_ready": search_projection_evidence.vector_ready,
+            "embedding_identity_ready": search_projection_evidence.embedding_identity_ready,
+            "fail_soft_ready": search_projection_evidence.fail_soft_ready,
+            "rebuild_marker_ready": search_projection_evidence.rebuild_marker_ready,
+            "metadata_repair_marker_ready": search_projection_evidence.metadata_repair_marker_ready,
+            "incremental_update_ready": search_projection_evidence.incremental_update_ready,
+            "source_chunk_ready": search_projection_evidence.source_chunk_ready,
+            "blocker_codes": search_projection_evidence.blocker_codes,
         },
         "cutover_evidence": {
             "eligible": cutover_evidence_eligible,
@@ -320,6 +342,7 @@ struct ReplacementReadinessInputs<'a> {
     dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
     dual_engine_evidence_consistent: bool,
+    search_projection_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
 }
 
@@ -336,6 +359,7 @@ struct NextActionInputs<'a> {
     dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
     dual_engine_evidence_consistent: bool,
+    search_projection_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
     production_cutover_ready: bool,
 }
@@ -360,6 +384,24 @@ struct ShadowEvidenceSummary<'a> {
     ready_wrapper_identity: Option<&'a str>,
     contract_wrapper_identity: Option<&'a str>,
     cutover_ready_wrapper_identity: Option<&'a str>,
+}
+
+struct SearchProjectionEvidenceSummary {
+    present: bool,
+    ready: bool,
+    derived_projection: Option<bool>,
+    all_tables_covered: Option<bool>,
+    covered_table_count: Option<u64>,
+    required_table_count: Option<u64>,
+    fts_ready: Option<bool>,
+    vector_ready: Option<bool>,
+    embedding_identity_ready: Option<bool>,
+    fail_soft_ready: Option<bool>,
+    rebuild_marker_ready: Option<bool>,
+    metadata_repair_marker_ready: Option<bool>,
+    incremental_update_ready: Option<bool>,
+    source_chunk_ready: Option<bool>,
+    blocker_codes: serde_json::Value,
 }
 
 fn shadow_evidence_summary(bundle: &serde_json::Value) -> ShadowEvidenceSummary<'_> {
@@ -453,6 +495,73 @@ fn dual_engine_evidence_summary(bundle: &serde_json::Value) -> DualEngineEvidenc
     }
 }
 
+fn search_projection_evidence_summary(
+    bundle: &serde_json::Value,
+) -> SearchProjectionEvidenceSummary {
+    let path = if json_get_path(bundle, &["search_projection_evidence"]).is_some() {
+        &["search_projection_evidence"][..]
+    } else {
+        &["cutover_evidence", "search_projection_evidence"][..]
+    };
+    let present = json_get_path(bundle, path).is_some();
+    let covered_table_count = json_get_u64_path_from_dynamic(bundle, path, "covered_table_count");
+    let required_table_count = json_get_u64_path_from_dynamic(bundle, path, "required_table_count");
+    let derived_projection = json_get_bool_path_from_dynamic(bundle, path, "derived_projection");
+    let all_tables_covered = json_get_bool_path_from_dynamic(bundle, path, "all_tables_covered");
+    let fts_ready = json_get_bool_path_from_dynamic(bundle, path, "fts_ready");
+    let vector_ready = json_get_bool_path_from_dynamic(bundle, path, "vector_ready");
+    let embedding_identity_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "embedding_identity_ready");
+    let fail_soft_ready = json_get_bool_path_from_dynamic(bundle, path, "fail_soft_ready");
+    let rebuild_marker_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "rebuild_marker_ready");
+    let metadata_repair_marker_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "metadata_repair_marker_ready");
+    let incremental_update_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "incremental_update_ready");
+    let source_chunk_ready = json_get_bool_path_from_dynamic(bundle, path, "source_chunk_ready");
+    let ready = present
+        && derived_projection == Some(true)
+        && all_tables_covered == Some(true)
+        && covered_table_count.is_some_and(|count| count > 0)
+        && covered_table_count == required_table_count
+        && fts_ready == Some(true)
+        && vector_ready == Some(true)
+        && embedding_identity_ready == Some(true)
+        && fail_soft_ready == Some(true)
+        && rebuild_marker_ready == Some(true)
+        && metadata_repair_marker_ready == Some(true)
+        && incremental_update_ready == Some(true)
+        && source_chunk_ready == Some(true);
+    SearchProjectionEvidenceSummary {
+        present,
+        ready,
+        derived_projection,
+        all_tables_covered,
+        covered_table_count,
+        required_table_count,
+        fts_ready,
+        vector_ready,
+        embedding_identity_ready,
+        fail_soft_ready,
+        rebuild_marker_ready,
+        metadata_repair_marker_ready,
+        incremental_update_ready,
+        source_chunk_ready,
+        blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
+    }
+}
+
+fn json_get_array_path_from_dynamic(
+    value: &serde_json::Value,
+    base_path: &[&str],
+    field: &str,
+) -> serde_json::Value {
+    let mut path = base_path.to_vec();
+    path.push(field);
+    json_get_array_path(value, &path)
+}
+
 fn nowledge_replacement_blocking_categories(
     bundle: &serde_json::Value,
     inputs: ReplacementReadinessInputs<'_>,
@@ -484,6 +593,9 @@ fn nowledge_replacement_blocking_categories(
         || !inputs.dual_engine_evidence_consistent
     {
         categories.insert("dual_engine_evidence".to_string());
+    }
+    if !inputs.search_projection_evidence_ready {
+        categories.insert("search_projection_evidence".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
@@ -615,6 +727,29 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
+    if !inputs.search_projection_evidence_ready {
+        actions.push(next_action(
+            "attach_search_projection_replacement_evidence",
+            "LanceDB replacement evidence is missing or not ready",
+            [
+                "search_projection_evidence.present",
+                "search_projection_evidence.ready",
+                "search_projection_evidence.derived_projection",
+                "search_projection_evidence.all_tables_covered",
+                "search_projection_evidence.covered_table_count",
+                "search_projection_evidence.required_table_count",
+                "search_projection_evidence.fts_ready",
+                "search_projection_evidence.vector_ready",
+                "search_projection_evidence.embedding_identity_ready",
+                "search_projection_evidence.fail_soft_ready",
+                "search_projection_evidence.rebuild_marker_ready",
+                "search_projection_evidence.metadata_repair_marker_ready",
+                "search_projection_evidence.incremental_update_ready",
+                "search_projection_evidence.source_chunk_ready",
+                "search_projection_evidence.blocker_codes",
+            ],
+        ));
+    }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
     {
@@ -721,6 +856,13 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
         && json_get_path(bundle, &["cutover", "dual_engine_evidence"]).is_none()
     {
         missing.push("dual_engine_evidence".to_string());
+    }
+    if bundle.get("search_projection_evidence").is_none()
+        && json_get_path(bundle, &["cutover_evidence", "search_projection_evidence"]).is_none()
+    {
+        missing.push("search_projection_evidence".to_string());
+    } else if !search_projection_evidence_summary(bundle).ready {
+        missing.push("search_projection_evidence_ready".to_string());
     }
     if bundle.get("shadow_run").is_none() {
         missing.push("shadow_run".to_string());
@@ -894,6 +1036,7 @@ mod tests {
                 "cutover_evidence",
                 "dual_engine_evidence",
                 "previous_wrapper_contract",
+                "search_projection_evidence",
                 "shadow_parity"
             ])
         );
@@ -982,10 +1125,91 @@ mod tests {
             summary["dual_engine_evidence"]["shadow_engine"],
             "previous-wrapper"
         );
+        assert_eq!(summary["search_projection_evidence"]["present"], true);
+        assert_eq!(summary["search_projection_evidence"]["ready"], true);
+        assert_eq!(
+            summary["search_projection_evidence"]["covered_table_count"],
+            6
+        );
+        assert_eq!(
+            summary["search_projection_evidence"]["required_table_count"],
+            6
+        );
         assert_eq!(
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_search_projection_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("search_projection_evidence");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_evidence"]["present"], false);
+        assert_eq!(summary["search_projection_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_search_projection_replacement_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "search_projection_evidence.fts_ready")
+            }));
+    }
+
+    #[test]
+    fn replacement_summary_recomputes_search_projection_evidence_readiness() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_projection_evidence"]["covered_table_count"] = serde_json::json!(5);
+        bundle["search_projection_evidence"]["blocker_codes"] =
+            serde_json::json!(["missing_source_chunks_index"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_evidence"]["covered_table_count"],
+            5
+        );
+        assert_eq!(
+            summary["search_projection_evidence"]["blocker_codes"],
+            serde_json::json!(["missing_source_chunks_index"])
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_evidence_ready"));
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_evidence"));
     }
 
     #[test]
@@ -1430,6 +1654,7 @@ mod tests {
                 "migration_gate",
                 "previous_wrapper_contract",
                 "query_family_readiness",
+                "search_projection_evidence",
                 "shadow_parity",
                 "storage_recovery"
             ])
@@ -1442,6 +1667,7 @@ mod tests {
                 "previous_wrapper_contract_evidence",
                 "full_contract_evidence",
                 "dual_engine_evidence",
+                "search_projection_evidence",
                 "shadow_run",
                 "shadow_ready"
             ])
@@ -1520,6 +1746,27 @@ mod tests {
                         "dual_engine_evidence.matched_check_count",
                         "dual_engine_evidence.primary_only_check_count",
                         "dual_engine_evidence.matched_per_million"
+                    ]
+                },
+                {
+                    "action": "attach_search_projection_replacement_evidence",
+                    "reason": "LanceDB replacement evidence is missing or not ready",
+                    "evidence_fields": [
+                        "search_projection_evidence.present",
+                        "search_projection_evidence.ready",
+                        "search_projection_evidence.derived_projection",
+                        "search_projection_evidence.all_tables_covered",
+                        "search_projection_evidence.covered_table_count",
+                        "search_projection_evidence.required_table_count",
+                        "search_projection_evidence.fts_ready",
+                        "search_projection_evidence.vector_ready",
+                        "search_projection_evidence.embedding_identity_ready",
+                        "search_projection_evidence.fail_soft_ready",
+                        "search_projection_evidence.rebuild_marker_ready",
+                        "search_projection_evidence.metadata_repair_marker_ready",
+                        "search_projection_evidence.incremental_update_ready",
+                        "search_projection_evidence.source_chunk_ready",
+                        "search_projection_evidence.blocker_codes"
                     ]
                 },
                 {
@@ -1621,6 +1868,22 @@ mod tests {
                 "matched_check_count": 1,
                 "primary_only_check_count": 0,
                 "matched_per_million": 1_000_000
+            },
+            "search_projection_evidence": {
+                "ready": true,
+                "derived_projection": true,
+                "all_tables_covered": true,
+                "covered_table_count": 6,
+                "required_table_count": 6,
+                "fts_ready": true,
+                "vector_ready": true,
+                "embedding_identity_ready": true,
+                "fail_soft_ready": true,
+                "rebuild_marker_ready": true,
+                "metadata_repair_marker_ready": true,
+                "incremental_update_ready": true,
+                "source_chunk_ready": true,
+                "blocker_codes": []
             },
             "previous_wrapper_contract_evidence": {
                 "ready": true,
