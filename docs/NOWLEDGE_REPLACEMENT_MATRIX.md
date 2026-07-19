@@ -369,6 +369,13 @@ Thread source summary lookup is covered by
 thread-id/title/source/created-at projection for the Nowledge REST export
 source-thread shape, reports total matched Thread rows for ambiguity
 diagnostics, supports pinned read snapshots, and does not write WAL.
+Thread message-render lookup is covered by
+`Database::knowledge_thread_message_lookup`. The typed read applies the
+Nowledge REST FS `id = key OR id STARTS WITH key OR id CONTAINS key` lookup
+against Thread physical ids, keeps the exact source filter, returns the first
+stable node-id ordered id/message-count/raw-space projection, preserves raw
+empty `space_id`, reports total matched Thread rows for ambiguity diagnostics,
+supports pinned read snapshots, and does not write WAL.
 ThreadIdentity exact resolution is covered by
 `Database::knowledge_thread_identity`. The typed read resolves one
 `ThreadIdentity` by external id, returns the Nowledge repo fields

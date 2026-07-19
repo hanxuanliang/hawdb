@@ -190,6 +190,8 @@ source directories without WAL writes. Thread attachment title lookup is
 exposed as a typed `knowledge_thread_title` API for exact physical/logical
 Thread ids without WAL writes. Thread source summary lookup is exposed as a
 typed `knowledge_thread_source` API for exact physical/logical Thread ids
+without WAL writes. Thread message-render lookup is exposed as a typed
+`knowledge_thread_message_lookup` API for REST FS id lookup plus source filters
 without WAL writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.

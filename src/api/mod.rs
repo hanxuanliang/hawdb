@@ -2830,6 +2830,25 @@ pub struct KnowledgeThreadSourceLookupOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageLookupRequest {
+    pub key: String,
+    pub source: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageLookupOutput {
+    pub graph_commit_epoch: u64,
+    pub key: String,
+    pub source_filter: String,
+    pub thread_node_id: Option<u64>,
+    pub found_thread: bool,
+    pub id: Option<String>,
+    pub message_count: Option<Value>,
+    pub raw_space_id: Option<String>,
+    pub matched_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadIdentityRequest {
     pub identity_key: String,
 }
@@ -5719,6 +5738,13 @@ impl Database {
         request: &KnowledgeThreadSourceLookupRequest,
     ) -> Result<KnowledgeThreadSourceLookupOutput> {
         knowledge_thread_source_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_message_lookup(
+        &self,
+        request: &KnowledgeThreadMessageLookupRequest,
+    ) -> Result<KnowledgeThreadMessageLookupOutput> {
+        knowledge_thread_message_lookup_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_identity(
@@ -11536,6 +11562,10 @@ fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn raw_string_property(node: &NodeRecord, property: &str) -> Option<String> {
+    node.properties.get(property).map(value_to_external_id)
+}
+
 fn coalesced_string_property(node: &NodeRecord, property: &str, fallback: &str) -> String {
     node.properties
         .get(property)
@@ -13357,6 +13387,61 @@ fn validate_knowledge_thread_source_request(
     Ok(())
 }
 
+fn knowledge_thread_message_lookup_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadMessageLookupRequest,
+) -> Result<KnowledgeThreadMessageLookupOutput> {
+    validate_knowledge_thread_message_lookup_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Thread") else {
+        return Ok(KnowledgeThreadMessageLookupOutput {
+            graph_commit_epoch,
+            key: request.key.clone(),
+            source_filter: request.source.clone(),
+            thread_node_id: None,
+            found_thread: false,
+            id: None,
+            message_count: None,
+            raw_space_id: None,
+            matched_count: 0,
+        });
+    };
+
+    let matched =
+        thread_id_lookup_key_and_source_candidates(store, label_id, &request.key, &request.source);
+    let matched_count = matched.len();
+    let first = matched.into_iter().next();
+
+    Ok(KnowledgeThreadMessageLookupOutput {
+        graph_commit_epoch,
+        key: request.key.clone(),
+        source_filter: request.source.clone(),
+        thread_node_id: first.map(|node| node.id.0),
+        found_thread: first.is_some(),
+        id: first.and_then(node_external_id),
+        message_count: first.and_then(|node| node.properties.get("message_count").cloned()),
+        raw_space_id: first.and_then(|node| raw_string_property(node, "space_id")),
+        matched_count,
+    })
+}
+
+fn validate_knowledge_thread_message_lookup_request(
+    request: &KnowledgeThreadMessageLookupRequest,
+) -> Result<()> {
+    if request.key.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread message lookup requires a non-empty key".to_string(),
+        ));
+    }
+    if request.source.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread message lookup requires a non-empty source".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn exact_thread_id_or_logical_candidates<'a>(
     store: &'a GraphStore,
     label_id: LabelId,
@@ -13367,6 +13452,25 @@ fn exact_thread_id_or_logical_candidates<'a>(
         .filter(|node| {
             node_external_id(node).as_deref() == Some(id)
                 || string_property(node, "thread_id").as_deref() == Some(id)
+        })
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|node| node.id.0);
+    matched
+}
+
+fn thread_id_lookup_key_and_source_candidates<'a>(
+    store: &'a GraphStore,
+    label_id: LabelId,
+    key: &str,
+    source: &str,
+) -> Vec<&'a NodeRecord> {
+    let mut matched = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| {
+            node_external_id(node).is_some_and(|id| {
+                (id == key || id.starts_with(key) || id.contains(key))
+                    && string_property(node, "source").as_deref() == Some(source)
+            })
         })
         .collect::<Vec<_>>();
     matched.sort_by_key(|node| node.id.0);
@@ -21462,6 +21566,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_thread_source(request)
     }
 
+    pub fn knowledge_thread_message_lookup(
+        &self,
+        request: &KnowledgeThreadMessageLookupRequest,
+    ) -> Result<KnowledgeThreadMessageLookupOutput> {
+        self.db.knowledge_thread_message_lookup(request)
+    }
+
     pub fn knowledge_thread_identity(
         &self,
         request: &KnowledgeThreadIdentityRequest,
@@ -22401,6 +22512,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeThreadSourceLookupRequest,
     ) -> Result<KnowledgeThreadSourceLookupOutput> {
         knowledge_thread_source_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_message_lookup(
+        &self,
+        request: &KnowledgeThreadMessageLookupRequest,
+    ) -> Result<KnowledgeThreadMessageLookupOutput> {
+        knowledge_thread_message_lookup_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

@@ -69,12 +69,12 @@ use super::{
     KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityRequest,
     KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
-    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
-    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
-    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
-    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetadataBatchRequest,
+    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
+    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
+    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
+    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
+    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -10132,6 +10132,102 @@ fn thread_source_read_rejects_empty_sid() {
         .knowledge_thread_source(&KnowledgeThreadSourceLookupRequest { sid: String::new() })
         .unwrap_err();
     assert!(error.to_string().contains("non-empty thread id"));
+}
+
+#[test]
+fn reads_thread_message_lookup_for_rest_fs_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', source: 'codex', message_count: 3, space_id: 'team'})")
+        .unwrap();
+    db.query(
+        "CREATE (:Thread {id: 'beta-thread-1', source: 'codex', message_count: 5, space_id: ''})",
+    )
+    .unwrap();
+    db.query("CREATE (:Thread {id: 'alpha-thread-2', source: 'slack', message_count: 7, space_id: 'other'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'gamma-thread-1', source: 'codex'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'alpha-thread-1', source: 'codex', message_count: 99})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let exact = db
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: "alpha-thread-1".to_string(),
+            source: "codex".to_string(),
+        })
+        .unwrap();
+    assert_eq!(exact.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(exact.key, "alpha-thread-1");
+    assert_eq!(exact.source_filter, "codex");
+    assert!(exact.thread_node_id.is_some());
+    assert!(exact.found_thread);
+    assert_eq!(exact.id.as_deref(), Some("alpha-thread-1"));
+    assert_eq!(exact.message_count, Some(Value::Int(3)));
+    assert_eq!(exact.raw_space_id.as_deref(), Some("team"));
+    assert_eq!(exact.matched_count, 1);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let prefix = db
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: "beta".to_string(),
+            source: "codex".to_string(),
+        })
+        .unwrap();
+    assert_eq!(prefix.id.as_deref(), Some("beta-thread-1"));
+    assert_eq!(prefix.message_count, Some(Value::Int(5)));
+    assert_eq!(prefix.raw_space_id.as_deref(), Some(""));
+
+    let contains = db
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: "thread".to_string(),
+            source: "codex".to_string(),
+        })
+        .unwrap();
+    assert_eq!(contains.id.as_deref(), Some("alpha-thread-1"));
+    assert_eq!(contains.matched_count, 3);
+
+    let missing = db
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: "alpha".to_string(),
+            source: "email".to_string(),
+        })
+        .unwrap();
+    assert!(!missing.found_thread);
+    assert_eq!(missing.thread_node_id, None);
+    assert_eq!(missing.matched_count, 0);
+
+    let tx = db.begin_read_transaction();
+    db.query("MATCH (t:Thread {id: 'alpha-thread-1'}) SET t.message_count = 42")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: "alpha-thread-1".to_string(),
+            source: "codex".to_string(),
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.message_count, Some(Value::Int(3)));
+}
+
+#[test]
+fn thread_message_lookup_rejects_empty_filters() {
+    let db = Database::new();
+    let empty_key = db
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: String::new(),
+            source: "codex".to_string(),
+        })
+        .unwrap_err();
+    assert!(empty_key.to_string().contains("non-empty key"));
+
+    let empty_source = db
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: "thread".to_string(),
+            source: String::new(),
+        })
+        .unwrap_err();
+    assert!(empty_source.to_string().contains("non-empty source"));
 }
 
 #[test]
