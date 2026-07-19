@@ -168,7 +168,10 @@ write-state updates are exposed as a typed batch for Nowledge stage changes,
 rejections, promotions, compiled metadata, draft bundle writes, content hashes,
 and `updated_at` stamping. Skill synthesized-memory evidence reads are exposed
 as a typed `knowledge_skill_memories` API for id-filtered and stage-filtered
-`SYNTHESIZED_FROM` Memory lists with explicit created-at ordering. Thread
+`SYNTHESIZED_FROM` Memory lists with explicit created-at ordering. Skill node
+catalog/detail reads are exposed as a typed `knowledge_skills` API for
+stage-filtered lists, exact id lookup, key prefix/contains lookup, active
+after-id pagination, and updated-at/id ordering without WAL writes. Thread
 metadata updates are exposed as a typed batch for Nowledge `metadata` writes
 with optional `updated_at` stamping. Thread
 denormalized message-count refreshes are exposed as a typed batch for Nowledge

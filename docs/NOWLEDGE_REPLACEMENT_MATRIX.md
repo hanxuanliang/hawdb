@@ -294,6 +294,11 @@ write origin, and `updated_at` stamping. The wrapper validates Skill ids,
 non-empty stages, and non-empty write origins before WAL, reports missing,
 idless, and duplicate rows without writing, and commits eligible Skill rows
 through one grouped WAL batch.
+Skill catalog/detail reads are covered by `Database::knowledge_skills`.
+The typed read supports exact id lists, key lookup using exact/prefix/contains
+matching, stage-filtered catalog and active lists, active after-id pagination,
+updated-at or id ordering, missing-id reporting, and pinned read snapshots
+without WAL writes.
 Skill evidence-memory reads are covered by `Database::knowledge_skill_memories`.
 The typed read requires either one Skill id or a non-empty stage filter, scans
 outgoing `SYNTHESIZED_FROM` edges to Memory nodes, returns Memory id/title/

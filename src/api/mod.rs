@@ -2570,6 +2570,58 @@ pub struct KnowledgeSkillMemoryListOutput {
     pub missing_skill_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KnowledgeSkillListOrder {
+    IdAsc,
+    #[default]
+    UpdatedAtDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeSkillListRequest {
+    pub ids: Vec<String>,
+    pub lookup_key: Option<String>,
+    pub stages: Vec<String>,
+    pub after_id: Option<String>,
+    pub limit: usize,
+    pub order: KnowledgeSkillListOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillRow {
+    pub id: Option<String>,
+    pub node_id: u64,
+    pub title: Option<String>,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub stage: Option<String>,
+    pub version: Option<Value>,
+    pub use_count: i64,
+    pub success_rate: Option<Value>,
+    pub metadata: Option<Value>,
+    pub bundle_path: Option<String>,
+    pub triggers: Option<Value>,
+    pub content_hash: Option<String>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: String,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub evidence_count: i64,
+    pub scope: Option<String>,
+    pub rationale: Option<String>,
+    pub kind: Option<String>,
+    pub confidence: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSkillListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSkillRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadMetadataUpdate {
     pub thread_id: String,
@@ -5497,6 +5549,13 @@ impl Database {
         request: &KnowledgeSkillMemoryListRequest,
     ) -> Result<KnowledgeSkillMemoryListOutput> {
         knowledge_skill_memories_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skills(
+        &self,
+        request: &KnowledgeSkillListRequest,
+    ) -> Result<KnowledgeSkillListOutput> {
+        knowledge_skills_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_thread_metadata_batch(
@@ -12245,6 +12304,169 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
         (Value::String(left), Value::String(right)) => left > right,
         _ => false,
     }
+}
+
+fn knowledge_skills_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSkillListRequest,
+) -> Result<KnowledgeSkillListOutput> {
+    validate_knowledge_skill_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Skill") else {
+        return Ok(KnowledgeSkillListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_ids: request.ids.clone(),
+        });
+    };
+
+    let requested_ids = request.ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut matched_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| skill_matches_list_request(node, request, &requested_ids))
+        .map(|node| {
+            if let Some(id) = node_external_id(node) {
+                matched_ids.insert(id);
+            }
+            knowledge_skill_row(node)
+        })
+        .collect::<Vec<_>>();
+
+    sort_skill_rows(&mut rows, request.order);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    let missing_ids = request
+        .ids
+        .iter()
+        .filter(|id| !matched_ids.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeSkillListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_ids,
+    })
+}
+
+fn validate_knowledge_skill_list_request(request: &KnowledgeSkillListRequest) -> Result<()> {
+    if request.ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge skill list requires non-empty ids".to_string(),
+        ));
+    }
+    if request.lookup_key.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge skill list requires a non-empty lookup key".to_string(),
+        ));
+    }
+    if request.stages.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge skill list requires non-empty stages".to_string(),
+        ));
+    }
+    if request.after_id.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge skill list requires a non-empty after id".to_string(),
+        ));
+    }
+    if request.ids.is_empty()
+        && request.lookup_key.is_none()
+        && request.stages.is_empty()
+        && request.after_id.is_none()
+        && request.limit == 0
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge skill list requires a bounded limit or a filter".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn skill_matches_list_request(
+    node: &NodeRecord,
+    request: &KnowledgeSkillListRequest,
+    requested_ids: &BTreeSet<String>,
+) -> bool {
+    let id = node_external_id(node);
+    if !requested_ids.is_empty() && !id.as_ref().is_some_and(|id| requested_ids.contains(id)) {
+        return false;
+    }
+    if request.lookup_key.as_ref().is_some_and(|key| {
+        !id.as_ref()
+            .is_some_and(|id| id == key || id.starts_with(key) || id.contains(key))
+    }) {
+        return false;
+    }
+    if !request.stages.is_empty() {
+        let stages = request.stages.iter().collect::<BTreeSet<_>>();
+        if string_property(node, "stage")
+            .as_ref()
+            .is_none_or(|stage| !stages.contains(stage))
+        {
+            return false;
+        }
+    }
+    if request
+        .after_id
+        .as_ref()
+        .is_some_and(|after| id.as_ref().is_none_or(|id| id.as_str() <= after.as_str()))
+    {
+        return false;
+    }
+    true
+}
+
+fn knowledge_skill_row(node: &NodeRecord) -> KnowledgeSkillRow {
+    KnowledgeSkillRow {
+        id: node_external_id(node),
+        node_id: node.id.0,
+        title: string_property(node, "title"),
+        name: string_property(node, "name"),
+        description: string_property(node, "description"),
+        stage: string_property(node, "stage"),
+        version: node.properties.get("version").cloned(),
+        use_count: integer_property(node, "use_count").unwrap_or(0),
+        success_rate: node.properties.get("success_rate").cloned(),
+        metadata: node.properties.get("metadata").cloned(),
+        bundle_path: string_property(node, "bundle_path"),
+        triggers: node.properties.get("triggers").cloned(),
+        content_hash: string_property(node, "content_hash"),
+        raw_space_id: string_property(node, "space_id"),
+        normalized_space_id: normalized_node_space_id(node),
+        created_at: node.properties.get("created_at").cloned(),
+        updated_at: node.properties.get("updated_at").cloned(),
+        evidence_count: integer_property(node, "evidence_count").unwrap_or(0),
+        scope: string_property(node, "scope"),
+        rationale: string_property(node, "rationale"),
+        kind: string_property(node, "kind"),
+        confidence: node.properties.get("confidence").cloned(),
+    }
+}
+
+fn sort_skill_rows(rows: &mut [KnowledgeSkillRow], order: KnowledgeSkillListOrder) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeSkillListOrder::IdAsc => compare_skill_ids(left, right),
+        KnowledgeSkillListOrder::UpdatedAtDesc => {
+            compare_optional_values_desc(left.updated_at.as_ref(), right.updated_at.as_ref())
+                .then_with(|| compare_skill_ids(left, right))
+        }
+    });
+}
+
+fn compare_skill_ids(left: &KnowledgeSkillRow, right: &KnowledgeSkillRow) -> std::cmp::Ordering {
+    left.id
+        .cmp(&right.id)
+        .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
 fn knowledge_skill_memories_for(
@@ -20644,6 +20866,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_skill_memories(request)
     }
 
+    pub fn knowledge_skills(
+        &self,
+        request: &KnowledgeSkillListRequest,
+    ) -> Result<KnowledgeSkillListOutput> {
+        self.db.knowledge_skills(request)
+    }
+
     pub fn update_knowledge_thread_metadata_batch(
         &mut self,
         request: &KnowledgeThreadMetadataBatchRequest,
@@ -21541,6 +21770,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSynthesizedSourceIdsRequest,
     ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
         knowledge_synthesized_source_ids_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_skills(
+        &self,
+        request: &KnowledgeSkillListRequest,
+    ) -> Result<KnowledgeSkillListOutput> {
+        knowledge_skills_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

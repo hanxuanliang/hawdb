@@ -56,7 +56,8 @@ use super::{
     KnowledgeScopedRelationshipDeleteRequest, KnowledgeScopedRelationshipUpdateBatchRequest,
     KnowledgeScopedRelationshipUpdateRequest, KnowledgeScopedRelationshipsRequest,
     KnowledgeScopedSubgraphRequest, KnowledgeSkillLifecycleBatchRequest,
-    KnowledgeSkillLifecycleUpdate, KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
+    KnowledgeSkillLifecycleUpdate, KnowledgeSkillListOrder, KnowledgeSkillListRequest,
+    KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
     KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
     KnowledgeSourceIdListRequest, KnowledgeSourceLifecycleBatchRequest,
     KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
@@ -8637,6 +8638,189 @@ fn typed_skill_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
         );
     }
     std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Skill {id: 'skill_active_a', title: 'Active A', name: 'active-a', description: 'first active', triggers: '[\"a\"]', stage: 'active', version: 1, use_count: 7, success_rate: 0.8, metadata: '{\"rank\":1}', bundle_path: '/tmp/a', content_hash: 'hash-a', space_id: '', created_at: 1, updated_at: 20, evidence_count: 3, scope: 'workspace', rationale: 'test', kind: 'procedure', confidence: 0.9})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'skill_active_b', title: 'Active B', name: 'active-b', description: 'second active', triggers: '[\"b\"]', stage: 'active', version: 2, use_count: 9, metadata: '{\"rank\":2}', bundle_path: '/tmp/b', space_id: 'research', updated_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'skill_draft', title: 'Draft Skill', name: 'draft', stage: 'draft', updated_at: 40})")
+        .unwrap();
+    db.query("CREATE (:Skill {id: 'skill_archived', title: 'Archived Skill', stage: 'archived', updated_at: 50})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let active = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            stages: vec!["active".to_string()],
+            limit: 10,
+            order: KnowledgeSkillListOrder::UpdatedAtDesc,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(active.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(active.matched_count, 2);
+    assert_eq!(active.returned_count, 2);
+    assert_eq!(
+        active
+            .rows
+            .iter()
+            .map(|row| row.id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["skill_active_b", "skill_active_a"]
+    );
+    assert_eq!(active.rows[1].title.as_deref(), Some("Active A"));
+    assert_eq!(active.rows[1].name.as_deref(), Some("active-a"));
+    assert_eq!(active.rows[1].description.as_deref(), Some("first active"));
+    assert_eq!(active.rows[1].version, Some(Value::Int(1)));
+    assert_eq!(active.rows[1].use_count, 7);
+    assert_eq!(active.rows[1].success_rate, Some(Value::Float(0.8)));
+    assert_eq!(
+        active.rows[1].metadata,
+        Some(Value::String("{\"rank\":1}".to_string()))
+    );
+    assert_eq!(active.rows[1].bundle_path.as_deref(), Some("/tmp/a"));
+    assert_eq!(
+        active.rows[1].triggers,
+        Some(Value::String("[\"a\"]".to_string()))
+    );
+    assert_eq!(active.rows[1].content_hash.as_deref(), Some("hash-a"));
+    assert_eq!(active.rows[1].raw_space_id, None);
+    assert_eq!(active.rows[1].normalized_space_id, "default");
+    assert_eq!(active.rows[1].evidence_count, 3);
+    assert_eq!(active.rows[1].scope.as_deref(), Some("workspace"));
+    assert_eq!(active.rows[1].rationale.as_deref(), Some("test"));
+    assert_eq!(active.rows[1].kind.as_deref(), Some("procedure"));
+    assert_eq!(active.rows[1].confidence, Some(Value::Float(0.9)));
+
+    let fs_page = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            stages: vec!["active".to_string()],
+            after_id: Some("skill_active_a".to_string()),
+            limit: 10,
+            order: KnowledgeSkillListOrder::IdAsc,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(fs_page.matched_count, 1);
+    assert_eq!(fs_page.rows[0].id.as_deref(), Some("skill_active_b"));
+
+    let catalog = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            stages: vec![
+                "active".to_string(),
+                "draft".to_string(),
+                "candidate".to_string(),
+                "promotable".to_string(),
+                "rejected".to_string(),
+                "stale".to_string(),
+            ],
+            limit: 1500,
+            order: KnowledgeSkillListOrder::UpdatedAtDesc,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(
+        catalog
+            .rows
+            .iter()
+            .map(|row| row.id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["skill_draft", "skill_active_b", "skill_active_a"]
+    );
+
+    let prefix = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            lookup_key: Some("skill_active".to_string()),
+            limit: 1,
+            order: KnowledgeSkillListOrder::UpdatedAtDesc,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(prefix.matched_count, 2);
+    assert_eq!(prefix.returned_count, 1);
+    assert_eq!(prefix.rows[0].id.as_deref(), Some("skill_active_b"));
+
+    let exact = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            ids: vec!["skill_active_a".to_string(), "missing".to_string()],
+            limit: 0,
+            order: KnowledgeSkillListOrder::IdAsc,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(exact.matched_count, 1);
+    assert_eq!(exact.returned_count, 1);
+    assert_eq!(exact.rows[0].id.as_deref(), Some("skill_active_a"));
+    assert_eq!(exact.missing_ids, vec!["missing".to_string()]);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let tx = db.begin_read_transaction();
+    db.query("CREATE (:Skill {id: 'skill_active_after', stage: 'active', updated_at: 100})")
+        .unwrap();
+    let snapshot = tx
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            stages: vec!["active".to_string()],
+            limit: 10,
+            order: KnowledgeSkillListOrder::UpdatedAtDesc,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(snapshot.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot.matched_count, 2);
+    assert!(snapshot
+        .rows
+        .iter()
+        .all(|row| row.id.as_deref() != Some("skill_active_after")));
+}
+
+#[test]
+fn skill_list_rejects_unbounded_or_empty_filters() {
+    let db = Database::new();
+
+    let unbounded = db
+        .knowledge_skills(&KnowledgeSkillListRequest::default())
+        .unwrap_err();
+    assert!(unbounded.to_string().contains("bounded limit or a filter"));
+
+    let empty_id = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            ids: vec![String::new()],
+            limit: 10,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_id.to_string().contains("non-empty ids"));
+
+    let empty_lookup = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            lookup_key: Some(String::new()),
+            limit: 10,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_lookup.to_string().contains("non-empty lookup key"));
+
+    let empty_stage = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            stages: vec![String::new()],
+            limit: 10,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_stage.to_string().contains("non-empty stages"));
+
+    let empty_after = db
+        .knowledge_skills(&KnowledgeSkillListRequest {
+            after_id: Some(String::new()),
+            limit: 10,
+            ..KnowledgeSkillListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_after.to_string().contains("non-empty after id"));
 }
 
 #[test]
