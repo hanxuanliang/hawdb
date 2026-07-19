@@ -78,11 +78,11 @@ use super::{
     KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
     KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
-    KnowledgeSourceMetadataBatchRequest, KnowledgeSourceMetadataUpdate,
-    KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
-    KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
-    KnowledgeSourceProjectedListRequest, KnowledgeSourceReferenceEntityListRequest,
-    KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSourceMemoryProjectedListRequest, KnowledgeSourceMetadataBatchRequest,
+    KnowledgeSourceMetadataUpdate, KnowledgeSourceParsedCreate,
+    KnowledgeSourceParsedCreateBatchRequest, KnowledgeSourceParsedMetadataBatchRequest,
+    KnowledgeSourceParsedMetadataUpdate, KnowledgeSourceProjectedListRequest,
+    KnowledgeSourceReferenceEntityListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
     KnowledgeSourceReferenceRelationshipCountRequest, KnowledgeSourceRequest,
     KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
     KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSourceVersionLookupRequest,
@@ -10280,6 +10280,173 @@ fn source_read_requests_validate_nowledge_inputs() {
     assert!(source_memories_error
         .to_string()
         .contains("non-empty source id"));
+}
+
+#[test]
+fn projects_source_memories_for_nowledge_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'projected_source_a', original_name: 'Projected Source'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_source_memory_a', title: 'Alpha', content: 'alpha body', confidence: 0.8, space_id: '', future_memory_field: 'memory-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_source_memory_b', title: 'Beta', content: 'beta body', confidence: 0.6, space_id: 'team', future_memory_field: 'memory-b'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_source_memory_a'}), (s:Source {id: 'projected_source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', created_at: 200, future_edge_field: 'edge-a'}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_source_memory_b'}), (s:Source {id: 'projected_source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v1', created_at: 100, future_edge_field: 'edge-b'}]->(s)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query("CREATE (:Memory {id: 'projected_source_memory_c', title: 'Gamma', confidence: 1.0, future_memory_field: 'memory-c'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_source_memory_c'}), (s:Source {id: 'projected_source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 0, future_edge_field: 'edge-c'}]->(s)")
+        .unwrap();
+
+    let projected = db
+        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
+            list: KnowledgeSourceMemoryListRequest {
+                source_id: "projected_source_a".to_string(),
+                limit: 2,
+            },
+            memory_property_names: vec![
+                "title".to_string(),
+                "future_memory_field".to_string(),
+                "space_id".to_string(),
+                "title".to_string(),
+            ],
+            relationship_property_names: vec![
+                "chunk_index".to_string(),
+                "future_edge_field".to_string(),
+            ],
+        })
+        .unwrap();
+    assert!(projected.found);
+    assert_eq!(projected.source_id, "projected_source_a");
+    assert!(projected.source_node_id.is_some());
+    assert_eq!(projected.matched_count, 3);
+    assert_eq!(projected.returned_count, 2);
+    assert_eq!(
+        projected
+            .rows
+            .iter()
+            .map(|row| row.memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("projected_source_memory_c"),
+            Some("projected_source_memory_b")
+        ]
+    );
+    assert_eq!(projected.rows[0].normalized_space_id, "default");
+    assert_eq!(
+        projected.rows[0]
+            .memory_properties
+            .get("future_memory_field"),
+        Some(&Value::String("memory-c".to_string()))
+    );
+    assert_eq!(
+        projected.rows[0].relationship_properties.get("chunk_index"),
+        Some(&Value::Int(0))
+    );
+    assert_eq!(
+        projected.rows[1]
+            .relationship_properties
+            .get("future_edge_field"),
+        Some(&Value::String("edge-b".to_string()))
+    );
+    assert_eq!(projected.rows[1].normalized_space_id, "team");
+    assert!(!projected.rows[1]
+        .memory_properties
+        .contains_key("confidence"));
+    assert!(!projected.rows[1]
+        .relationship_properties
+        .contains_key("source_version"));
+
+    let snapshot_projected = snapshot
+        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
+            list: KnowledgeSourceMemoryListRequest {
+                source_id: "projected_source_a".to_string(),
+                limit: 0,
+            },
+            memory_property_names: vec!["title".to_string()],
+            relationship_property_names: vec!["future_edge_field".to_string()],
+        })
+        .unwrap();
+    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_projected.matched_count, 2);
+    assert_eq!(
+        snapshot_projected
+            .rows
+            .iter()
+            .map(|row| row.memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![
+            Some("projected_source_memory_b"),
+            Some("projected_source_memory_a")
+        ]
+    );
+
+    let missing_projected = db
+        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
+            list: KnowledgeSourceMemoryListRequest {
+                source_id: "missing_projected_source".to_string(),
+                limit: 10,
+            },
+            memory_property_names: vec!["title".to_string()],
+            relationship_property_names: vec!["chunk_index".to_string()],
+        })
+        .unwrap();
+    assert!(!missing_projected.found);
+    assert_eq!(missing_projected.source_node_id, None);
+    assert_eq!(missing_projected.matched_count, 0);
+    assert_eq!(missing_projected.returned_count, 0);
+}
+
+#[test]
+fn source_memory_projected_read_rejects_empty_property_names_without_wal() {
+    let path = unique_test_dir("source_memory_projected_empty_property_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Source {id: 'projected_source_wal'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'projected_source_memory_wal'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'projected_source_memory_wal'}), (s:Source {id: 'projected_source_wal'}) CREATE (m)-[:SOURCED_FROM]->(s)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let memory_property_error = db
+        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
+            list: KnowledgeSourceMemoryListRequest {
+                source_id: "projected_source_wal".to_string(),
+                limit: 10,
+            },
+            memory_property_names: vec![String::new()],
+            relationship_property_names: Vec::new(),
+        })
+        .unwrap_err();
+    assert!(memory_property_error
+        .to_string()
+        .contains("non-empty property names"));
+
+    let relationship_property_error = db
+        .knowledge_source_memory_projected_list(&KnowledgeSourceMemoryProjectedListRequest {
+            list: KnowledgeSourceMemoryListRequest {
+                source_id: "projected_source_wal".to_string(),
+                limit: 10,
+            },
+            memory_property_names: Vec::new(),
+            relationship_property_names: vec![String::new()],
+        })
+        .unwrap_err();
+    assert!(relationship_property_error
+        .to_string()
+        .contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
 }
 
 #[test]

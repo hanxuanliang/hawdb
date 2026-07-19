@@ -266,6 +266,12 @@ edges, returns Memory id/title/content/unit type/confidence plus chunk
 index/range/source version/created-at relationship metadata ordered by chunk
 index and Memory id, supports bounded limits, reports found/matched/returned
 counts and the graph commit epoch, and does not write WAL.
+Field-extensible Source attribution reads are covered by
+`Database::knowledge_source_memory_projected_list`. The typed read preserves the
+same one-Source incoming `SOURCED_FROM` adjacency bound and stable ordering, but
+returns only caller-allowlisted Memory and relationship properties so future
+Nowledge attribution fields can be added without cloning whole records or
+widening the fixed row.
 Bulk Memory/Source attribution reads are covered by
 `Database::knowledge_memory_source_attributions`. The typed read scans
 `SOURCED_FROM` edges by bounded Memory ids, Source ids, or both, returning

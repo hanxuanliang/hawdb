@@ -618,7 +618,14 @@ snapshot/no-WAL semantics without broadening the fixed attribution row.
 Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with
-chunk metadata ordering and no WAL writes.
+Memory display fields, chunk attribution metadata, bounded limits, stable
+ordering, and no WAL writes.
+Field-extensible Source attribution memory reads are available as
+`Database::knowledge_source_memory_projected_list`, covering the same bounded
+incoming `SOURCED_FROM` adjacency while projecting only caller-allowlisted
+Memory and relationship fields. This keeps future Source-memory attribution
+field growth on an explicit projection surface without widening the fixed row,
+cloning whole nodes, or scanning outside the target Source.
 Bulk Memory/Source attribution reads are available as
 `Database::knowledge_memory_source_attributions`, covering Nowledge Memory id to
 Source id reads and Source id to Memory summary/library rows over
