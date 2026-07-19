@@ -246,3 +246,30 @@ pub struct KnowledgeMemoryEvolvesProjectedSuccessorOutput {
     pub matched_relationship_count: usize,
     pub returned_count: usize,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelRegexMemoryConnectionsRequest {
+    pub label_name_pattern: String,
+    pub memory_property_names: Vec<String>,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelRegexMemoryConnectionRow {
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub memory_properties: BTreeMap<String, Value>,
+    pub label_id: Option<String>,
+    pub label_node_id: u64,
+    pub label_name: Option<String>,
+    pub label_connections: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeLabelRegexMemoryConnectionsOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeLabelRegexMemoryConnectionRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}

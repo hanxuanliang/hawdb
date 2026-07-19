@@ -708,6 +708,11 @@ distribution and OKF label-row stats shapes by counting distinct Memory nodes
 per Label over `HAS_LABEL`, de-duplicating repeated edges, sorting by
 Memory-count descending then label name ascending, supporting offset/limit, and
 not writing WAL.
+`Database::knowledge_label_regex_memory_connections` covers Nowledge label
+stats pattern lookups by matching Label names with a caller-supplied regex,
+aggregating `HAS_LABEL` connection counts per Memory/Label pair, projecting
+only caller-allowlisted Memory properties, supporting offset/limit and pinned
+read snapshots, and not writing WAL.
 Endpoint-known `HAS_LABEL` assignment reads are covered by
 `Database::knowledge_entity_labels` for Nowledge Memory, Source, Entity, and
 other id-bearing graph identities. The typed read validates the entity label
