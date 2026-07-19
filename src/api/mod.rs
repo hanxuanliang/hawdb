@@ -1832,6 +1832,43 @@ pub struct KnowledgeMemoryEvolvesNeighborOutput {
     pub returned_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+    pub old_memory_ids: Vec<String>,
+    pub limit_per_old_memory: usize,
+    pub new_memory_property_names: Vec<String>,
+    pub relationship_property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesProjectedSuccessorRow {
+    pub new_memory_id: Option<String>,
+    pub new_node_id: u64,
+    pub relationship_id: u64,
+    pub new_memory_properties: BTreeMap<String, Value>,
+    pub relationship_properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesProjectedSuccessorGroup {
+    pub old_memory_id: String,
+    pub old_node_id: Option<u64>,
+    pub found_old_memory: bool,
+    pub rows: Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow>,
+    pub matched_relationship_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryEvolvesProjectedSuccessorOutput {
+    pub graph_commit_epoch: u64,
+    pub groups: Vec<KnowledgeMemoryEvolvesProjectedSuccessorGroup>,
+    pub found_old_memory_count: usize,
+    pub missing_old_memory_count: usize,
+    pub matched_relationship_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeCrystalListOrder {
     ExternalIdAsc,
@@ -6661,6 +6698,13 @@ impl Database {
         knowledge_memory_evolves_neighbors_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_evolves_projected_successors(
+        &self,
+        request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+    ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
+        knowledge_memory_evolves_projected_successors_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_source_reference_entities(
         &self,
         request: &KnowledgeSourceReferenceEntityListRequest,
@@ -10765,6 +10809,82 @@ fn knowledge_memory_evolves_neighbors_for(
     })
 }
 
+fn knowledge_memory_evolves_projected_successors_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
+    validate_knowledge_memory_evolves_projected_successor_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(empty_memory_evolves_projected_successor_output(
+            graph_commit_epoch,
+            request,
+        ));
+    };
+    let evolves_type_id = catalog.rel_type_id("EVOLVES");
+    let mut groups = Vec::with_capacity(request.old_memory_ids.len());
+    let mut found_old_memory_count = 0;
+    let mut missing_old_memory_count = 0;
+    let mut matched_relationship_count = 0;
+    let mut returned_count = 0;
+
+    for old_memory_id in &request.old_memory_ids {
+        let Some(old_memory) =
+            seed_node_by_label_and_external_id(catalog, store, "Memory", old_memory_id)
+        else {
+            missing_old_memory_count += 1;
+            groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
+                old_memory_id: old_memory_id.clone(),
+                old_node_id: None,
+                found_old_memory: false,
+                rows: Vec::new(),
+                matched_relationship_count: 0,
+                returned_count: 0,
+            });
+            continue;
+        };
+
+        found_old_memory_count += 1;
+        let mut rows = evolves_type_id
+            .map(|rel_type_id| {
+                memory_evolves_projected_successor_rows(
+                    store,
+                    old_memory,
+                    memory_label_id,
+                    rel_type_id,
+                    &request.new_memory_property_names,
+                    &request.relationship_property_names,
+                )
+            })
+            .unwrap_or_default();
+        let group_matched_relationship_count = rows.len();
+        if request.limit_per_old_memory > 0 {
+            rows.truncate(request.limit_per_old_memory);
+        }
+        let group_returned_count = rows.len();
+        matched_relationship_count += group_matched_relationship_count;
+        returned_count += group_returned_count;
+        groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
+            old_memory_id: old_memory_id.clone(),
+            old_node_id: Some(old_memory.id.0),
+            found_old_memory: true,
+            rows,
+            matched_relationship_count: group_matched_relationship_count,
+            returned_count: group_returned_count,
+        });
+    }
+
+    Ok(KnowledgeMemoryEvolvesProjectedSuccessorOutput {
+        graph_commit_epoch,
+        groups,
+        found_old_memory_count,
+        missing_old_memory_count,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
 fn validate_knowledge_memory_evolves_neighbor_request(
     request: &KnowledgeMemoryEvolvesNeighborRequest,
 ) -> Result<()> {
@@ -10781,6 +10901,29 @@ fn validate_knowledge_memory_evolves_neighbor_request(
     {
         return Err(SkeinError::Semantic(
             "knowledge memory evolves neighbor read requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_knowledge_memory_evolves_projected_successor_request(
+    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+) -> Result<()> {
+    if request.old_memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves projected successor read requires non-empty memory ids"
+                .to_string(),
+        ));
+    }
+    if request
+        .new_memory_property_names
+        .iter()
+        .chain(request.relationship_property_names.iter())
+        .any(String::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge memory evolves projected successor read requires non-empty property names"
+                .to_string(),
         ));
     }
     Ok(())
@@ -10812,6 +10955,87 @@ fn knowledge_memory_evolves_neighbor_row(
             &request.relationship_property_names,
         ),
     })
+}
+
+fn empty_memory_evolves_projected_successor_output(
+    graph_commit_epoch: u64,
+    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+) -> KnowledgeMemoryEvolvesProjectedSuccessorOutput {
+    KnowledgeMemoryEvolvesProjectedSuccessorOutput {
+        graph_commit_epoch,
+        groups: request
+            .old_memory_ids
+            .iter()
+            .map(
+                |old_memory_id| KnowledgeMemoryEvolvesProjectedSuccessorGroup {
+                    old_memory_id: old_memory_id.clone(),
+                    old_node_id: None,
+                    found_old_memory: false,
+                    rows: Vec::new(),
+                    matched_relationship_count: 0,
+                    returned_count: 0,
+                },
+            )
+            .collect(),
+        found_old_memory_count: 0,
+        missing_old_memory_count: request.old_memory_ids.len(),
+        matched_relationship_count: 0,
+        returned_count: 0,
+    }
+}
+
+fn memory_evolves_projected_successor_rows(
+    store: &GraphStore,
+    old_memory: &NodeRecord,
+    memory_label_id: LabelId,
+    evolves_type_id: RelTypeId,
+    new_memory_property_names: &[String],
+    relationship_property_names: &[String],
+) -> Vec<KnowledgeMemoryEvolvesProjectedSuccessorRow> {
+    let mut rows = store
+        .outgoing_relationships(old_memory.id, evolves_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|new_memory| new_memory.labels.contains(&memory_label_id))
+                .map(|new_memory| {
+                    memory_evolves_projected_successor_row(
+                        new_memory,
+                        relationship,
+                        new_memory_property_names,
+                        relationship_property_names,
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.new_memory_id
+            .cmp(&right.new_memory_id)
+            .then_with(|| left.new_node_id.cmp(&right.new_node_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    rows
+}
+
+fn memory_evolves_projected_successor_row(
+    new_memory: &NodeRecord,
+    relationship: &RelRecord,
+    new_memory_property_names: &[String],
+    relationship_property_names: &[String],
+) -> KnowledgeMemoryEvolvesProjectedSuccessorRow {
+    KnowledgeMemoryEvolvesProjectedSuccessorRow {
+        new_memory_id: node_external_id(new_memory),
+        new_node_id: new_memory.id.0,
+        relationship_id: relationship.id.0,
+        new_memory_properties: projected_properties(
+            &new_memory.properties,
+            new_memory_property_names,
+        ),
+        relationship_properties: projected_properties(
+            &relationship.properties,
+            relationship_property_names,
+        ),
+    }
 }
 
 fn projected_properties(
@@ -27418,6 +27642,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_evolves_neighbors(request)
     }
 
+    pub fn knowledge_memory_evolves_projected_successors(
+        &self,
+        request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+    ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
+        self.db
+            .knowledge_memory_evolves_projected_successors(request)
+    }
+
     pub fn knowledge_source_reference_entities(
         &self,
         request: &KnowledgeSourceReferenceEntityListRequest,
@@ -28849,6 +29081,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEvolvesNeighborRequest,
     ) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
         knowledge_memory_evolves_neighbors_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_evolves_projected_successors(
+        &self,
+        request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+    ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
+        knowledge_memory_evolves_projected_successors_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_source_sourced_memory_count(

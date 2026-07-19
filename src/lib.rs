@@ -113,6 +113,8 @@ pub use api::{
     KnowledgeMemoryEvolvesLatestOutput, KnowledgeMemoryEvolvesLatestRequest,
     KnowledgeMemoryEvolvesLatestRow, KnowledgeMemoryEvolvesNeighborOutput,
     KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesNeighborRow,
+    KnowledgeMemoryEvolvesProjectedSuccessorGroup, KnowledgeMemoryEvolvesProjectedSuccessorOutput,
+    KnowledgeMemoryEvolvesProjectedSuccessorRequest, KnowledgeMemoryEvolvesProjectedSuccessorRow,
     KnowledgeMemoryLabelDeleteOutput, KnowledgeMemoryLabelDeleteRequest,
     KnowledgeMemoryLabelTransferOutput, KnowledgeMemoryLabelTransferRequest,
     KnowledgeMemoryLabelTransferRow, KnowledgeMemoryLatestBatchOutput,

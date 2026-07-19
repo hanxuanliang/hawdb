@@ -36,14 +36,15 @@ use super::{
     KnowledgeMemoryContentUpdate, KnowledgeMemoryDedupReviewedBatchRequest,
     KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesCreate,
     KnowledgeMemoryEvolvesCreateBatchRequest, KnowledgeMemoryEvolvesLatestRequest,
-    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryLabelDeleteRequest,
-    KnowledgeMemoryLabelTransferRequest, KnowledgeMemoryLatestBatchRequest,
-    KnowledgeMemoryLatestUpdate, KnowledgeMemoryLifecycleBatchRequest,
-    KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder, KnowledgeMemoryListRequest,
-    KnowledgeMemoryMetadataBatchRequest, KnowledgeMemoryMetadataRelatedProjectedListRequest,
-    KnowledgeMemoryMetadataUpdate, KnowledgeMemoryPrefixOwnershipRequest,
-    KnowledgeMemoryProjectedListRequest, KnowledgeMemorySourceAttributionRequest,
-    KnowledgeMemoryTitleContentRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
+    KnowledgeMemoryEvolvesNeighborRequest, KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+    KnowledgeMemoryLabelDeleteRequest, KnowledgeMemoryLabelTransferRequest,
+    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
+    KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
+    KnowledgeMemoryListRequest, KnowledgeMemoryMetadataBatchRequest,
+    KnowledgeMemoryMetadataRelatedProjectedListRequest, KnowledgeMemoryMetadataUpdate,
+    KnowledgeMemoryPrefixOwnershipRequest, KnowledgeMemoryProjectedListRequest,
+    KnowledgeMemorySourceAttributionRequest, KnowledgeMemoryTitleContentRequest,
+    KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
     KnowledgePageRankClearRequest, KnowledgePageRankMembershipRequest,
     KnowledgePageRankMemoryVisibilityRequest, KnowledgePageRankPlanRequest,
@@ -5508,6 +5509,171 @@ fn memory_evolves_neighbors_rejects_empty_projection_fields_without_wal() {
         .unwrap_err();
 
     assert!(error.to_string().contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
+}
+
+#[test]
+fn projects_memory_evolves_successors_for_nowledge_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'evolves_old_a', title: 'Old A'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_old_b', title: 'Old B'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_new_a', title: 'New A', is_latest: true, future_memory_field: 'new-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_new_b', title: 'New B', is_latest: false, future_memory_field: 'new-b'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'evolves_not_memory'})")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (new:Memory {id: 'evolves_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'supersedes', confidence: 0.7, future_edge_field: 'edge-b'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (new:Memory {id: 'evolves_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'replaces', confidence: 0.9, future_edge_field: 'edge-a'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (new:Memory {id: 'evolves_new_a'}) CREATE (old)-[:EVOLVES {content_relation: 'duplicate', confidence: 0.8, future_edge_field: 'edge-a-dup'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_old_b'}), (new:Memory {id: 'evolves_new_b'}) CREATE (old)-[:EVOLVES {content_relation: 'confirms', future_edge_field: 'edge-b2'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_old_a'}), (source:Source {id: 'evolves_not_memory'}) CREATE (old)-[:EVOLVES {content_relation: 'ignored'}]->(source)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query(
+        "CREATE (:Memory {id: 'evolves_new_c', title: 'New C', future_memory_field: 'new-c'})",
+    )
+    .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves_old_b'}), (new:Memory {id: 'evolves_new_c'}) CREATE (old)-[:EVOLVES {content_relation: 'late', future_edge_field: 'edge-c'}]->(new)")
+        .unwrap();
+
+    let projected = db
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec![
+                    "evolves_old_a".to_string(),
+                    "missing_evolves_old".to_string(),
+                    "evolves_old_b".to_string(),
+                ],
+                limit_per_old_memory: 2,
+                new_memory_property_names: vec![
+                    "title".to_string(),
+                    "future_memory_field".to_string(),
+                    "is_latest".to_string(),
+                    "title".to_string(),
+                ],
+                relationship_property_names: vec![
+                    "content_relation".to_string(),
+                    "future_edge_field".to_string(),
+                ],
+            },
+        )
+        .unwrap();
+
+    assert_eq!(projected.graph_commit_epoch, db.store.commit_epoch());
+    assert_eq!(projected.found_old_memory_count, 2);
+    assert_eq!(projected.missing_old_memory_count, 1);
+    assert_eq!(projected.matched_relationship_count, 5);
+    assert_eq!(projected.returned_count, 4);
+    assert_eq!(projected.groups[0].old_memory_id, "evolves_old_a");
+    assert!(projected.groups[0].found_old_memory);
+    assert_eq!(projected.groups[0].matched_relationship_count, 3);
+    assert_eq!(projected.groups[0].returned_count, 2);
+    assert_eq!(
+        projected.groups[0]
+            .rows
+            .iter()
+            .map(|row| row.new_memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("evolves_new_a"), Some("evolves_new_a")]
+    );
+    assert_eq!(
+        projected.groups[0].rows[0]
+            .new_memory_properties
+            .get("future_memory_field"),
+        Some(&Value::String("new-a".to_string()))
+    );
+    assert!(!projected.groups[0].rows[0]
+        .new_memory_properties
+        .contains_key("content"));
+    assert_eq!(
+        projected.groups[0].rows[0]
+            .relationship_properties
+            .get("future_edge_field"),
+        Some(&Value::String("edge-a".to_string()))
+    );
+    assert!(!projected.groups[0].rows[0]
+        .relationship_properties
+        .contains_key("confidence"));
+    assert!(!projected.groups[1].found_old_memory);
+    assert!(projected.groups[1].rows.is_empty());
+    assert_eq!(projected.groups[2].matched_relationship_count, 2);
+    assert_eq!(projected.groups[2].returned_count, 2);
+    assert_eq!(
+        projected.groups[2]
+            .rows
+            .iter()
+            .map(|row| row.new_memory_id.as_deref())
+            .collect::<Vec<_>>(),
+        vec![Some("evolves_new_b"), Some("evolves_new_c")]
+    );
+
+    let snapshot_projected = snapshot
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec!["evolves_old_b".to_string()],
+                limit_per_old_memory: 0,
+                new_memory_property_names: vec!["title".to_string()],
+                relationship_property_names: vec!["future_edge_field".to_string()],
+            },
+        )
+        .unwrap();
+    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_projected.matched_relationship_count, 1);
+    assert_eq!(
+        snapshot_projected.groups[0].rows[0]
+            .new_memory_id
+            .as_deref(),
+        Some("evolves_new_b")
+    );
+}
+
+#[test]
+fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
+    let path = unique_test_dir("memory_evolves_projected_successors_empty_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Memory {id: 'evolves_old_wal'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let memory_id_error = db
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec![String::new()],
+                limit_per_old_memory: 10,
+                new_memory_property_names: Vec::new(),
+                relationship_property_names: Vec::new(),
+            },
+        )
+        .unwrap_err();
+    assert!(memory_id_error.to_string().contains("non-empty memory ids"));
+
+    let property_error = db
+        .knowledge_memory_evolves_projected_successors(
+            &KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+                old_memory_ids: vec!["evolves_old_wal".to_string()],
+                limit_per_old_memory: 10,
+                new_memory_property_names: vec![String::new()],
+                relationship_property_names: Vec::new(),
+            },
+        )
+        .unwrap_err();
+    assert!(property_error
+        .to_string()
+        .contains("non-empty property names"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
     assert_eq!(
         std::fs::read_to_string(path.join("wal.skein")).unwrap(),

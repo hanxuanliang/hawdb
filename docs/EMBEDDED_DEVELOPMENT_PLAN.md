@@ -540,6 +540,13 @@ EVOLVES adjacency reads over one anchor Memory with explicit node and
 relationship property allowlists so future fields can be projected without
 adding another raw-Cypher path. The read scans only the anchor adjacency and
 does not write WAL.
+Memory EVOLVES projected successor reads are available as
+`Database::knowledge_memory_evolves_projected_successors`, covering old-Memory
+id batches with caller-order groups, missing-old rows, per-old limits, and
+caller-allowlisted successor Memory and `EVOLVES` relationship properties. This
+keeps evolution workflows bounded per parent while allowing future successor
+payload fields without cloning whole Memory nodes or scanning outside requested
+old Memories.
 Memory EVOLVES creates are available as
 `Database::create_knowledge_memory_evolves_batch`, covering Nowledge
 `add_evolves_edge` and replacement-relation create shapes with caller-supplied
