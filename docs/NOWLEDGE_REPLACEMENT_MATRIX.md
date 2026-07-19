@@ -281,6 +281,11 @@ rule, unit-type/latest/crystal filters, created-at or score ordering, and
 bounded limits. It returns Memory title/content/metadata/lifecycle/review/
 space/timestamp/source/rank fields, reports missing ids and the graph commit
 epoch, rejects unbounded scans without filters, and does not write WAL.
+Memory title/content id-list reads are covered by
+`Database::knowledge_memory_title_contents`. The typed read accepts Memory ids,
+returns title/content rows ordered by `created_at` ascending for the REST Skills
+write-path source preview, reports missing Memory ids, supports pinned read
+snapshots, and does not write WAL.
 Memory EVOLVES latest reads are covered by
 `Database::knowledge_memory_evolves_latest`. The typed read accepts old Memory
 ids, follows outgoing `EVOLVES` edges to Memory targets, returns distinct

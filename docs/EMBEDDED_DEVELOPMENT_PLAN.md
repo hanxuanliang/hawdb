@@ -442,6 +442,10 @@ Memory bulk detail and filtered list reads are available as
 `Database::knowledge_memories`, covering id-bounded metadata/space/detail
 reads, normalized-space inclusion and exclusion, learning latest lists, and
 ranked overview lists with bounded limits and no WAL writes.
+Memory title/content reads are available as
+`Database::knowledge_memory_title_contents`, covering REST Skills write-path
+Memory id-list source previews with `created_at` ascending ordering and no WAL
+writes.
 Memory EVOLVES latest reads are available as
 `Database::knowledge_memory_evolves_latest`, covering REST Skills successor
 checks over old Memory id lists with distinct latest-state rows and no WAL

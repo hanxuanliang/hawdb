@@ -1696,6 +1696,29 @@ pub struct KnowledgeMemoryListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryTitleContentRequest {
+    pub memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryTitleContentRow {
+    pub memory_id: Option<String>,
+    pub node_id: u64,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub created_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryTitleContentOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryTitleContentRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_memory_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryEvolvesLatestRequest {
     pub old_memory_ids: Vec<String>,
 }
@@ -5553,6 +5576,13 @@ impl Database {
         knowledge_memories_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_title_contents(
+        &self,
+        request: &KnowledgeMemoryTitleContentRequest,
+    ) -> Result<KnowledgeMemoryTitleContentOutput> {
+        knowledge_memory_title_contents_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_memory_evolves_latest(
         &self,
         request: &KnowledgeMemoryEvolvesLatestRequest,
@@ -8757,6 +8787,99 @@ fn knowledge_memory_list_row(memory: &NodeRecord) -> KnowledgeMemoryListRow {
         source: string_property(memory, "source"),
         event_start: memory.properties.get("event_start").cloned(),
         event_end: memory.properties.get("event_end").cloned(),
+    }
+}
+
+fn knowledge_memory_title_contents_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryTitleContentRequest,
+) -> Result<KnowledgeMemoryTitleContentOutput> {
+    validate_knowledge_memory_title_content_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    if request.memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryTitleContentOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: Vec::new(),
+        });
+    }
+
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryTitleContentOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: deduplicated_strings_in_order(&request.memory_ids),
+        });
+    };
+
+    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut matched_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| {
+            node_external_id(memory).is_some_and(|memory_id| {
+                let matched = requested_ids.contains(&memory_id);
+                if matched {
+                    matched_ids.insert(memory_id);
+                }
+                matched
+            })
+        })
+        .map(knowledge_memory_title_content_row)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_skill_memory_created_at(
+            &left.created_at,
+            &right.created_at,
+            KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        )
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
+        .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let matched_count = rows.len();
+    let returned_count = rows.len();
+
+    let mut seen_missing = BTreeSet::new();
+    let missing_memory_ids = request
+        .memory_ids
+        .iter()
+        .filter(|memory_id| !matched_ids.contains(*memory_id))
+        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeMemoryTitleContentOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_memory_ids,
+    })
+}
+
+fn validate_knowledge_memory_title_content_request(
+    request: &KnowledgeMemoryTitleContentRequest,
+) -> Result<()> {
+    if request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory title content read requires non-empty memory ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_memory_title_content_row(memory: &NodeRecord) -> KnowledgeMemoryTitleContentRow {
+    KnowledgeMemoryTitleContentRow {
+        memory_id: node_external_id(memory),
+        node_id: memory.id.0,
+        title: string_property(memory, "title"),
+        content: string_property(memory, "content"),
+        created_at: memory.properties.get("created_at").cloned(),
     }
 }
 
@@ -21718,6 +21841,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memories(request)
     }
 
+    pub fn knowledge_memory_title_contents(
+        &self,
+        request: &KnowledgeMemoryTitleContentRequest,
+    ) -> Result<KnowledgeMemoryTitleContentOutput> {
+        self.db.knowledge_memory_title_contents(request)
+    }
+
     pub fn knowledge_memory_evolves_latest(
         &self,
         request: &KnowledgeMemoryEvolvesLatestRequest,
@@ -22885,6 +23015,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
         knowledge_related_entity_names_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_title_contents(
+        &self,
+        request: &KnowledgeMemoryTitleContentRequest,
+    ) -> Result<KnowledgeMemoryTitleContentOutput> {
+        knowledge_memory_title_contents_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_memory_evolves_latest(
