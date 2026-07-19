@@ -58,6 +58,29 @@ fn parses_set_system_variable_statement() {
 }
 
 #[test]
+fn parses_set_system_variable_keyword_statement() {
+    let statement = parse("SET SYSTEM VARIABLE work_priority = 'background'").unwrap();
+    let Statement::SetSystemVariable(set) = statement else {
+        panic!("expected set system variable");
+    };
+    assert_eq!(set.name, "work_priority");
+    assert_eq!(
+        set.value,
+        ValueExpression::Literal(Value::String("background".to_string()))
+    );
+
+    let statement = parse("SET SYSTEM VARIABLE system.work_class = 'analytics'").unwrap();
+    let Statement::SetSystemVariable(set) = statement else {
+        panic!("expected set system variable");
+    };
+    assert_eq!(set.name, "work_class");
+    assert_eq!(
+        set.value,
+        ValueExpression::Literal(Value::String("analytics".to_string()))
+    );
+}
+
+#[test]
 fn parses_cypher_system_hints() {
     let statement = parse(
         "CYPHER system.work_priority = 'background' system.work_class = 'analytics' \
@@ -101,6 +124,16 @@ fn rejects_cypher_system_hints_on_control_statements() {
     assert!(error
         .to_string()
         .contains("CYPHER system hints require a query or mutation statement"));
+}
+
+#[test]
+fn rejects_system_variable_keyword_inside_cypher_hints() {
+    let error = parse(
+        "CYPHER SYSTEM VARIABLE work_priority = 'background' MATCH (m:Memory) RETURN m.id AS id",
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("expected '.'"));
 }
 
 #[test]

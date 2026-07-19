@@ -1454,6 +1454,23 @@ fn set_system_variables_configures_query_work_request() {
 }
 
 #[test]
+fn set_system_variable_keyword_syntax_configures_query_work_request() {
+    let mut db = Database::new();
+
+    db.query("SET SYSTEM VARIABLE work_priority = 'background'")
+        .unwrap();
+    db.query("SET SYSTEM VARIABLE system.work_class = 'analytics'")
+        .unwrap();
+    db.query("SET SYSTEM VARIABLE estimated_operations = 32")
+        .unwrap();
+
+    assert_eq!(
+        db.query_work_request(),
+        WorkRequest::background(WorkClass::Analytics, 32)
+    );
+}
+
+#[test]
 fn set_system_variables_are_session_scoped() {
     let mut db = Database::new();
     db.query("SET system.work_class = 'query'").unwrap();

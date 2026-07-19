@@ -97,27 +97,15 @@ impl<'a> Parser<'a> {
 
     fn parse_set_system_variable_statement(&mut self) -> Result<Statement> {
         self.expect_keyword("SYSTEM")?;
-        self.expect_char('.')?;
-        let name = self.parse_ident()?;
-        self.expect_char('=')?;
-        let value = self.parse_value()?;
-        Ok(Statement::SetSystemVariable(SetSystemVariable {
-            name: name.to_ascii_lowercase(),
-            value,
-        }))
+        Ok(Statement::SetSystemVariable(
+            self.parse_system_variable_assignment(true)?,
+        ))
     }
 
     fn parse_cypher_query_statement(&mut self) -> Result<Statement> {
         let mut system_variables = Vec::new();
         while self.consume_keyword("SYSTEM") {
-            self.expect_char('.')?;
-            let name = self.parse_ident()?;
-            self.expect_char('=')?;
-            let value = self.parse_value()?;
-            system_variables.push(SetSystemVariable {
-                name: name.to_ascii_lowercase(),
-                value,
-            });
+            system_variables.push(self.parse_system_variable_assignment(false)?);
         }
         if system_variables.is_empty() {
             return Err(self.error("expected at least one CYPHER system hint"));
@@ -138,5 +126,30 @@ impl<'a> Parser<'a> {
             system_variables,
             statement,
         })))
+    }
+
+    fn parse_system_variable_assignment(
+        &mut self,
+        allow_variable_keyword: bool,
+    ) -> Result<SetSystemVariable> {
+        let name = if allow_variable_keyword && self.consume_keyword("VARIABLE") {
+            self.parse_system_variable_name()?
+        } else {
+            self.expect_char('.')?;
+            self.parse_ident()?
+        };
+        self.expect_char('=')?;
+        let value = self.parse_value()?;
+        Ok(SetSystemVariable {
+            name: name.to_ascii_lowercase(),
+            value,
+        })
+    }
+
+    fn parse_system_variable_name(&mut self) -> Result<String> {
+        if self.consume_keyword("SYSTEM") {
+            self.expect_char('.')?;
+        }
+        self.parse_ident()
     }
 }
