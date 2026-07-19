@@ -50,6 +50,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         json_get_bool_path(bundle, &["previous_wrapper_contract_evidence", "ready"])
             .unwrap_or(false);
     let dual_engine_evidence = dual_engine_evidence_summary(bundle);
+    let dual_engine_evidence_present = dual_engine_evidence.present;
     let dual_engine_evidence_ready = dual_engine_evidence.ready;
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
@@ -57,7 +58,8 @@ pub fn nowledge_replacement_summary_json_with_options(
         && cutover_decision == Some("ready")
         && cutover_evidence_eligible
         && previous_wrapper_contract_ready
-        && dual_engine_evidence_ready != Some(false)
+        && dual_engine_evidence_present
+        && dual_engine_evidence_ready == Some(true)
         && !background_graph_delta_evidence_missing
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
@@ -75,6 +77,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_decision,
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
+            dual_engine_evidence_present,
             dual_engine_evidence_ready,
             background_graph_delta_evidence_missing,
         },
@@ -94,6 +97,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             cutover_decision,
             cutover_evidence_eligible,
             previous_wrapper_contract_ready,
+            dual_engine_evidence_present,
             dual_engine_evidence_ready,
             background_graph_delta_evidence_missing,
             production_cutover_ready,
@@ -280,6 +284,7 @@ struct ReplacementReadinessInputs<'a> {
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
+    dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
     background_graph_delta_evidence_missing: bool,
 }
@@ -292,6 +297,7 @@ struct NextActionInputs<'a> {
     cutover_decision: Option<&'a str>,
     cutover_evidence_eligible: bool,
     previous_wrapper_contract_ready: bool,
+    dual_engine_evidence_present: bool,
     dual_engine_evidence_ready: Option<bool>,
     background_graph_delta_evidence_missing: bool,
     production_cutover_ready: bool,
@@ -358,7 +364,7 @@ fn nowledge_replacement_blocking_categories(
     if !inputs.previous_wrapper_contract_ready {
         categories.insert("previous_wrapper_contract".to_string());
     }
-    if inputs.dual_engine_evidence_ready == Some(false) {
+    if !inputs.dual_engine_evidence_present || inputs.dual_engine_evidence_ready != Some(true) {
         categories.insert("dual_engine_evidence".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
@@ -461,11 +467,12 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
-    if inputs.dual_engine_evidence_ready == Some(false) {
+    if !inputs.dual_engine_evidence_present || inputs.dual_engine_evidence_ready != Some(true) {
         actions.push(next_action(
             "rerun_dual_engine_shadow_gate",
-            "side-by-side dual-engine evidence is present but not ready",
+            "side-by-side dual-engine evidence is missing or not ready",
             [
+                "dual_engine_evidence.present",
                 "dual_engine_evidence.ready",
                 "dual_engine_evidence.primary_check_count",
                 "dual_engine_evidence.shadow_check_count",
@@ -571,6 +578,11 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     }
     if bundle.get("previous_wrapper_contract_evidence").is_none() {
         missing.push("previous_wrapper_contract_evidence".to_string());
+    }
+    if bundle.get("dual_engine_evidence").is_none()
+        && json_get_path(bundle, &["cutover", "dual_engine_evidence"]).is_none()
+    {
+        missing.push("dual_engine_evidence".to_string());
     }
     if bundle.get("shadow_run").is_none() {
         missing.push("shadow_run".to_string());
@@ -736,7 +748,11 @@ mod tests {
         assert_eq!(summary["production_replacement_per_million"], 0);
         assert_eq!(
             summary["blocking_categories"],
-            serde_json::json!(["cutover_evidence", "previous_wrapper_contract"])
+            serde_json::json!([
+                "cutover_evidence",
+                "dual_engine_evidence",
+                "previous_wrapper_contract"
+            ])
         );
         assert!(summary["missing_evidence"]
             .as_array()
@@ -869,6 +885,47 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "rerun_dual_engine_shadow_gate"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_dual_engine_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("dual_engine_evidence");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["dual_engine_evidence"]["present"], false);
+        assert_eq!(
+            summary["dual_engine_evidence"]["ready"],
+            serde_json::Value::Null
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "dual_engine_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "dual_engine_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "rerun_dual_engine_shadow_gate"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "dual_engine_evidence.present")
+            }));
     }
 
     #[test]
@@ -1107,6 +1164,7 @@ mod tests {
             serde_json::json!([
                 "background_maintenance",
                 "cutover_evidence",
+                "dual_engine_evidence",
                 "migration_gate",
                 "previous_wrapper_contract",
                 "query_family_readiness",
@@ -1120,6 +1178,7 @@ mod tests {
                 "storage_recovery",
                 "background_maintenance",
                 "previous_wrapper_contract_evidence",
+                "dual_engine_evidence",
                 "shadow_run",
                 "shadow_ready"
             ])
@@ -1174,6 +1233,17 @@ mod tests {
                         "previous_wrapper_contract_evidence.ready",
                         "previous_wrapper_contract_evidence.wrapper_identity",
                         "previous_wrapper_contract_evidence.blocker_codes"
+                    ]
+                },
+                {
+                    "action": "rerun_dual_engine_shadow_gate",
+                    "reason": "side-by-side dual-engine evidence is missing or not ready",
+                    "evidence_fields": [
+                        "dual_engine_evidence.present",
+                        "dual_engine_evidence.ready",
+                        "dual_engine_evidence.primary_check_count",
+                        "dual_engine_evidence.shadow_check_count",
+                        "dual_engine_evidence.primary_only_check_count"
                     ]
                 },
                 {
