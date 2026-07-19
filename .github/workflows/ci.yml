@@ -368,7 +368,8 @@ jobs:
           checks = {check["name"]: check for check in report["checks"]}
           assert checks["storage_recovery"]["ready"] is True
           assert checks["background_maintenance"]["ready"] is True
-          assert report["failed_checks"] == ["migration_gate", "replacement_summary"]
+          assert report["failed_checks"] == ["adapter_smoke", "migration_gate", "replacement_summary"]
+          assert checks["adapter_smoke"]["failed_evidence_fields"] == ["dual_engine_evidence.ready"]
           assert report["release_summary"]["wrapper_identity"] == "nowledge-previous-wrapper:ci-smoke"
           assert report["release_summary"]["production_replacement_per_million"] == 0
           assert report["release_summary"]["background_maintenance_executable_search_projection_graph_delta_count"] >= 1

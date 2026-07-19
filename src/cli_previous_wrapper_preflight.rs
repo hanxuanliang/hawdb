@@ -169,7 +169,7 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 str_path(&adapter_smoke, &["engine_kind"]) == Some("previous_wrapper"),
                 str_path(&adapter_smoke, &["wrapper_identity"]) == Some(wrapper_identity.as_str()),
                 u64_path(&adapter_smoke, &["primary_only_checks"]) == Some(0),
-                optional_bool_path(&adapter_smoke, &["dual_engine_evidence", "ready"]),
+                bool_path(&adapter_smoke, &["dual_engine_evidence", "ready"]) == Some(true),
             ],
             [
                 "adapter_smoke_ready",
@@ -428,10 +428,6 @@ fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a ser
 
 fn bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
     value_path(value, path).and_then(serde_json::Value::as_bool)
-}
-
-fn optional_bool_path(value: &serde_json::Value, path: &[&str]) -> bool {
-    bool_path(value, path).unwrap_or(true)
 }
 
 fn str_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
@@ -698,6 +694,30 @@ mod tests {
         let mut inputs = ready_inputs();
         let adapter_smoke = inputs.adapter_smoke.as_mut().unwrap();
         adapter_smoke["dual_engine_evidence"]["ready"] = serde_json::json!(false);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["adapter_smoke"])
+        );
+        assert_eq!(
+            check_by_name(&report, "adapter_smoke")["failed_evidence_fields"],
+            serde_json::json!(["dual_engine_evidence.ready"])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_adapter_dual_engine_evidence() {
+        let mut inputs = ready_inputs();
+        inputs
+            .adapter_smoke
+            .as_mut()
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove("dual_engine_evidence");
 
         let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
 
