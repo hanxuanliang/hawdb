@@ -307,11 +307,19 @@ fn preflight_check(
     evidence_fields: impl IntoIterator<Item = &'static str>,
     blocker_codes: Vec<String>,
 ) -> serde_json::Value {
-    let ready = conditions.into_iter().all(|condition| condition);
+    let conditions = conditions.into_iter().collect::<Vec<_>>();
+    let evidence_fields = evidence_fields.into_iter().collect::<Vec<_>>();
+    let failed_evidence_fields = conditions
+        .iter()
+        .zip(evidence_fields.iter())
+        .filter_map(|(condition, field)| (!*condition).then_some(*field))
+        .collect::<Vec<_>>();
+    let ready = failed_evidence_fields.is_empty();
     serde_json::json!({
         "name": name,
         "ready": ready,
-        "evidence_fields": evidence_fields.into_iter().collect::<Vec<_>>(),
+        "evidence_fields": evidence_fields,
+        "failed_evidence_fields": failed_evidence_fields,
         "blocker_codes": blocker_codes,
     })
 }
@@ -390,6 +398,11 @@ mod tests {
             .unwrap()
             .iter()
             .all(|check| check["ready"] == true));
+        assert!(report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|check| check["failed_evidence_fields"] == serde_json::json!([])));
     }
 
     #[test]
@@ -418,6 +431,15 @@ mod tests {
             check_by_name(&report, "replacement_summary")["blocker_codes"],
             serde_json::json!(["cutover_evidence", "provide_eligible_cutover_evidence"])
         );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!([
+                "production_cutover_ready",
+                "production_replacement_per_million",
+                "blocking_categories",
+                "next_actions"
+            ])
+        );
     }
 
     #[test]
@@ -443,6 +465,10 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "storage_recovery")["blocker_codes"],
             serde_json::json!(["wal_replay_unbounded"])
+        );
+        assert_eq!(
+            check_by_name(&report, "storage_recovery")["failed_evidence_fields"],
+            serde_json::json!(["cutover_evidence.storage_recovery_ready"])
         );
     }
 
@@ -484,6 +510,18 @@ mod tests {
         assert_eq!(
             report["failed_checks"],
             serde_json::json!(["full_contract", "adapter_smoke", "migration_gate"])
+        );
+        assert_eq!(
+            check_by_name(&report, "full_contract")["failed_evidence_fields"],
+            serde_json::json!(["previous_wrapper_contract_evidence.wrapper_identity"])
+        );
+        assert_eq!(
+            check_by_name(&report, "adapter_smoke")["failed_evidence_fields"],
+            serde_json::json!(["wrapper_identity"])
+        );
+        assert_eq!(
+            check_by_name(&report, "migration_gate")["failed_evidence_fields"],
+            serde_json::json!(["cutover_evidence.ready_wrapper_identity"])
         );
     }
 

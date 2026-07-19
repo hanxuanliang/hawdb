@@ -242,3 +242,5 @@ maintenance evidence, and replacement summary artifacts. It fails closed unless
 every stage is ready, the storage/background evidence is explicitly required and
 present in the migration gate, and the replacement summary has no blockers,
 missing evidence, or next actions.
+Each per-stage check includes `failed_evidence_fields`, so release automation
+can report the exact missing or mismatched field without parsing blocker text.
