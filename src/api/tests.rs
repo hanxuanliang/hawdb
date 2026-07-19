@@ -79,7 +79,8 @@ use super::{
     KnowledgeSourceMetadataBatchRequest, KnowledgeSourceMetadataUpdate,
     KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
     KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
-    KnowledgeSourceReferenceEntityListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSourceProjectedListRequest, KnowledgeSourceReferenceEntityListRequest,
+    KnowledgeSourceReferenceRelationshipCleanupRequest,
     KnowledgeSourceReferenceRelationshipCountRequest, KnowledgeSourceRequest,
     KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
     KnowledgeSourceSourcedMemoryCountRequest, KnowledgeSourceVersionLookupRequest,
@@ -10151,6 +10152,99 @@ fn lists_sources_for_nowledge_summary_page_and_ranking_shapes() {
 }
 
 #[test]
+fn projects_source_list_fields_for_rest_fs_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha', summary: 'Alpha summary', source_type: 'file', lifecycle_state: 'parsed', space_id: '', parsed_path: '/parsed/a', mime_type: 'text/markdown', memory_count: 2, chunk_count: 4, size_bytes: 128, created_at: 10, updated_at: 20, future_field: 'future-a'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', summary: 'Beta summary', source_type: 'web', lifecycle_state: 'indexed', space_id: 'team', mime_type: 'text/html', memory_count: 5, chunk_count: 1, size_bytes: 256, created_at: 30, updated_at: 40, future_field: 'future-b'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_c', original_name: 'Gamma', lifecycle_state: 'indexed', memory_count: 1, created_at: 50, updated_at: 60})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let projected = db
+        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
+            list: KnowledgeSourceListRequest {
+                after_source_id: Some("source_a".to_string()),
+                limit: 1,
+                order: KnowledgeSourceListOrder::SourceIdAsc,
+                ..KnowledgeSourceListRequest::default()
+            },
+            property_names: vec![
+                "original_name".to_string(),
+                "summary".to_string(),
+                "mime_type".to_string(),
+                "size_bytes".to_string(),
+                "space_id".to_string(),
+                "future_field".to_string(),
+                "updated_at".to_string(),
+                "original_name".to_string(),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(projected.matched_count, 2);
+    assert_eq!(projected.returned_count, 1);
+    assert_eq!(projected.rows[0].source_id.as_deref(), Some("source_b"));
+    assert_eq!(projected.rows[0].normalized_space_id, "team");
+    assert_eq!(
+        projected.rows[0].properties.get("original_name"),
+        Some(&Value::String("Beta".to_string()))
+    );
+    assert_eq!(
+        projected.rows[0].properties.get("future_field"),
+        Some(&Value::String("future-b".to_string()))
+    );
+    assert_eq!(
+        projected.rows[0].properties.get("updated_at"),
+        Some(&Value::Int(40))
+    );
+    assert!(!projected.rows[0].properties.contains_key("memory_count"));
+
+    let ranked = db
+        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
+            list: KnowledgeSourceListRequest {
+                limit: 2,
+                order: KnowledgeSourceListOrder::MemoryCountDesc,
+                ..KnowledgeSourceListRequest::default()
+            },
+            property_names: vec!["original_name".to_string()],
+        })
+        .unwrap();
+    assert_eq!(
+        ranked
+            .rows
+            .iter()
+            .map(|row| row.source_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["source_b", "source_a"]
+    );
+    assert!(!ranked.rows[0].properties.contains_key("memory_count"));
+
+    let snapshot = db.begin_read_transaction();
+    db.query("CREATE (:Source {id: 'source_late', original_name: 'Late', memory_count: 99})")
+        .unwrap();
+    let snapshot_output = snapshot
+        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
+            list: KnowledgeSourceListRequest {
+                limit: 10,
+                order: KnowledgeSourceListOrder::MemoryCountDesc,
+                ..KnowledgeSourceListRequest::default()
+            },
+            property_names: vec!["original_name".to_string(), "memory_count".to_string()],
+        })
+        .unwrap();
+    assert_eq!(snapshot_output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(snapshot_output.matched_count, 3);
+    assert!(snapshot_output
+        .rows
+        .iter()
+        .all(|row| row.source_id.as_deref() != Some("source_late")));
+}
+
+#[test]
 fn source_list_rejects_unbounded_or_empty_filters() {
     let db = Database::new();
 
@@ -10189,6 +10283,34 @@ fn source_list_rejects_unbounded_or_empty_filters() {
     assert!(empty_marker
         .to_string()
         .contains("non-empty metadata marker"));
+}
+
+#[test]
+fn projected_source_list_rejects_empty_property_names_without_wal() {
+    let path = unique_test_dir("projected_source_list_empty_property_without_wal");
+    let mut db = Database::open(&path).unwrap();
+    db.query("CREATE (:Source {id: 'source_a', lifecycle_state: 'indexed'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+
+    let error = db
+        .knowledge_source_projected_list(&KnowledgeSourceProjectedListRequest {
+            list: KnowledgeSourceListRequest {
+                lifecycle_states: vec!["indexed".to_string()],
+                limit: 10,
+                ..KnowledgeSourceListRequest::default()
+            },
+            property_names: vec![String::new()],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty property names"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(
+        std::fs::read_to_string(path.join("wal.skein")).unwrap(),
+        wal_before
+    );
 }
 
 #[test]

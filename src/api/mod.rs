@@ -2755,6 +2755,29 @@ pub struct KnowledgeSourceListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceProjectedListRequest {
+    pub list: KnowledgeSourceListRequest,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceProjectedRow {
+    pub source_id: Option<String>,
+    pub node_id: u64,
+    pub properties: BTreeMap<String, Value>,
+    pub normalized_space_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceProjectedListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSourceProjectedRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_source_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRow {
     pub source_id: Option<String>,
     pub node_id: u64,
@@ -6726,6 +6749,13 @@ impl Database {
         request: &KnowledgeSourceListRequest,
     ) -> Result<KnowledgeSourceListOutput> {
         knowledge_sources_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_projected_list(
+        &self,
+        request: &KnowledgeSourceProjectedListRequest,
+    ) -> Result<KnowledgeSourceProjectedListOutput> {
+        knowledge_source_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
@@ -14127,6 +14157,87 @@ fn knowledge_sources_for(
     })
 }
 
+fn knowledge_source_projected_list_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceProjectedListRequest,
+) -> Result<KnowledgeSourceProjectedListOutput> {
+    validate_knowledge_source_projected_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Source") else {
+        return Ok(KnowledgeSourceProjectedListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_source_ids: request.list.source_ids.clone(),
+        });
+    };
+
+    let requested_ids = request
+        .list
+        .source_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut matched_source_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| source_matches_list_request(node, &request.list, &requested_ids))
+        .map(|node| {
+            if let Some(source_id) = node_external_id(node) {
+                matched_source_ids.insert(source_id);
+            }
+            (
+                knowledge_source_projected_row(node, &request.property_names),
+                integer_property(node, "memory_count").unwrap_or(0),
+                node.properties.get("created_at").cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+
+    sort_source_projected_rows(&mut rows, request.list.order);
+    let matched_count = rows.len();
+    if request.list.offset > 0 {
+        rows = rows.into_iter().skip(request.list.offset).collect();
+    }
+    if request.list.limit > 0 {
+        rows.truncate(request.list.limit);
+    }
+    let returned_count = rows.len();
+    let rows = rows
+        .into_iter()
+        .map(|(row, _memory_count, _created_at)| row)
+        .collect::<Vec<_>>();
+    let missing_source_ids = request
+        .list
+        .source_ids
+        .iter()
+        .filter(|source_id| !matched_source_ids.contains(*source_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeSourceProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_source_ids,
+    })
+}
+
+fn validate_knowledge_source_projected_list_request(
+    request: &KnowledgeSourceProjectedListRequest,
+) -> Result<()> {
+    validate_knowledge_source_list_request(&request.list)?;
+    if request.property_names.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge source projected list requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_knowledge_source_list_request(request: &KnowledgeSourceListRequest) -> Result<()> {
     if request
         .source_ids
@@ -14253,6 +14364,18 @@ fn source_metadata_contains(node: &NodeRecord, marker: &str) -> bool {
         .is_some_and(|metadata| metadata.contains(marker))
 }
 
+fn knowledge_source_projected_row(
+    node: &NodeRecord,
+    property_names: &[String],
+) -> KnowledgeSourceProjectedRow {
+    KnowledgeSourceProjectedRow {
+        source_id: node_external_id(node),
+        node_id: node.id.0,
+        properties: projected_properties(&node.properties, property_names),
+        normalized_space_id: normalized_node_space_id(node),
+    }
+}
+
 fn knowledge_source_list_row(
     catalog: &Catalog,
     store: &GraphStore,
@@ -14313,6 +14436,34 @@ fn sort_source_list_rows(rows: &mut [KnowledgeSourceListRow], order: KnowledgeSo
 fn compare_source_list_ids(
     left: &KnowledgeSourceListRow,
     right: &KnowledgeSourceListRow,
+) -> std::cmp::Ordering {
+    left.source_id
+        .cmp(&right.source_id)
+        .then_with(|| left.node_id.cmp(&right.node_id))
+}
+
+fn sort_source_projected_rows(
+    rows: &mut [(KnowledgeSourceProjectedRow, i64, Option<Value>)],
+    order: KnowledgeSourceListOrder,
+) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeSourceListOrder::SourceIdAsc => compare_source_projected_ids(&left.0, &right.0),
+        KnowledgeSourceListOrder::MemoryCountDesc => right
+            .1
+            .cmp(&left.1)
+            .then_with(|| compare_source_projected_ids(&left.0, &right.0)),
+        KnowledgeSourceListOrder::CreatedAtDesc => compare_skill_memory_created_at(
+            &left.2,
+            &right.2,
+            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        )
+        .then_with(|| compare_source_projected_ids(&left.0, &right.0)),
+    });
+}
+
+fn compare_source_projected_ids(
+    left: &KnowledgeSourceProjectedRow,
+    right: &KnowledgeSourceProjectedRow,
 ) -> std::cmp::Ordering {
     left.source_id
         .cmp(&right.source_id)
@@ -26518,6 +26669,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_sources(request)
     }
 
+    pub fn knowledge_source_projected_list(
+        &self,
+        request: &KnowledgeSourceProjectedListRequest,
+    ) -> Result<KnowledgeSourceProjectedListOutput> {
+        self.db.knowledge_source_projected_list(request)
+    }
+
     pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
         self.db.knowledge_source_count()
     }
@@ -27692,6 +27850,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeSynthesizedSourceIdsRequest,
     ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
         knowledge_synthesized_source_ids_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_projected_list(
+        &self,
+        request: &KnowledgeSourceProjectedListRequest,
+    ) -> Result<KnowledgeSourceProjectedListOutput> {
+        knowledge_source_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skills(

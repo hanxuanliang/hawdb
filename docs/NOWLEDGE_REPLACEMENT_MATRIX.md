@@ -254,6 +254,12 @@ pagination, lifecycle-state sets, normalized-space and source-type filters,
 metadata substring markers, parsed-path-only selection, offset/limit, Source id,
 memory-count, or created-at ordering, display-name and numeric fallback fields,
 and no WAL writes.
+Field-extensible Source list reads are covered by
+`Database::knowledge_source_projected_list`. The typed read reuses the same
+bounded Source filters, pagination, and ordering, but returns only
+caller-selected Source properties through an explicit allowlist so REST FS and
+MCP Source fields can grow without cloning whole Source nodes or adding
+raw-Cypher paths.
 Source attribution reads are covered by `Database::knowledge_source_memories`.
 The typed read resolves one Source id, scans incoming `SOURCED_FROM` Memory
 edges, returns Memory id/title/content/unit type/confidence plus chunk

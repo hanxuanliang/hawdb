@@ -630,6 +630,10 @@ Bounded Source list and summary reads are available as
 overview ranking, parsed-path list, lifecycle attention, and metadata-marker
 page shapes with explicit filters, ordering, missing-id reporting, display-name
 fallbacks, numeric defaults, and no WAL writes.
+Field-extensible Source list reads are also available as
+`Database::knowledge_source_projected_list`, reusing the same bounded filters,
+pagination, and ordering while returning only caller-selected Source properties
+through an explicit allowlist for future field growth.
 Source-reference relationship cleanup for Nowledge memory/source delete flows
 is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty
