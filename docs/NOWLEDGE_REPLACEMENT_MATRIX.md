@@ -216,6 +216,13 @@ nodes and `MENTIONS` to Entity nodes, filters by explicit community ids or
 non-null communities, returns hit counts and distinct source-memory counts for
 each crystal/community pair, supports topic-ranking and OKF mapping orderings,
 read-transaction snapshots, and no WAL writes.
+Crystal source visibility reads are covered by
+`Database::knowledge_crystal_source_visibility`. The typed read uses the same
+Crystal/source/entity community path but preserves one row per visible path,
+returning Crystal fields plus source Memory metadata, `COALESCE(is_latest,
+true)` semantics, and lifecycle state for Nowledge wiki community crystal
+rendering; it supports explicit community-id scopes, read-transaction
+snapshots, and no WAL writes.
 Memory entity mention reads are covered by
 `Database::knowledge_memory_entities`. The typed read validates a non-empty
 Memory id list, resolves each Memory in caller order, scans outgoing `MENTIONS`

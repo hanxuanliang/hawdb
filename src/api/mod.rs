@@ -1684,6 +1684,42 @@ pub struct KnowledgeCrystalCommunityListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalSourceVisibilityRequest {
+    pub community_ids: Vec<Value>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalSourceVisibilityRow {
+    pub crystal_memory_id: Option<String>,
+    pub crystal_node_id: u64,
+    pub source_memory_id: Option<String>,
+    pub source_node_id: u64,
+    pub entity_id: Option<String>,
+    pub entity_node_id: u64,
+    pub community_id: Value,
+    pub crystal_title: Option<String>,
+    pub title: Option<String>,
+    pub display_title: String,
+    pub content: Option<String>,
+    pub importance: Option<Value>,
+    pub crystal_metadata: Option<Value>,
+    pub crystal_is_latest: bool,
+    pub crystal_lifecycle_state: Option<String>,
+    pub source_metadata: Option<Value>,
+    pub source_is_latest: bool,
+    pub source_lifecycle_state: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCrystalSourceVisibilityOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeCrystalSourceVisibilityRow>,
+    pub matched_path_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityCreateRequest {
     pub label: String,
     pub external_id: String,
@@ -5048,6 +5084,13 @@ impl Database {
         knowledge_crystal_communities_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_crystal_source_visibility(
+        &self,
+        request: &KnowledgeCrystalSourceVisibilityRequest,
+    ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
+        knowledge_crystal_source_visibility_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -8016,6 +8059,159 @@ fn compare_crystal_community_ids(
         .cmp(&right.community_id)
         .then_with(|| left.crystal_memory_id.cmp(&right.crystal_memory_id))
         .then_with(|| left.crystal_node_id.cmp(&right.crystal_node_id))
+}
+
+fn knowledge_crystal_source_visibility_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeCrystalSourceVisibilityRequest,
+) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
+    validate_knowledge_crystal_source_visibility_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
+    };
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
+    };
+    let Some(synthesized_from_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
+        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
+    };
+    let Some(mentions_type_id) = catalog.rel_type_id("MENTIONS") else {
+        return Ok(empty_crystal_source_visibility_output(graph_commit_epoch));
+    };
+
+    let community_ids = request
+        .community_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut rows = Vec::new();
+    for crystal in store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| boolean_property(memory, "is_crystal") == Some(true))
+    {
+        for source_rel in store.outgoing_relationships(crystal.id, synthesized_from_type_id) {
+            let Some(source_memory) = store
+                .node(source_rel.target)
+                .filter(|node| node.labels.contains(&memory_label_id))
+            else {
+                continue;
+            };
+            for mention_rel in store.outgoing_relationships(source_memory.id, mentions_type_id) {
+                let Some(entity) = store
+                    .node(mention_rel.target)
+                    .filter(|node| node.labels.contains(&entity_label_id))
+                else {
+                    continue;
+                };
+                let Some(community_id) = entity.properties.get("community_id").cloned() else {
+                    continue;
+                };
+                if !community_ids.contains(&community_id) {
+                    continue;
+                }
+                rows.push(knowledge_crystal_source_visibility_row(
+                    crystal,
+                    source_memory,
+                    entity,
+                    community_id,
+                ));
+            }
+        }
+    }
+
+    sort_crystal_source_visibility_rows(&mut rows);
+    let matched_path_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCrystalSourceVisibilityOutput {
+        graph_commit_epoch,
+        rows,
+        matched_path_count,
+        returned_count,
+    })
+}
+
+fn empty_crystal_source_visibility_output(
+    graph_commit_epoch: u64,
+) -> KnowledgeCrystalSourceVisibilityOutput {
+    KnowledgeCrystalSourceVisibilityOutput {
+        graph_commit_epoch,
+        rows: Vec::new(),
+        matched_path_count: 0,
+        returned_count: 0,
+    }
+}
+
+fn validate_knowledge_crystal_source_visibility_request(
+    request: &KnowledgeCrystalSourceVisibilityRequest,
+) -> Result<()> {
+    if request.community_ids.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge crystal source visibility requires non-empty community ids".to_string(),
+        ));
+    }
+    if request
+        .community_ids
+        .iter()
+        .any(|community_id| community_id == &Value::Null)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge crystal source visibility requires non-null community ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_crystal_source_visibility_row(
+    crystal: &NodeRecord,
+    source_memory: &NodeRecord,
+    entity: &NodeRecord,
+    community_id: Value,
+) -> KnowledgeCrystalSourceVisibilityRow {
+    let crystal_title = string_property(crystal, "crystal_title");
+    let title = string_property(crystal, "title");
+    let display_title = crystal_title
+        .clone()
+        .or_else(|| title.clone())
+        .unwrap_or_default();
+    KnowledgeCrystalSourceVisibilityRow {
+        crystal_memory_id: node_external_id(crystal),
+        crystal_node_id: crystal.id.0,
+        source_memory_id: node_external_id(source_memory),
+        source_node_id: source_memory.id.0,
+        entity_id: node_external_id(entity),
+        entity_node_id: entity.id.0,
+        community_id,
+        crystal_title,
+        title,
+        display_title,
+        content: string_property(crystal, "content"),
+        importance: crystal.properties.get("importance").cloned(),
+        crystal_metadata: crystal.properties.get("metadata").cloned(),
+        crystal_is_latest: boolean_property(crystal, "is_latest").unwrap_or(true),
+        crystal_lifecycle_state: string_property(crystal, "lifecycle_state"),
+        source_metadata: source_memory.properties.get("metadata").cloned(),
+        source_is_latest: boolean_property(source_memory, "is_latest").unwrap_or(true),
+        source_lifecycle_state: string_property(source_memory, "lifecycle_state"),
+    }
+}
+
+fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibilityRow]) {
+    rows.sort_by(|left, right| {
+        left.community_id
+            .cmp(&right.community_id)
+            .then_with(|| left.crystal_memory_id.cmp(&right.crystal_memory_id))
+            .then_with(|| left.source_memory_id.cmp(&right.source_memory_id))
+            .then_with(|| left.entity_id.cmp(&right.entity_id))
+            .then_with(|| left.crystal_node_id.cmp(&right.crystal_node_id))
+            .then_with(|| left.source_node_id.cmp(&right.source_node_id))
+            .then_with(|| left.entity_node_id.cmp(&right.entity_node_id))
+    });
 }
 
 enum KnowledgeScopedEntityMatch {
@@ -19104,6 +19300,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_crystal_communities(request)
     }
 
+    pub fn knowledge_crystal_source_visibility(
+        &self,
+        request: &KnowledgeCrystalSourceVisibilityRequest,
+    ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
+        self.db.knowledge_crystal_source_visibility(request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -20138,6 +20341,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeCrystalCommunityListRequest,
     ) -> Result<KnowledgeCrystalCommunityListOutput> {
         knowledge_crystal_communities_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_crystal_source_visibility(
+        &self,
+        request: &KnowledgeCrystalSourceVisibilityRequest,
+    ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
+        knowledge_crystal_source_visibility_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(
