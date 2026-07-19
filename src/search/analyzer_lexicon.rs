@@ -104,3 +104,48 @@ pub(super) const CORE_SEMANTIC_ALIAS_RULES: &[(&[&str], &[&str])] = &[
     ),
     (&["value_stream", "valuestream"], &["content_stream"]),
 ];
+
+pub(super) const NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES: &[(&[&str], &[&str])] = &[
+    (&["crystal"], &["crystallized memory", "synthesized memory"]),
+    (&["crystallization", "crystallized"], &["crystal"]),
+    (&["synthesized", "synthesis"], &["crystal"]),
+    (&["synthesized from"], &["crystal", "sourced from"]),
+    (&["episodic", "episodic provenance"], &["raw evidence"]),
+    (&["raw evidence"], &["episodic provenance"]),
+    (&["source provenance"], &["sourced from"]),
+    (&["sourced from"], &["source provenance"]),
+    (&["entity mention", "memory mention"], &["mentions"]),
+    (&["mentions"], &["entity mention", "memory mention"]),
+    (&["evolves"], &["memory evolution"]),
+    (&["memory evolution", "evolution edge"], &["evolves"]),
+    (&["ai summary"], &["community summary"]),
+    (
+        &["community summary", "summarized community"],
+        &["ai summary"],
+    ),
+    (
+        &[
+            "memory-to-memory",
+            "memory to memory",
+            "memory_to_memory",
+            "memory link",
+            "memory links",
+            "memorylink",
+            "memorylinks",
+            "linked memories",
+            "memory relation",
+            "memory relationship",
+            "memory edge",
+        ],
+        &[
+            "memory_relates_to",
+            "relation_type",
+            "semantic relation",
+            "same_topic",
+        ],
+    ),
+    (
+        &["memory_relates_to", "relation_type", "same_topic"],
+        &["memory link", "semantic relation"],
+    ),
+];

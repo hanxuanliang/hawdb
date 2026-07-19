@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 mod analyzer_lexicon;
-use analyzer_lexicon::CORE_SEMANTIC_ALIAS_RULES;
+use analyzer_lexicon::{CORE_SEMANTIC_ALIAS_RULES, NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES};
 
 const SEARCH_SNAPSHOT_FILE: &str = "search_projection.skein";
 pub const FULL_REINDEX_MARKER: &str = ".reindex_needed";
@@ -402,6 +402,18 @@ impl SearchAnalyzerLexicon {
                 .flat_map(|stopword| normalized_stopword_terms(stopword.as_ref())),
         );
         self
+    }
+
+    pub fn nowledge_memory() -> Self {
+        Self::default().with_nowledge_memory_aliases()
+    }
+
+    pub fn with_nowledge_memory_aliases(self) -> Self {
+        NOWLEDGE_MEMORY_SEMANTIC_ALIAS_RULES
+            .iter()
+            .fold(self, |lexicon, (inputs, aliases)| {
+                lexicon.with_normalized_alias_rule(inputs.iter().copied(), aliases.iter().copied())
+            })
     }
 
     fn is_stopword(&self, token: &str) -> bool {
@@ -3509,8 +3521,8 @@ mod tests {
 
     #[test]
     fn tokenizer_expands_nowledge_memory_lifecycle_aliases() {
-        let mut index =
-            SearchIndex::in_memory().with_analyzer_lexicon(nowledge_example_analyzer_lexicon());
+        let mut index = SearchIndex::in_memory()
+            .with_analyzer_lexicon(SearchAnalyzerLexicon::nowledge_memory());
         index
             .upsert(SearchDocument {
                 id: "memory-lifecycle".to_string(),
@@ -3556,8 +3568,8 @@ mod tests {
 
     #[test]
     fn tokenizer_expands_nowledge_schema_relationship_aliases() {
-        let mut index =
-            SearchIndex::in_memory().with_analyzer_lexicon(nowledge_example_analyzer_lexicon());
+        let mut index = SearchIndex::in_memory()
+            .with_analyzer_lexicon(SearchAnalyzerLexicon::nowledge_memory());
         index
             .upsert(SearchDocument {
                 id: "schema-relationships".to_string(),
@@ -3583,6 +3595,37 @@ mod tests {
             .matched_terms
             .iter()
             .any(|term| term == "community_summary"));
+    }
+
+    #[test]
+    fn tokenizer_expands_nowledge_memory_relation_product_aliases() {
+        let mut index = SearchIndex::in_memory()
+            .with_analyzer_lexicon(SearchAnalyzerLexicon::nowledge_memory());
+        index
+            .upsert(SearchDocument {
+                id: "memory-relations".to_string(),
+                title: "MEMORY_RELATES_TO relation_type same_topic".to_string(),
+                content: "Internal schema rows model semantic relation edges between memories"
+                    .to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let product_hits =
+            index.search_with_report("memory-to-memory relationships", None, SearchMode::Text, 10);
+        let schema_hits = index.search_with_report("relation_type", None, SearchMode::Text, 10);
+
+        assert_eq!(product_hits.hits[0].id, "memory-relations");
+        assert!(product_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "memory_relates_to"));
+        assert_eq!(schema_hits.hits[0].id, "memory-relations");
+        assert!(schema_hits.hits[0]
+            .matched_terms
+            .iter()
+            .any(|term| term == "semantic_relation"));
     }
 
     #[test]
@@ -3662,27 +3705,6 @@ mod tests {
             .iter()
             .any(|term| term == "thread"));
         assert!(noisy_hits.is_empty());
-    }
-
-    fn nowledge_example_analyzer_lexicon() -> SearchAnalyzerLexicon {
-        SearchAnalyzerLexicon::default()
-            .with_normalized_alias_rule(["crystal"], ["crystallized memory", "synthesized memory"])
-            .with_normalized_alias_rule(["crystallization", "crystallized"], ["crystal"])
-            .with_normalized_alias_rule(["synthesized", "synthesis"], ["crystal"])
-            .with_normalized_alias_rule(["synthesized from"], ["crystal", "sourced from"])
-            .with_normalized_alias_rule(["episodic", "episodic provenance"], ["raw evidence"])
-            .with_normalized_alias_rule(["raw evidence"], ["episodic provenance"])
-            .with_normalized_alias_rule(["source provenance"], ["sourced from"])
-            .with_normalized_alias_rule(["sourced from"], ["source provenance"])
-            .with_normalized_alias_rule(["entity mention", "memory mention"], ["mentions"])
-            .with_normalized_alias_rule(["mentions"], ["entity mention", "memory mention"])
-            .with_normalized_alias_rule(["evolves"], ["memory evolution"])
-            .with_normalized_alias_rule(["memory evolution", "evolution edge"], ["evolves"])
-            .with_normalized_alias_rule(["ai summary"], ["community summary"])
-            .with_normalized_alias_rule(
-                ["community summary", "summarized community"],
-                ["ai summary"],
-            )
     }
 
     #[test]

@@ -541,7 +541,11 @@ aliases through normalized alias rules and can add domain stopword rules for
 high-frequency application terms. The graph/search kernel keeps only the small
 cross-domain default alias and stopword set, while Nowledge-specific lifecycle,
 schema relationship vocabulary, and application noise terms stay in the
-caller-owned lexicon.
+caller-owned lexicon. `SearchAnalyzerLexicon::nowledge_memory()` provides the
+opt-in Nowledge Mem profile, including lifecycle aliases and the conservative
+Memory-to-Memory relation bridge used by Nowledge Mem search anchors. The
+profile is a retrieval recall bridge only; focus-map decisions about whether an
+internal schema handle can lead a graph view remain the caller's responsibility.
 
 Search hits expose the information needed by a knowledge retrieval surface:
 fused RRF score, per-child RRF components, vector score, text score, vector
