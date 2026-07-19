@@ -582,6 +582,14 @@ that already have the source `HAS_LABEL` edge, de-duplicates repeated source
 edges, skips projected-idless Memory rows without writing, and idempotently
 MERGEs the target `HAS_LABEL` edge with create-only `assigned_by`,
 `created_at`, and `properties` fields through one grouped WAL batch.
+Memory label carry-over writes are covered by
+`Database::transfer_knowledge_memory_label_edges`. The typed facade fixes the
+Nowledge older-Memory to newer-Memory label copy shape used during Memory
+evolution, requires both Memory endpoints to match the exact `space_id`
+predicate before writing, scans distinct Label targets from the older Memory,
+skips projected-idless Labels without writing, and idempotently MERGEs
+`newer` `HAS_LABEL` edges with create-only `assigned_by = 'system'`,
+`created_at`, and `properties = '{}'` through one grouped WAL batch.
 Label canonical and usage reads are covered by typed APIs for Nowledge label
 merge and list surfaces. `Database::lookup_knowledge_labels_by_canonical_name`
 handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_canonical_name`

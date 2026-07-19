@@ -480,7 +480,10 @@ writes. Memory label cleanup writes are available as
 one Memory through grouped WAL-backed relationship deletes. Label merge
 transfer writes are available as `Database::transfer_knowledge_label_memory_edges`,
 covering source-label to target-label Memory retargeting with idempotent
-target `HAS_LABEL` creation.
+target `HAS_LABEL` creation. Memory label carry-over writes are available as
+`Database::transfer_knowledge_memory_label_edges`, covering older-Memory to
+newer-Memory label copying inside one exact `space_id` with duplicate old label
+edges de-duplicated and target `HAS_LABEL` creation kept idempotent.
 Endpoint-known label assignment reads are also available as
 `Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
 bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
@@ -869,6 +872,11 @@ Nowledge label merge transfer supports the bounded retarget shape
 The old label edge selects the source node set, the second `MATCH` selects the
 new label target, and the target HAS_LABEL merge is idempotent with one grouped
 WAL append for newly created edges.
+Nowledge Memory label carry-over supports the bounded shape
+`MATCH (older:Memory {id: $older_id})-[:HAS_LABEL]->(label:Label), (newer:Memory {id: $newer_id}) WHERE older.space_id = $space_id AND newer.space_id = $space_id MERGE (newer)-[edge:HAS_LABEL]->(label) ON CREATE SET ...`.
+The two Memory endpoints must both match the explicit `space_id`; the old
+Memory selects distinct Label targets, and the new Memory edge merge is
+idempotent with one grouped WAL append for newly created edges.
 Nowledge label upsert supports single-node `MERGE ... ON CREATE SET ... ON
 MATCH SET ...` for the bounded label shape, including
 `l.canonical_name = COALESCE(l.canonical_name, $canonical)`. Pending creates
