@@ -179,7 +179,8 @@ entity lookup shapes used around unified PageRank execution.
 GraphMeta PageRank and community-detection stamps are exposed as a typed batch
 over `meta_id` plus validated state assignments.
 Schema migration log writes are exposed as a typed create-once batch over
-`SchemaMigrationLog` ids and `applied_at` values.
+`SchemaMigrationLog` ids and `applied_at` values. Applied migration id reads are
+exposed through a typed list API with deterministic id ordering.
 AugmentationJob create/running/progress/completed/failed lifecycle writes are
 exposed as a typed batch with explicit status-transition checks.
 `DatabaseConfig` provides read-only operation and bounded read-result

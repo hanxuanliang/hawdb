@@ -2462,6 +2462,26 @@ pub struct KnowledgeSchemaMigrationApplyBatchOutput {
     pub duplicate_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeSchemaMigrationListRequest {
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSchemaMigrationRow {
+    pub migration_id: String,
+    pub node_id: u64,
+    pub applied_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSchemaMigrationListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSchemaMigrationRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum KnowledgeAugmentationJobLifecycleTransition {
     Create {
@@ -4544,6 +4564,13 @@ impl Database {
         request: &KnowledgeSchemaMigrationApplyBatchRequest,
     ) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
         apply_knowledge_schema_migrations_batch_for(self, request)
+    }
+
+    pub fn knowledge_schema_migrations(
+        &self,
+        request: &KnowledgeSchemaMigrationListRequest,
+    ) -> KnowledgeSchemaMigrationListOutput {
+        knowledge_schema_migrations_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_augmentation_jobs_batch(
@@ -10381,6 +10408,44 @@ fn apply_knowledge_schema_migrations_batch_for(
     })
 }
 
+fn knowledge_schema_migrations_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSchemaMigrationListRequest,
+) -> KnowledgeSchemaMigrationListOutput {
+    let Some(label_id) = catalog.label_id("SchemaMigrationLog") else {
+        return KnowledgeSchemaMigrationListOutput {
+            graph_commit_epoch: store.commit_epoch(),
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        };
+    };
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .filter_map(|node| {
+            let migration_id = node_external_id(node)?;
+            Some(KnowledgeSchemaMigrationRow {
+                migration_id,
+                node_id: node.id.0,
+                applied_at: node.properties.get("applied_at").cloned(),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| left.migration_id.cmp(&right.migration_id));
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    KnowledgeSchemaMigrationListOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        rows,
+        matched_count,
+        returned_count,
+    }
+}
+
 fn update_knowledge_augmentation_jobs_batch_for(
     db: &mut Database,
     request: &KnowledgeAugmentationJobLifecycleBatchRequest,
@@ -15681,6 +15746,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSchemaMigrationApplyBatchRequest,
     ) -> Result<KnowledgeSchemaMigrationApplyBatchOutput> {
         self.db.apply_knowledge_schema_migrations_batch(request)
+    }
+
+    pub fn knowledge_schema_migrations(
+        &self,
+        request: &KnowledgeSchemaMigrationListRequest,
+    ) -> KnowledgeSchemaMigrationListOutput {
+        self.db.knowledge_schema_migrations(request)
     }
 
     pub fn update_knowledge_augmentation_jobs_batch(

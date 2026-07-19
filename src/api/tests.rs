@@ -32,9 +32,10 @@ use super::{
     KnowledgeRelationshipUpdateRequest, KnowledgeRelationshipUpsertBatchRequest,
     KnowledgeRelationshipUpsertRequest, KnowledgeRelationshipsRequest,
     KnowledgeRetrievalEmptyReasonCode, KnowledgeRetrievalRequest, KnowledgeSchemaMigrationApply,
-    KnowledgeSchemaMigrationApplyBatchRequest, KnowledgeScopedEntityBatchRequest,
-    KnowledgeScopedEntityDeleteBatchRequest, KnowledgeScopedEntityDeleteRequest,
-    KnowledgeScopedEntityRequest, KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
+    KnowledgeSchemaMigrationApplyBatchRequest, KnowledgeSchemaMigrationListRequest,
+    KnowledgeScopedEntityBatchRequest, KnowledgeScopedEntityDeleteBatchRequest,
+    KnowledgeScopedEntityDeleteRequest, KnowledgeScopedEntityRequest,
+    KnowledgeScopedNeighborsRequest, KnowledgeScopedPathRequest,
     KnowledgeScopedPropertyBatchRequest, KnowledgeScopedPropertyUpdateBatchRequest,
     KnowledgeScopedPropertyUpdateRequest, KnowledgeScopedRelationshipCreateBatchRequest,
     KnowledgeScopedRelationshipCreateRequest, KnowledgeScopedRelationshipDeleteBatchRequest,
@@ -8558,6 +8559,36 @@ fn applies_schema_migration_log_batch_idempotently() {
         Some(&Value::String("new_2".to_string()))
     );
     assert_eq!(rows.rows[2].get("applied_at"), Some(&Value::Int(103)));
+
+    let graph_commit_epoch = db.store.commit_epoch();
+    let applied = db.knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 0 });
+    assert_eq!(applied.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(applied.matched_count, 3);
+    assert_eq!(applied.returned_count, 3);
+    assert_eq!(
+        applied
+            .rows
+            .iter()
+            .map(|row| row.migration_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["existing", "new_1", "new_2"]
+    );
+    assert_eq!(applied.rows[0].applied_at, Some(Value::Int(10)));
+    assert_eq!(applied.rows[1].applied_at, Some(Value::Int(101)));
+    assert_eq!(applied.rows[2].applied_at, Some(Value::Int(103)));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+
+    let limited = db.knowledge_schema_migrations(&KnowledgeSchemaMigrationListRequest { limit: 2 });
+    assert_eq!(limited.matched_count, 3);
+    assert_eq!(limited.returned_count, 2);
+    assert_eq!(
+        limited
+            .rows
+            .iter()
+            .map(|row| row.migration_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["existing", "new_1"]
+    );
 }
 
 #[test]
