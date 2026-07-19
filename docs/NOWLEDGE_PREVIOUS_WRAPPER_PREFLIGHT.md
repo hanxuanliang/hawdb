@@ -53,6 +53,25 @@ export NOWLEDGE_WRAPPER_COMMAND="/path/to/nowledge-previous-wrapper-command"
 export NOWLEDGE_WRAPPER_IDENTITY="nowledge-previous-wrapper:local-copy"
 ```
 
+## Recommended Bundle Runner
+
+Use the checked-in bundle runner for release preflight. It runs the full
+contract, adapter smoke, storage recovery, background maintenance, migration
+gate, replacement summary, and final preflight verifier in the fail-closed
+order documented below:
+
+```bash
+scripts/nowledge-previous-wrapper-preflight.sh \
+  --preflight-root "$NMEM_PREFLIGHT_ROOT" \
+  --nowledge-root /Users/hawkingrei/devel/nowledge/mem \
+  --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
+  -- "$NOWLEDGE_WRAPPER_COMMAND"
+```
+
+The script prints `preflight-check.json` on success and leaves every
+intermediate artifact under `$NMEM_PREFLIGHT_ROOT`. Use the manual steps below
+when bringing up a new wrapper command or debugging a specific failed stage.
+
 ## 1. Export The Contract
 
 ```bash
