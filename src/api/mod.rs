@@ -1431,6 +1431,41 @@ pub struct KnowledgeMemoryEntityListOutput {
     pub entity_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeContextMemoryLatestFilter {
+    NullOrTrue,
+    TrueOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeContextMemoryPreviewRequest {
+    pub unit_types: Vec<String>,
+    pub latest_filter: KnowledgeContextMemoryLatestFilter,
+    pub include_labels: bool,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeContextMemoryPreviewRow {
+    pub memory_id: Option<String>,
+    pub memory_node_id: u64,
+    pub title: Option<String>,
+    pub unit_type: Option<String>,
+    pub created_at: Option<Value>,
+    pub label_id: Option<String>,
+    pub label_node_id: Option<u64>,
+    pub label_canonical_name: Option<String>,
+    pub label_name: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeContextMemoryPreviewOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeContextMemoryPreviewRow>,
+    pub matched_memory_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeEntityCreateRequest {
     pub label: String,
@@ -4442,6 +4477,13 @@ impl Database {
         knowledge_memory_entities_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_context_memory_preview(
+        &self,
+        request: &KnowledgeContextMemoryPreviewRequest,
+    ) -> Result<KnowledgeContextMemoryPreviewOutput> {
+        knowledge_context_memory_preview_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_scoped_entity(
         &self,
         request: &KnowledgeScopedEntityRequest,
@@ -6422,6 +6464,152 @@ fn memory_entity_row(entity: &NodeRecord, relationship: &RelRecord) -> Knowledge
         confidence: entity.properties.get("confidence").cloned(),
         relationship_confidence: relationship.properties.get("confidence").cloned(),
         mention_count: relationship_integer_property(relationship, "mention_count"),
+    }
+}
+
+fn knowledge_context_memory_preview_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeContextMemoryPreviewRequest,
+) -> Result<KnowledgeContextMemoryPreviewOutput> {
+    if request.unit_types.is_empty() || request.unit_types.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge context memory preview requires non-empty unit types".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeContextMemoryPreviewOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_memory_count: 0,
+            returned_count: 0,
+        });
+    };
+    let unit_types = request.unit_types.iter().collect::<BTreeSet<_>>();
+    let mut memories = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| context_memory_matches_preview(memory, &unit_types, request))
+        .collect::<Vec<_>>();
+    memories.sort_by(|left, right| {
+        compare_skill_memory_created_at(
+            &left.properties.get("created_at").cloned(),
+            &right.properties.get("created_at").cloned(),
+            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        )
+        .then_with(|| node_external_id(left).cmp(&node_external_id(right)))
+        .then_with(|| left.id.0.cmp(&right.id.0))
+    });
+    let matched_memory_count = memories.len();
+
+    let mut rows = if request.include_labels {
+        context_memory_label_preview_rows(catalog, store, memories)
+    } else {
+        memories
+            .into_iter()
+            .map(|memory| context_memory_preview_row(memory, None))
+            .collect::<Vec<_>>()
+    };
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeContextMemoryPreviewOutput {
+        graph_commit_epoch,
+        rows,
+        matched_memory_count,
+        returned_count,
+    })
+}
+
+fn context_memory_matches_preview(
+    memory: &NodeRecord,
+    unit_types: &BTreeSet<&String>,
+    request: &KnowledgeContextMemoryPreviewRequest,
+) -> bool {
+    memory
+        .properties
+        .get("unit_type")
+        .map(value_to_external_id)
+        .as_ref()
+        .is_some_and(|unit_type| unit_types.contains(unit_type))
+        && context_memory_matches_latest(memory, request.latest_filter)
+        && context_memory_is_not_crystal(memory)
+}
+
+fn context_memory_matches_latest(
+    memory: &NodeRecord,
+    filter: KnowledgeContextMemoryLatestFilter,
+) -> bool {
+    match filter {
+        KnowledgeContextMemoryLatestFilter::NullOrTrue => {
+            !matches!(memory.properties.get("is_latest"), Some(Value::Bool(false)))
+        }
+        KnowledgeContextMemoryLatestFilter::TrueOnly => {
+            memory.properties.get("is_latest") == Some(&Value::Bool(true))
+        }
+    }
+}
+
+fn context_memory_is_not_crystal(memory: &NodeRecord) -> bool {
+    !matches!(memory.properties.get("is_crystal"), Some(Value::Bool(true)))
+}
+
+fn context_memory_label_preview_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    memories: Vec<&NodeRecord>,
+) -> Vec<KnowledgeContextMemoryPreviewRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return Vec::new();
+    };
+    let Some(label_label_id) = catalog.label_id("Label") else {
+        return Vec::new();
+    };
+    memories
+        .into_iter()
+        .flat_map(|memory| {
+            let mut labels = store
+                .outgoing_relationships(memory.id, rel_type_id)
+                .filter_map(|relationship| {
+                    store
+                        .node(relationship.target)
+                        .filter(|label| label.labels.contains(&label_label_id))
+                })
+                .collect::<Vec<_>>();
+            labels.sort_by(|left, right| {
+                string_property(left, "canonical_name")
+                    .cmp(&string_property(right, "canonical_name"))
+                    .then_with(|| {
+                        string_property(left, "name").cmp(&string_property(right, "name"))
+                    })
+                    .then_with(|| node_external_id(left).cmp(&node_external_id(right)))
+                    .then_with(|| left.id.0.cmp(&right.id.0))
+            });
+            labels
+                .into_iter()
+                .map(|label| context_memory_preview_row(memory, Some(label)))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+fn context_memory_preview_row(
+    memory: &NodeRecord,
+    label: Option<&NodeRecord>,
+) -> KnowledgeContextMemoryPreviewRow {
+    KnowledgeContextMemoryPreviewRow {
+        memory_id: node_external_id(memory),
+        memory_node_id: memory.id.0,
+        title: string_property(memory, "title"),
+        unit_type: string_property(memory, "unit_type"),
+        created_at: memory.properties.get("created_at").cloned(),
+        label_id: label.and_then(node_external_id),
+        label_node_id: label.map(|label| label.id.0),
+        label_canonical_name: label.and_then(|label| string_property(label, "canonical_name")),
+        label_name: label.and_then(|label| string_property(label, "name")),
     }
 }
 
@@ -16241,6 +16429,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryEntityListRequest,
     ) -> Result<KnowledgeMemoryEntityListOutput> {
         self.db.knowledge_memory_entities(request)
+    }
+
+    pub fn knowledge_context_memory_preview(
+        &self,
+        request: &KnowledgeContextMemoryPreviewRequest,
+    ) -> Result<KnowledgeContextMemoryPreviewOutput> {
+        self.db.knowledge_context_memory_preview(request)
     }
 
     pub fn knowledge_scoped_entity(

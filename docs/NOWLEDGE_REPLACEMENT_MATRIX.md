@@ -197,6 +197,13 @@ edges to Entity nodes, returns Entity id/name/type/confidence plus relationship
 confidence and mention count rows sorted by Entity name/id/relationship id,
 supports per-Memory limits and distinct Entity name limits, reports
 found/missing Memory counts and the graph commit epoch, and does not write WAL.
+Context memory preview reads are covered by
+`Database::knowledge_context_memory_preview`. The typed read validates
+non-empty unit types, applies the Nowledge context-wiring filters for latest
+Memory rows and non-crystal rows, orders by `created_at` descending, supports
+bounded limits, can either return Memory title/unit-type preview rows or expand
+outgoing `HAS_LABEL` rows to Label id/canonical-name/name fields, reports
+matched Memory counts and the graph commit epoch, and does not write WAL.
 Skill usage-stat writes are covered by a typed batch for Nowledge
 `use_count`, optional `success_rate`, `last_activity_at`, `updated_at`, and
 `metadata` update shapes. The wrapper validates Skill ids, non-negative use

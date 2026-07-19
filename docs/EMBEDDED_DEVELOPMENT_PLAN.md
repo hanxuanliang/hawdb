@@ -159,8 +159,10 @@ mutation, source memory-count adjustments, source lifecycle updates, source
 detail/count/id-list reads, and grouped WAL commits for eligible lifecycle rows.
 Memory lifecycle metadata updates are
 also exposed as a typed batch for the Nowledge `metadata`/`is_latest`/
-`lifecycle_state`/`updated_at` write shape. Skill usage-stat updates are exposed
-as a typed batch for Nowledge `use_count`, optional `success_rate`,
+`lifecycle_state`/`updated_at` write shape. Context memory preview reads are
+exposed as a typed API for Nowledge semantic-unit title, typed, and label
+preview rows with latest/non-crystal filtering. Skill usage-stat updates are
+exposed as a typed batch for Nowledge `use_count`, optional `success_rate`,
 `last_activity_at`, `updated_at`, and `metadata` writes. Skill lifecycle and
 write-state updates are exposed as a typed batch for Nowledge stage changes,
 rejections, promotions, compiled metadata, draft bundle writes, content hashes,
@@ -951,6 +953,7 @@ undo-community detection writes for deleting Community nodes, clearing
 CRYSTALLIZED_FROM-to-SYNTHESIZED_FROM relationship-copy migration writes,
 thread bulk-move normalized-space selection reads and update-return writes,
 thread distillation optional source filters,
+context memory semantic-unit title, typed, and label preview reads,
 feed synthesized-source id collection reads,
 skill synthesized memory id reads,
 skill stage projection, active, and builder list reads,
