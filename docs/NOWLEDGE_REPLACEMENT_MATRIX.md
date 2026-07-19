@@ -211,6 +211,13 @@ edges to Entity nodes, returns Entity id/name/type/confidence plus relationship
 confidence and mention count rows sorted by Entity name/id/relationship id,
 supports per-Memory limits and distinct Entity name limits, reports
 found/missing Memory counts and the graph commit epoch, and does not write WAL.
+Related Entity name reads are covered by
+`Database::knowledge_related_entity_names`. The typed read validates either a
+non-empty Memory id list or one Thread id with physical `id` or logical
+`thread_id` identity, returns distinct non-empty `Entity.name` values in sorted
+order for the Nowledge REST list `Memory` id and `Thread` `COMPACTS_TO` ->
+`MENTIONS` shapes, reports missing Memory ids or missing Thread status,
+supports bounded limits, and does not write WAL.
 Context memory preview reads are covered by
 `Database::knowledge_context_memory_preview`. The typed read validates
 non-empty unit types, applies the Nowledge context-wiring filters for latest

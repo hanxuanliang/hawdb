@@ -416,6 +416,11 @@ Memory entity mention reads are available as
 `Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
 `MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
 bounded limits, and no WAL writes.
+Related Entity name reads are available as
+`Database::knowledge_related_entity_names`, covering Nowledge REST list
+`Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`
+`Memory` to `MENTIONS` Entity name reads with bounded limits, missing Memory id
+reporting, Thread physical/logical identity support, and no WAL writes.
 Thread ordered message reads are available as
 `Database::knowledge_thread_messages`, covering Nowledge `Thread` outgoing
 `CONTAINS` transcript/list shapes with `COALESCE(c.order_index, m.order_index)`

@@ -1458,6 +1458,32 @@ pub struct KnowledgeMemoryEntityListOutput {
     pub entity_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KnowledgeRelatedEntityNameScope {
+    MemoryIds(Vec<String>),
+    Thread {
+        thread_id: String,
+        identity_property: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelatedEntityNameListRequest {
+    pub scope: KnowledgeRelatedEntityNameScope,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeRelatedEntityNameListOutput {
+    pub graph_commit_epoch: u64,
+    pub entity_names: Vec<String>,
+    pub matched_memory_count: usize,
+    pub returned_count: usize,
+    pub missing_memory_ids: Vec<String>,
+    pub thread_node_id: Option<u64>,
+    pub found_thread: Option<bool>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KnowledgeContextMemoryLatestFilter {
     NullOrTrue,
@@ -4814,6 +4840,13 @@ impl Database {
         knowledge_memory_entities_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_related_entity_names(
+        &self,
+        request: &KnowledgeRelatedEntityNameListRequest,
+    ) -> Result<KnowledgeRelatedEntityNameListOutput> {
+        knowledge_related_entity_names_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_context_memory_preview(
         &self,
         request: &KnowledgeContextMemoryPreviewRequest,
@@ -6850,6 +6883,145 @@ fn memory_entity_row(entity: &NodeRecord, relationship: &RelRecord) -> Knowledge
         confidence: entity.properties.get("confidence").cloned(),
         relationship_confidence: relationship.properties.get("confidence").cloned(),
         mention_count: relationship_integer_property(relationship, "mention_count"),
+    }
+}
+
+fn knowledge_related_entity_names_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeRelatedEntityNameListRequest,
+) -> Result<KnowledgeRelatedEntityNameListOutput> {
+    validate_related_entity_name_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let mut entity_names = BTreeSet::new();
+    let mut matched_memory_count = 0;
+    let mut missing_memory_ids = Vec::new();
+    let mut thread_node_id = None;
+    let mut found_thread = None;
+
+    match &request.scope {
+        KnowledgeRelatedEntityNameScope::MemoryIds(memory_ids) => {
+            for memory_id in memory_ids {
+                let Some(memory) =
+                    seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
+                else {
+                    missing_memory_ids.push(memory_id.clone());
+                    continue;
+                };
+                matched_memory_count += 1;
+                collect_entity_names_for_memory(catalog, store, memory.id, &mut entity_names);
+            }
+        }
+        KnowledgeRelatedEntityNameScope::Thread {
+            thread_id,
+            identity_property,
+        } => {
+            if let Some(thread) =
+                thread_node_by_identity(catalog, store, identity_property, thread_id)
+            {
+                thread_node_id = Some(thread.id.0);
+                found_thread = Some(true);
+                let memory_ids = compacted_memory_node_ids_for_thread(catalog, store, thread.id);
+                matched_memory_count = memory_ids.len();
+                for memory_id in memory_ids {
+                    collect_entity_names_for_memory(catalog, store, memory_id, &mut entity_names);
+                }
+            } else {
+                found_thread = Some(false);
+            }
+        }
+    }
+
+    let mut entity_names = entity_names.into_iter().collect::<Vec<_>>();
+    if request.limit > 0 {
+        entity_names.truncate(request.limit);
+    }
+    let returned_count = entity_names.len();
+    Ok(KnowledgeRelatedEntityNameListOutput {
+        graph_commit_epoch,
+        entity_names,
+        matched_memory_count,
+        returned_count,
+        missing_memory_ids,
+        thread_node_id,
+        found_thread,
+    })
+}
+
+fn validate_related_entity_name_request(
+    request: &KnowledgeRelatedEntityNameListRequest,
+) -> Result<()> {
+    match &request.scope {
+        KnowledgeRelatedEntityNameScope::MemoryIds(memory_ids) => {
+            if memory_ids.is_empty() || memory_ids.iter().any(String::is_empty) {
+                return Err(SkeinError::Semantic(
+                    "knowledge related entity name read requires non-empty memory ids".to_string(),
+                ));
+            }
+        }
+        KnowledgeRelatedEntityNameScope::Thread {
+            thread_id,
+            identity_property,
+        } => {
+            if thread_id.is_empty() {
+                return Err(SkeinError::Semantic(
+                    "knowledge related entity name read requires a non-empty thread id".to_string(),
+                ));
+            }
+            if identity_property != "id" && identity_property != "thread_id" {
+                return Err(SkeinError::Semantic(
+                    "knowledge related entity name read requires id or thread_id identity"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compacted_memory_node_ids_for_thread(
+    catalog: &Catalog,
+    store: &GraphStore,
+    thread_node_id: NodeId,
+) -> Vec<NodeId> {
+    let Some(rel_type_id) = catalog.rel_type_id("COMPACTS_TO") else {
+        return Vec::new();
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    store
+        .outgoing_relationships(thread_node_id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .map(|memory| memory.id)
+        })
+        .collect()
+}
+
+fn collect_entity_names_for_memory(
+    catalog: &Catalog,
+    store: &GraphStore,
+    memory_node_id: NodeId,
+    entity_names: &mut BTreeSet<String>,
+) {
+    let Some(rel_type_id) = catalog.rel_type_id("MENTIONS") else {
+        return;
+    };
+    let Some(entity_label_id) = catalog.label_id("Entity") else {
+        return;
+    };
+    for relationship in store.outgoing_relationships(memory_node_id, rel_type_id) {
+        if let Some(name) = store
+            .node(relationship.target)
+            .filter(|entity| entity.labels.contains(&entity_label_id))
+            .and_then(|entity| string_property(entity, "name"))
+            .filter(|name| !name.is_empty())
+        {
+            entity_names.insert(name);
+        }
     }
 }
 
@@ -18112,6 +18284,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_entities(request)
     }
 
+    pub fn knowledge_related_entity_names(
+        &self,
+        request: &KnowledgeRelatedEntityNameListRequest,
+    ) -> Result<KnowledgeRelatedEntityNameListOutput> {
+        self.db.knowledge_related_entity_names(request)
+    }
+
     pub fn knowledge_context_memory_preview(
         &self,
         request: &KnowledgeContextMemoryPreviewRequest,
@@ -19118,6 +19297,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryEntityListRequest,
     ) -> Result<KnowledgeMemoryEntityListOutput> {
         knowledge_memory_entities_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_related_entity_names(
+        &self,
+        request: &KnowledgeRelatedEntityNameListRequest,
+    ) -> Result<KnowledgeRelatedEntityNameListOutput> {
+        knowledge_related_entity_names_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_entity(
