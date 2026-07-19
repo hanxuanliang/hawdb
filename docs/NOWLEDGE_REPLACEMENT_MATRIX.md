@@ -256,9 +256,10 @@ Community Memory ranking reads are covered by
 non-null community scopes, returns Nowledge wiki ranking/export rows from either
 incoming `Memory` `MENTIONS` over Entity communities or direct
 `Memory.community_id` assignment, preserves distinct mentioned Entity ids,
-supports false-only and null-or-false crystal filters, applies importance and
-latest-state fallbacks, supports the Nowledge ordering variants, read-transaction
-snapshots, and no WAL writes.
+supports false-only and null-or-false crystal filters plus Nowledge
+`unit_type IN $types` filters, applies importance and latest-state fallbacks,
+supports the Nowledge ordering variants, read-transaction snapshots, and no WAL
+writes.
 Related Entity name reads are covered by
 `Database::knowledge_related_entity_names`. The typed read validates either a
 non-empty Memory id list or one Thread id with physical `id` or logical

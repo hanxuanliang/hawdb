@@ -450,8 +450,9 @@ Community Memory ranking reads are available as
 memory ranking and export shapes over explicit community scopes. The typed read
 supports incoming `Memory` -> `MENTIONS` -> `Entity` mention breadth, direct
 `Memory.community_id` ranking, `is_crystal` false/null-or-false filters,
-importance and `created_at` fallbacks, distinct mentioned Entity ids, pinned
-read-transaction snapshots, and no WAL writes.
+Nowledge `unit_type IN $types` filters, importance and `created_at` fallbacks,
+distinct mentioned Entity ids, pinned read-transaction snapshots, and no WAL
+writes.
 Related Entity name reads are available as
 `Database::knowledge_related_entity_names`, covering Nowledge REST list
 `Memory` id to distinct `Entity.name` reads and `Thread` `COMPACTS_TO`

@@ -4151,6 +4151,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::NullOrFalse,
+            unit_types: Vec::new(),
             order: KnowledgeCommunityMemoryListOrder::CommunityBreadthImportanceCreatedAt,
             limit: 0,
         })
@@ -4201,6 +4202,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
             community_ids: vec![Value::Int(8)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::FalseOnly,
+            unit_types: Vec::new(),
             order: KnowledgeCommunityMemoryListOrder::EntityCountImportancePagerank,
             limit: 0,
         })
@@ -4212,6 +4214,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
             community_ids: vec![Value::Int(7), Value::Int(8)],
             source: KnowledgeCommunityMemorySource::DirectMemoryCommunity,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::NullOrFalse,
+            unit_types: Vec::new(),
             order: KnowledgeCommunityMemoryListOrder::CommunityImportanceCreatedAt,
             limit: 0,
         })
@@ -4247,6 +4250,7 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
             community_ids: vec![Value::Int(7)],
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::NullOrFalse,
+            unit_types: Vec::new(),
             order: KnowledgeCommunityMemoryListOrder::EntityCountImportancePagerank,
             limit: 1,
         })
@@ -4258,6 +4262,65 @@ fn reads_community_memories_for_wiki_ranking_shapes() {
 }
 
 #[test]
+fn reads_community_memories_for_unit_type_filter_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Entity {id: 'type_entity_a', community_id: 17})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'type_entity_b', community_id: 18})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'type_memory_fact', title: 'Fact Memory', unit_type: 'fact', is_crystal: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'type_memory_note', title: 'Note Memory', unit_type: 'note', is_crystal: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'type_memory_decision', title: 'Decision Memory', unit_type: 'decision', is_crystal: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'type_memory_crystal', title: 'Crystal Memory', unit_type: 'fact', is_crystal: true})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'type_memory_fact'}), (e:Entity {id: 'type_entity_a'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'type_memory_note'}), (e:Entity {id: 'type_entity_a'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'type_memory_decision'}), (e:Entity {id: 'type_entity_a'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'type_memory_crystal'}), (e:Entity {id: 'type_entity_a'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'type_memory_note'}), (e:Entity {id: 'type_entity_b'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let output = db
+        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+            community_ids: vec![Value::Int(17)],
+            source: KnowledgeCommunityMemorySource::MentionedEntities,
+            crystal_filter: KnowledgeCommunityMemoryCrystalFilter::FalseOnly,
+            unit_types: vec!["fact".to_string(), "note".to_string()],
+            order: KnowledgeCommunityMemoryListOrder::EntityCountImportancePagerank,
+            limit: 200,
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(output.matched_row_count, 2);
+    assert_eq!(output.returned_count, 2);
+    assert_eq!(
+        output
+            .rows
+            .iter()
+            .map(|row| (
+                row.memory_id.as_deref().unwrap(),
+                row.title.as_deref().unwrap(),
+                row.unit_type.as_deref().unwrap()
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            ("type_memory_fact", "Fact Memory", "fact"),
+            ("type_memory_note", "Note Memory", "note")
+        ]
+    );
+}
+
+#[test]
 fn community_memory_read_rejects_invalid_scope() {
     let db = Database::new();
 
@@ -4266,6 +4329,7 @@ fn community_memory_read_rejects_invalid_scope() {
             community_ids: Vec::new(),
             source: KnowledgeCommunityMemorySource::MentionedEntities,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::Any,
+            unit_types: Vec::new(),
             order: KnowledgeCommunityMemoryListOrder::CommunityBreadthImportanceCreatedAt,
             limit: 0,
         })
@@ -4279,11 +4343,26 @@ fn community_memory_read_rejects_invalid_scope() {
             community_ids: vec![Value::Null],
             source: KnowledgeCommunityMemorySource::DirectMemoryCommunity,
             crystal_filter: KnowledgeCommunityMemoryCrystalFilter::Any,
+            unit_types: Vec::new(),
             order: KnowledgeCommunityMemoryListOrder::CommunityImportanceCreatedAt,
             limit: 0,
         })
         .unwrap_err();
     assert!(null_id_error.to_string().contains("non-null community ids"));
+
+    let empty_unit_type_error = db
+        .knowledge_community_memories(&KnowledgeCommunityMemoryListRequest {
+            community_ids: vec![Value::Int(1)],
+            source: KnowledgeCommunityMemorySource::MentionedEntities,
+            crystal_filter: KnowledgeCommunityMemoryCrystalFilter::Any,
+            unit_types: vec![String::new()],
+            order: KnowledgeCommunityMemoryListOrder::CommunityBreadthImportanceCreatedAt,
+            limit: 0,
+        })
+        .unwrap_err();
+    assert!(empty_unit_type_error
+        .to_string()
+        .contains("non-empty unit types"));
 }
 
 #[test]

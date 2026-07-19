@@ -1542,6 +1542,7 @@ pub struct KnowledgeCommunityMemoryListRequest {
     pub community_ids: Vec<Value>,
     pub source: KnowledgeCommunityMemorySource,
     pub crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
+    pub unit_types: Vec<String>,
     pub order: KnowledgeCommunityMemoryListOrder,
     pub limit: usize,
 }
@@ -7549,6 +7550,7 @@ fn knowledge_community_memories_for(
         .iter()
         .cloned()
         .collect::<BTreeSet<_>>();
+    let unit_types = community_memory_unit_type_filter_values(request);
     let mut rows = Vec::new();
 
     if matches!(
@@ -7561,6 +7563,7 @@ fn knowledge_community_memories_for(
             memory_label_id,
             &community_ids,
             request.crystal_filter,
+            &unit_types,
         ));
     }
     if matches!(
@@ -7574,6 +7577,7 @@ fn knowledge_community_memories_for(
             memory_label_id,
             &community_ids,
             request.crystal_filter,
+            &unit_types,
         ));
     }
 
@@ -7620,7 +7624,22 @@ fn validate_knowledge_community_memory_list_request(
             "knowledge community memory list requires non-null community ids".to_string(),
         ));
     }
+    if request.unit_types.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge community memory list requires non-empty unit types".to_string(),
+        ));
+    }
     Ok(())
+}
+
+fn community_memory_unit_type_filter_values(
+    request: &KnowledgeCommunityMemoryListRequest,
+) -> Option<BTreeSet<String>> {
+    if request.unit_types.is_empty() {
+        None
+    } else {
+        Some(request.unit_types.iter().cloned().collect())
+    }
 }
 
 fn mentioned_community_memory_rows(
@@ -7629,6 +7648,7 @@ fn mentioned_community_memory_rows(
     memory_label_id: LabelId,
     community_ids: &BTreeSet<Value>,
     crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
+    unit_types: &Option<BTreeSet<String>>,
 ) -> Vec<KnowledgeCommunityMemoryRow> {
     let Some(entity_label_id) = catalog.label_id("Entity") else {
         return Vec::new();
@@ -7656,6 +7676,7 @@ fn mentioned_community_memory_rows(
                 .filter(|memory| {
                     memory_matches_community_memory_crystal_filter(memory, crystal_filter)
                 })
+                .filter(|memory| memory_matches_community_memory_unit_types(memory, unit_types))
             else {
                 continue;
             };
@@ -7699,6 +7720,7 @@ fn direct_community_memory_rows(
     memory_label_id: LabelId,
     community_ids: &BTreeSet<Value>,
     crystal_filter: KnowledgeCommunityMemoryCrystalFilter,
+    unit_types: &Option<BTreeSet<String>>,
 ) -> Vec<KnowledgeCommunityMemoryRow> {
     store
         .scan_nodes(Some(memory_label_id))
@@ -7708,6 +7730,7 @@ fn direct_community_memory_rows(
                 .get("community_id")
                 .is_some_and(|community_id| community_ids.contains(community_id))
                 && memory_matches_community_memory_crystal_filter(memory, crystal_filter)
+                && memory_matches_community_memory_unit_types(memory, unit_types)
         })
         .filter_map(|memory| {
             memory
@@ -7740,6 +7763,16 @@ fn memory_matches_community_memory_crystal_filter(
             boolean_property(memory, "is_crystal") != Some(true)
         }
     }
+}
+
+fn memory_matches_community_memory_unit_types(
+    memory: &NodeRecord,
+    unit_types: &Option<BTreeSet<String>>,
+) -> bool {
+    unit_types.as_ref().is_none_or(|unit_types| {
+        string_property(memory, "unit_type")
+            .is_some_and(|unit_type| unit_types.contains(&unit_type))
+    })
 }
 
 fn knowledge_community_memory_row(
