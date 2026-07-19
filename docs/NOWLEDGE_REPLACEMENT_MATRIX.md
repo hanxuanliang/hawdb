@@ -716,6 +716,10 @@ Both use the Nowledge `meta_id` identity rather than the generic `id`
 property; deletes reject empty identities before WAL, do not write WAL for
 missing rows, and persist eligible cleanup through the WAL-backed `DELETE`
 path.
+Field-extensible GraphMeta state reads are covered by
+`Database::knowledge_graph_meta_projected`. Callers provide an explicit
+property allowlist so Nowledge can add future state fields without forcing
+full-map GraphMeta reads, while snapshot reads remain pinned and WAL-free.
 Schema migration log writes are covered by a typed create-once batch for
 Nowledge `SchemaMigrationLog` ids shaped as `MERGE ... ON CREATE SET
 applied_at`. The wrapper validates non-empty migration ids before WAL, reports

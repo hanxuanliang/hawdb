@@ -717,6 +717,11 @@ detection, and fixture reset paths are available as
 They use `meta_id` as the explicit identity, reject empty identities before
 WAL, preserve missing-row no-write semantics, and route eligible deletes
 through the WAL-backed `DELETE` path.
+Field-extensible GraphMeta state reads are available as
+`Database::knowledge_graph_meta_projected`. Callers provide an explicit
+property allowlist so future GraphMeta fields can be adopted without expanding
+every read response, while read-transaction snapshots remain pinned and no WAL
+writes are produced.
 Community node cleanup for replace-community and undo-community flows is
 available as `Database::delete_knowledge_communities`. It scans only
 `Community` nodes, supports the two Nowledge cleanup modes (`DELETE` and

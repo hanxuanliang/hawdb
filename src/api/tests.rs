@@ -24,8 +24,8 @@ use super::{
     KnowledgeEntityLabelProjectedListRequest, KnowledgeEntityMentionCountCursor,
     KnowledgeEntityMentionCountListRequest, KnowledgeEntityRequest,
     KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
-    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
+    KnowledgeFanoutReasonCode, KnowledgeGraphMetaProjectedRequest, KnowledgeGraphMetaRequest,
+    KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
     KnowledgeInducedEdgeListRequest, KnowledgeLabelBackfillScanRequest,
     KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
@@ -18503,6 +18503,80 @@ fn reads_graph_meta_by_meta_id_for_nowledge_algorithm_state() {
 }
 
 #[test]
+fn projects_graph_meta_for_nowledge_state_growth() {
+    let mut db = Database::new();
+    db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, community_detection_applied: false, pagerank_computed_at: 100, future_state_field: 'future'})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let snapshot = db.begin_read_transaction();
+
+    db.query("MATCH (m:GraphMeta {meta_id: 'main'}) SET m.future_state_field = 'late', m.extra_field = 'extra'")
+        .unwrap();
+
+    let projected = db
+        .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
+            meta: KnowledgeGraphMetaRequest {
+                meta_id: "main".to_string(),
+            },
+            property_names: vec![
+                "pagerank_applied".to_string(),
+                "future_state_field".to_string(),
+                "meta_id".to_string(),
+                "pagerank_applied".to_string(),
+            ],
+        })
+        .unwrap();
+    assert_eq!(projected.graph_commit_epoch, db.store.commit_epoch());
+    assert!(projected.found);
+    let meta = projected.meta.unwrap();
+    assert_eq!(meta.meta_id.as_deref(), Some("main"));
+    assert_eq!(
+        meta.properties.get("pagerank_applied"),
+        Some(&Value::Bool(true))
+    );
+    assert_eq!(
+        meta.properties.get("future_state_field"),
+        Some(&Value::String("late".to_string()))
+    );
+    assert_eq!(
+        meta.properties.get("meta_id"),
+        Some(&Value::String("main".to_string()))
+    );
+    assert!(!meta.properties.contains_key("community_detection_applied"));
+    assert!(!meta.properties.contains_key("extra_field"));
+
+    let snapshot_projected = snapshot
+        .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
+            meta: KnowledgeGraphMetaRequest {
+                meta_id: "main".to_string(),
+            },
+            property_names: vec!["future_state_field".to_string()],
+        })
+        .unwrap();
+    assert_eq!(snapshot_projected.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(
+        snapshot_projected
+            .meta
+            .unwrap()
+            .properties
+            .get("future_state_field"),
+        Some(&Value::String("future".to_string()))
+    );
+
+    let missing = db
+        .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
+            meta: KnowledgeGraphMetaRequest {
+                meta_id: "missing".to_string(),
+            },
+            property_names: vec!["pagerank_applied".to_string()],
+        })
+        .unwrap();
+    assert_eq!(missing.graph_commit_epoch, db.store.commit_epoch());
+    assert!(!missing.found);
+    assert!(missing.meta.is_none());
+}
+
+#[test]
 fn graph_meta_read_and_delete_reject_empty_meta_id_before_wal() {
     let mut db = Database::new();
     db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
@@ -18523,6 +18597,47 @@ fn graph_meta_read_and_delete_reject_empty_meta_id_before_wal() {
         .unwrap_err();
     assert!(delete_error.to_string().contains("non-empty meta id"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn graph_meta_projected_read_rejects_empty_fields_without_wal() {
+    let path = unique_test_dir("graph_meta_projected_read_rejects_empty_fields_without_wal");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true})")
+            .unwrap();
+    }
+    let wal_before = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    {
+        let db = Database::open(&path).unwrap();
+        let graph_commit_epoch_before = db.store.commit_epoch();
+
+        let meta_error = db
+            .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
+                meta: KnowledgeGraphMetaRequest {
+                    meta_id: String::new(),
+                },
+                property_names: vec!["pagerank_applied".to_string()],
+            })
+            .unwrap_err();
+        assert!(meta_error.to_string().contains("non-empty meta id"));
+
+        let property_error = db
+            .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
+                meta: KnowledgeGraphMetaRequest {
+                    meta_id: "main".to_string(),
+                },
+                property_names: vec![String::new()],
+            })
+            .unwrap_err();
+        assert!(property_error
+            .to_string()
+            .contains("non-empty property names"));
+        assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+    }
+    let wal_after = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert_eq!(wal_after, wal_before);
+    std::fs::remove_dir_all(path).unwrap();
 }
 
 #[test]

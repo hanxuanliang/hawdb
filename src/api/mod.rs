@@ -4714,6 +4714,26 @@ pub struct KnowledgeGraphMetaOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaProjectedRequest {
+    pub meta: KnowledgeGraphMetaRequest,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaProjected {
+    pub meta_id: Option<String>,
+    pub node_id: u64,
+    pub properties: BTreeMap<String, Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeGraphMetaProjectedOutput {
+    pub graph_commit_epoch: u64,
+    pub found: bool,
+    pub meta: Option<KnowledgeGraphMetaProjected>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeGraphMetaDeleteOutput {
     pub graph_commit_epoch_before: u64,
     pub graph_commit_epoch_after: u64,
@@ -7424,6 +7444,13 @@ impl Database {
         request: &KnowledgeGraphMetaRequest,
     ) -> Result<KnowledgeGraphMetaOutput> {
         knowledge_graph_meta_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_graph_meta_projected(
+        &self,
+        request: &KnowledgeGraphMetaProjectedRequest,
+    ) -> Result<KnowledgeGraphMetaProjectedOutput> {
+        knowledge_graph_meta_projected_for(&self.catalog, &self.store, request)
     }
 
     pub fn delete_knowledge_graph_meta(
@@ -21893,6 +21920,28 @@ fn knowledge_graph_meta_for(
     })
 }
 
+fn knowledge_graph_meta_projected_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeGraphMetaProjectedRequest,
+) -> Result<KnowledgeGraphMetaProjectedOutput> {
+    validate_graph_meta_projected_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let meta = node_by_label_property_external_id(
+        catalog,
+        store,
+        "GraphMeta",
+        "meta_id",
+        &request.meta.meta_id,
+    )
+    .map(|node| knowledge_graph_meta_projected_from_node(node, &request.property_names));
+    Ok(KnowledgeGraphMetaProjectedOutput {
+        graph_commit_epoch,
+        found: meta.is_some(),
+        meta,
+    })
+}
+
 fn delete_knowledge_graph_meta_for(
     db: &mut Database,
     request: &KnowledgeGraphMetaRequest,
@@ -21940,6 +21989,18 @@ fn validate_graph_meta_request(request: &KnowledgeGraphMetaRequest) -> Result<()
     Ok(())
 }
 
+fn validate_graph_meta_projected_request(
+    request: &KnowledgeGraphMetaProjectedRequest,
+) -> Result<()> {
+    validate_graph_meta_request(&request.meta)?;
+    if request.property_names.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge graph meta projected read requires non-empty property names".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn knowledge_graph_meta_from_node(node: &NodeRecord) -> KnowledgeGraphMeta {
     KnowledgeGraphMeta {
         meta_id: node
@@ -21949,6 +22010,21 @@ fn knowledge_graph_meta_from_node(node: &NodeRecord) -> KnowledgeGraphMeta {
             .filter(|meta_id| !meta_id.is_empty()),
         node_id: node.id.0,
         properties: node.properties.clone(),
+    }
+}
+
+fn knowledge_graph_meta_projected_from_node(
+    node: &NodeRecord,
+    property_names: &[String],
+) -> KnowledgeGraphMetaProjected {
+    KnowledgeGraphMetaProjected {
+        meta_id: node
+            .properties
+            .get("meta_id")
+            .map(value_to_external_id)
+            .filter(|meta_id| !meta_id.is_empty()),
+        node_id: node.id.0,
+        properties: projected_properties(&node.properties, property_names),
     }
 }
 
@@ -28375,6 +28451,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_graph_meta(request)
     }
 
+    pub fn knowledge_graph_meta_projected(
+        &self,
+        request: &KnowledgeGraphMetaProjectedRequest,
+    ) -> Result<KnowledgeGraphMetaProjectedOutput> {
+        self.db.knowledge_graph_meta_projected(request)
+    }
+
     pub fn delete_knowledge_graph_meta(
         &mut self,
         request: &KnowledgeGraphMetaRequest,
@@ -29165,6 +29248,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
         knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_graph_meta_projected(
+        &self,
+        request: &KnowledgeGraphMetaProjectedRequest,
+    ) -> Result<KnowledgeGraphMetaProjectedOutput> {
+        knowledge_graph_meta_projected_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_skills(
