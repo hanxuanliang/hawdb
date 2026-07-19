@@ -1577,10 +1577,11 @@ Current implemented slice:
   and bounded multi-hop path source/target coverage distinct statistics for
   distinct variable aggregate costing without depending on a storage fixture,
   plus optimizer smoke coverage for bounded multi-hop distinct-target
-  aggregates. The benchmark also emits an `optimizer_smoke_summaries` line with
-  stable per-case rows, cost, operator/class counts, and shortened
-  fingerprints so CI and release notes can compare Nowledge-shaped optimizer
-  plan drift without parsing full explain output
+  aggregates. The benchmark also emits `optimizer_smoke_summaries` and
+  `optimizer_smoke_summaries_json` lines with stable per-case rows, cost,
+  operator/class counts, and shortened fingerprints so CI and release notes can
+  compare Nowledge-shaped optimizer plan drift without parsing full explain
+  output. Automation should consume the JSON line when possible
 
 Remaining Phase 4 work:
 

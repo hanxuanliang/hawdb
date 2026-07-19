@@ -1,3 +1,4 @@
+use serde_json::json;
 use skein::optimizer::{
     CascadesOptimizer, OptimizerCatalog, OptimizerCatalogIndexes, OptimizerCatalogStatistics,
     OptimizerConfig, PlanCost,
@@ -25,14 +26,14 @@ fn main() {
             trace.selected_plan_fingerprint
         })
         .collect::<Vec<_>>();
-    let summaries = cases
+    let summary_reports = cases
         .iter()
         .zip(expected.iter())
         .map(|(case, expected_fingerprint)| {
             let (_, trace) = optimizer.optimize_with_catalog(&case.logical, &case.catalog);
             assert_trace(case, &trace);
             assert_eq!(&trace.selected_plan_fingerprint, expected_fingerprint);
-            optimizer_smoke_case_summary(case, &trace)
+            OptimizerSmokeCaseReport::new(case, &trace)
         })
         .collect::<Vec<_>>();
 
@@ -51,7 +52,23 @@ fn main() {
         elapsed.as_millis(),
         expected.join("|")
     );
-    println!("optimizer_smoke_summaries {}", summaries.join(" | "));
+    println!(
+        "optimizer_smoke_summaries {}",
+        summary_reports
+            .iter()
+            .map(OptimizerSmokeCaseReport::text)
+            .collect::<Vec<_>>()
+            .join(" | ")
+    );
+    println!(
+        "optimizer_smoke_summaries_json {}",
+        serde_json::Value::Array(
+            summary_reports
+                .iter()
+                .map(OptimizerSmokeCaseReport::json)
+                .collect::<Vec<_>>()
+        )
+    );
 
     let budgeted = CascadesOptimizer::new(OptimizerConfig { max_groups: 2 });
     let (_, budgeted_trace) = budgeted.optimize_with_catalog(&cases[0].logical, &cases[0].catalog);
@@ -62,20 +79,53 @@ fn main() {
     assert_eq!(budgeted_trace.selected_plan_cost, cases[0].expected_cost);
 }
 
-fn optimizer_smoke_case_summary(
-    case: &OptimizerSmokeCase,
-    trace: &skein::optimizer::OptimizerTrace,
-) -> String {
-    format!(
-        "case={} groups={} rows={} cost={} operators={} classes={} fingerprint={}",
-        case.name,
-        trace.groups,
-        trace.selected_plan_cost.estimated_rows,
-        trace.selected_plan_cost.cost,
-        stable_counts(&trace.selected_plan_operator_counts),
-        stable_counts(&trace.selected_plan_class_counts),
-        stable_fingerprint_summary(&trace.selected_plan_fingerprint)
-    )
+struct OptimizerSmokeCaseReport<'a> {
+    case: &'a str,
+    groups: usize,
+    rows: u64,
+    cost: u64,
+    operator_counts: BTreeMap<String, usize>,
+    class_counts: BTreeMap<String, usize>,
+    fingerprint: String,
+}
+
+impl<'a> OptimizerSmokeCaseReport<'a> {
+    fn new(case: &'a OptimizerSmokeCase, trace: &skein::optimizer::OptimizerTrace) -> Self {
+        Self {
+            case: case.name,
+            groups: trace.groups,
+            rows: trace.selected_plan_cost.estimated_rows,
+            cost: trace.selected_plan_cost.cost,
+            operator_counts: trace.selected_plan_operator_counts.clone(),
+            class_counts: trace.selected_plan_class_counts.clone(),
+            fingerprint: stable_fingerprint_summary(&trace.selected_plan_fingerprint),
+        }
+    }
+
+    fn text(&self) -> String {
+        format!(
+            "case={} groups={} rows={} cost={} operators={} classes={} fingerprint={}",
+            self.case,
+            self.groups,
+            self.rows,
+            self.cost,
+            stable_counts(&self.operator_counts),
+            stable_counts(&self.class_counts),
+            self.fingerprint
+        )
+    }
+
+    fn json(&self) -> serde_json::Value {
+        json!({
+            "case": self.case,
+            "groups": self.groups,
+            "rows": self.rows,
+            "cost": self.cost,
+            "operator_counts": self.operator_counts,
+            "class_counts": self.class_counts,
+            "fingerprint": self.fingerprint,
+        })
+    }
 }
 
 fn stable_counts(counts: &BTreeMap<String, usize>) -> String {
