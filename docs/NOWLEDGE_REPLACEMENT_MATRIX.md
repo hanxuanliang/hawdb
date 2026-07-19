@@ -170,6 +170,15 @@ chunk counts before WAL, applies optional current-state filtering, reports
 missing/idless/duplicate rows without writing, writes `lifecycle_state`,
 optional `chunk_count`, and `updated_at`, and commits eligible Source rows
 through one grouped WAL batch.
+Source operational reads are covered by typed APIs for Nowledge source detail,
+source count, extracted-source id list, and normalized-space id list paths.
+`Database::knowledge_source` returns the Source identity, display fields,
+normalized space, lifecycle fields, size/count fields, timestamps, and
+`SOURCED_FROM` Memory count for one Source id. `Database::knowledge_source_ids`
+returns sorted Source ids filtered by lifecycle state and/or normalized space
+with bounded limits, while `Database::knowledge_source_count` exposes the total
+Source node count. These reads report the graph commit epoch and do not write
+WAL.
 Memory lifecycle metadata writes are covered by a typed batch for the Nowledge
 `metadata`, `is_latest`, `lifecycle_state`, and `updated_at` update shape. The
 wrapper validates Memory ids and non-empty lifecycle states before WAL, reports

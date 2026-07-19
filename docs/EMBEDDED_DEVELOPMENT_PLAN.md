@@ -155,8 +155,9 @@ transaction execution without requiring raw string interpolation.
 The typed knowledge facade also covers endpoint-known entity lookup,
 create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
 normalized-space batch moves, memory access/click-dwell touches, ordered batch
-mutation, source memory-count adjustments, source lifecycle updates, and grouped
-WAL commits for eligible lifecycle rows. Memory lifecycle metadata updates are
+mutation, source memory-count adjustments, source lifecycle updates, source
+detail/count/id-list reads, and grouped WAL commits for eligible lifecycle rows.
+Memory lifecycle metadata updates are
 also exposed as a typed batch for the Nowledge `metadata`/`is_latest`/
 `lifecycle_state`/`updated_at` write shape. Skill usage-stat updates are exposed
 as a typed batch for Nowledge `use_count`, optional `success_rate`,

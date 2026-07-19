@@ -1714,6 +1714,59 @@ pub struct KnowledgeSourceLifecycleBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceRequest {
+    pub source_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeSourceIdListRequest {
+    pub lifecycle_state: Option<String>,
+    pub normalized_space_id: Option<String>,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceRow {
+    pub source_id: Option<String>,
+    pub node_id: u64,
+    pub original_name: Option<String>,
+    pub title: Option<String>,
+    pub source_type: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub normalized_space_id: String,
+    pub parsed_path: Option<String>,
+    pub file_path: Option<String>,
+    pub mime_type: Option<String>,
+    pub memory_count: Option<i64>,
+    pub chunk_count: Option<i64>,
+    pub size_bytes: Option<i64>,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub sourced_memory_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceOutput {
+    pub graph_commit_epoch: u64,
+    pub found: bool,
+    pub row: Option<KnowledgeSourceRow>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceIdListOutput {
+    pub graph_commit_epoch: u64,
+    pub source_ids: Vec<String>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceCountOutput {
+    pub graph_commit_epoch: u64,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryLifecycleUpdate {
     pub memory_id: String,
     pub metadata: Value,
@@ -4295,6 +4348,27 @@ impl Database {
         request: &KnowledgeSourceLifecycleBatchRequest,
     ) -> Result<KnowledgeSourceLifecycleBatchOutput> {
         update_knowledge_source_lifecycle_batch_for(self, request)
+    }
+
+    pub fn knowledge_source(
+        &self,
+        request: &KnowledgeSourceRequest,
+    ) -> Result<KnowledgeSourceOutput> {
+        knowledge_source_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_ids(
+        &self,
+        request: &KnowledgeSourceIdListRequest,
+    ) -> Result<KnowledgeSourceIdListOutput> {
+        knowledge_source_ids_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
+        KnowledgeSourceCountOutput {
+            graph_commit_epoch: self.store.commit_epoch(),
+            count: count_nodes_with_label(&self.catalog, &self.store, "Source"),
+        }
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(
@@ -7503,6 +7577,148 @@ fn update_knowledge_source_lifecycle_batch_for(
         updated_count,
         updated_property_count,
     })
+}
+
+fn knowledge_source_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceRequest,
+) -> Result<KnowledgeSourceOutput> {
+    if request.source_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source read requires a non-empty source id".to_string(),
+        ));
+    }
+    let row = seed_node_by_label_and_external_id(catalog, store, "Source", &request.source_id)
+        .map(|node| knowledge_source_row(catalog, store, node));
+    Ok(KnowledgeSourceOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        found: row.is_some(),
+        row,
+    })
+}
+
+fn knowledge_source_ids_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceIdListRequest,
+) -> Result<KnowledgeSourceIdListOutput> {
+    if request
+        .lifecycle_state
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source id list requires a non-empty lifecycle state".to_string(),
+        ));
+    }
+    if request
+        .normalized_space_id
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source id list requires a non-empty normalized space id".to_string(),
+        ));
+    }
+
+    let Some(label_id) = catalog.label_id("Source") else {
+        return Ok(KnowledgeSourceIdListOutput {
+            graph_commit_epoch: store.commit_epoch(),
+            source_ids: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+    let mut source_ids = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| {
+            request.lifecycle_state.as_ref().is_none_or(|state| {
+                node.properties
+                    .get("lifecycle_state")
+                    .map(value_to_external_id)
+                    .as_ref()
+                    == Some(state)
+            }) && request
+                .normalized_space_id
+                .as_ref()
+                .is_none_or(|space_id| normalized_node_space_id(node) == *space_id)
+        })
+        .filter_map(node_external_id)
+        .collect::<Vec<_>>();
+    source_ids.sort();
+    let matched_count = source_ids.len();
+    if request.limit > 0 {
+        source_ids.truncate(request.limit);
+    }
+    let returned_count = source_ids.len();
+    Ok(KnowledgeSourceIdListOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        source_ids,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn knowledge_source_row(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node: &NodeRecord,
+) -> KnowledgeSourceRow {
+    KnowledgeSourceRow {
+        source_id: node_external_id(node),
+        node_id: node.id.0,
+        original_name: string_property(node, "original_name"),
+        title: string_property(node, "title"),
+        source_type: string_property(node, "source_type"),
+        lifecycle_state: string_property(node, "lifecycle_state"),
+        normalized_space_id: normalized_node_space_id(node),
+        parsed_path: string_property(node, "parsed_path"),
+        file_path: string_property(node, "file_path"),
+        mime_type: string_property(node, "mime_type"),
+        memory_count: integer_property(node, "memory_count"),
+        chunk_count: integer_property(node, "chunk_count"),
+        size_bytes: integer_property(node, "size_bytes"),
+        created_at: node.properties.get("created_at").cloned(),
+        updated_at: node.properties.get("updated_at").cloned(),
+        sourced_memory_count: source_sourced_memory_count(catalog, store, node.id),
+    }
+}
+
+fn source_sourced_memory_count(
+    catalog: &Catalog,
+    store: &GraphStore,
+    source_node_id: NodeId,
+) -> usize {
+    let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
+        return 0;
+    };
+    let memory_label_id = catalog.label_id("Memory");
+    store
+        .scan_relationships(Some(rel_type_id))
+        .filter(|relationship| {
+            relationship.target == source_node_id
+                && memory_label_id.is_none_or(|label_id| {
+                    store
+                        .node(relationship.source)
+                        .is_some_and(|node| node.labels.contains(&label_id))
+                })
+        })
+        .count()
+}
+
+fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
+    node.properties
+        .get(property)
+        .map(value_to_external_id)
+        .filter(|value| !value.is_empty())
+}
+
+fn integer_property(node: &NodeRecord, property: &str) -> Option<i64> {
+    match node.properties.get(property) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
+    }
 }
 
 fn update_knowledge_memory_lifecycle_batch_for(
@@ -15270,6 +15486,24 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSourceLifecycleBatchRequest,
     ) -> Result<KnowledgeSourceLifecycleBatchOutput> {
         self.db.update_knowledge_source_lifecycle_batch(request)
+    }
+
+    pub fn knowledge_source(
+        &self,
+        request: &KnowledgeSourceRequest,
+    ) -> Result<KnowledgeSourceOutput> {
+        self.db.knowledge_source(request)
+    }
+
+    pub fn knowledge_source_ids(
+        &self,
+        request: &KnowledgeSourceIdListRequest,
+    ) -> Result<KnowledgeSourceIdListOutput> {
+        self.db.knowledge_source_ids(request)
+    }
+
+    pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
+        self.db.knowledge_source_count()
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(
