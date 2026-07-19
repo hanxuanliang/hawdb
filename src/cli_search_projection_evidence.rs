@@ -1,4 +1,5 @@
 use crate::{Result, SkeinError};
+use skein::{SearchIndex, SearchProjectionProbeOptions};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -21,6 +22,11 @@ const VECTOR_TABLES: &[&str] = &[
 
 pub fn nowledge_search_projection_evidence_usage() -> String {
     "nowledge-search-projection-evidence requires [--require-ready] <search-projection-probe-json>"
+        .to_string()
+}
+
+pub fn skein_search_projection_probe_usage() -> String {
+    "skein-search-projection-probe requires [--active-model <model>] [--active-dimension <dimension>] <search-index-dir>"
         .to_string()
 }
 
@@ -50,6 +56,37 @@ pub fn run_nowledge_search_projection_evidence(
     Err(SkeinError::Semantic(
         nowledge_search_projection_evidence_usage(),
     ))
+}
+
+pub fn run_skein_search_projection_probe(
+    mut args: impl Iterator<Item = String>,
+) -> Result<serde_json::Value> {
+    let mut options = SearchProjectionProbeOptions::default();
+    while let Some(flag) = args.next() {
+        match flag.as_str() {
+            "--active-model" => {
+                options.active_embedding_model =
+                    Some(args.next().ok_or_else(|| {
+                        SkeinError::Semantic(skein_search_projection_probe_usage())
+                    })?);
+            }
+            "--active-dimension" => {
+                let raw_dimension = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(skein_search_projection_probe_usage()))?;
+                options.active_embedding_dimension =
+                    Some(parse_positive_usize("--active-dimension", &raw_dimension)?);
+            }
+            path => {
+                if args.next().is_some() {
+                    return Err(SkeinError::Semantic(skein_search_projection_probe_usage()));
+                }
+                let index = SearchIndex::open(path)?;
+                return Ok(index.nowledge_search_projection_probe_json(options));
+            }
+        }
+    }
+    Err(SkeinError::Semantic(skein_search_projection_probe_usage()))
 }
 
 pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> serde_json::Value {
@@ -287,6 +324,18 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     })
 }
 
+fn parse_positive_usize(flag: &str, value: &str) -> Result<usize> {
+    let parsed = value.parse::<usize>().map_err(|error| {
+        SkeinError::Semantic(format!("invalid {flag} value '{value}': {error}"))
+    })?;
+    if parsed == 0 {
+        return Err(SkeinError::Semantic(format!(
+            "invalid {flag} value '{value}': expected a positive integer"
+        )));
+    }
+    Ok(parsed)
+}
+
 fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
     let mut current = value;
     for key in path {
@@ -320,7 +369,14 @@ fn array_path(value: &serde_json::Value, path: &[&str]) -> Option<Vec<String>> {
 
 #[cfg(test)]
 mod tests {
-    use super::nowledge_search_projection_evidence_json;
+    use super::{nowledge_search_projection_evidence_json, run_skein_search_projection_probe};
+    use skein::{
+        SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
+        SearchProjectionRow,
+    };
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn search_projection_evidence_reports_ready_for_complete_probe() {
@@ -382,6 +438,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn skein_probe_output_feeds_search_projection_evidence() {
+        let path = unique_test_dir("search_projection_probe_command");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: nowledge_probe_rows(),
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(11),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+
+        let probe = run_skein_search_projection_probe(
+            [
+                "--active-model",
+                "bge-m3",
+                "--active-dimension",
+                "2",
+                path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+        let evidence = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["covered_table_count"], 6);
+        assert_eq!(evidence["source_chunk_ready"], true);
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     fn ready_probe() -> serde_json::Value {
         serde_json::json!({
             "derived_projection": true,
@@ -425,5 +525,46 @@ mod tests {
             "row_count": 1,
             "blocker_codes": []
         })
+    }
+
+    fn nowledge_probe_rows() -> Vec<SearchProjectionRow> {
+        vec![
+            nowledge_probe_row(SearchProjectionKind::Memory, "mem_1"),
+            nowledge_probe_row_without_embedding(SearchProjectionKind::Message, "msg_1"),
+            nowledge_probe_row(SearchProjectionKind::Community, "community_1"),
+            nowledge_probe_row(SearchProjectionKind::Entity, "entity_1"),
+            nowledge_probe_row(SearchProjectionKind::Source, "source_1"),
+            nowledge_probe_row(SearchProjectionKind::SourceChunk, "chunk_1"),
+        ]
+    }
+
+    fn nowledge_probe_row(kind: SearchProjectionKind, external_id: &str) -> SearchProjectionRow {
+        SearchProjectionRow {
+            kind,
+            external_id: external_id.to_string(),
+            title: format!("{external_id} title"),
+            body: format!("{external_id} body"),
+            embedding: Some(vec![1.0, 0.0]),
+            source_id: Some("source_1".to_string()),
+            metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+        }
+    }
+
+    fn nowledge_probe_row_without_embedding(
+        kind: SearchProjectionKind,
+        external_id: &str,
+    ) -> SearchProjectionRow {
+        SearchProjectionRow {
+            embedding: None,
+            ..nowledge_probe_row(kind, external_id)
+        }
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}", std::process::id()))
     }
 }

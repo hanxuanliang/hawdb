@@ -89,6 +89,12 @@ pub struct SearchProjectionFreshness {
     pub embedding_dimension: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchProjectionProbeOptions {
+    pub active_embedding_model: Option<String>,
+    pub active_embedding_dimension: Option<usize>,
+}
+
 impl SearchProjectionRow {
     pub fn into_document(self) -> SearchDocument {
         let kind = self.kind.as_str();
@@ -741,6 +747,79 @@ impl SearchIndex {
                 .map(|manifest| manifest.dimension)
                 .or(self.embedding_dimension),
         }
+    }
+
+    pub fn nowledge_search_projection_probe_json(
+        &self,
+        options: SearchProjectionProbeOptions,
+    ) -> serde_json::Value {
+        let freshness = self.projection_freshness();
+        let table_reports =
+            search_projection_probe_table_reports(&self.documents, freshness.embedding_dimension);
+        let manifest = self.embedding_manifest.as_ref();
+        let model = manifest.map(|manifest| manifest.model.as_str());
+        let dimension = manifest
+            .map(|manifest| manifest.dimension)
+            .or(freshness.embedding_dimension);
+        let active_model = options.active_embedding_model.as_deref().or(model);
+        let active_dimension = options.active_embedding_dimension.or(dimension);
+        let model_matches = model.is_some() && model == active_model;
+        let dimension_matches = dimension.is_some() && dimension == active_dimension;
+        let has_documents = !self.documents.is_empty();
+        let has_text = self
+            .documents
+            .values()
+            .any(|document| !document.title.is_empty() || !document.content.is_empty());
+        let has_vector = self
+            .documents
+            .values()
+            .any(|document| document.embedding.is_some());
+
+        serde_json::json!({
+            "protocol": "skein-nowledge-search-projection-probe",
+            "derived_projection": true,
+            "document_count": self.documents.len(),
+            "tables": table_reports,
+            "embedding_manifest": {
+                "model": model,
+                "version": manifest.and_then(|manifest| manifest.version.as_deref()),
+                "dimension": dimension,
+                "active_model": active_model,
+                "active_dimension": active_dimension,
+                "model_matches": model_matches,
+                "dimension_matches": dimension_matches,
+            },
+            "fail_soft": {
+                "fts_to_vector_ready": has_vector,
+                "vector_to_fts_ready": has_text,
+                "no_500_on_leg_failure": has_documents,
+            },
+            "lifecycle": {
+                "rebuild_marker_ready": !freshness.full_reindex_needed,
+                "metadata_repair_marker_ready": !freshness.metadata_repair_needed,
+                "full_reindex_needed": freshness.full_reindex_needed,
+                "full_reindex_reasons": freshness.full_reindex_reasons,
+                "metadata_repair_needed": freshness.metadata_repair_needed,
+                "metadata_repair_reasons": freshness.metadata_repair_reasons,
+                "source_graph_commit_epoch": freshness.source_graph_commit_epoch,
+            },
+            "incremental_update": {
+                "ready": has_documents && freshness.source_graph_commit_epoch.is_some(),
+                "upsert_ready": has_documents,
+                "delete_ready": has_documents,
+                "watermark_ready": freshness.source_graph_commit_epoch.is_some(),
+                "source_graph_commit_epoch": freshness.source_graph_commit_epoch,
+            },
+            "blocker_codes": search_projection_probe_blocker_codes(
+                has_documents,
+                has_text,
+                has_vector,
+                manifest.is_some(),
+                model_matches,
+                dimension_matches,
+                &freshness,
+            ),
+        })
     }
 
     pub fn apply_embedding_manifest(&mut self, manifest: SearchEmbeddingManifest) -> Result<()> {
@@ -1534,6 +1613,103 @@ impl SearchIndex {
             .map(str::to_string)
             .collect())
     }
+}
+
+const NOWLEDGE_SEARCH_PROJECTION_TABLES: &[(&str, &str, bool)] = &[
+    ("memories_index", "memory", true),
+    ("messages_index", "message", false),
+    ("communities_index", "community", true),
+    ("entities_index", "entity", true),
+    ("sources_index", "source", true),
+    ("source_chunks_index", "source_chunk", true),
+];
+
+fn search_projection_probe_table_reports(
+    documents: &BTreeMap<String, SearchDocument>,
+    embedding_dimension: Option<usize>,
+) -> Vec<serde_json::Value> {
+    NOWLEDGE_SEARCH_PROJECTION_TABLES
+        .iter()
+        .map(|(table_name, kind, requires_vector)| {
+            let table_documents = documents
+                .values()
+                .filter(|document| {
+                    document
+                        .metadata
+                        .get("kind")
+                        .is_some_and(|value| value == kind)
+                })
+                .collect::<Vec<_>>();
+            let present = !table_documents.is_empty();
+            let has_text = table_documents
+                .iter()
+                .any(|document| !document.title.is_empty() || !document.content.is_empty());
+            let vectors_match = !*requires_vector
+                || table_documents.iter().all(|document| {
+                    document.embedding.as_ref().is_some_and(|embedding| {
+                        embedding_dimension.is_none_or(|dimension| embedding.len() == dimension)
+                    })
+                });
+            let vector_ready = !*requires_vector || (present && vectors_match);
+            let mut blocker_codes = Vec::new();
+            if !present {
+                blocker_codes.push("missing_table_rows");
+            }
+            if !has_text {
+                blocker_codes.push("missing_searchable_text");
+            }
+            if *requires_vector && !vector_ready {
+                blocker_codes.push("missing_or_mismatched_vectors");
+            }
+            serde_json::json!({
+                "name": table_name,
+                "kind": kind,
+                "present": present,
+                "fts_ready": present && has_text,
+                "vector_ready": vector_ready,
+                "row_count": table_documents.len(),
+                "requires_vector": requires_vector,
+                "blocker_codes": blocker_codes,
+            })
+        })
+        .collect()
+}
+
+fn search_projection_probe_blocker_codes(
+    has_documents: bool,
+    has_text: bool,
+    has_vector: bool,
+    has_manifest: bool,
+    model_matches: bool,
+    dimension_matches: bool,
+    freshness: &SearchProjectionFreshness,
+) -> Vec<String> {
+    let mut blockers = BTreeSet::new();
+    if !has_documents {
+        blockers.insert("empty_search_projection".to_string());
+    }
+    if !has_text {
+        blockers.insert("missing_text_leg".to_string());
+    }
+    if !has_vector {
+        blockers.insert("missing_vector_leg".to_string());
+    }
+    if !has_manifest {
+        blockers.insert("missing_embedding_manifest".to_string());
+    }
+    if !model_matches {
+        blockers.insert("embedding_model_mismatch".to_string());
+    }
+    if !dimension_matches {
+        blockers.insert("embedding_dimension_mismatch".to_string());
+    }
+    if freshness.full_reindex_needed {
+        blockers.insert("full_reindex_needed".to_string());
+    }
+    if freshness.metadata_repair_needed {
+        blockers.insert("metadata_repair_needed".to_string());
+    }
+    blockers.into_iter().collect()
 }
 
 pub(crate) fn projection_row_from_node(
@@ -4403,6 +4579,88 @@ mod tests {
     }
 
     #[test]
+    fn nowledge_search_projection_probe_reports_ready_shape() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "bge-m3".to_string(),
+                version: Some("local".to_string()),
+                dimension: 2,
+            })
+            .unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: nowledge_probe_rows(),
+                deletes: Vec::new(),
+                max_operations: None,
+                source_graph_commit_epoch: Some(7),
+            })
+            .unwrap();
+
+        let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
+            active_embedding_model: Some("bge-m3".to_string()),
+            active_embedding_dimension: Some(2),
+        });
+
+        assert_eq!(probe["derived_projection"], true);
+        assert_eq!(probe["document_count"], 6);
+        assert_eq!(probe["tables"].as_array().unwrap().len(), 6);
+        assert!(probe["tables"].as_array().unwrap().iter().all(|table| {
+            table["present"] == true && table["fts_ready"] == true && table["vector_ready"] == true
+        }));
+        assert_eq!(probe["embedding_manifest"]["model_matches"], true);
+        assert_eq!(probe["embedding_manifest"]["dimension_matches"], true);
+        assert_eq!(probe["fail_soft"]["fts_to_vector_ready"], true);
+        assert_eq!(probe["fail_soft"]["vector_to_fts_ready"], true);
+        assert_eq!(probe["lifecycle"]["rebuild_marker_ready"], true);
+        assert_eq!(probe["lifecycle"]["metadata_repair_marker_ready"], true);
+        assert_eq!(probe["incremental_update"]["ready"], true);
+        assert_eq!(probe["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn nowledge_search_projection_probe_reports_manifest_and_marker_blockers() {
+        let path = unique_test_dir("search_projection_probe_blockers");
+        let mut index = SearchIndex::open(&path).unwrap();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "bge-m3".to_string(),
+                version: None,
+                dimension: 2,
+            })
+            .unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: nowledge_probe_rows(),
+                deletes: Vec::new(),
+                max_operations: None,
+                source_graph_commit_epoch: Some(7),
+            })
+            .unwrap();
+        index
+            .mark_full_reindex_needed("embedding model changed")
+            .unwrap();
+
+        let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
+            active_embedding_model: Some("text-embedding-3-small".to_string()),
+            active_embedding_dimension: Some(1536),
+        });
+
+        assert_eq!(probe["embedding_manifest"]["model_matches"], false);
+        assert_eq!(probe["embedding_manifest"]["dimension_matches"], false);
+        assert_eq!(probe["lifecycle"]["rebuild_marker_ready"], false);
+        assert_eq!(
+            probe["blocker_codes"],
+            serde_json::json!([
+                "embedding_dimension_mismatch",
+                "embedding_model_mismatch",
+                "full_reindex_needed"
+            ])
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
     fn projection_markers_round_trip() {
         let path = unique_test_dir("search_markers");
         let index = SearchIndex::open(&path).unwrap();
@@ -4423,6 +4681,39 @@ mod tests {
             "embedding model changed"
         );
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    fn nowledge_probe_rows() -> Vec<SearchProjectionRow> {
+        vec![
+            nowledge_probe_row(SearchProjectionKind::Memory, "mem_1"),
+            nowledge_probe_row_without_embedding(SearchProjectionKind::Message, "msg_1"),
+            nowledge_probe_row(SearchProjectionKind::Community, "community_1"),
+            nowledge_probe_row(SearchProjectionKind::Entity, "entity_1"),
+            nowledge_probe_row(SearchProjectionKind::Source, "source_1"),
+            nowledge_probe_row(SearchProjectionKind::SourceChunk, "chunk_1"),
+        ]
+    }
+
+    fn nowledge_probe_row(kind: SearchProjectionKind, external_id: &str) -> SearchProjectionRow {
+        SearchProjectionRow {
+            kind,
+            external_id: external_id.to_string(),
+            title: format!("{external_id} title"),
+            body: format!("{external_id} body"),
+            embedding: Some(vec![1.0, 0.0]),
+            source_id: Some("source_1".to_string()),
+            metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+        }
+    }
+
+    fn nowledge_probe_row_without_embedding(
+        kind: SearchProjectionKind,
+        external_id: &str,
+    ) -> SearchProjectionRow {
+        SearchProjectionRow {
+            embedding: None,
+            ..nowledge_probe_row(kind, external_id)
+        }
     }
 
     #[test]
