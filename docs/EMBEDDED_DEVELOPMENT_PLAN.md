@@ -509,6 +509,13 @@ Field-extensible Memory list reads are available as
 filters and ordering while projecting only caller-allowlisted Memory fields.
 Sort keys remain internal, so Nowledge can request newly added Memory fields
 without widening the default typed row or emitting WAL entries.
+Metadata-related Memory detail reads are available as
+`Database::knowledge_memory_metadata_related_projected_list`, covering the
+Nowledge REST list fallback that finds Memories in one normalized space whose
+metadata references a source or source Thread id. The typed read builds only the
+Nowledge-used `source_id` and `source_thread_id` metadata markers, requires a
+positive limit, projects caller-allowlisted Memory fields, orders by internal
+`created_at` descending, supports pinned snapshots, and does not write WAL.
 Memory prefix ownership guard reads are available as
 `Database::knowledge_memory_prefix_ownership`, covering MCP skill-memory prefix
 ownership checks with raw and normalized `space_id` projection and no WAL

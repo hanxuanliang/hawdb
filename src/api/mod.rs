@@ -1719,6 +1719,22 @@ pub struct KnowledgeMemoryProjectedListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryMetadataRelatedProjectedListRequest {
+    pub normalized_space_id: String,
+    pub source_id: String,
+    pub limit: usize,
+    pub property_names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryMetadataRelatedProjectedListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeMemoryProjectedRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryPrefixOwnershipRequest {
     pub prefix: String,
     pub limit: usize,
@@ -6518,6 +6534,13 @@ impl Database {
         knowledge_memory_projected_list_for(&self.catalog, &self.store, request)
     }
 
+    pub fn knowledge_memory_metadata_related_projected_list(
+        &self,
+        request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
+    ) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
+        knowledge_memory_metadata_related_projected_list_for(&self.catalog, &self.store, request)
+    }
+
     pub fn knowledge_memory_prefix_ownership(
         &self,
         request: &KnowledgeMemoryPrefixOwnershipRequest,
@@ -10053,6 +10076,108 @@ fn validate_knowledge_memory_projected_list_request(
         ));
     }
     Ok(())
+}
+
+fn knowledge_memory_metadata_related_projected_list_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
+) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
+    validate_knowledge_memory_metadata_related_projected_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Ok(KnowledgeMemoryMetadataRelatedProjectedListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let markers = metadata_related_memory_markers(&request.source_id);
+    let mut rows = store
+        .scan_nodes(Some(memory_label_id))
+        .filter(|memory| normalized_node_space_id(memory) == request.normalized_space_id)
+        .filter(|memory| memory_metadata_contains_any(memory, &markers))
+        .map(|memory| {
+            (
+                knowledge_memory_projected_row(memory, &request.property_names),
+                memory.properties.get("created_at").cloned(),
+            )
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_skill_memory_created_at(
+            &left.1,
+            &right.1,
+            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        )
+        .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
+    });
+    let matched_count = rows.len();
+    rows.truncate(request.limit);
+    let returned_count = rows.len();
+    let rows = rows
+        .into_iter()
+        .map(|(row, _created_at)| row)
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeMemoryMetadataRelatedProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_memory_metadata_related_projected_list_request(
+    request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
+) -> Result<()> {
+    if request.normalized_space_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory metadata related projected list requires a non-empty normalized space id"
+                .to_string(),
+        ));
+    }
+    if request.source_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory metadata related projected list requires a non-empty source id"
+                .to_string(),
+        ));
+    }
+    if request.limit == 0 {
+        return Err(SkeinError::Semantic(
+            "knowledge memory metadata related projected list requires a positive limit"
+                .to_string(),
+        ));
+    }
+    if request.property_names.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory metadata related projected list requires non-empty property names"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn metadata_related_memory_markers(source_id: &str) -> [String; 4] {
+    [
+        format!("\"source_id\": \"{source_id}\""),
+        format!("\"source_id\":\"{source_id}\""),
+        format!("\"source_thread_id\": \"{source_id}\""),
+        format!("\"source_thread_id\":\"{source_id}\""),
+    ]
+}
+
+fn memory_metadata_contains_any(memory: &NodeRecord, markers: &[String]) -> bool {
+    memory
+        .properties
+        .get("metadata")
+        .and_then(|value| match value {
+            Value::String(metadata) => Some(metadata.as_str()),
+            _ => None,
+        })
+        .is_some_and(|metadata| markers.iter().any(|marker| metadata.contains(marker)))
 }
 
 fn validate_knowledge_memory_list_request(request: &KnowledgeMemoryListRequest) -> Result<()> {
@@ -26729,6 +26854,14 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_memory_projected_list(request)
     }
 
+    pub fn knowledge_memory_metadata_related_projected_list(
+        &self,
+        request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
+    ) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
+        self.db
+            .knowledge_memory_metadata_related_projected_list(request)
+    }
+
     pub fn knowledge_memory_prefix_ownership(
         &self,
         request: &KnowledgeMemoryPrefixOwnershipRequest,
@@ -28138,6 +28271,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeMemoryPrefixOwnershipRequest,
     ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
         knowledge_memory_prefix_ownership_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_memory_metadata_related_projected_list(
+        &self,
+        request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
+    ) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
+        knowledge_memory_metadata_related_projected_list_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_memory_title_contents(

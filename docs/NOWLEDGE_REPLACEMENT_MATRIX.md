@@ -381,6 +381,13 @@ properties plus stable Memory id, node id, and normalized space id. Ordering can
 still use internal `created_at`, `pagerank_score`, or `importance` keys even
 when those fields are not projected, allowing Nowledge to add Memory fields
 without broadening the default row shape or writing WAL.
+Metadata-related Memory detail reads are covered by
+`Database::knowledge_memory_metadata_related_projected_list`. The typed read
+fixes the Nowledge REST list fallback shape that filters one normalized space
+and tests Memory metadata for `source_id` or `source_thread_id` markers, returns
+only caller-allowlisted Memory properties plus stable Memory id/node/space
+identity fields, orders by internal `created_at` descending, requires a bounded
+positive limit, supports pinned snapshots, and does not write WAL.
 Memory prefix ownership guard reads are covered by
 `Database::knowledge_memory_prefix_ownership`. The typed read covers the MCP
 skill-memory guard shape `MATCH (m:Memory) WHERE m.id STARTS WITH $p RETURN
