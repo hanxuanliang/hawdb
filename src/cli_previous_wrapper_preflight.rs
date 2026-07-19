@@ -263,6 +263,8 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 empty_array_path(&replacement_summary, &["blocking_categories"]),
                 empty_array_path(&replacement_summary, &["missing_evidence"]),
                 empty_array_path(&replacement_summary, &["next_actions"]),
+                bool_path(&replacement_summary, &["dual_engine_evidence", "present"]) == Some(true),
+                bool_path(&replacement_summary, &["dual_engine_evidence", "ready"]) == Some(true),
             ],
             [
                 "production_cutover_ready",
@@ -270,6 +272,8 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "blocking_categories",
                 "missing_evidence",
                 "next_actions",
+                "dual_engine_evidence.present",
+                "dual_engine_evidence.ready",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -414,7 +418,7 @@ mod tests {
     #[test]
     fn preflight_check_fails_closed_on_partial_evidence() {
         let mut inputs = ready_inputs();
-        inputs.replacement_summary = Some(serde_json::json!({
+        let replacement_summary = serde_json::json!({
             "production_cutover_ready": false,
             "production_replacement_per_million": 0,
             "blocking_categories": ["cutover_evidence"],
@@ -424,7 +428,8 @@ mod tests {
                     "action": "provide_eligible_cutover_evidence"
                 }
             ]
-        }));
+        });
+        inputs.replacement_summary = Some(replacement_summary);
 
         let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
 
@@ -443,8 +448,38 @@ mod tests {
                 "production_cutover_ready",
                 "production_replacement_per_million",
                 "blocking_categories",
-                "next_actions"
+                "next_actions",
+                "dual_engine_evidence.present",
+                "dual_engine_evidence.ready"
             ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_summary_dual_engine_evidence() {
+        let mut inputs = ready_inputs();
+        inputs.replacement_summary = Some(serde_json::json!({
+            "production_cutover_ready": true,
+            "production_replacement_per_million": 1_000_000,
+            "blocking_categories": [],
+            "missing_evidence": [],
+            "next_actions": [],
+            "dual_engine_evidence": {
+                "present": true,
+                "ready": false
+            }
+        }));
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
+            serde_json::json!(["dual_engine_evidence.ready"])
         );
     }
 
@@ -607,7 +642,11 @@ mod tests {
                 "production_replacement_per_million": 1_000_000,
                 "blocking_categories": [],
                 "missing_evidence": [],
-                "next_actions": []
+                "next_actions": [],
+                "dual_engine_evidence": {
+                    "present": true,
+                    "ready": true
+                }
             })),
         }
     }

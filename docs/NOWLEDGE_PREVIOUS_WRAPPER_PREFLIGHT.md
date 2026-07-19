@@ -213,7 +213,9 @@ jq -e '
   .production_replacement_per_million == 1000000 and
   (.blocking_categories | length) == 0 and
   (.missing_evidence | length) == 0 and
-  (.next_actions | length) == 0
+  (.next_actions | length) == 0 and
+  .dual_engine_evidence.present == true and
+  .dual_engine_evidence.ready == true
 ' "$NMEM_PREFLIGHT_ROOT/replacement-summary.json"
 ```
 
@@ -243,6 +245,9 @@ maintenance evidence, and replacement summary artifacts. It fails closed unless
 every stage is ready, the storage/background evidence is explicitly required and
 present in the migration gate, and the replacement summary has no blockers,
 missing evidence, or next actions.
+The final preflight is stricter than compatibility summary generation: the
+replacement summary must carry `dual_engine_evidence.present == true` and
+`dual_engine_evidence.ready == true`.
 When adapter smoke reports include `dual_engine_evidence`, the verifier also
 requires `dual_engine_evidence.ready == true` so side-by-side cutover evidence
 cannot silently degrade into a primary-only smoke run.
