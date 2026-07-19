@@ -158,8 +158,8 @@ normalized-space batch moves, memory access/click-dwell touches, ordered batch
 mutation, source memory-count adjustments, source lifecycle updates, source
 metadata updates, source parsed metadata updates, parsed Source creates, source
 detail/count/id-list reads, source version lookups, Source revision-edge
-creates, and grouped WAL commits for eligible lifecycle/metadata/parser/create/
-revision rows.
+creates, Source detach deletes, and grouped WAL commits for eligible lifecycle/
+metadata/parser/create/revision/delete rows.
 Memory content/edit updates are exposed as a typed batch for Nowledge content,
 title, semantic field, scoring, source, normalized-space, review status,
 extraction method, and `reindex_needed` writes.
@@ -557,6 +557,9 @@ Source version-chain operations are available as
 latest-version reads without WAL writes and
 `Database::create_knowledge_source_revision_batch` for fixed-property
 `REVISED_AS` edge creation through one grouped WAL batch.
+Source node cleanup is available as `Database::delete_knowledge_sources`,
+covering Nowledge Source `DETACH DELETE` cleanup through the typed entity
+delete path and one grouped WAL batch.
 Bounded Source list and summary reads are available as
 `Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
 overview ranking, parsed-path list, lifecycle attention, and metadata-marker

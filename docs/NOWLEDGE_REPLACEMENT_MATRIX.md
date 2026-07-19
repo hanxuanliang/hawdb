@@ -215,6 +215,12 @@ The revision create wrapper validates endpoint ids before WAL, resolves exact
 Source endpoints, reports missing or idless endpoints without writing, creates
 the fixed `REVISED_AS` properties used by Nowledge, and commits eligible
 revision edges through one grouped WAL batch.
+Source detach deletes are covered by `Database::delete_knowledge_sources` for
+the Nowledge Source node cleanup shape. The Source-specific wrapper validates
+Source ids before WAL, reuses the existing typed entity `DETACH DELETE` path,
+reports missing and idless rows without writing, cascades Source relationships
+through storage/WAL, and commits eligible Source node deletes through one
+grouped WAL batch.
 Source operational reads are covered by typed APIs for Nowledge source detail,
 source count, extracted-source id list, and normalized-space id list paths.
 `Database::knowledge_source` returns the Source identity, display fields,

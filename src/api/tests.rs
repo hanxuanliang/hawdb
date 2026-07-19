@@ -63,27 +63,28 @@ use super::{
     KnowledgeSkillListRequest, KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
     KnowledgeSkillSourceMergeRequest, KnowledgeSkillStateRequest,
     KnowledgeSkillThreadSourceListRequest, KnowledgeSkillUsageStatsBatchRequest,
-    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceIdListRequest,
-    KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
-    KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
-    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
-    KnowledgeSourceMetadataBatchRequest, KnowledgeSourceMetadataUpdate,
-    KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
-    KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
-    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
-    KnowledgeSourceRevisionCreate, KnowledgeSourceRevisionCreateBatchRequest,
-    KnowledgeSourceVersionLookupRequest, KnowledgeSubgraphRequest,
-    KnowledgeSynthesizedSourceCoverageRequest, KnowledgeSynthesizedSourceIdsRequest,
-    KnowledgeThreadCompactedMemoryListRequest, KnowledgeThreadDistillationCandidateRequest,
-    KnowledgeThreadIdentityRequest, KnowledgeThreadListOrder, KnowledgeThreadListRequest,
-    KnowledgeThreadMessageCountBatchRequest, KnowledgeThreadMessageCountUpdate,
-    KnowledgeThreadMessageListRequest, KnowledgeThreadMessageLookupRequest,
-    KnowledgeThreadMetaLookupRequest, KnowledgeThreadMetadataBatchRequest,
-    KnowledgeThreadMetadataUpdate, KnowledgeThreadSourceListRequest,
-    KnowledgeThreadSourceLookupRequest, KnowledgeThreadSyncMetadataRequest,
-    KnowledgeThreadTitleLookupRequest, KnowledgeTraversalFallbackReasonCode,
-    KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
-    RecoveryMode, SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    KnowledgeSkillUsageStatsUpdate, KnowledgeSourceDeleteBatchRequest,
+    KnowledgeSourceIdListRequest, KnowledgeSourceLifecycleBatchRequest,
+    KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
+    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
+    KnowledgeSourceMemoryListRequest, KnowledgeSourceMetadataBatchRequest,
+    KnowledgeSourceMetadataUpdate, KnowledgeSourceParsedCreate,
+    KnowledgeSourceParsedCreateBatchRequest, KnowledgeSourceParsedMetadataBatchRequest,
+    KnowledgeSourceParsedMetadataUpdate, KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSourceRequest, KnowledgeSourceRevisionCreate,
+    KnowledgeSourceRevisionCreateBatchRequest, KnowledgeSourceVersionLookupRequest,
+    KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
+    KnowledgeSynthesizedSourceIdsRequest, KnowledgeThreadCompactedMemoryListRequest,
+    KnowledgeThreadDistillationCandidateRequest, KnowledgeThreadIdentityRequest,
+    KnowledgeThreadListOrder, KnowledgeThreadListRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
+    KnowledgeThreadMessageLookupRequest, KnowledgeThreadMetaLookupRequest,
+    KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
+    KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
+    KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
+    KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
+    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -8136,6 +8137,143 @@ fn typed_source_metadata_batch_persists_as_one_wal_batch_and_replays() {
             rows.rows[1].properties.get("updated_at"),
             Some(&Some(Value::String("2026-07-19T12:01:00Z".to_string())))
         );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[test]
+fn deletes_sources_for_nowledge_detach_delete_shape() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1'})-[:SOURCED_FROM]->(:Source {id: 'source_1'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2'})-[:SOURCED_FROM]->(:Source {id: 'source_2'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_3'})").unwrap();
+    db.query("CREATE (:Source {original_name: 'Idless Source'})")
+        .unwrap();
+    let idless = db
+        .query("MATCH (s:Source) WHERE s.original_name = 'Idless Source' RETURN id(s) AS id")
+        .unwrap();
+    let idless_source_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+
+    let output = db
+        .delete_knowledge_sources(&KnowledgeSourceDeleteBatchRequest {
+            source_ids: vec![
+                "source_1".to_string(),
+                "missing".to_string(),
+                idless_source_id,
+                "source_2".to_string(),
+                "source_1".to_string(),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 4);
+    assert_eq!(output.graph_commit_epoch_after, 5);
+    assert_eq!(output.rows.len(), 5);
+    assert_eq!(output.matched_count, 3);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.non_writable_count, 1);
+    assert_eq!(output.deleted_node_count, 2);
+    assert!(output.rows[0].matched);
+    assert!(!output.rows[1].matched);
+    assert!(output.rows[2].non_writable);
+    assert!(output.rows[3].matched);
+    assert!(output.rows[4].matched);
+
+    for source_id in ["source_1", "source_2"] {
+        assert!(
+            !db.knowledge_source(&KnowledgeSourceRequest {
+                source_id: source_id.to_string(),
+            })
+            .unwrap()
+            .found
+        );
+    }
+    assert!(
+        db.knowledge_source(&KnowledgeSourceRequest {
+            source_id: "source_3".to_string(),
+        })
+        .unwrap()
+        .found
+    );
+    assert_eq!(
+        db.query("MATCH (m:Memory)-[r:SOURCED_FROM]->(s:Source) RETURN count(r) AS relationships")
+            .unwrap()
+            .rows[0]
+            .get("relationships"),
+        Some(&Value::Int(0))
+    );
+    assert_eq!(
+        db.query("MATCH (m:Memory) RETURN count(m) AS memories")
+            .unwrap()
+            .rows[0]
+            .get("memories"),
+        Some(&Value::Int(2))
+    );
+}
+
+#[test]
+fn source_delete_rejects_empty_source_id_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_1'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let error = db
+        .delete_knowledge_sources(&KnowledgeSourceDeleteBatchRequest {
+            source_ids: vec![String::new()],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("non-empty source id"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_source_delete_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_source_delete_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1'})-[:SOURCED_FROM]->(:Source {id: 'source_1'})")
+            .unwrap();
+        db.query("CREATE (:Source {id: 'source_2'})").unwrap();
+        let batch_count_before_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.delete_knowledge_sources(&KnowledgeSourceDeleteBatchRequest {
+            source_ids: vec!["source_1".to_string(), "source_2".to_string()],
+        })
+        .unwrap();
+        let batch_count_after_delete = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_delete, batch_count_before_delete + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("delete_node"));
+    {
+        let db = Database::open(&path).unwrap();
+        for source_id in ["source_1", "source_2"] {
+            assert!(
+                !db.knowledge_source(&KnowledgeSourceRequest {
+                    source_id: source_id.to_string(),
+                })
+                .unwrap()
+                .found
+            );
+        }
+        assert!(db
+            .knowledge_entity(&KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "memory_1".to_string(),
+            })
+            .entity
+            .is_some());
     }
     std::fs::remove_dir_all(path).unwrap();
 }

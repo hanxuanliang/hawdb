@@ -2501,6 +2501,30 @@ pub struct KnowledgeSourceRevisionCreateBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceDeleteBatchRequest {
+    pub source_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceDeleteBatchRow {
+    pub source_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub non_writable: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceDeleteBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceDeleteBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub non_writable_count: usize,
+    pub deleted_node_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRequest {
     pub source_id: String,
 }
@@ -6089,6 +6113,13 @@ impl Database {
         request: &KnowledgeSourceRevisionCreateBatchRequest,
     ) -> Result<KnowledgeSourceRevisionCreateBatchOutput> {
         create_knowledge_source_revision_batch_for(self, request)
+    }
+
+    pub fn delete_knowledge_sources(
+        &mut self,
+        request: &KnowledgeSourceDeleteBatchRequest,
+    ) -> Result<KnowledgeSourceDeleteBatchOutput> {
+        delete_knowledge_sources_for(self, request)
     }
 
     pub fn knowledge_source(
@@ -12605,6 +12636,46 @@ fn knowledge_source_revision_relationship_create(
             ("created_at".to_string(), create.created_at.clone()),
         ]),
     }
+}
+
+fn delete_knowledge_sources_for(
+    db: &mut Database,
+    request: &KnowledgeSourceDeleteBatchRequest,
+) -> Result<KnowledgeSourceDeleteBatchOutput> {
+    for source_id in &request.source_ids {
+        if source_id.is_empty() {
+            return Err(SkeinError::Semantic(
+                "knowledge source delete requires a non-empty source id".to_string(),
+            ));
+        }
+    }
+
+    let output = delete_knowledge_entity_batch_for(
+        db,
+        &KnowledgeEntityDeleteBatchRequest {
+            label: "Source".to_string(),
+            external_ids: request.source_ids.clone(),
+        },
+    )?;
+
+    Ok(KnowledgeSourceDeleteBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeSourceDeleteBatchRow {
+                source_id: row.external_id,
+                node_id: row.node_id,
+                matched: row.matched,
+                non_writable: row.non_writable,
+            })
+            .collect(),
+        matched_count: output.matched_count,
+        missing_count: output.missing_count,
+        non_writable_count: output.non_writable_count,
+        deleted_node_count: output.deleted_node_count,
+    })
 }
 
 fn knowledge_source_for(
@@ -23462,6 +23533,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSourceRevisionCreateBatchRequest,
     ) -> Result<KnowledgeSourceRevisionCreateBatchOutput> {
         self.db.create_knowledge_source_revision_batch(request)
+    }
+
+    pub fn delete_knowledge_sources(
+        &mut self,
+        request: &KnowledgeSourceDeleteBatchRequest,
+    ) -> Result<KnowledgeSourceDeleteBatchOutput> {
+        self.db.delete_knowledge_sources(request)
     }
 
     pub fn knowledge_source(
