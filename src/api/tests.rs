@@ -30,6 +30,7 @@ use super::{
     KnowledgeLabelLifecycleUpdate, KnowledgeLabelMemoryDistributionRequest,
     KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
     KnowledgeMemoryAccessTouch, KnowledgeMemoryCompactingThreadListRequest,
+    KnowledgeMemoryContentBatchRequest, KnowledgeMemoryContentUpdate,
     KnowledgeMemoryEntityListRequest, KnowledgeMemoryEvolvesLatestRequest,
     KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate, KnowledgeMemoryListOrder,
@@ -7207,6 +7208,233 @@ fn typed_knowledge_memory_access_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("total_dwell_time_ms"),
             Some(&Some(Value::Int(100)))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+fn memory_content_update(memory_id: &str, title: &str) -> KnowledgeMemoryContentUpdate {
+    KnowledgeMemoryContentUpdate {
+        memory_id: memory_id.to_string(),
+        content: format!("{title} content"),
+        title: title.to_string(),
+        semantic_field: format!("{title} semantic field"),
+        importance: Value::Float(0.7),
+        confidence: Value::Float(0.8),
+        unit_type: "fact".to_string(),
+        source: "codex".to_string(),
+        source_range: Value::String("1..3".to_string()),
+        space_id: "default".to_string(),
+        updated_at: Value::Int(1700000000),
+        reindex_needed: true,
+        review_status: "reviewed".to_string(),
+        extraction_method: "manual".to_string(),
+    }
+}
+
+#[test]
+fn updates_memory_content_batch_for_nowledge_full_update_shape() {
+    let mut db = Database::new();
+    db.query(
+        "CREATE (:Memory {id: 'memory_1', title: 'Old', content: 'old', reindex_needed: false})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {title: 'Idless memory'})")
+        .unwrap();
+    let idless = db
+        .query("MATCH (m:Memory) WHERE m.title = 'Idless memory' RETURN id(m) AS id")
+        .unwrap();
+    let idless_memory_id = match idless.rows[0].get("id").unwrap() {
+        Value::Int(id) => id.to_string(),
+        other => panic!("expected projected id int, got {other:?}"),
+    };
+
+    let output = db
+        .update_knowledge_memory_content_batch(&KnowledgeMemoryContentBatchRequest {
+            updates: vec![
+                memory_content_update("memory_1", "Updated Memory"),
+                memory_content_update("missing", "Missing Memory"),
+                memory_content_update(&idless_memory_id, "Idless Memory"),
+                memory_content_update("memory_1", "Duplicate Memory"),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 2);
+    assert_eq!(output.graph_commit_epoch_after, 3);
+    assert_eq!(output.rows.len(), 4);
+    assert_eq!(output.matched_count, 1);
+    assert_eq!(output.missing_count, 1);
+    assert_eq!(output.duplicate_count, 1);
+    assert_eq!(output.non_writable_count, 1);
+    assert_eq!(output.updated_count, 1);
+    assert_eq!(output.updated_property_count, 13);
+    assert!(output.rows[0].updated);
+    assert!(!output.rows[1].matched);
+    assert!(output.rows[2].non_writable);
+    assert!(output.rows[3].duplicate);
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: "memory_1".to_string(),
+        }],
+        property_names: vec![
+            "content".to_string(),
+            "title".to_string(),
+            "semantic_field".to_string(),
+            "importance".to_string(),
+            "confidence".to_string(),
+            "unit_type".to_string(),
+            "source".to_string(),
+            "source_range".to_string(),
+            "space_id".to_string(),
+            "updated_at".to_string(),
+            "reindex_needed".to_string(),
+            "review_status".to_string(),
+            "extraction_method".to_string(),
+        ],
+    });
+    let properties = &rows.rows[0].properties;
+    assert_eq!(
+        properties.get("content"),
+        Some(&Some(Value::String("Updated Memory content".to_string())))
+    );
+    assert_eq!(
+        properties.get("title"),
+        Some(&Some(Value::String("Updated Memory".to_string())))
+    );
+    assert_eq!(
+        properties.get("semantic_field"),
+        Some(&Some(Value::String(
+            "Updated Memory semantic field".to_string()
+        )))
+    );
+    assert_eq!(properties.get("importance"), Some(&Some(Value::Float(0.7))));
+    assert_eq!(properties.get("confidence"), Some(&Some(Value::Float(0.8))));
+    assert_eq!(
+        properties.get("unit_type"),
+        Some(&Some(Value::String("fact".to_string())))
+    );
+    assert_eq!(
+        properties.get("source"),
+        Some(&Some(Value::String("codex".to_string())))
+    );
+    assert_eq!(
+        properties.get("source_range"),
+        Some(&Some(Value::String("1..3".to_string())))
+    );
+    assert_eq!(
+        properties.get("space_id"),
+        Some(&Some(Value::String("default".to_string())))
+    );
+    assert_eq!(
+        properties.get("updated_at"),
+        Some(&Some(Value::Int(1700000000)))
+    );
+    assert_eq!(
+        properties.get("reindex_needed"),
+        Some(&Some(Value::Bool(true)))
+    );
+    assert_eq!(
+        properties.get("review_status"),
+        Some(&Some(Value::String("reviewed".to_string())))
+    );
+    assert_eq!(
+        properties.get("extraction_method"),
+        Some(&Some(Value::String("manual".to_string())))
+    );
+}
+
+#[test]
+fn memory_content_update_rejects_invalid_rows_before_wal() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    let graph_commit_epoch_before = db.store.commit_epoch();
+
+    let empty_id = db
+        .update_knowledge_memory_content_batch(&KnowledgeMemoryContentBatchRequest {
+            updates: vec![memory_content_update("", "Empty")],
+        })
+        .unwrap_err();
+    assert!(empty_id.to_string().contains("non-empty memory id"));
+
+    let mut invalid_importance = memory_content_update("memory_1", "Invalid Importance");
+    invalid_importance.importance = Value::String("high".to_string());
+    let importance_error = db
+        .update_knowledge_memory_content_batch(&KnowledgeMemoryContentBatchRequest {
+            updates: vec![invalid_importance],
+        })
+        .unwrap_err();
+    assert!(importance_error
+        .to_string()
+        .contains("numeric finite importance"));
+
+    let mut empty_unit_type = memory_content_update("memory_1", "Empty Unit Type");
+    empty_unit_type.unit_type.clear();
+    let unit_type_error = db
+        .update_knowledge_memory_content_batch(&KnowledgeMemoryContentBatchRequest {
+            updates: vec![empty_unit_type],
+        })
+        .unwrap_err();
+    assert!(unit_type_error.to_string().contains("non-empty unit type"));
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch_before);
+}
+
+#[test]
+fn typed_memory_content_update_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_memory_content_update_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        db.query("CREATE (:Memory {id: 'memory_1', title: 'Old 1'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'memory_2', title: 'Old 2'})")
+            .unwrap();
+        let batch_count_before_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        db.update_knowledge_memory_content_batch(&KnowledgeMemoryContentBatchRequest {
+            updates: vec![
+                memory_content_update("memory_1", "Updated One"),
+                memory_content_update("memory_2", "Updated Two"),
+            ],
+        })
+        .unwrap();
+        let batch_count_after_update = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_update, batch_count_before_update + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("set_node_property"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "memory_2".to_string(),
+                },
+            ],
+            property_names: vec!["title".to_string(), "reindex_needed".to_string()],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("title"),
+            Some(&Some(Value::String("Updated One".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("title"),
+            Some(&Some(Value::String("Updated Two".to_string())))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("reindex_needed"),
+            Some(&Some(Value::Bool(true)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();

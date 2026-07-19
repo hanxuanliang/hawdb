@@ -2178,6 +2178,53 @@ pub struct KnowledgeMemoryAccessBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryContentUpdate {
+    pub memory_id: String,
+    pub content: String,
+    pub title: String,
+    pub semantic_field: String,
+    pub importance: Value,
+    pub confidence: Value,
+    pub unit_type: String,
+    pub source: String,
+    pub source_range: Value,
+    pub space_id: String,
+    pub updated_at: Value,
+    pub reindex_needed: bool,
+    pub review_status: String,
+    pub extraction_method: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryContentBatchRequest {
+    pub updates: Vec<KnowledgeMemoryContentUpdate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryContentBatchRow {
+    pub memory_id: String,
+    pub node_id: Option<u64>,
+    pub matched: bool,
+    pub updated: bool,
+    pub duplicate: bool,
+    pub non_writable: bool,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeMemoryContentBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeMemoryContentBatchRow>,
+    pub matched_count: usize,
+    pub missing_count: usize,
+    pub duplicate_count: usize,
+    pub non_writable_count: usize,
+    pub updated_count: usize,
+    pub updated_property_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceMemoryCountAdjustment {
     pub source_id: String,
     pub delta: i64,
@@ -5778,6 +5825,13 @@ impl Database {
         request: &KnowledgeMemoryAccessBatchRequest,
     ) -> Result<KnowledgeMemoryAccessBatchOutput> {
         touch_knowledge_memory_access_batch_for(self, request)
+    }
+
+    pub fn update_knowledge_memory_content_batch(
+        &mut self,
+        request: &KnowledgeMemoryContentBatchRequest,
+    ) -> Result<KnowledgeMemoryContentBatchOutput> {
+        update_knowledge_memory_content_batch_for(self, request)
     }
 
     pub fn adjust_knowledge_source_memory_count_batch(
@@ -11043,6 +11097,198 @@ fn knowledge_memory_access_touch_statement(
         );
     }
     (cypher, parameters)
+}
+
+fn update_knowledge_memory_content_batch_for(
+    db: &mut Database,
+    request: &KnowledgeMemoryContentBatchRequest,
+) -> Result<KnowledgeMemoryContentBatchOutput> {
+    db.ensure_writable()?;
+    for update in &request.updates {
+        validate_knowledge_memory_content_update(update)?;
+    }
+
+    let graph_commit_epoch_before = db.store.commit_epoch();
+    let mut rows = Vec::with_capacity(request.updates.len());
+    let mut matched_count = 0;
+    let mut missing_count = 0;
+    let mut duplicate_count = 0;
+    let mut non_writable_count = 0;
+    let mut updated_count = 0;
+    let mut updated_property_count = 0;
+    let mut pending_node_ids = BTreeSet::new();
+    let mut eligible_updates = Vec::new();
+
+    for update in &request.updates {
+        let Some(seed) =
+            seed_node_by_label_and_external_id(&db.catalog, &db.store, "Memory", &update.memory_id)
+        else {
+            missing_count += 1;
+            rows.push(KnowledgeMemoryContentBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: None,
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        };
+        let node_id = seed.id;
+        if !node_has_external_id_property(seed, update.memory_id.as_str()) {
+            non_writable_count += 1;
+            rows.push(KnowledgeMemoryContentBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: false,
+                updated: false,
+                duplicate: false,
+                non_writable: true,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+        if !pending_node_ids.insert(node_id) {
+            duplicate_count += 1;
+            rows.push(KnowledgeMemoryContentBatchRow {
+                memory_id: update.memory_id.clone(),
+                node_id: Some(node_id.0),
+                matched: true,
+                updated: false,
+                duplicate: true,
+                non_writable: false,
+                updated_property_count: 0,
+            });
+            continue;
+        }
+
+        let assignments = memory_content_assignments(update);
+        let row_updated_property_count = assignments.len();
+        matched_count += 1;
+        updated_count += 1;
+        updated_property_count += row_updated_property_count;
+        eligible_updates.push((node_id, assignments));
+        rows.push(KnowledgeMemoryContentBatchRow {
+            memory_id: update.memory_id.clone(),
+            node_id: Some(node_id.0),
+            matched: true,
+            updated: true,
+            duplicate: false,
+            non_writable: false,
+            updated_property_count: row_updated_property_count,
+        });
+    }
+
+    if eligible_updates.is_empty() {
+        return Ok(KnowledgeMemoryContentBatchOutput {
+            graph_commit_epoch_before,
+            graph_commit_epoch_after: graph_commit_epoch_before,
+            rows,
+            matched_count,
+            missing_count,
+            duplicate_count,
+            non_writable_count,
+            updated_count: 0,
+            updated_property_count: 0,
+        });
+    }
+
+    let mut tx = db.begin_transaction();
+    for (node_id, assignments) in &eligible_updates {
+        let (cypher, parameters) =
+            knowledge_property_update_statement("Memory", node_id.0, assignments);
+        tx.query_with_params(cypher.as_str(), &parameters)?;
+    }
+    tx.commit()?;
+
+    Ok(KnowledgeMemoryContentBatchOutput {
+        graph_commit_epoch_before,
+        graph_commit_epoch_after: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        missing_count,
+        duplicate_count,
+        non_writable_count,
+        updated_count,
+        updated_property_count,
+    })
+}
+
+fn validate_knowledge_memory_content_update(update: &KnowledgeMemoryContentUpdate) -> Result<()> {
+    if update.memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory content update requires a non-empty memory id".to_string(),
+        ));
+    }
+    if update.unit_type.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory content update requires a non-empty unit type".to_string(),
+        ));
+    }
+    if update.extraction_method.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory content update requires a non-empty extraction method".to_string(),
+        ));
+    }
+    validate_finite_numeric_value(
+        &update.importance,
+        "knowledge memory content update requires numeric finite importance",
+    )?;
+    validate_finite_numeric_value(
+        &update.confidence,
+        "knowledge memory content update requires numeric finite confidence",
+    )?;
+    Ok(())
+}
+
+fn validate_finite_numeric_value(value: &Value, message: &str) -> Result<()> {
+    let valid = match value {
+        Value::Float(value) => value.is_finite(),
+        Value::Int(_) => true,
+        _ => false,
+    };
+    if valid {
+        Ok(())
+    } else {
+        Err(SkeinError::Semantic(message.to_string()))
+    }
+}
+
+fn memory_content_assignments(update: &KnowledgeMemoryContentUpdate) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("content".to_string(), Value::String(update.content.clone())),
+        ("title".to_string(), Value::String(update.title.clone())),
+        (
+            "semantic_field".to_string(),
+            Value::String(update.semantic_field.clone()),
+        ),
+        ("importance".to_string(), update.importance.clone()),
+        ("confidence".to_string(), update.confidence.clone()),
+        (
+            "unit_type".to_string(),
+            Value::String(update.unit_type.clone()),
+        ),
+        ("source".to_string(), Value::String(update.source.clone())),
+        ("source_range".to_string(), update.source_range.clone()),
+        (
+            "space_id".to_string(),
+            Value::String(update.space_id.clone()),
+        ),
+        ("updated_at".to_string(), update.updated_at.clone()),
+        (
+            "reindex_needed".to_string(),
+            Value::Bool(update.reindex_needed),
+        ),
+        (
+            "review_status".to_string(),
+            Value::String(update.review_status.clone()),
+        ),
+        (
+            "extraction_method".to_string(),
+            Value::String(update.extraction_method.clone()),
+        ),
+    ])
 }
 
 fn adjust_knowledge_source_memory_count_batch_for(
@@ -22184,6 +22430,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeMemoryAccessBatchRequest,
     ) -> Result<KnowledgeMemoryAccessBatchOutput> {
         self.db.touch_knowledge_memory_access_batch(request)
+    }
+
+    pub fn update_knowledge_memory_content_batch(
+        &mut self,
+        request: &KnowledgeMemoryContentBatchRequest,
+    ) -> Result<KnowledgeMemoryContentBatchOutput> {
+        self.db.update_knowledge_memory_content_batch(request)
     }
 
     pub fn adjust_knowledge_source_memory_count_batch(

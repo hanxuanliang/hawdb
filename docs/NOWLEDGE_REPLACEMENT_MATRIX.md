@@ -156,6 +156,14 @@ It also includes a typed Memory access touch batch for Nowledge
 `last_accessed_at` and `last_clicked_at`, reports missing/idless rows without
 writing, and preserves duplicate same-memory touches as separate increments in
 the same grouped WAL batch.
+Memory content/edit writes are covered by
+`Database::update_knowledge_memory_content_batch` for the Nowledge full Memory
+update shape. The wrapper updates content, title, semantic field, importance,
+confidence, unit type, source, source range, space, `updated_at`,
+`reindex_needed`, review status, and extraction method together, validates
+non-empty Memory ids plus numeric finite scoring fields before WAL, reports
+missing/idless/duplicate rows without writing those rows, and commits eligible
+Memory updates through one grouped WAL batch.
 Source provenance count writes are covered by a typed Source memory-count
 adjustment batch for Nowledge `memory_count + 1` and floor-to-zero decrement
 paths. The wrapper validates non-empty Source ids and non-zero deltas before
