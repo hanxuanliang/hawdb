@@ -1877,6 +1877,63 @@ pub struct KnowledgeSourceIdListRequest {
     pub limit: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum KnowledgeSourceListOrder {
+    #[default]
+    SourceIdAsc,
+    MemoryCountDesc,
+    CreatedAtDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct KnowledgeSourceListRequest {
+    pub source_ids: Vec<String>,
+    pub after_source_id: Option<String>,
+    pub lifecycle_states: Vec<String>,
+    pub normalized_space_id: Option<String>,
+    pub source_type: Option<String>,
+    pub metadata_contains: Option<String>,
+    pub parsed_path_required: bool,
+    pub limit: usize,
+    pub offset: usize,
+    pub order: KnowledgeSourceListOrder,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceListRow {
+    pub source_id: Option<String>,
+    pub node_id: u64,
+    pub display_name: String,
+    pub original_name: Option<String>,
+    pub title: Option<String>,
+    pub summary: Option<String>,
+    pub source_type: Option<String>,
+    pub lifecycle_state: Option<String>,
+    pub raw_space_id: Option<String>,
+    pub normalized_space_id: String,
+    pub parsed_path: Option<String>,
+    pub file_path: Option<String>,
+    pub mime_type: Option<String>,
+    pub source_url: Option<String>,
+    pub metadata: Option<Value>,
+    pub memory_count: i64,
+    pub chunk_count: i64,
+    pub size_bytes: i64,
+    pub version: i64,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub sourced_memory_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeSourceListRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+    pub missing_source_ids: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRow {
     pub source_id: Option<String>,
@@ -4693,6 +4750,13 @@ impl Database {
         request: &KnowledgeSourceIdListRequest,
     ) -> Result<KnowledgeSourceIdListOutput> {
         knowledge_source_ids_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_sources(
+        &self,
+        request: &KnowledgeSourceListRequest,
+    ) -> Result<KnowledgeSourceListOutput> {
+        knowledge_sources_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
@@ -8493,6 +8557,253 @@ fn knowledge_source_ids_for(
         matched_count,
         returned_count,
     })
+}
+
+fn knowledge_sources_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceListRequest,
+) -> Result<KnowledgeSourceListOutput> {
+    validate_knowledge_source_list_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Source") else {
+        return Ok(KnowledgeSourceListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_source_ids: request.source_ids.clone(),
+        });
+    };
+
+    let requested_ids = request.source_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let mut matched_source_ids = BTreeSet::new();
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| source_matches_list_request(node, request, &requested_ids))
+        .map(|node| {
+            if let Some(source_id) = node_external_id(node) {
+                matched_source_ids.insert(source_id);
+            }
+            knowledge_source_list_row(catalog, store, node)
+        })
+        .collect::<Vec<_>>();
+
+    sort_source_list_rows(&mut rows, request.order);
+    let matched_count = rows.len();
+    if request.offset > 0 {
+        rows = rows.into_iter().skip(request.offset).collect();
+    }
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    let missing_source_ids = request
+        .source_ids
+        .iter()
+        .filter(|source_id| !matched_source_ids.contains(*source_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeSourceListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_source_ids,
+    })
+}
+
+fn validate_knowledge_source_list_request(request: &KnowledgeSourceListRequest) -> Result<()> {
+    if request
+        .source_ids
+        .iter()
+        .any(|source_id| source_id.is_empty())
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source list requires non-empty source ids".to_string(),
+        ));
+    }
+    if request
+        .after_source_id
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source list requires a non-empty after source id".to_string(),
+        ));
+    }
+    if request
+        .lifecycle_states
+        .iter()
+        .any(|state| state.is_empty())
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source list requires non-empty lifecycle states".to_string(),
+        ));
+    }
+    if request
+        .normalized_space_id
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source list requires a non-empty normalized space id".to_string(),
+        ));
+    }
+    if request.source_type.as_deref().is_some_and(str::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge source list requires a non-empty source type".to_string(),
+        ));
+    }
+    if request
+        .metadata_contains
+        .as_deref()
+        .is_some_and(str::is_empty)
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source list requires a non-empty metadata marker".to_string(),
+        ));
+    }
+    if request.source_ids.is_empty()
+        && request.after_source_id.is_none()
+        && request.lifecycle_states.is_empty()
+        && request.normalized_space_id.is_none()
+        && request.source_type.is_none()
+        && request.metadata_contains.is_none()
+        && !request.parsed_path_required
+        && request.limit == 0
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge source list requires a bounded limit or a filter".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn source_matches_list_request(
+    node: &NodeRecord,
+    request: &KnowledgeSourceListRequest,
+    requested_ids: &BTreeSet<String>,
+) -> bool {
+    let source_id = node_external_id(node);
+    if !requested_ids.is_empty()
+        && !source_id
+            .as_ref()
+            .is_some_and(|source_id| requested_ids.contains(source_id))
+    {
+        return false;
+    }
+    if request.after_source_id.as_ref().is_some_and(|after| {
+        source_id
+            .as_ref()
+            .is_none_or(|source_id| source_id.as_str() <= after.as_str())
+    }) {
+        return false;
+    }
+    if !request.lifecycle_states.is_empty()
+        && !string_property(node, "lifecycle_state")
+            .as_ref()
+            .is_some_and(|state| request.lifecycle_states.contains(state))
+    {
+        return false;
+    }
+    if request
+        .normalized_space_id
+        .as_ref()
+        .is_some_and(|space_id| normalized_node_space_id(node) != *space_id)
+    {
+        return false;
+    }
+    if request.source_type.as_ref().is_some_and(|source_type| {
+        string_property(node, "source_type").as_ref() != Some(source_type)
+    }) {
+        return false;
+    }
+    if request.parsed_path_required && string_property(node, "parsed_path").is_none() {
+        return false;
+    }
+    if request
+        .metadata_contains
+        .as_ref()
+        .is_some_and(|marker| !source_metadata_contains(node, marker))
+    {
+        return false;
+    }
+    true
+}
+
+fn source_metadata_contains(node: &NodeRecord, marker: &str) -> bool {
+    node.properties
+        .get("metadata")
+        .map(value_to_external_id)
+        .is_some_and(|metadata| metadata.contains(marker))
+}
+
+fn knowledge_source_list_row(
+    catalog: &Catalog,
+    store: &GraphStore,
+    node: &NodeRecord,
+) -> KnowledgeSourceListRow {
+    let original_name = string_property(node, "original_name");
+    let title = string_property(node, "title");
+    let file_path = string_property(node, "file_path");
+    let source_type = string_property(node, "source_type");
+    let display_name = original_name
+        .clone()
+        .or_else(|| title.clone())
+        .or_else(|| file_path.clone())
+        .or_else(|| source_type.clone())
+        .unwrap_or_else(|| "Source".to_string());
+    KnowledgeSourceListRow {
+        source_id: node_external_id(node),
+        node_id: node.id.0,
+        display_name,
+        original_name,
+        title,
+        summary: string_property(node, "summary"),
+        source_type,
+        lifecycle_state: string_property(node, "lifecycle_state"),
+        raw_space_id: string_property(node, "space_id"),
+        normalized_space_id: normalized_node_space_id(node),
+        parsed_path: string_property(node, "parsed_path"),
+        file_path,
+        mime_type: string_property(node, "mime_type"),
+        source_url: string_property(node, "source_url"),
+        metadata: node.properties.get("metadata").cloned(),
+        memory_count: integer_property(node, "memory_count").unwrap_or(0),
+        chunk_count: integer_property(node, "chunk_count").unwrap_or(0),
+        size_bytes: integer_property(node, "size_bytes").unwrap_or(0),
+        version: integer_property(node, "version").unwrap_or(1),
+        created_at: node.properties.get("created_at").cloned(),
+        updated_at: node.properties.get("updated_at").cloned(),
+        sourced_memory_count: source_sourced_memory_count(catalog, store, node.id),
+    }
+}
+
+fn sort_source_list_rows(rows: &mut [KnowledgeSourceListRow], order: KnowledgeSourceListOrder) {
+    rows.sort_by(|left, right| match order {
+        KnowledgeSourceListOrder::SourceIdAsc => compare_source_list_ids(left, right),
+        KnowledgeSourceListOrder::MemoryCountDesc => right
+            .memory_count
+            .cmp(&left.memory_count)
+            .then_with(|| compare_source_list_ids(left, right)),
+        KnowledgeSourceListOrder::CreatedAtDesc => compare_skill_memory_created_at(
+            &left.created_at,
+            &right.created_at,
+            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        )
+        .then_with(|| compare_source_list_ids(left, right)),
+    });
+}
+
+fn compare_source_list_ids(
+    left: &KnowledgeSourceListRow,
+    right: &KnowledgeSourceListRow,
+) -> std::cmp::Ordering {
+    left.source_id
+        .cmp(&right.source_id)
+        .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
 fn knowledge_source_row(
@@ -16960,6 +17271,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeSourceIdListRequest,
     ) -> Result<KnowledgeSourceIdListOutput> {
         self.db.knowledge_source_ids(request)
+    }
+
+    pub fn knowledge_sources(
+        &self,
+        request: &KnowledgeSourceListRequest,
+    ) -> Result<KnowledgeSourceListOutput> {
+        self.db.knowledge_sources(request)
     }
 
     pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {

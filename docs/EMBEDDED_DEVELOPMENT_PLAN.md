@@ -424,6 +424,11 @@ Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with
 chunk metadata ordering and no WAL writes.
+Bounded Source list and summary reads are available as
+`Database::knowledge_sources`, covering Nowledge Source page, bulk summary,
+overview ranking, parsed-path list, lifecycle attention, and metadata-marker
+page shapes with explicit filters, ordering, missing-id reporting, display-name
+fallbacks, numeric defaults, and no WAL writes.
 Source-reference relationship cleanup for Nowledge memory/source delete flows
 is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty

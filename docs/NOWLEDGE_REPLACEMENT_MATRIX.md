@@ -179,6 +179,14 @@ returns sorted Source ids filtered by lifecycle state and/or normalized space
 with bounded limits, while `Database::knowledge_source_count` exposes the total
 Source node count. These reads report the graph commit epoch and do not write
 WAL.
+Source list and summary reads are covered by `Database::knowledge_sources` for
+Nowledge bounded Source page, bulk summary, memory-count overview ranking,
+parsed-path list, lifecycle attention, and metadata-marker page shapes. The
+typed read supports id-bounded bulk rows with missing-id reporting, after-id
+pagination, lifecycle-state sets, normalized-space and source-type filters,
+metadata substring markers, parsed-path-only selection, offset/limit, Source id,
+memory-count, or created-at ordering, display-name and numeric fallback fields,
+and no WAL writes.
 Source attribution reads are covered by `Database::knowledge_source_memories`.
 The typed read resolves one Source id, scans incoming `SOURCED_FROM` Memory
 edges, returns Memory id/title/content/unit type/confidence plus chunk

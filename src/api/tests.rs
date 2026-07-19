@@ -48,10 +48,10 @@ use super::{
     KnowledgeSkillLifecycleUpdate, KnowledgeSkillMemoryListOrder, KnowledgeSkillMemoryListRequest,
     KnowledgeSkillUsageStatsBatchRequest, KnowledgeSkillUsageStatsUpdate,
     KnowledgeSourceIdListRequest, KnowledgeSourceLifecycleBatchRequest,
-    KnowledgeSourceLifecycleUpdate, KnowledgeSourceMemoryCountAdjustment,
-    KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
-    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
-    KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder, KnowledgeSourceListRequest,
+    KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
+    KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMessageListRequest,
     KnowledgeThreadMetadataBatchRequest, KnowledgeThreadMetadataUpdate,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
@@ -6115,6 +6115,165 @@ fn source_read_requests_validate_nowledge_inputs() {
     assert!(source_memories_error
         .to_string()
         .contains("non-empty source id"));
+}
+
+#[test]
+fn lists_sources_for_nowledge_summary_page_and_ranking_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha', title: 'Alpha Title', summary: 'Alpha summary', source_type: 'file', lifecycle_state: 'parsed', space_id: '', parsed_path: '/parsed/a', file_path: '/tmp/a.md', mime_type: 'text/markdown', source_url: 'file:///tmp/a.md', memory_count: 2, chunk_count: 4, size_bytes: 128, version: 3, created_at: 10, updated_at: 20, metadata: 'generated:yes'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', summary: 'Beta summary', source_type: 'web', lifecycle_state: 'indexed', space_id: 'archive', file_path: '/tmp/b.html', mime_type: 'text/html', memory_count: 5, chunk_count: 1, size_bytes: 256, created_at: 30, updated_at: 40})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_c', source_type: 'pdf', lifecycle_state: 'ingested', space_id: 'default', created_at: 50})")
+        .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let bulk = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            source_ids: vec![
+                "source_b".to_string(),
+                "missing".to_string(),
+                "source_a".to_string(),
+            ],
+            limit: 0,
+            order: KnowledgeSourceListOrder::SourceIdAsc,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(bulk.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(bulk.matched_count, 2);
+    assert_eq!(bulk.returned_count, 2);
+    assert_eq!(bulk.missing_source_ids, vec!["missing".to_string()]);
+    assert_eq!(bulk.rows[0].source_id.as_deref(), Some("source_a"));
+    assert_eq!(bulk.rows[0].display_name, "Alpha");
+    assert_eq!(bulk.rows[0].summary.as_deref(), Some("Alpha summary"));
+    assert_eq!(bulk.rows[0].source_type.as_deref(), Some("file"));
+    assert_eq!(bulk.rows[0].lifecycle_state.as_deref(), Some("parsed"));
+    assert_eq!(bulk.rows[0].raw_space_id, None);
+    assert_eq!(bulk.rows[0].normalized_space_id, "default");
+    assert_eq!(bulk.rows[0].parsed_path.as_deref(), Some("/parsed/a"));
+    assert_eq!(bulk.rows[0].file_path.as_deref(), Some("/tmp/a.md"));
+    assert_eq!(bulk.rows[0].mime_type.as_deref(), Some("text/markdown"));
+    assert_eq!(bulk.rows[0].source_url.as_deref(), Some("file:///tmp/a.md"));
+    assert_eq!(
+        bulk.rows[0].metadata,
+        Some(Value::String("generated:yes".to_string()))
+    );
+    assert_eq!(bulk.rows[0].memory_count, 2);
+    assert_eq!(bulk.rows[0].chunk_count, 4);
+    assert_eq!(bulk.rows[0].size_bytes, 128);
+    assert_eq!(bulk.rows[0].version, 3);
+    assert_eq!(bulk.rows[1].source_id.as_deref(), Some("source_b"));
+
+    let ranked = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            limit: 1,
+            order: KnowledgeSourceListOrder::MemoryCountDesc,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(ranked.matched_count, 3);
+    assert_eq!(ranked.returned_count, 1);
+    assert_eq!(ranked.rows[0].source_id.as_deref(), Some("source_b"));
+    assert_eq!(ranked.rows[0].memory_count, 5);
+
+    let parsed = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            parsed_path_required: true,
+            limit: 12,
+            order: KnowledgeSourceListOrder::CreatedAtDesc,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(parsed.matched_count, 1);
+    assert_eq!(parsed.rows[0].source_id.as_deref(), Some("source_a"));
+
+    let attention = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            lifecycle_states: vec![
+                "ingested".to_string(),
+                "parsed".to_string(),
+                "chunked".to_string(),
+                "error".to_string(),
+            ],
+            limit: 15,
+            order: KnowledgeSourceListOrder::CreatedAtDesc,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(attention.matched_count, 2);
+    assert_eq!(attention.rows[0].source_id.as_deref(), Some("source_c"));
+    assert_eq!(attention.rows[1].source_id.as_deref(), Some("source_a"));
+
+    let page = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            after_source_id: Some("source_a".to_string()),
+            limit: 10,
+            order: KnowledgeSourceListOrder::SourceIdAsc,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(
+        page.rows
+            .iter()
+            .map(|row| row.source_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["source_b", "source_c"]
+    );
+
+    let generated = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            metadata_contains: Some("generated".to_string()),
+            limit: 10,
+            order: KnowledgeSourceListOrder::SourceIdAsc,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap();
+    assert_eq!(generated.matched_count, 1);
+    assert_eq!(generated.rows[0].source_id.as_deref(), Some("source_a"));
+
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn source_list_rejects_unbounded_or_empty_filters() {
+    let db = Database::new();
+
+    let unbounded = db
+        .knowledge_sources(&KnowledgeSourceListRequest::default())
+        .unwrap_err();
+    assert!(unbounded.to_string().contains("bounded limit or a filter"));
+
+    let empty_id = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            source_ids: vec![String::new()],
+            limit: 10,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_id.to_string().contains("non-empty source ids"));
+
+    let empty_state = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            lifecycle_states: vec![String::new()],
+            limit: 10,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_state
+        .to_string()
+        .contains("non-empty lifecycle states"));
+
+    let empty_marker = db
+        .knowledge_sources(&KnowledgeSourceListRequest {
+            metadata_contains: Some(String::new()),
+            limit: 10,
+            ..KnowledgeSourceListRequest::default()
+        })
+        .unwrap_err();
+    assert!(empty_marker
+        .to_string()
+        .contains("non-empty metadata marker"));
 }
 
 #[test]
