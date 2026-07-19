@@ -11,14 +11,15 @@ use super::{
     KnowledgeCommunityMembershipCreate, KnowledgeCommunityMembershipCreateBatchRequest,
     KnowledgeCommunitySummaryUpdate, KnowledgeEntityBatchRequest,
     KnowledgeEntityCreateBatchRequest, KnowledgeEntityCreateRequest,
-    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest, KnowledgeEntityRequest,
-    KnowledgeEntityUpsertBatchRequest, KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode,
-    KnowledgeFanoutReasonCode, KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp,
-    KnowledgeGraphMetaStampBatchRequest, KnowledgeGraphPathDirection,
-    KnowledgeLabelBackfillScanRequest, KnowledgeLabelCanonicalLookupRequest,
-    KnowledgeLabelLifecycleBatchRequest, KnowledgeLabelLifecycleUpdate,
-    KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest, KnowledgeMemoryAccessBatchRequest,
-    KnowledgeMemoryAccessTouch, KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
+    KnowledgeEntityDeleteBatchRequest, KnowledgeEntityDeleteRequest,
+    KnowledgeEntityLabelListRequest, KnowledgeEntityRequest, KnowledgeEntityUpsertBatchRequest,
+    KnowledgeEntityUpsertRequest, KnowledgeFallbackReasonCode, KnowledgeFanoutReasonCode,
+    KnowledgeGraphMetaRequest, KnowledgeGraphMetaStamp, KnowledgeGraphMetaStampBatchRequest,
+    KnowledgeGraphPathDirection, KnowledgeLabelBackfillScanRequest,
+    KnowledgeLabelCanonicalLookupRequest, KnowledgeLabelLifecycleBatchRequest,
+    KnowledgeLabelLifecycleUpdate, KnowledgeLabelUsageListRequest, KnowledgeLabelUsageRequest,
+    KnowledgeMemoryAccessBatchRequest, KnowledgeMemoryAccessTouch,
+    KnowledgeMemoryLatestBatchRequest, KnowledgeMemoryLatestUpdate,
     KnowledgeMemoryLifecycleBatchRequest, KnowledgeMemoryLifecycleUpdate,
     KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
     KnowledgeNormalizedSpaceMoveBatchRequest, KnowledgePageRankCentralEntityRequest,
@@ -7190,6 +7191,99 @@ fn reads_label_usage_rows_for_nowledge_label_apis() {
 }
 
 #[test]
+fn reads_entity_labels_for_nowledge_has_label_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Label {id: 'alpha', name: 'Alpha', canonical_name: 'alpha', color: '#fff', description: 'Alpha label'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'beta', name: 'Beta', canonical_name: 'beta'})")
+        .unwrap();
+    db.query("CREATE (:Label {id: 'gamma', name: 'Gamma', canonical_name: 'gamma'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_2'})").unwrap();
+    db.query("CREATE (:Source {id: 'source_1'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'beta'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_1'}), (l:Label {id: 'alpha'}) CREATE (m)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (s:Source {id: 'source_1'}), (l:Label {id: 'gamma'}) CREATE (s)-[:HAS_LABEL]->(l)",
+    )
+    .unwrap();
+    let graph_commit_epoch = db.store.commit_epoch();
+
+    let memories = db
+        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+            entity_label: "Memory".to_string(),
+            external_ids: vec![
+                "memory_1".to_string(),
+                "memory_2".to_string(),
+                "missing".to_string(),
+            ],
+            limit_per_entity: 0,
+        })
+        .unwrap();
+
+    assert_eq!(memories.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(memories.found_entity_count, 2);
+    assert_eq!(memories.missing_entity_count, 1);
+    assert_eq!(memories.label_count, 2);
+    assert_eq!(memories.groups.len(), 3);
+    assert!(memories.groups[0].found);
+    assert_eq!(memories.groups[0].external_id, "memory_1");
+    assert_eq!(memories.groups[0].returned_count, 2);
+    assert_eq!(
+        memories.groups[0].labels[0].label_id.as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(memories.groups[0].labels[0].name.as_deref(), Some("Alpha"));
+    assert_eq!(
+        memories.groups[0].labels[0].canonical_name.as_deref(),
+        Some("alpha")
+    );
+    assert_eq!(
+        memories.groups[0].labels[0].color,
+        Some(Value::String("#fff".to_string()))
+    );
+    assert_eq!(
+        memories.groups[0].labels[0].description,
+        Some(Value::String("Alpha label".to_string()))
+    );
+    assert_eq!(
+        memories.groups[0].labels[1].label_id.as_deref(),
+        Some("beta")
+    );
+    assert!(memories.groups[1].found);
+    assert_eq!(memories.groups[1].returned_count, 0);
+    assert!(!memories.groups[2].found);
+    assert_eq!(memories.groups[2].node_id, None);
+
+    let sources = db
+        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+            entity_label: "Source".to_string(),
+            external_ids: vec!["source_1".to_string()],
+            limit_per_entity: 1,
+        })
+        .unwrap();
+
+    assert_eq!(sources.graph_commit_epoch, graph_commit_epoch);
+    assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    assert_eq!(sources.found_entity_count, 1);
+    assert_eq!(sources.missing_entity_count, 0);
+    assert_eq!(sources.label_count, 1);
+    assert_eq!(sources.groups[0].returned_count, 1);
+    assert_eq!(
+        sources.groups[0].labels[0].label_id.as_deref(),
+        Some("gamma")
+    );
+}
+
+#[test]
 fn label_read_requests_validate_non_empty_filters() {
     let db = Database::new();
     let canonical_error = db
@@ -7219,6 +7313,28 @@ fn label_read_requests_validate_non_empty_filters() {
         })
         .unwrap_err();
     assert!(usage_error.to_string().contains("non-empty label id"));
+
+    let entity_label_error = db
+        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+            entity_label: "Bad Label".to_string(),
+            external_ids: vec!["memory_1".to_string()],
+            limit_per_entity: 10,
+        })
+        .unwrap_err();
+    assert!(entity_label_error
+        .to_string()
+        .contains("knowledge entity label"));
+
+    let external_ids_error = db
+        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
+            entity_label: "Memory".to_string(),
+            external_ids: Vec::new(),
+            limit_per_entity: 10,
+        })
+        .unwrap_err();
+    assert!(external_ids_error
+        .to_string()
+        .contains("non-empty external ids"));
 }
 
 #[test]

@@ -2092,6 +2092,41 @@ pub struct KnowledgeLabelUsageListOutput {
     pub returned_count: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelListRequest {
+    pub entity_label: String,
+    pub external_ids: Vec<String>,
+    pub limit_per_entity: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelRow {
+    pub label_id: Option<String>,
+    pub node_id: u64,
+    pub name: Option<String>,
+    pub canonical_name: Option<String>,
+    pub color: Option<Value>,
+    pub description: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelGroup {
+    pub external_id: String,
+    pub node_id: Option<u64>,
+    pub found: bool,
+    pub labels: Vec<KnowledgeEntityLabelRow>,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeEntityLabelListOutput {
+    pub graph_commit_epoch: u64,
+    pub groups: Vec<KnowledgeEntityLabelGroup>,
+    pub found_entity_count: usize,
+    pub missing_entity_count: usize,
+    pub label_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgePageRankScoreUpdate {
     pub label: String,
@@ -4466,6 +4501,13 @@ impl Database {
         request: &KnowledgeLabelUsageListRequest,
     ) -> KnowledgeLabelUsageListOutput {
         knowledge_label_canonical_usage_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_entity_labels(
+        &self,
+        request: &KnowledgeEntityLabelListRequest,
+    ) -> Result<KnowledgeEntityLabelListOutput> {
+        knowledge_entity_labels_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_pagerank_scores_batch(
@@ -8918,6 +8960,62 @@ fn knowledge_label_canonical_usage_for(
     label_usage_list_output(catalog, store, graph_commit_epoch, rows, request.limit)
 }
 
+fn knowledge_entity_labels_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeEntityLabelListRequest,
+) -> Result<KnowledgeEntityLabelListOutput> {
+    validate_cypher_identifier(&request.entity_label, "knowledge entity label")?;
+    if request.external_ids.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity label read requires non-empty external ids".to_string(),
+        ));
+    }
+    validate_non_empty_external_ids(
+        &request.external_ids,
+        "knowledge entity label read requires non-empty external ids",
+    )?;
+    let graph_commit_epoch = store.commit_epoch();
+    let mut groups = Vec::with_capacity(request.external_ids.len());
+    let mut found_entity_count = 0;
+    let mut missing_entity_count = 0;
+    let mut label_count = 0;
+
+    for external_id in &request.external_ids {
+        let Some(entity) =
+            seed_node_by_label_and_external_id(catalog, store, &request.entity_label, external_id)
+        else {
+            missing_entity_count += 1;
+            groups.push(KnowledgeEntityLabelGroup {
+                external_id: external_id.clone(),
+                node_id: None,
+                found: false,
+                labels: Vec::new(),
+                returned_count: 0,
+            });
+            continue;
+        };
+        found_entity_count += 1;
+        let labels = entity_label_rows(catalog, store, entity, request.limit_per_entity);
+        label_count += labels.len();
+        groups.push(KnowledgeEntityLabelGroup {
+            external_id: external_id.clone(),
+            node_id: Some(entity.id.0),
+            found: true,
+            returned_count: labels.len(),
+            labels,
+        });
+    }
+
+    Ok(KnowledgeEntityLabelListOutput {
+        graph_commit_epoch,
+        groups,
+        found_entity_count,
+        missing_entity_count,
+        label_count,
+    })
+}
+
 fn validate_optional_label_id(label_id: Option<&str>) -> Result<()> {
     if label_id.is_some_and(str::is_empty) {
         return Err(SkeinError::Semantic(
@@ -8985,6 +9083,47 @@ fn label_usage_count(catalog: &Catalog, store: &GraphStore, label_node_id: NodeI
         .scan_relationships(Some(rel_type_id))
         .filter(|relationship| relationship.target == label_node_id)
         .count()
+}
+
+fn entity_label_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    entity: &NodeRecord,
+    limit: usize,
+) -> Vec<KnowledgeEntityLabelRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
+        return Vec::new();
+    };
+    let Some(label_label_id) = catalog.label_id("Label") else {
+        return Vec::new();
+    };
+    let mut rows = store
+        .outgoing_relationships(entity.id, rel_type_id)
+        .filter_map(|relationship| store.node(relationship.target))
+        .filter(|node| node.labels.contains(&label_label_id))
+        .map(entity_label_row)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.name
+            .cmp(&right.name)
+            .then_with(|| left.label_id.cmp(&right.label_id))
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    if limit > 0 {
+        rows.truncate(limit);
+    }
+    rows
+}
+
+fn entity_label_row(node: &NodeRecord) -> KnowledgeEntityLabelRow {
+    KnowledgeEntityLabelRow {
+        label_id: node_external_id(node),
+        node_id: node.id.0,
+        name: node_string_property(node, "name"),
+        canonical_name: node_string_property(node, "canonical_name"),
+        color: node.properties.get("color").cloned(),
+        description: node.properties.get("description").cloned(),
+    }
 }
 
 fn update_knowledge_pagerank_scores_batch_for(
@@ -15647,6 +15786,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeLabelUsageListRequest,
     ) -> KnowledgeLabelUsageListOutput {
         self.db.knowledge_label_canonical_usage(request)
+    }
+
+    pub fn knowledge_entity_labels(
+        &self,
+        request: &KnowledgeEntityLabelListRequest,
+    ) -> Result<KnowledgeEntityLabelListOutput> {
+        self.db.knowledge_entity_labels(request)
     }
 
     pub fn update_knowledge_pagerank_scores_batch(

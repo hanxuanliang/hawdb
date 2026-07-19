@@ -395,6 +395,10 @@ label list surfaces are available as typed APIs:
 `Database::knowledge_label_canonical_usage`. They scan only `Label` nodes,
 validate non-empty lookup filters, and compute `HAS_LABEL` usage counts over
 any source node type.
+Endpoint-known label assignment reads are also available as
+`Database::knowledge_entity_labels`, covering the Nowledge Memory/Source/Entity
+bulk `HAS_LABEL` id/name/metadata read shapes without application-side Cypher
+construction or WAL writes.
 Source-reference relationship cleanup for Nowledge memory/source delete flows
 is available as `Database::delete_knowledge_source_reference_relationships`.
 It is intentionally scoped to `RELATES_TO.source_reference`, rejects empty

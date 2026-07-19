@@ -219,6 +219,13 @@ handles duplicate/collision checks, `Database::scan_knowledge_labels_missing_can
 handles canonical backfill scans, and `Database::knowledge_label_usage` plus
 `Database::knowledge_label_canonical_usage` expose single-row and canonical
 usage rows with `HAS_LABEL` counts over any source node type.
+Endpoint-known `HAS_LABEL` assignment reads are covered by
+`Database::knowledge_entity_labels` for Nowledge Memory, Source, Entity, and
+other id-bearing graph identities. The typed read validates the entity label
+and non-empty external id list, resolves each input identity in caller order,
+returns Label id/name/canonical-name/color/description rows sorted by label
+name/id/node id with optional per-entity limits, reports found/missing entity
+counts and the graph commit epoch, and does not write WAL.
 PageRank score writes are covered by typed batches for Nowledge Memory and
 Entity `pagerank_score` persistence and clear operations. The wrapper accepts
 only finite non-negative scores for Memory/Entity identities, reports missing,
