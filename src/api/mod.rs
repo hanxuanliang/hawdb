@@ -1767,6 +1767,38 @@ pub struct KnowledgeSourceCountOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMemoryListRequest {
+    pub source_id: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMemoryRow {
+    pub memory_id: Option<String>,
+    pub node_id: u64,
+    pub relationship_id: u64,
+    pub title: Option<String>,
+    pub content: Option<String>,
+    pub unit_type: Option<String>,
+    pub confidence: Option<Value>,
+    pub chunk_index: Option<i64>,
+    pub chunk_range: Option<String>,
+    pub source_version: Option<String>,
+    pub created_at: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceMemoryListOutput {
+    pub graph_commit_epoch: u64,
+    pub source_id: String,
+    pub source_node_id: Option<u64>,
+    pub found: bool,
+    pub rows: Vec<KnowledgeSourceMemoryRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeMemoryLifecycleUpdate {
     pub memory_id: String,
     pub metadata: Value,
@@ -4424,6 +4456,13 @@ impl Database {
             graph_commit_epoch: self.store.commit_epoch(),
             count: count_nodes_with_label(&self.catalog, &self.store, "Source"),
         }
+    }
+
+    pub fn knowledge_source_memories(
+        &self,
+        request: &KnowledgeSourceMemoryListRequest,
+    ) -> Result<KnowledgeSourceMemoryListOutput> {
+        knowledge_source_memories_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(
@@ -7751,6 +7790,108 @@ fn knowledge_source_row(
         created_at: node.properties.get("created_at").cloned(),
         updated_at: node.properties.get("updated_at").cloned(),
         sourced_memory_count: source_sourced_memory_count(catalog, store, node.id),
+    }
+}
+
+fn knowledge_source_memories_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeSourceMemoryListRequest,
+) -> Result<KnowledgeSourceMemoryListOutput> {
+    if request.source_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source memory read requires a non-empty source id".to_string(),
+        ));
+    }
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(source) =
+        seed_node_by_label_and_external_id(catalog, store, "Source", &request.source_id)
+    else {
+        return Ok(KnowledgeSourceMemoryListOutput {
+            graph_commit_epoch,
+            source_id: request.source_id.clone(),
+            source_node_id: None,
+            found: false,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = source_memory_rows(catalog, store, source.id);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    Ok(KnowledgeSourceMemoryListOutput {
+        graph_commit_epoch,
+        source_id: request.source_id.clone(),
+        source_node_id: Some(source.id.0),
+        found: true,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn source_memory_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    source_node_id: NodeId,
+) -> Vec<KnowledgeSourceMemoryRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
+        return Vec::new();
+    };
+    let Some(memory_label_id) = catalog.label_id("Memory") else {
+        return Vec::new();
+    };
+    let mut rows = store
+        .incoming_relationships(source_node_id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.source)
+                .filter(|memory| memory.labels.contains(&memory_label_id))
+                .map(|memory| source_memory_row(memory, relationship))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.chunk_index
+            .cmp(&right.chunk_index)
+            .then_with(|| left.memory_id.cmp(&right.memory_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    rows
+}
+
+fn source_memory_row(memory: &NodeRecord, relationship: &RelRecord) -> KnowledgeSourceMemoryRow {
+    KnowledgeSourceMemoryRow {
+        memory_id: node_external_id(memory),
+        node_id: memory.id.0,
+        relationship_id: relationship.id.0,
+        title: string_property(memory, "title"),
+        content: string_property(memory, "content"),
+        unit_type: string_property(memory, "unit_type"),
+        confidence: memory.properties.get("confidence").cloned(),
+        chunk_index: relationship_integer_property(relationship, "chunk_index"),
+        chunk_range: relationship_string_property(relationship, "chunk_range"),
+        source_version: relationship_string_property(relationship, "source_version"),
+        created_at: relationship.properties.get("created_at").cloned(),
+    }
+}
+
+fn relationship_string_property(relationship: &RelRecord, property: &str) -> Option<String> {
+    relationship
+        .properties
+        .get(property)
+        .map(value_to_external_id)
+        .filter(|value| !value.is_empty())
+}
+
+fn relationship_integer_property(relationship: &RelRecord, property: &str) -> Option<i64> {
+    match relationship.properties.get(property) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
     }
 }
 
@@ -15708,6 +15849,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
 
     pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
         self.db.knowledge_source_count()
+    }
+
+    pub fn knowledge_source_memories(
+        &self,
+        request: &KnowledgeSourceMemoryListRequest,
+    ) -> Result<KnowledgeSourceMemoryListOutput> {
+        self.db.knowledge_source_memories(request)
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(

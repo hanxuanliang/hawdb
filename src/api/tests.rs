@@ -47,8 +47,8 @@ use super::{
     KnowledgeSkillUsageStatsUpdate, KnowledgeSourceIdListRequest,
     KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate,
     KnowledgeSourceMemoryCountAdjustment, KnowledgeSourceMemoryCountBatchRequest,
-    KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
-    KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
+    KnowledgeSourceMemoryListRequest, KnowledgeSourceReferenceRelationshipCleanupRequest,
+    KnowledgeSourceRequest, KnowledgeSubgraphRequest, KnowledgeThreadMessageCountBatchRequest,
     KnowledgeThreadMessageCountUpdate, KnowledgeThreadMetadataBatchRequest,
     KnowledgeThreadMetadataUpdate, KnowledgeTraversalFallbackReasonCode,
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphStatement, QueryOutput,
@@ -5496,11 +5496,13 @@ fn reads_source_detail_count_and_id_lists_for_nowledge_shapes() {
         .unwrap();
     db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', source_type: 'url', lifecycle_state: 'indexed', space_id: 'team', memory_count: 1, created_at: 30})")
         .unwrap();
-    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
-    db.query("CREATE (:Memory {id: 'memory_b'})").unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM]->(s)")
+    db.query("CREATE (:Memory {id: 'memory_a', title: 'Memory A', content: 'Alpha content', unit_type: 'fact', confidence: 0.8})")
         .unwrap();
-    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM]->(s)")
+    db.query("CREATE (:Memory {id: 'memory_b', title: 'Memory B', content: 'Beta content', unit_type: 'note', confidence: 0.6})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', created_at: 200}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v1', created_at: 100}]->(s)")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
@@ -5559,6 +5561,54 @@ fn reads_source_detail_count_and_id_lists_for_nowledge_shapes() {
         .unwrap();
     assert_eq!(limited.matched_count, 2);
     assert_eq!(limited.returned_count, 1);
+
+    let memories = db
+        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
+            source_id: "source_a".to_string(),
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(memories.graph_commit_epoch, graph_commit_epoch);
+    assert!(memories.found);
+    assert_eq!(memories.source_id, "source_a");
+    assert!(memories.source_node_id.is_some());
+    assert_eq!(memories.matched_count, 2);
+    assert_eq!(memories.returned_count, 2);
+    assert_eq!(memories.rows[0].memory_id.as_deref(), Some("memory_b"));
+    assert_eq!(memories.rows[0].title.as_deref(), Some("Memory B"));
+    assert_eq!(memories.rows[0].content.as_deref(), Some("Beta content"));
+    assert_eq!(memories.rows[0].unit_type.as_deref(), Some("note"));
+    assert_eq!(memories.rows[0].confidence, Some(Value::Float(0.6)));
+    assert_eq!(memories.rows[0].chunk_index, Some(1));
+    assert_eq!(memories.rows[0].chunk_range.as_deref(), Some("0..10"));
+    assert_eq!(memories.rows[0].source_version.as_deref(), Some("v1"));
+    assert_eq!(memories.rows[0].created_at, Some(Value::Int(100)));
+    assert_eq!(memories.rows[1].memory_id.as_deref(), Some("memory_a"));
+    assert_eq!(memories.rows[1].chunk_index, Some(2));
+
+    let limited_memories = db
+        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
+            source_id: "source_a".to_string(),
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(limited_memories.matched_count, 2);
+    assert_eq!(limited_memories.returned_count, 1);
+    assert_eq!(
+        limited_memories.rows[0].memory_id.as_deref(),
+        Some("memory_b")
+    );
+
+    let missing_memories = db
+        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
+            source_id: "missing".to_string(),
+            limit: 10,
+        })
+        .unwrap();
+    assert!(!missing_memories.found);
+    assert_eq!(missing_memories.source_node_id, None);
+    assert_eq!(missing_memories.matched_count, 0);
+    assert_eq!(missing_memories.returned_count, 0);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
 }
 
@@ -5594,6 +5644,16 @@ fn source_read_requests_validate_nowledge_inputs() {
     assert!(space_error
         .to_string()
         .contains("non-empty normalized space id"));
+
+    let source_memories_error = db
+        .knowledge_source_memories(&KnowledgeSourceMemoryListRequest {
+            source_id: String::new(),
+            limit: 10,
+        })
+        .unwrap_err();
+    assert!(source_memories_error
+        .to_string()
+        .contains("non-empty source id"));
 }
 
 #[test]
