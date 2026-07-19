@@ -1593,7 +1593,7 @@ fn external_shadow_adapter_smoke_report_json(
             "execute_session": true,
             "project_graph": true,
         },
-        "adapter_smoke_ready": missing_capabilities.is_empty() && matched_checks > 0,
+        "adapter_smoke_ready": missing_capabilities.is_empty() && dual_engine_ready,
     });
     if let Some(trace_path) = trace_path {
         if let Some(object) = json.as_object_mut() {
@@ -1631,6 +1631,18 @@ fn enforce_external_shadow_adapter_smoke_requirements(
         return Err(SkeinError::Execution(
             "external shadow adapter smoke did not match any shadow checks".to_string(),
         ));
+    }
+    let primary_only_checks = report
+        .shadow_checks
+        .iter()
+        .filter(|check| check.status == CompatibilityShadowStatus::PrimaryOnly)
+        .map(|check| check.name.as_str())
+        .collect::<Vec<_>>();
+    if require_previous_wrapper && !primary_only_checks.is_empty() {
+        return Err(SkeinError::Execution(format!(
+            "external shadow adapter smoke requires all checks to run on previous-wrapper; primary-only checks: {}",
+            primary_only_checks.join(", ")
+        )));
     }
     if !report
         .shadow_checks
@@ -4265,7 +4277,7 @@ mod tests {
     }
 
     #[test]
-    fn adapter_smoke_report_allows_primary_only_projection() {
+    fn adapter_smoke_blocks_primary_only_projection_for_required_previous_wrapper() {
         let ready = ExternalShadowReady {
             protocol_version: 1,
             capabilities: vec![
@@ -4289,10 +4301,14 @@ mod tests {
             ),
         ]);
 
-        enforce_external_shadow_adapter_smoke_requirements(&ready, &report, true).unwrap();
+        let error =
+            enforce_external_shadow_adapter_smoke_requirements(&ready, &report, true).unwrap_err();
+        assert!(error.to_string().contains(
+            "requires all checks to run on previous-wrapper; primary-only checks: single memory projection"
+        ));
         let json = external_shadow_adapter_smoke_report_json(&ready, &report, 3, None);
 
-        assert_eq!(json["adapter_smoke_ready"], true);
+        assert_eq!(json["adapter_smoke_ready"], false);
         assert_eq!(json["dual_engine_evidence"]["ready"], false);
         assert_eq!(
             json["dual_engine_evidence"]["primary_engine"],
