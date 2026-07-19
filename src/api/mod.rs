@@ -2797,6 +2797,21 @@ pub struct KnowledgeThreadSourceListOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadTitleLookupRequest {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadTitleLookupOutput {
+    pub graph_commit_epoch: u64,
+    pub id: String,
+    pub thread_node_id: Option<u64>,
+    pub found_thread: bool,
+    pub title: Option<String>,
+    pub matched_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeThreadIdentityRequest {
     pub identity_key: String,
 }
@@ -5672,6 +5687,13 @@ impl Database {
         request: &KnowledgeThreadSourceListRequest,
     ) -> KnowledgeThreadSourceListOutput {
         knowledge_thread_sources_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_title(
+        &self,
+        request: &KnowledgeThreadTitleLookupRequest,
+    ) -> Result<KnowledgeThreadTitleLookupOutput> {
+        knowledge_thread_title_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_thread_identity(
@@ -13216,6 +13238,56 @@ fn knowledge_thread_sources_for(
         matched_count,
         returned_count,
     }
+}
+
+fn knowledge_thread_title_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadTitleLookupRequest,
+) -> Result<KnowledgeThreadTitleLookupOutput> {
+    validate_knowledge_thread_title_request(request)?;
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(label_id) = catalog.label_id("Thread") else {
+        return Ok(KnowledgeThreadTitleLookupOutput {
+            graph_commit_epoch,
+            id: request.id.clone(),
+            thread_node_id: None,
+            found_thread: false,
+            title: None,
+            matched_count: 0,
+        });
+    };
+
+    let mut matched = store
+        .scan_nodes(Some(label_id))
+        .filter(|node| {
+            node_external_id(node).as_deref() == Some(request.id.as_str())
+                || string_property(node, "thread_id").as_deref() == Some(request.id.as_str())
+        })
+        .collect::<Vec<_>>();
+    matched.sort_by_key(|node| node.id.0);
+    let matched_count = matched.len();
+    let first = matched.into_iter().next();
+
+    Ok(KnowledgeThreadTitleLookupOutput {
+        graph_commit_epoch,
+        id: request.id.clone(),
+        thread_node_id: first.map(|node| node.id.0),
+        found_thread: first.is_some(),
+        title: first.and_then(|node| string_property(node, "title")),
+        matched_count,
+    })
+}
+
+fn validate_knowledge_thread_title_request(
+    request: &KnowledgeThreadTitleLookupRequest,
+) -> Result<()> {
+    if request.id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread title read requires a non-empty thread id".to_string(),
+        ));
+    }
+    Ok(())
 }
 
 fn knowledge_thread_identity_for(
@@ -21293,6 +21365,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.knowledge_thread_sources(request)
     }
 
+    pub fn knowledge_thread_title(
+        &self,
+        request: &KnowledgeThreadTitleLookupRequest,
+    ) -> Result<KnowledgeThreadTitleLookupOutput> {
+        self.db.knowledge_thread_title(request)
+    }
+
     pub fn knowledge_thread_identity(
         &self,
         request: &KnowledgeThreadIdentityRequest,
@@ -22218,6 +22297,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeThreadSourceListRequest,
     ) -> KnowledgeThreadSourceListOutput {
         knowledge_thread_sources_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_thread_title(
+        &self,
+        request: &KnowledgeThreadTitleLookupRequest,
+    ) -> Result<KnowledgeThreadTitleLookupOutput> {
+        knowledge_thread_title_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_communities(

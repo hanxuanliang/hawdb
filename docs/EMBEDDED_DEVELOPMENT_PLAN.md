@@ -186,7 +186,9 @@ WAL writes. Thread sync metadata reads are exposed as a typed
 `knowledge_thread_sync_metadata` API for exact physical Thread ids and
 Cypher-compatible `COALESCE` fallbacks without WAL writes. Distinct Thread
 source listing is exposed as a typed `knowledge_thread_sources` API for REST FS
-source directories without WAL writes.
+source directories without WAL writes. Thread attachment title lookup is
+exposed as a typed `knowledge_thread_title` API for exact physical/logical
+Thread ids without WAL writes.
 Label lifecycle writes are exposed as a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates.
 PageRank score persistence and clear operations are exposed as typed batches

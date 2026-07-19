@@ -357,6 +357,12 @@ Distinct Thread source listing is covered by
 filters missing and empty `source` values, returns sorted distinct source
 strings with optional bounded truncation, supports pinned read snapshots, and
 does not write WAL.
+Thread attachment title lookup is covered by
+`Database::knowledge_thread_title`. The typed read resolves exact physical
+`id` or logical `thread_id`, returns the first stable node-id ordered title for
+the Nowledge REST agent attached-source shape, reports total matched Thread
+rows for ambiguity diagnostics, supports pinned read snapshots, and does not
+write WAL.
 ThreadIdentity exact resolution is covered by
 `Database::knowledge_thread_identity`. The typed read resolves one
 `ThreadIdentity` by external id, returns the Nowledge repo fields
