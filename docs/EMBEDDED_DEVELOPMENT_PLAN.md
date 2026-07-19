@@ -403,6 +403,10 @@ Memory entity mention reads are available as
 `Database::knowledge_memory_entities`, covering Nowledge `Memory` outgoing
 `MENTIONS` Entity name/detail list shapes with grouped rows, distinct names,
 bounded limits, and no WAL writes.
+Thread ordered message reads are available as
+`Database::knowledge_thread_messages`, covering Nowledge `Thread` outgoing
+`CONTAINS` transcript/list shapes with `COALESCE(c.order_index, m.order_index)`
+ordering and no WAL writes.
 Source attribution memory reads are available as
 `Database::knowledge_source_memories`, covering the Nowledge
 `Source`-to-`Memory` incoming `SOURCED_FROM` detail/id-list shapes with

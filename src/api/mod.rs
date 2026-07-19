@@ -2074,6 +2074,40 @@ pub struct KnowledgeThreadMessageCountBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageListRequest {
+    pub thread_id: String,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageRow {
+    pub message_id: Option<String>,
+    pub node_id: u64,
+    pub relationship_id: u64,
+    pub role: Option<String>,
+    pub content: Option<String>,
+    pub order_index: Option<i64>,
+    pub relationship_order_index: Option<i64>,
+    pub message_order_index: Option<i64>,
+    pub timestamp: Option<Value>,
+    pub token_count: Option<i64>,
+    pub created_at: Option<Value>,
+    pub updated_at: Option<Value>,
+    pub metadata: Option<Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeThreadMessageListOutput {
+    pub graph_commit_epoch: u64,
+    pub thread_id: String,
+    pub thread_node_id: Option<u64>,
+    pub found: bool,
+    pub rows: Vec<KnowledgeThreadMessageRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeLabelLifecycleUpdate {
     pub label_id: String,
     pub name: Option<String>,
@@ -4551,6 +4585,13 @@ impl Database {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         update_knowledge_thread_message_count_batch_for(self, request)
+    }
+
+    pub fn knowledge_thread_messages(
+        &self,
+        request: &KnowledgeThreadMessageListRequest,
+    ) -> Result<KnowledgeThreadMessageListOutput> {
+        knowledge_thread_messages_for(&self.catalog, &self.store, request)
     }
 
     pub fn update_knowledge_label_lifecycle_batch(
@@ -9002,6 +9043,96 @@ fn value_is_greater(left: &Value, right: &Value) -> bool {
         (Value::Float(left), Value::Int(right)) => *left > (*right as f64),
         (Value::String(left), Value::String(right)) => left > right,
         _ => false,
+    }
+}
+
+fn knowledge_thread_messages_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeThreadMessageListRequest,
+) -> Result<KnowledgeThreadMessageListOutput> {
+    if request.thread_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge thread message read requires a non-empty thread id".to_string(),
+        ));
+    }
+    let graph_commit_epoch = store.commit_epoch();
+    let Some(thread) =
+        seed_node_by_label_and_external_id(catalog, store, "Thread", &request.thread_id)
+    else {
+        return Ok(KnowledgeThreadMessageListOutput {
+            graph_commit_epoch,
+            thread_id: request.thread_id.clone(),
+            thread_node_id: None,
+            found: false,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+    let mut rows = thread_message_rows(catalog, store, thread.id);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    Ok(KnowledgeThreadMessageListOutput {
+        graph_commit_epoch,
+        thread_id: request.thread_id.clone(),
+        thread_node_id: Some(thread.id.0),
+        found: true,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn thread_message_rows(
+    catalog: &Catalog,
+    store: &GraphStore,
+    thread_node_id: NodeId,
+) -> Vec<KnowledgeThreadMessageRow> {
+    let Some(rel_type_id) = catalog.rel_type_id("CONTAINS") else {
+        return Vec::new();
+    };
+    let Some(message_label_id) = catalog.label_id("Message") else {
+        return Vec::new();
+    };
+    let mut rows = store
+        .outgoing_relationships(thread_node_id, rel_type_id)
+        .filter_map(|relationship| {
+            store
+                .node(relationship.target)
+                .filter(|message| message.labels.contains(&message_label_id))
+                .map(|message| thread_message_row(message, relationship))
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.order_index
+            .cmp(&right.order_index)
+            .then_with(|| left.message_id.cmp(&right.message_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    rows
+}
+
+fn thread_message_row(message: &NodeRecord, relationship: &RelRecord) -> KnowledgeThreadMessageRow {
+    let relationship_order_index = relationship_integer_property(relationship, "order_index");
+    let message_order_index = integer_property(message, "order_index");
+    KnowledgeThreadMessageRow {
+        message_id: node_external_id(message),
+        node_id: message.id.0,
+        relationship_id: relationship.id.0,
+        role: string_property(message, "role"),
+        content: string_property(message, "content"),
+        order_index: relationship_order_index.or(message_order_index),
+        relationship_order_index,
+        message_order_index,
+        timestamp: message.properties.get("timestamp").cloned(),
+        token_count: integer_property(message, "token_count"),
+        created_at: message.properties.get("created_at").cloned(),
+        updated_at: message.properties.get("updated_at").cloned(),
+        metadata: message.properties.get("metadata").cloned(),
     }
 }
 
@@ -16064,6 +16195,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         request: &KnowledgeThreadMessageCountBatchRequest,
     ) -> Result<KnowledgeThreadMessageCountBatchOutput> {
         self.db.update_knowledge_thread_message_count_batch(request)
+    }
+
+    pub fn knowledge_thread_messages(
+        &self,
+        request: &KnowledgeThreadMessageListRequest,
+    ) -> Result<KnowledgeThreadMessageListOutput> {
+        self.db.knowledge_thread_messages(request)
     }
 
     pub fn update_knowledge_label_lifecycle_batch(

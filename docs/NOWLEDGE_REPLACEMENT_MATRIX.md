@@ -221,6 +221,13 @@ Nowledge `message_count` refreshes with optional `updated_at` stamping and
 ids and non-negative counts before WAL, keeps newer existing timestamps when
 requested, reports missing, idless, and duplicate rows without writing, and
 commits eligible Thread rows through one grouped WAL batch.
+Thread ordered message reads are covered by
+`Database::knowledge_thread_messages`. The typed read resolves one Thread id,
+scans outgoing `CONTAINS` Message edges, returns Message id/role/content/order
+index/timestamps/token count/metadata plus relationship id and relationship
+order index, orders by `COALESCE(c.order_index, m.order_index)`, supports
+bounded limits, reports found/matched/returned counts and the graph commit
+epoch, and does not write WAL.
 Label lifecycle writes are covered by a typed batch for Nowledge metadata
 updates, canonical-name backfill, and rename/canonical-name updates. The
 wrapper validates Label ids, non-empty names, and non-empty canonical names
