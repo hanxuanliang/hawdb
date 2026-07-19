@@ -869,5 +869,7 @@ reasons.
    reporting guard for production replacement notes after the migration-gate
    bundle has been generated with previous-wrapper, storage recovery, and
    background-maintenance evidence.
-7. Continue the chryso-style crate split beyond the current `core` crate once
-   parser, planner, optimizer, store, and search contracts stabilize.
+7. Continue the chryso-style crate split beyond the current `core`, `cypher`,
+   `optimizer`, `plan-cache`, `qos`, and `api-types` crates. `api-types`
+   should keep DTO-only contracts that depend on `skein-core`; execution logic
+   should move only when the dependency direction is acyclic and stable.

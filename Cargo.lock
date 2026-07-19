@@ -188,12 +188,20 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "skein-api-types",
  "skein-core",
  "skein-cypher",
  "skein-optimizer",
  "skein-plan-cache",
  "skein-qos",
  "zstd",
+]
+
+[[package]]
+name = "skein-api-types"
+version = "0.1.0"
+dependencies = [
+ "skein-core",
 ]
 
 [[package]]

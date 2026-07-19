@@ -1405,6 +1405,10 @@ Scope:
   storage, search, compatibility, and executor boundaries; use internal module
   splits first when public contracts are still moving, and promote boundaries to
   workspace packages only when the dependency direction is acyclic and stable
+- `skein-api-types` owns stable typed facade DTOs that only depend on
+  `skein-core`, starting with scheduler Memory read/write request and response
+  types; root `src/api` remains the execution facade while more DTOs and
+  implementation families are migrated behind acyclic crate boundaries
 - `skein-cypher` owns syntax-only AST and parser modules, while root
   `src/cypher.rs` remains a compatibility re-export facade
 - Chryso-style rule and cost interfaces
