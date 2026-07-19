@@ -137,6 +137,56 @@ impl QuerySystemVariables {
             }
         }
     }
+
+    fn apply_set_system_variable(
+        &mut self,
+        set: &cypher::SetSystemVariable,
+    ) -> Result<QueryOutput> {
+        let value = literal_system_variable_value(&set.value)?;
+        match set.name.as_str() {
+            "work_priority" => {
+                let priority = string_system_variable_value(&set.name, &value)?
+                    .parse::<WorkPriority>()
+                    .map_err(|_| {
+                        SkeinError::Semantic(
+                            "SET system.work_priority accepts foreground or background".to_string(),
+                        )
+                    })?;
+                self.work_priority = priority;
+                Ok(query_output_row(
+                    "system.work_priority",
+                    Value::String(priority.as_str().to_string()),
+                ))
+            }
+            "work_class" => {
+                let class = string_system_variable_value(&set.name, &value)?
+                    .parse::<WorkClass>()
+                    .map_err(|_| {
+                        SkeinError::Semantic(
+                            "SET system.work_class accepts query, mutation, projection, import, analytics, or shadow"
+                                .to_string(),
+                        )
+                    })?;
+                self.work_class = class;
+                Ok(query_output_row(
+                    "system.work_class",
+                    Value::String(class.as_str().to_string()),
+                ))
+            }
+            "estimated_operations" => {
+                let estimated_operations = usize_system_variable_value(&set.name, &value)?;
+                self.estimated_operations = estimated_operations;
+                Ok(query_output_row(
+                    "system.estimated_operations",
+                    Value::Int(i64::try_from(estimated_operations).unwrap_or(i64::MAX)),
+                ))
+            }
+            _ => Err(SkeinError::Semantic(format!(
+                "unknown system variable system.{}",
+                set.name
+            ))),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5369,6 +5419,7 @@ pub struct DatabaseTransaction<'a> {
 pub struct DatabaseSession<'a> {
     db: &'a mut Database,
     transaction_mutations: Option<Vec<GraphMutation>>,
+    system_variables: QuerySystemVariables,
 }
 
 #[derive(Debug)]
@@ -5511,56 +5562,6 @@ impl Database {
         self.system_variables.query_work_request()
     }
 
-    fn apply_set_system_variable(
-        &mut self,
-        set: &cypher::SetSystemVariable,
-    ) -> Result<QueryOutput> {
-        let value = literal_system_variable_value(&set.value)?;
-        match set.name.as_str() {
-            "work_priority" => {
-                let priority = string_system_variable_value(&set.name, &value)?
-                    .parse::<WorkPriority>()
-                    .map_err(|_| {
-                        SkeinError::Semantic(
-                            "SET system.work_priority accepts foreground or background".to_string(),
-                        )
-                    })?;
-                self.system_variables.work_priority = priority;
-                Ok(query_output_row(
-                    "system.work_priority",
-                    Value::String(priority.as_str().to_string()),
-                ))
-            }
-            "work_class" => {
-                let class = string_system_variable_value(&set.name, &value)?
-                    .parse::<WorkClass>()
-                    .map_err(|_| {
-                        SkeinError::Semantic(
-                            "SET system.work_class accepts query, mutation, projection, import, analytics, or shadow"
-                                .to_string(),
-                        )
-                    })?;
-                self.system_variables.work_class = class;
-                Ok(query_output_row(
-                    "system.work_class",
-                    Value::String(class.as_str().to_string()),
-                ))
-            }
-            "estimated_operations" => {
-                let estimated_operations = usize_system_variable_value(&set.name, &value)?;
-                self.system_variables.estimated_operations = estimated_operations;
-                Ok(query_output_row(
-                    "system.estimated_operations",
-                    Value::Int(i64::try_from(estimated_operations).unwrap_or(i64::MAX)),
-                ))
-            }
-            _ => Err(SkeinError::Semantic(format!(
-                "unknown system variable system.{}",
-                set.name
-            ))),
-        }
-    }
-
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -5573,7 +5574,7 @@ impl Database {
         let statement = cypher::parse(cypher_text)?;
         if let cypher::Statement::SetSystemVariable(set) = &statement {
             reject_system_variable_parameters(parameters)?;
-            return self.apply_set_system_variable(set);
+            return self.system_variables.apply_set_system_variable(set);
         }
         if matches!(statement, cypher::Statement::Checkpoint) {
             if !parameters.is_empty() {
@@ -5605,9 +5606,11 @@ impl Database {
     }
 
     pub fn session(&mut self) -> DatabaseSession<'_> {
+        let system_variables = self.system_variables.clone();
         DatabaseSession {
             db: self,
             transaction_mutations: None,
+            system_variables,
         }
     }
 
@@ -29797,6 +29800,14 @@ impl DatabaseTransaction<'_> {
 }
 
 impl DatabaseSession<'_> {
+    pub fn system_variables(&self) -> &QuerySystemVariables {
+        &self.system_variables
+    }
+
+    pub fn query_work_request(&self) -> WorkRequest {
+        self.system_variables.query_work_request()
+    }
+
     pub fn query(&mut self, cypher_text: &str) -> Result<QueryOutput> {
         self.query_with_params(cypher_text, &BTreeMap::new())
     }
@@ -29851,6 +29862,10 @@ impl DatabaseSession<'_> {
                 Err(SkeinError::Execution(
                     "SET system variable is not allowed inside an active transaction".to_string(),
                 ))
+            }
+            cypher::Statement::SetSystemVariable(set) => {
+                reject_system_variable_parameters(parameters)?;
+                self.system_variables.apply_set_system_variable(&set)
             }
             statement if self.transaction_mutations.is_some() => {
                 let mutation =

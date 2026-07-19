@@ -1425,6 +1425,38 @@ fn set_system_variables_configures_query_work_request() {
 }
 
 #[test]
+fn set_system_variables_are_session_scoped() {
+    let mut db = Database::new();
+    db.query("SET system.work_class = 'query'").unwrap();
+    assert_eq!(
+        db.query_work_request(),
+        WorkRequest::foreground(WorkClass::Query, 1)
+    );
+
+    {
+        let mut session = db.session();
+        session
+            .query("SET system.work_priority = 'background'")
+            .unwrap();
+        session
+            .query("SET system.work_class = 'analytics'")
+            .unwrap();
+        session
+            .query("SET system.estimated_operations = 64")
+            .unwrap();
+        assert_eq!(
+            session.query_work_request(),
+            WorkRequest::background(WorkClass::Analytics, 64)
+        );
+    }
+
+    assert_eq!(
+        db.query_work_request(),
+        WorkRequest::foreground(WorkClass::Query, 1)
+    );
+}
+
+#[test]
 fn set_system_variables_reject_invalid_values_without_wal() {
     let path = unique_test_dir("set_system_variables_invalid_without_wal");
     let mut db = Database::open(&path).unwrap();
@@ -1453,6 +1485,16 @@ fn set_system_variables_reject_invalid_values_without_wal() {
 #[test]
 fn set_system_variable_is_rejected_inside_transactions() {
     let mut db = Database::new();
+    {
+        let mut tx = db.begin_transaction();
+        let error = tx
+            .query("SET system.work_priority = 'background'")
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("not allowed inside a transaction"));
+        tx.rollback();
+    }
     {
         let mut session = db.session();
         session.query("BEGIN TRANSACTION").unwrap();
