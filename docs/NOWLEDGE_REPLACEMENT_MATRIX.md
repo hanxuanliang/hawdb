@@ -192,6 +192,15 @@ fields used by current parser call sites, validates Source ids, non-empty
 checksums, and non-negative sizes before WAL, reports missing/idless/duplicate
 rows without writing, and commits eligible Source rows through one grouped WAL
 batch.
+Source parsed creates are covered by
+`Database::create_knowledge_source_parsed_batch` for the Nowledge markdown,
+URL, PDF, generic file, and markdown import create shapes. The typed wrapper
+accepts only the fields used by current parsed Source creation, fills the
+fixed Nowledge defaults for parsed lifecycle, zero chunk/memory counts, and
+empty error messages, validates ids, type/name/mime/parsed-path/checksum/space,
+non-negative sizes, and positive versions before WAL, reports existing or
+duplicate Source ids, and commits eligible Source nodes through one grouped WAL
+batch.
 Source operational reads are covered by typed APIs for Nowledge source detail,
 source count, extracted-source id list, and normalized-space id list paths.
 `Database::knowledge_source` returns the Source identity, display fields,

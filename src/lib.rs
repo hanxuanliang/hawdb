@@ -167,6 +167,8 @@ pub use api::{
     KnowledgeSourceMemoryCountBatchOutput, KnowledgeSourceMemoryCountBatchRequest,
     KnowledgeSourceMemoryCountBatchRow, KnowledgeSourceMemoryListOutput,
     KnowledgeSourceMemoryListRequest, KnowledgeSourceMemoryRow, KnowledgeSourceOutput,
+    KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchOutput,
+    KnowledgeSourceParsedCreateBatchRequest, KnowledgeSourceParsedCreateBatchRow,
     KnowledgeSourceParsedMetadataBatchOutput, KnowledgeSourceParsedMetadataBatchRequest,
     KnowledgeSourceParsedMetadataBatchRow, KnowledgeSourceParsedMetadataUpdate,
     KnowledgeSourceReferenceRelationshipCleanupOutput,

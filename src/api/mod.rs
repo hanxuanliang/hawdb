@@ -2372,6 +2372,49 @@ pub struct KnowledgeSourceParsedMetadataBatchOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceParsedCreate {
+    pub source_id: String,
+    pub source_type: String,
+    pub original_name: String,
+    pub mime_type: String,
+    pub file_path: String,
+    pub parsed_path: String,
+    pub source_url: String,
+    pub sha256: String,
+    pub size_bytes: i64,
+    pub version: i64,
+    pub space_id: String,
+    pub section_tree: String,
+    pub summary: String,
+    pub created_at: Value,
+    pub updated_at: Value,
+    pub metadata: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceParsedCreateBatchRequest {
+    pub creates: Vec<KnowledgeSourceParsedCreate>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceParsedCreateBatchRow {
+    pub source_id: String,
+    pub node_id: Option<u64>,
+    pub created: bool,
+    pub already_exists: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeSourceParsedCreateBatchOutput {
+    pub graph_commit_epoch_before: u64,
+    pub graph_commit_epoch_after: u64,
+    pub rows: Vec<KnowledgeSourceParsedCreateBatchRow>,
+    pub created_count: usize,
+    pub already_exists_count: usize,
+    pub created_node_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeSourceRequest {
     pub source_id: String,
 }
@@ -5932,6 +5975,13 @@ impl Database {
         request: &KnowledgeSourceParsedMetadataBatchRequest,
     ) -> Result<KnowledgeSourceParsedMetadataBatchOutput> {
         update_knowledge_source_parsed_metadata_batch_for(self, request)
+    }
+
+    pub fn create_knowledge_source_parsed_batch(
+        &mut self,
+        request: &KnowledgeSourceParsedCreateBatchRequest,
+    ) -> Result<KnowledgeSourceParsedCreateBatchOutput> {
+        create_knowledge_source_parsed_batch_for(self, request)
     }
 
     pub fn knowledge_source(
@@ -12005,6 +12055,152 @@ fn source_parsed_metadata_assignments(
         assignments.insert("metadata".to_string(), metadata.clone());
     }
     assignments
+}
+
+fn create_knowledge_source_parsed_batch_for(
+    db: &mut Database,
+    request: &KnowledgeSourceParsedCreateBatchRequest,
+) -> Result<KnowledgeSourceParsedCreateBatchOutput> {
+    for create in &request.creates {
+        validate_knowledge_source_parsed_create(create)?;
+    }
+
+    let entity_creates = request
+        .creates
+        .iter()
+        .map(knowledge_source_parsed_entity_create)
+        .collect::<Vec<_>>();
+    let output = create_knowledge_entity_batch_for(
+        db,
+        &KnowledgeEntityCreateBatchRequest {
+            creates: entity_creates,
+        },
+    )?;
+
+    Ok(KnowledgeSourceParsedCreateBatchOutput {
+        graph_commit_epoch_before: output.graph_commit_epoch_before,
+        graph_commit_epoch_after: output.graph_commit_epoch_after,
+        rows: output
+            .rows
+            .into_iter()
+            .map(|row| KnowledgeSourceParsedCreateBatchRow {
+                source_id: row.external_id,
+                node_id: row.node_id,
+                created: row.created,
+                already_exists: row.already_exists,
+            })
+            .collect(),
+        created_count: output.created_count,
+        already_exists_count: output.already_exists_count,
+        created_node_count: output.created_node_count,
+    })
+}
+
+fn validate_knowledge_source_parsed_create(create: &KnowledgeSourceParsedCreate) -> Result<()> {
+    if create.source_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a non-empty source id".to_string(),
+        ));
+    }
+    if create.source_type.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a non-empty source type".to_string(),
+        ));
+    }
+    if create.original_name.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a non-empty original name".to_string(),
+        ));
+    }
+    if create.mime_type.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a non-empty mime type".to_string(),
+        ));
+    }
+    if create.parsed_path.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a non-empty parsed path".to_string(),
+        ));
+    }
+    if create.sha256.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a non-empty sha256".to_string(),
+        ));
+    }
+    if create.size_bytes < 0 {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires non-negative size bytes".to_string(),
+        ));
+    }
+    if create.version < 1 {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a positive version".to_string(),
+        ));
+    }
+    if create.space_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source parsed create requires a non-empty space id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn knowledge_source_parsed_entity_create(
+    create: &KnowledgeSourceParsedCreate,
+) -> KnowledgeEntityCreateRequest {
+    KnowledgeEntityCreateRequest {
+        label: "Source".to_string(),
+        external_id: create.source_id.clone(),
+        properties: BTreeMap::from([
+            ("id".to_string(), Value::String(create.source_id.clone())),
+            (
+                "source_type".to_string(),
+                Value::String(create.source_type.clone()),
+            ),
+            (
+                "original_name".to_string(),
+                Value::String(create.original_name.clone()),
+            ),
+            (
+                "mime_type".to_string(),
+                Value::String(create.mime_type.clone()),
+            ),
+            (
+                "file_path".to_string(),
+                Value::String(create.file_path.clone()),
+            ),
+            (
+                "parsed_path".to_string(),
+                Value::String(create.parsed_path.clone()),
+            ),
+            (
+                "source_url".to_string(),
+                Value::String(create.source_url.clone()),
+            ),
+            ("sha256".to_string(), Value::String(create.sha256.clone())),
+            ("size_bytes".to_string(), Value::Int(create.size_bytes)),
+            ("version".to_string(), Value::Int(create.version)),
+            (
+                "space_id".to_string(),
+                Value::String(create.space_id.clone()),
+            ),
+            (
+                "lifecycle_state".to_string(),
+                Value::String("parsed".to_string()),
+            ),
+            ("chunk_count".to_string(), Value::Int(0)),
+            ("memory_count".to_string(), Value::Int(0)),
+            (
+                "section_tree".to_string(),
+                Value::String(create.section_tree.clone()),
+            ),
+            ("summary".to_string(), Value::String(create.summary.clone())),
+            ("error_message".to_string(), Value::String(String::new())),
+            ("created_at".to_string(), create.created_at.clone()),
+            ("updated_at".to_string(), create.updated_at.clone()),
+            ("metadata".to_string(), create.metadata.clone()),
+        ]),
+    }
 }
 
 fn knowledge_source_for(
@@ -22834,6 +23030,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
     ) -> Result<KnowledgeSourceParsedMetadataBatchOutput> {
         self.db
             .update_knowledge_source_parsed_metadata_batch(request)
+    }
+
+    pub fn create_knowledge_source_parsed_batch(
+        &mut self,
+        request: &KnowledgeSourceParsedCreateBatchRequest,
+    ) -> Result<KnowledgeSourceParsedCreateBatchOutput> {
+        self.db.create_knowledge_source_parsed_batch(request)
     }
 
     pub fn knowledge_source(

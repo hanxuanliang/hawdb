@@ -67,6 +67,7 @@ use super::{
     KnowledgeSourceLifecycleBatchRequest, KnowledgeSourceLifecycleUpdate, KnowledgeSourceListOrder,
     KnowledgeSourceListRequest, KnowledgeSourceMemoryCountAdjustment,
     KnowledgeSourceMemoryCountBatchRequest, KnowledgeSourceMemoryListRequest,
+    KnowledgeSourceParsedCreate, KnowledgeSourceParsedCreateBatchRequest,
     KnowledgeSourceParsedMetadataBatchRequest, KnowledgeSourceParsedMetadataUpdate,
     KnowledgeSourceReferenceRelationshipCleanupRequest, KnowledgeSourceRequest,
     KnowledgeSubgraphRequest, KnowledgeSynthesizedSourceCoverageRequest,
@@ -8216,6 +8217,248 @@ fn typed_source_parsed_metadata_batch_persists_as_one_wal_batch_and_replays() {
         assert_eq!(
             rows.rows[1].properties.get("sha256"),
             Some(&Some(Value::String("sha-second".to_string())))
+        );
+    }
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+fn parsed_source_create(source_id: &str) -> KnowledgeSourceParsedCreate {
+    KnowledgeSourceParsedCreate {
+        source_id: source_id.to_string(),
+        source_type: "file".to_string(),
+        original_name: "Document.md".to_string(),
+        mime_type: "text/markdown".to_string(),
+        file_path: "/tmp/document.md".to_string(),
+        parsed_path: "/tmp/document.parsed".to_string(),
+        source_url: String::new(),
+        sha256: "sha-document".to_string(),
+        size_bytes: 1024,
+        version: 1,
+        space_id: "default".to_string(),
+        section_tree: String::new(),
+        summary: "Document summary".to_string(),
+        created_at: Value::String("2026-07-19T12:00:00Z".to_string()),
+        updated_at: Value::String("2026-07-19T12:01:00Z".to_string()),
+        metadata: Value::String("{\"import\":\"manual\"}".to_string()),
+    }
+}
+
+#[test]
+fn creates_source_parsed_batch_for_nowledge_ingest_shapes() {
+    let mut db = Database::new();
+    db.query("CREATE (:Source {id: 'existing', original_name: 'Existing'})")
+        .unwrap();
+
+    let mut markdown = parsed_source_create("markdown-source");
+    markdown.version = 3;
+    let mut url = parsed_source_create("url-source");
+    url.source_type = "url".to_string();
+    url.original_name = "URL Source".to_string();
+    url.mime_type = "text/html".to_string();
+    url.file_path = String::new();
+    url.source_url = "https://example.test/source".to_string();
+    url.section_tree = "{\"sections\":[]}".to_string();
+    url.sha256 = "sha-url".to_string();
+    url.size_bytes = 2048;
+    let mut pdf = parsed_source_create("pdf-source");
+    pdf.original_name = "Source.pdf".to_string();
+    pdf.mime_type = "application/pdf".to_string();
+    pdf.file_path = "/tmp/source.pdf".to_string();
+    pdf.source_url = "file:///tmp/source.pdf".to_string();
+    pdf.sha256 = "sha-pdf".to_string();
+
+    let output = db
+        .create_knowledge_source_parsed_batch(&KnowledgeSourceParsedCreateBatchRequest {
+            creates: vec![
+                markdown,
+                url,
+                pdf,
+                parsed_source_create("existing"),
+                parsed_source_create("markdown-source"),
+            ],
+        })
+        .unwrap();
+
+    assert_eq!(output.graph_commit_epoch_before, 1);
+    assert_eq!(output.graph_commit_epoch_after, 2);
+    assert_eq!(output.rows.len(), 5);
+    assert_eq!(output.created_count, 3);
+    assert_eq!(output.already_exists_count, 2);
+    assert_eq!(output.created_node_count, 3);
+    assert!(output.rows[0].created);
+    assert!(output.rows[1].created);
+    assert!(output.rows[2].created);
+    assert!(output.rows[3].already_exists);
+    assert!(output.rows[4].already_exists);
+    assert!(output.rows[0].node_id.is_some());
+
+    let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "markdown-source".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "url-source".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Source".to_string(),
+                external_id: "pdf-source".to_string(),
+            },
+        ],
+        property_names: vec![
+            "source_type".to_string(),
+            "original_name".to_string(),
+            "mime_type".to_string(),
+            "file_path".to_string(),
+            "parsed_path".to_string(),
+            "source_url".to_string(),
+            "sha256".to_string(),
+            "size_bytes".to_string(),
+            "version".to_string(),
+            "space_id".to_string(),
+            "lifecycle_state".to_string(),
+            "chunk_count".to_string(),
+            "memory_count".to_string(),
+            "section_tree".to_string(),
+            "summary".to_string(),
+            "error_message".to_string(),
+            "created_at".to_string(),
+            "updated_at".to_string(),
+            "metadata".to_string(),
+        ],
+    });
+    assert_eq!(
+        rows.rows[0].properties.get("source_type"),
+        Some(&Some(Value::String("file".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("mime_type"),
+        Some(&Some(Value::String("text/markdown".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("version"),
+        Some(&Some(Value::Int(3)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("lifecycle_state"),
+        Some(&Some(Value::String("parsed".to_string())))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("chunk_count"),
+        Some(&Some(Value::Int(0)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("memory_count"),
+        Some(&Some(Value::Int(0)))
+    );
+    assert_eq!(
+        rows.rows[0].properties.get("error_message"),
+        Some(&Some(Value::String(String::new())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("source_type"),
+        Some(&Some(Value::String("url".to_string())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("file_path"),
+        Some(&Some(Value::String(String::new())))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("source_url"),
+        Some(&Some(Value::String(
+            "https://example.test/source".to_string()
+        )))
+    );
+    assert_eq!(
+        rows.rows[1].properties.get("section_tree"),
+        Some(&Some(Value::String("{\"sections\":[]}".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("mime_type"),
+        Some(&Some(Value::String("application/pdf".to_string())))
+    );
+    assert_eq!(
+        rows.rows[2].properties.get("source_url"),
+        Some(&Some(Value::String("file:///tmp/source.pdf".to_string())))
+    );
+}
+
+#[test]
+fn source_parsed_create_batch_rejects_invalid_rows_before_wal() {
+    let mut db = Database::new();
+    let mut invalid = parsed_source_create("invalid-source");
+    invalid.version = 0;
+    let error = db
+        .create_knowledge_source_parsed_batch(&KnowledgeSourceParsedCreateBatchRequest {
+            creates: vec![invalid],
+        })
+        .unwrap_err();
+
+    assert!(error.to_string().contains("positive version"));
+    assert_eq!(db.store.commit_epoch(), 0);
+}
+
+#[test]
+fn typed_source_parsed_create_batch_persists_as_one_wal_batch_and_replays() {
+    let path = unique_test_dir("typed_source_parsed_create_batch_wal_replay");
+    {
+        let mut db = Database::open(&path).unwrap();
+        let batch_count_before_create = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap_or_default()
+            .matches("\tbatch\t")
+            .count();
+        db.create_knowledge_source_parsed_batch(&KnowledgeSourceParsedCreateBatchRequest {
+            creates: vec![
+                parsed_source_create("source_1"),
+                parsed_source_create("source_2"),
+            ],
+        })
+        .unwrap();
+        let batch_count_after_create = std::fs::read_to_string(path.join("wal.skein"))
+            .unwrap()
+            .matches("\tbatch\t")
+            .count();
+        assert_eq!(batch_count_after_create, batch_count_before_create + 1);
+    }
+    let wal = std::fs::read_to_string(path.join("wal.skein")).unwrap();
+    assert!(wal.contains("create_node"));
+    {
+        let db = Database::open(&path).unwrap();
+        let rows = db.knowledge_property_batch(&KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Source".to_string(),
+                    external_id: "source_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Source".to_string(),
+                    external_id: "source_2".to_string(),
+                },
+            ],
+            property_names: vec![
+                "lifecycle_state".to_string(),
+                "sha256".to_string(),
+                "chunk_count".to_string(),
+                "memory_count".to_string(),
+            ],
+        });
+        assert_eq!(
+            rows.rows[0].properties.get("lifecycle_state"),
+            Some(&Some(Value::String("parsed".to_string())))
+        );
+        assert_eq!(
+            rows.rows[0].properties.get("sha256"),
+            Some(&Some(Value::String("sha-document".to_string())))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("chunk_count"),
+            Some(&Some(Value::Int(0)))
+        );
+        assert_eq!(
+            rows.rows[1].properties.get("memory_count"),
+            Some(&Some(Value::Int(0)))
         );
     }
     std::fs::remove_dir_all(path).unwrap();
