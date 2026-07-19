@@ -389,6 +389,13 @@ non-empty Community ids and names, non-negative `community_id` and
 to the Nowledge `louvain` algorithm marker, reports existing, missing,
 duplicate, and non-writable rows, and commits eligible creates plus summary
 updates through one grouped WAL batch.
+Community summary list reads are covered by `Database::knowledge_communities`.
+The typed read scans only `Community` nodes, supports the Nowledge REST
+summary-only list and library summary-presence ranked shapes, filters optional
+non-negative `community_id`, orders by member count or summary presence then
+member count, returns id/community_id/name/description/ai_summary/member_count/
+updated_at fields, supports bounded limits and read-transaction snapshots, and
+does not write WAL.
 Community node cleanup is covered by `Database::delete_knowledge_communities`
 for Nowledge replace-community and undo-community flows. It scans only
 `Community` nodes, supports the two production cleanup modes (`DELETE` and

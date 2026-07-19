@@ -2926,6 +2926,41 @@ pub struct KnowledgeCommunityLifecycleBatchOutput {
     pub updated_property_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnowledgeCommunityListOrder {
+    MemberCountDesc,
+    SummaryPresenceThenMemberCountDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityListRequest {
+    pub require_summary: bool,
+    pub require_non_negative_community_id: bool,
+    pub order: KnowledgeCommunityListOrder,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityRow {
+    pub id: Option<String>,
+    pub node_id: u64,
+    pub community_id: Option<i64>,
+    pub name: Option<String>,
+    pub description: Option<Value>,
+    pub ai_summary: Option<Value>,
+    pub member_count: Option<i64>,
+    pub updated_at: Option<Value>,
+    pub has_summary: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnowledgeCommunityListOutput {
+    pub graph_commit_epoch: u64,
+    pub rows: Vec<KnowledgeCommunityRow>,
+    pub matched_count: usize,
+    pub returned_count: usize,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnowledgeCommunityCleanupRequest {
     pub detach: bool,
@@ -5195,6 +5230,13 @@ impl Database {
         request: &KnowledgeCommunityLifecycleBatchRequest,
     ) -> Result<KnowledgeCommunityLifecycleBatchOutput> {
         update_knowledge_communities_batch_for(self, request)
+    }
+
+    pub fn knowledge_communities(
+        &self,
+        request: &KnowledgeCommunityListRequest,
+    ) -> Result<KnowledgeCommunityListOutput> {
+        knowledge_communities_for(&self.catalog, &self.store, request)
     }
 
     pub fn delete_knowledge_communities(
@@ -12429,6 +12471,92 @@ fn knowledge_community_membership_relationship_create(
     }
 }
 
+fn knowledge_communities_for(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeCommunityListRequest,
+) -> Result<KnowledgeCommunityListOutput> {
+    let Some(label_id) = catalog.label_id("Community") else {
+        return Ok(KnowledgeCommunityListOutput {
+            graph_commit_epoch: store.commit_epoch(),
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let mut rows = store
+        .scan_nodes(Some(label_id))
+        .map(knowledge_community_row)
+        .filter(|row| !request.require_summary || row.has_summary)
+        .filter(|row| {
+            !request.require_non_negative_community_id
+                || row
+                    .community_id
+                    .is_some_and(|community_id| community_id >= 0)
+        })
+        .collect::<Vec<_>>();
+    let matched_count = rows.len();
+    rows.sort_by(|left, right| compare_knowledge_community_rows(left, right, request.order));
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCommunityListOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn knowledge_community_row(node: &NodeRecord) -> KnowledgeCommunityRow {
+    let ai_summary = node.properties.get("ai_summary").cloned();
+    KnowledgeCommunityRow {
+        id: node_external_id(node),
+        node_id: node.id.0,
+        community_id: integer_property(node, "community_id"),
+        name: string_property(node, "name"),
+        description: node.properties.get("description").cloned(),
+        has_summary: ai_summary.as_ref().is_some_and(|value| {
+            !matches!(value, Value::Null) && !value_to_external_id(value).is_empty()
+        }),
+        ai_summary,
+        member_count: integer_property(node, "member_count"),
+        updated_at: node.properties.get("updated_at").cloned(),
+    }
+}
+
+fn compare_knowledge_community_rows(
+    left: &KnowledgeCommunityRow,
+    right: &KnowledgeCommunityRow,
+    order: KnowledgeCommunityListOrder,
+) -> std::cmp::Ordering {
+    match order {
+        KnowledgeCommunityListOrder::MemberCountDesc => {
+            compare_optional_i64_desc(left.member_count, right.member_count)
+        }
+        KnowledgeCommunityListOrder::SummaryPresenceThenMemberCountDesc => right
+            .has_summary
+            .cmp(&left.has_summary)
+            .then_with(|| compare_optional_i64_desc(left.member_count, right.member_count)),
+    }
+    .then_with(|| left.name.cmp(&right.name))
+    .then_with(|| left.community_id.cmp(&right.community_id))
+    .then_with(|| left.id.cmp(&right.id))
+    .then_with(|| left.node_id.cmp(&right.node_id))
+}
+
+fn compare_optional_i64_desc(left: Option<i64>, right: Option<i64>) -> std::cmp::Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => right.cmp(&left),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    }
+}
+
 fn update_knowledge_communities_batch_for(
     db: &mut Database,
     request: &KnowledgeCommunityLifecycleBatchRequest,
@@ -18640,6 +18768,13 @@ impl<'a> NowledgeGraphAdapter<'a> {
         self.db.update_knowledge_communities_batch(request)
     }
 
+    pub fn knowledge_communities(
+        &self,
+        request: &KnowledgeCommunityListRequest,
+    ) -> Result<KnowledgeCommunityListOutput> {
+        self.db.knowledge_communities(request)
+    }
+
     pub fn delete_knowledge_communities(
         &mut self,
         request: &KnowledgeCommunityCleanupRequest,
@@ -19304,6 +19439,13 @@ impl DatabaseReadTransaction {
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
         knowledge_related_entity_names_for(&self.catalog, &self.store, request)
+    }
+
+    pub fn knowledge_communities(
+        &self,
+        request: &KnowledgeCommunityListRequest,
+    ) -> Result<KnowledgeCommunityListOutput> {
+        knowledge_communities_for(&self.catalog, &self.store, request)
     }
 
     pub fn knowledge_scoped_entity(

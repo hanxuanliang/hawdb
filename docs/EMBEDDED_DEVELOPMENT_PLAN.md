@@ -471,6 +471,11 @@ non-empty Community ids and names, non-negative numeric counters, and finite
 resolutions before WAL, reports existing, missing, duplicate, and non-writable
 rows, fixes detection-result `algorithm` to `louvain`, and commits eligible
 creates plus summary updates through one grouped WAL batch.
+Community summary list reads are available as
+`Database::knowledge_communities`, covering Nowledge REST community list and
+library summary-ranked shapes with `ai_summary` presence filtering, optional
+non-negative `community_id` filtering, member-count and summary-presence
+ordering, bounded limits, pinned read-transaction snapshots, and no WAL writes.
 GraphMeta state reads and cleanup deletes used by PageRank, community
 detection, and fixture reset paths are available as
 `Database::knowledge_graph_meta` and `Database::delete_knowledge_graph_meta`.
