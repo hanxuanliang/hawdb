@@ -140,6 +140,10 @@ fn nowledge_previous_wrapper_preflight_check_json(
             "full_contract",
             [
                 bool_path(&contract_evidence, &["required_contract_ready"]) == Some(true),
+                bool_path(&contract_evidence, &["full_contract_checked"]) == Some(true),
+                bool_path(&contract_evidence, &["full_contract_ready"]) == Some(true),
+                full_contract_check_count_ready(&contract_evidence),
+                selected_checks_match_check_count(&contract_evidence),
                 bool_path(
                     &contract_evidence,
                     &["previous_wrapper_contract_evidence", "ready"],
@@ -151,6 +155,10 @@ fn nowledge_previous_wrapper_preflight_check_json(
             ],
             [
                 "required_contract_ready",
+                "full_contract_checked",
+                "full_contract_ready",
+                "check_count",
+                "selected_checks",
                 "previous_wrapper_contract_evidence.ready",
                 "previous_wrapper_contract_evidence.wrapper_identity",
             ],
@@ -362,6 +370,7 @@ fn previous_wrapper_preflight_release_summary(
         "wrapper_identity": wrapper_identity,
         "required_contract_ready": bool_path(contract_evidence, &["required_contract_ready"]),
         "full_contract_checked": bool_path(contract_evidence, &["full_contract_checked"]),
+        "full_contract_ready": bool_path(contract_evidence, &["full_contract_ready"]),
         "selected_checks": u64_path(contract_evidence, &["selected_checks"]),
         "check_count": u64_path(contract_evidence, &["check_count"]),
         "adapter_smoke_ready": bool_path(adapter_smoke, &["adapter_smoke_ready"]),
@@ -443,6 +452,20 @@ fn u64_path(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
     value_path(value, path).and_then(serde_json::Value::as_u64)
 }
 
+fn full_contract_check_count_ready(value: &serde_json::Value) -> bool {
+    u64_path(value, &["check_count"]).is_some_and(|count| count > 0)
+}
+
+fn selected_checks_match_check_count(value: &serde_json::Value) -> bool {
+    let Some(selected_checks) = u64_path(value, &["selected_checks"]) else {
+        return false;
+    };
+    let Some(check_count) = u64_path(value, &["check_count"]) else {
+        return false;
+    };
+    check_count > 0 && selected_checks == check_count
+}
+
 fn empty_array_path(value: &serde_json::Value, path: &[&str]) -> bool {
     value_path(value, path)
         .and_then(serde_json::Value::as_array)
@@ -500,6 +523,7 @@ mod tests {
                 "wrapper_identity": "nowledge-previous-wrapper:test",
                 "required_contract_ready": true,
                 "full_contract_checked": true,
+                "full_contract_ready": true,
                 "selected_checks": 2,
                 "check_count": 2,
                 "adapter_smoke_ready": true,
@@ -584,6 +608,31 @@ mod tests {
                 "next_actions",
                 "dual_engine_evidence.present",
                 "dual_engine_evidence.ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_full_contract_evidence() {
+        let mut inputs = ready_inputs();
+        let contract_evidence = inputs.contract_evidence.as_mut().unwrap();
+        contract_evidence["full_contract_checked"] = serde_json::json!(false);
+        contract_evidence["full_contract_ready"] = serde_json::json!(false);
+        contract_evidence["selected_checks"] = serde_json::json!(1);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["full_contract"])
+        );
+        assert_eq!(
+            check_by_name(&report, "full_contract")["failed_evidence_fields"],
+            serde_json::json!([
+                "full_contract_checked",
+                "full_contract_ready",
+                "selected_checks"
             ])
         );
     }
@@ -801,6 +850,7 @@ mod tests {
             contract_evidence: Some(serde_json::json!({
                 "required_contract_ready": true,
                 "full_contract_checked": true,
+                "full_contract_ready": true,
                 "selected_checks": 2,
                 "check_count": 2,
                 "previous_wrapper_contract_evidence": {

@@ -272,6 +272,10 @@ jobs:
           cat > "$root/contract-evidence.json" <<'JSON'
           {
             "required_contract_ready": true,
+            "full_contract_checked": true,
+            "full_contract_ready": true,
+            "selected_checks": 2,
+            "check_count": 2,
             "required_contract_blocker_codes": [],
             "previous_wrapper_contract_evidence": {
               "ready": true,
