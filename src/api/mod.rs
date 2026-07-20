@@ -5651,10 +5651,16 @@ impl Database {
         if is_mutation {
             self.ensure_writable()?;
         }
-        let rows = executor::execute(&physical, &mut self.catalog, &mut self.store)?;
-        if !is_mutation {
-            enforce_read_result_row_limit(&rows, &self.config)?;
-        }
+        let rows = if is_mutation {
+            executor::execute(&physical, &mut self.catalog, &mut self.store)?
+        } else {
+            executor::execute_with_row_limit(
+                &physical,
+                &mut self.catalog,
+                &mut self.store,
+                self.config.max_read_result_rows,
+            )?
+        };
         Ok(QueryOutput { rows })
     }
 
@@ -28617,19 +28623,6 @@ fn query_output_row(name: &str, value: Value) -> QueryOutput {
     }
 }
 
-fn enforce_read_result_row_limit(rows: &[Row], config: &DatabaseConfig) -> Result<()> {
-    let Some(max_rows) = config.max_read_result_rows else {
-        return Ok(());
-    };
-    if rows.len() > max_rows {
-        return Err(SkeinError::Execution(format!(
-            "read query returned {} rows, exceeding max_read_result_rows {max_rows}",
-            rows.len()
-        )));
-    }
-    Ok(())
-}
-
 fn optimizer_config_from_database_config(config: &DatabaseConfig) -> OptimizerConfig {
     let mut optimizer = OptimizerConfig::default();
     if let Some(max_groups) = config.max_optimizer_groups {
@@ -30148,6 +30141,15 @@ impl DatabaseReadTransaction {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
+        self.query_with_params_bounded(cypher_text, parameters, self.config.max_read_result_rows)
+    }
+
+    pub fn query_with_params_bounded(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        max_rows: Option<usize>,
+    ) -> Result<QueryOutput> {
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if matches!(body, cypher::Statement::Checkpoint) {
@@ -30169,8 +30171,12 @@ impl DatabaseReadTransaction {
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
-        let rows = executor::execute(&physical, &mut self.catalog, &mut self.store)?;
-        enforce_read_result_row_limit(&rows, &self.config)?;
+        let rows = executor::execute_with_row_limit(
+            &physical,
+            &mut self.catalog,
+            &mut self.store,
+            max_rows,
+        )?;
         Ok(QueryOutput { rows })
     }
 

@@ -215,10 +215,11 @@ impl NowledgeMemGraph {
         parameters: &BTreeMap<String, Value>,
         options: &NowledgeMemReadOptions,
     ) -> Result<NowledgeMemReadOutput> {
-        let output = self
-            .db
-            .begin_read_transaction()
-            .query_with_params(cypher, parameters)?;
+        let output = self.db.begin_read_transaction().query_with_params_bounded(
+            cypher,
+            parameters,
+            options.max_rows,
+        )?;
         let report = nowledge_mem_read_report(self.mode, &output, options);
         if report.row_budget_exceeded {
             return Err(SkeinError::Execution(format!(
@@ -550,7 +551,7 @@ mod tests {
     use crate::search::SearchFusionWeights;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
-        KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
+        DatabaseConfig, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
         LocalQosScheduler, LocalQosState, SearchEmbeddingManifest, SearchIndex, SearchMode,
         SearchProjectionDelta, SearchProjectionKind, SearchProjectionProbeOptions,
         SearchProjectionRow, WorkClass,
@@ -632,6 +633,51 @@ mod tests {
         assert!(error
             .to_string()
             .contains("exceeding max_estimated_payload_bytes 4"));
+    }
+
+    #[test]
+    fn read_transaction_rejects_rows_above_configured_limit() {
+        let mut db = Database::new_with_config(DatabaseConfig {
+            max_read_result_rows: Some(1),
+            ..DatabaseConfig::default()
+        });
+        db.query("CREATE (:Memory {id: 'mem-limit-1', title: 'Limit one'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem-limit-2', title: 'Limit two'})")
+            .unwrap();
+
+        let error = db
+            .begin_read_transaction()
+            .query("MATCH (m:Memory) RETURN m.id AS id")
+            .unwrap_err();
+
+        assert!(error.to_string().contains("more than 1 rows"));
+    }
+
+    #[test]
+    fn graph_read_query_rejects_rows_before_returning_oversized_output() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-read-limit-1', title: 'Limit one'})")
+            .unwrap();
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-read-limit-2', title: 'Limit two'})")
+            .unwrap();
+
+        let error = graph
+            .read_query_with_options(
+                "MATCH (m:Memory) RETURN m.id AS id",
+                &NowledgeMemReadOptions {
+                    max_rows: Some(1),
+                    max_estimated_payload_bytes: Some(4096),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("more than 1 rows"));
     }
 
     #[test]

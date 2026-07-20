@@ -38,8 +38,33 @@ pub fn execute(
     catalog: &mut Catalog,
     store: &mut GraphStore,
 ) -> Result<Vec<Row>> {
+    execute_with_row_limit(plan, catalog, store, None)
+}
+
+pub fn execute_with_row_limit(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    max_rows: Option<usize>,
+) -> Result<Vec<Row>> {
     let bindings = execute_bindings(plan, catalog, store)?;
-    Ok(bindings.into_iter().map(|binding| binding.values).collect())
+    collect_rows(bindings, max_rows)
+}
+
+fn collect_rows(bindings: Vec<Binding>, max_rows: Option<usize>) -> Result<Vec<Row>> {
+    let Some(max_rows) = max_rows else {
+        return Ok(bindings.into_iter().map(|binding| binding.values).collect());
+    };
+    let mut rows = Vec::with_capacity(bindings.len().min(max_rows));
+    for binding in bindings {
+        if rows.len() == max_rows {
+            return Err(SkeinError::Execution(format!(
+                "read query returned more than {max_rows} rows"
+            )));
+        }
+        rows.push(binding.values);
+    }
+    Ok(rows)
 }
 
 pub fn mutation_command(plan: &PhysicalPlan) -> Result<Option<GraphMutation>> {
