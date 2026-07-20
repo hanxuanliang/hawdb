@@ -4,7 +4,7 @@ use crate::{
     SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
 };
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemGraphMode {
@@ -16,6 +16,80 @@ pub fn nowledge_mem_graph_config(mode: NowledgeMemGraphMode) -> DatabaseConfig {
     DatabaseConfig {
         read_only: matches!(mode, NowledgeMemGraphMode::ShadowReadOnly),
         ..DatabaseConfig::default()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemOpenOptions {
+    pub graph_path: PathBuf,
+    pub search_projection_path: Option<PathBuf>,
+    pub mode: NowledgeMemGraphMode,
+}
+
+impl NowledgeMemOpenOptions {
+    pub fn graph_only(graph_path: impl Into<PathBuf>, mode: NowledgeMemGraphMode) -> Self {
+        Self {
+            graph_path: graph_path.into(),
+            search_projection_path: None,
+            mode,
+        }
+    }
+
+    pub fn with_search_projection(
+        graph_path: impl Into<PathBuf>,
+        search_projection_path: impl Into<PathBuf>,
+        mode: NowledgeMemGraphMode,
+    ) -> Self {
+        Self {
+            graph_path: graph_path.into(),
+            search_projection_path: Some(search_projection_path.into()),
+            mode,
+        }
+    }
+
+    pub fn sanitized_report(&self) -> NowledgeMemOpenReport {
+        NowledgeMemOpenReport {
+            protocol: NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL.to_string(),
+            mode: self.mode,
+            graph_configured: true,
+            search_projection_configured: self.search_projection_path.is_some(),
+            graph_opened: false,
+            search_projection_opened: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemOpenReport {
+    pub protocol: String,
+    pub mode: NowledgeMemGraphMode,
+    pub graph_configured: bool,
+    pub search_projection_configured: bool,
+    pub graph_opened: bool,
+    pub search_projection_opened: bool,
+}
+
+impl NowledgeMemOpenReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "mode": self.mode.as_str(),
+            "graph_configured": self.graph_configured,
+            "search_projection_configured": self.search_projection_configured,
+            "graph_opened": self.graph_opened,
+            "search_projection_opened": self.search_projection_opened,
+        })
+    }
+}
+
+pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-report";
+
+impl NowledgeMemGraphMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ShadowReadOnly => "shadow_read_only",
+            Self::WritableCutover => "writable_cutover",
+        }
     }
 }
 
@@ -112,6 +186,23 @@ impl NowledgeMemEmbeddedStore {
             graph,
             search_projection,
         }
+    }
+
+    pub fn open_with_options(
+        options: NowledgeMemOpenOptions,
+    ) -> Result<(Self, NowledgeMemOpenReport)> {
+        let mut report = options.sanitized_report();
+        let graph = NowledgeMemGraph::open(&options.graph_path, options.mode)?;
+        report.graph_opened = true;
+        let search_projection = match options.search_projection_path.as_ref() {
+            Some(path) => {
+                let projection = NowledgeMemSearchProjection::open(path)?;
+                report.search_projection_opened = true;
+                Some(projection)
+            }
+            None => None,
+        };
+        Ok((Self::new(graph, search_projection), report))
     }
 
     pub fn graph(&self) -> &NowledgeMemGraph {
@@ -214,7 +305,8 @@ fn require_search_projection_mut(
 mod tests {
     use super::{
         nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph,
-        NowledgeMemGraphMode, NowledgeMemSearchProjection,
+        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemSearchProjection,
+        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
     };
     use crate::{
         BackgroundWorkHint, Database, LocalQosPolicy, LocalQosScheduler, SearchIndex,
@@ -257,6 +349,59 @@ mod tests {
             .probe_json(SearchProjectionProbeOptions::default());
 
         assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
+    }
+
+    #[test]
+    fn open_options_report_is_sanitized() {
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            "redacted_graph_path",
+            "redacted_search_path",
+            NowledgeMemGraphMode::ShadowReadOnly,
+        );
+
+        let report = options.sanitized_report().json();
+
+        assert_eq!(report["protocol"], NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL);
+        assert_eq!(report["mode"], "shadow_read_only");
+        assert_eq!(report["graph_configured"], true);
+        assert_eq!(report["search_projection_configured"], true);
+        assert!(report.get("graph_path").is_none());
+        assert!(report.get("search_projection_path").is_none());
+        assert!(!report.to_string().contains("redacted_graph_path"));
+        assert!(!report.to_string().contains("redacted_search_path"));
+    }
+
+    #[test]
+    fn embedded_store_opens_from_options_with_sanitized_report() {
+        let root = unique_nowledge_mem_test_dir("open_options");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            graph_path,
+            search_path,
+            NowledgeMemGraphMode::WritableCutover,
+        );
+
+        let (mut store, report) = NowledgeMemEmbeddedStore::open_with_options(options).unwrap();
+        store
+            .graph_mut()
+            .query("CREATE (:Memory {id: 'mem-open', title: 'Open options'})")
+            .unwrap();
+
+        assert_eq!(report.protocol, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL);
+        assert_eq!(report.mode, NowledgeMemGraphMode::WritableCutover);
+        assert!(report.graph_opened);
+        assert!(report.search_projection_opened);
+        assert!(store.search_projection().is_some());
+        assert_eq!(
+            store
+                .graph_mut()
+                .query("MATCH (m:Memory {id: 'mem-open'}) RETURN m.title AS title")
+                .unwrap()
+                .rows
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -327,5 +472,17 @@ mod tests {
             .index()
             .document("memory:new")
             .is_none());
+    }
+
+    fn unique_nowledge_mem_test_dir(name: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "skein_nowledge_mem_{name}_{}_{}",
+            std::process::id(),
+            nanos
+        ))
     }
 }

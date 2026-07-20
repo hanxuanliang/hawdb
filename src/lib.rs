@@ -311,7 +311,8 @@ pub use nowledge_inventory::{
 };
 pub use nowledge_mem::{
     nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph, NowledgeMemGraphMode,
-    NowledgeMemSearchProjection,
+    NowledgeMemOpenOptions, NowledgeMemOpenReport, NowledgeMemSearchProjection,
+    NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
