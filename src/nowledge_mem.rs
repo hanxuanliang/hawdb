@@ -90,6 +90,8 @@ impl NowledgeMemOpenReport {
 
 pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-report";
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
+pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-mem-bounded-read-evidence-v1";
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ROWS: usize = 512;
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ESTIMATED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
@@ -162,6 +164,68 @@ impl NowledgeMemReadReport {
             "streaming": self.streaming,
         })
     }
+
+    pub fn bounded_read_evidence_json(&self) -> serde_json::Value {
+        nowledge_mem_bounded_read_evidence_json(self)
+    }
+}
+
+pub fn nowledge_mem_bounded_read_evidence_json(
+    report: &NowledgeMemReadReport,
+) -> serde_json::Value {
+    let blocker_codes = nowledge_mem_bounded_read_blocker_codes(report);
+    let ready = blocker_codes.is_empty();
+
+    serde_json::json!({
+        "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        "present": true,
+        "ready": ready,
+        "max_rows": report.max_rows,
+        "execution_row_cap": report.execution_row_cap,
+        "row_limit_enforced_before_output": report.row_limit_enforced_before_output,
+        "operator_row_cap_enabled": report.operator_row_cap_enabled,
+        "streaming": report.streaming,
+        "blocking_operator_count": report.blocking_operator_count,
+        "blocking_operator_kinds": report.blocking_operator_kinds,
+        "row_budget_exceeded": report.row_budget_exceeded,
+        "payload_budget_exceeded": report.payload_budget_exceeded,
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn nowledge_mem_bounded_read_blocker_codes(report: &NowledgeMemReadReport) -> Vec<&'static str> {
+    let mut blockers = Vec::new();
+    let expected_row_cap = match report.max_rows {
+        Some(0) => {
+            blockers.push("invalid_max_rows");
+            None
+        }
+        Some(max_rows) => max_rows.checked_add(1),
+        None => {
+            blockers.push("missing_max_rows");
+            None
+        }
+    };
+
+    match (report.execution_row_cap, expected_row_cap) {
+        (Some(execution_row_cap), Some(expected_row_cap))
+            if execution_row_cap == expected_row_cap => {}
+        (Some(_), _) => blockers.push("execution_row_cap_mismatch"),
+        (None, _) => blockers.push("missing_execution_row_cap"),
+    }
+    if !report.row_limit_enforced_before_output {
+        blockers.push("row_limit_not_enforced_before_output");
+    }
+    if !report.operator_row_cap_enabled {
+        blockers.push("operator_row_cap_disabled");
+    }
+    if report.row_budget_exceeded {
+        blockers.push("row_budget_exceeded");
+    }
+    if report.payload_budget_exceeded {
+        blockers.push("payload_budget_exceeded");
+    }
+    blockers
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -567,9 +631,10 @@ fn estimate_value_payload_bytes(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph,
-        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
-        NowledgeMemSearchProjection, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+        nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config,
+        NowledgeMemEmbeddedStore, NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions,
+        NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemSearchProjection,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
     };
     use crate::search::SearchFusionWeights;
@@ -642,6 +707,50 @@ mod tests {
         assert_eq!(read.report.json()["operator_row_cap_enabled"], true);
         assert_eq!(read.report.json()["blocking_operator_count"], 0);
         assert_eq!(read.report.json()["streaming"], false);
+        assert_eq!(
+            read.report.bounded_read_evidence_json()["protocol"],
+            NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL
+        );
+        assert_eq!(read.report.bounded_read_evidence_json()["ready"], true);
+    }
+
+    #[test]
+    fn bounded_read_evidence_fails_closed_for_missing_row_cap() {
+        let report = NowledgeMemReadReport {
+            protocol: NOWLEDGE_MEM_READ_REPORT_PROTOCOL.to_string(),
+            mode: NowledgeMemGraphMode::ShadowReadOnly,
+            row_count: 2,
+            max_rows: Some(512),
+            execution_row_cap: None,
+            estimated_payload_bytes: 128,
+            max_estimated_payload_bytes: Some(4 * 1024 * 1024),
+            row_budget_exceeded: false,
+            payload_budget_exceeded: false,
+            row_limit_enforced_before_output: false,
+            operator_row_cap_enabled: false,
+            blocking_operator_count: 1,
+            blocking_operator_kinds: vec!["Sort".to_string()],
+            streaming: false,
+        };
+
+        let evidence = nowledge_mem_bounded_read_evidence_json(&report);
+
+        assert_eq!(
+            evidence["protocol"],
+            NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL
+        );
+        assert_eq!(evidence["present"], true);
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["max_rows"], 512);
+        assert_eq!(evidence["execution_row_cap"], serde_json::Value::Null);
+        assert_eq!(
+            evidence["blocker_codes"],
+            serde_json::json!([
+                "missing_execution_row_cap",
+                "row_limit_not_enforced_before_output",
+                "operator_row_cap_disabled"
+            ])
+        );
     }
 
     #[test]

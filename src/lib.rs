@@ -314,10 +314,11 @@ pub use nowledge_inventory::{
     StorageRecoveryEvidenceHealth,
 };
 pub use nowledge_mem::{
-    nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph, NowledgeMemGraphMode,
-    NowledgeMemOpenOptions, NowledgeMemOpenReport, NowledgeMemReadOptions, NowledgeMemReadOutput,
-    NowledgeMemReadReport, NowledgeMemSearchProjection, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-    NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+    nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config, NowledgeMemEmbeddedStore,
+    NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemOpenReport,
+    NowledgeMemReadOptions, NowledgeMemReadOutput, NowledgeMemReadReport,
+    NowledgeMemSearchProjection, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+    NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
