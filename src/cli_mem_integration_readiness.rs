@@ -349,6 +349,83 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 ],
             ),
         ),
+        check(
+            "storage_recovery_evidence",
+            [
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "storage_recovery_required",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "cutover_evidence", "storage_recovery_ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "storage_recovery_protocol_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "cutover_evidence", "storage_recovery_durable"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "storage_recovery_checkpoint_boundary_present",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "storage_recovery_wal_replay_bounded",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "storage_recovery_torn_tail_clean",
+                    ],
+                ) == Some(true),
+            ],
+            [
+                "replacement_summary.cutover_evidence.storage_recovery_required",
+                "replacement_summary.cutover_evidence.storage_recovery_ready",
+                "replacement_summary.cutover_evidence.storage_recovery_protocol_matches",
+                "replacement_summary.cutover_evidence.storage_recovery_durable",
+                "replacement_summary.cutover_evidence.storage_recovery_checkpoint_boundary_present",
+                "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded",
+                "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "storage_recovery_blocker_codes",
+                    ][..],
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "storage_recovery_blockers",
+                    ][..],
+                ],
+            ),
+        ),
     ];
     let ready = checks
         .iter()
@@ -487,6 +564,54 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
                 "replacement_summary.bounded_read_evidence.blocker_codes",
+            ],
+        ));
+    }
+    if bool_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_required",
+        ],
+    ) != Some(true)
+        || bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_ready",
+            ],
+        ) != Some(true)
+        || bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_protocol_matches",
+            ],
+        ) != Some(true)
+        || bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_wal_replay_bounded",
+            ],
+        ) != Some(true)
+    {
+        actions.push(next_action(
+            "attach_storage_recovery_report",
+            "storage recovery evidence must prove durable bounded WAL replay before Mem cutover",
+            [
+                "replacement_summary.cutover_evidence.storage_recovery_required",
+                "replacement_summary.cutover_evidence.storage_recovery_ready",
+                "replacement_summary.cutover_evidence.storage_recovery_protocol_matches",
+                "replacement_summary.cutover_evidence.storage_recovery_durable",
+                "replacement_summary.cutover_evidence.storage_recovery_checkpoint_boundary_present",
+                "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded",
+                "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
+                "replacement_summary.cutover_evidence.storage_recovery_blocker_codes",
             ],
         ));
     }
@@ -787,6 +912,47 @@ mod tests {
             .any(|action| action["action"] == "attach_background_maintenance_report"));
     }
 
+    #[test]
+    fn requires_storage_recovery_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_wal_replay_bounded"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_blocker_codes"] =
+            serde_json::json!(["wal_replay_unbounded"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["storage_recovery_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["wal_replay_unbounded"])
+        );
+        let storage_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "storage_recovery_evidence")
+            .unwrap();
+        assert_eq!(
+            storage_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.cutover_evidence.storage_recovery_ready",
+                "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_storage_recovery_report"));
+    }
+
     fn ready_bundle() -> serde_json::Value {
         serde_json::json!({
             "submodule": {
@@ -849,6 +1015,15 @@ mod tests {
                     "blocker_codes": []
                 },
                 "cutover_evidence": {
+                    "storage_recovery_required": true,
+                    "storage_recovery_ready": true,
+                    "storage_recovery_protocol_matches": true,
+                    "storage_recovery_durable": true,
+                    "storage_recovery_checkpoint_boundary_present": true,
+                    "storage_recovery_wal_replay_bounded": true,
+                    "storage_recovery_torn_tail_clean": true,
+                    "storage_recovery_blocker_codes": [],
+                    "storage_recovery_blockers": [],
                     "background_maintenance_required": true,
                     "background_maintenance_ready": true,
                     "background_maintenance_protocol_matches": true,
