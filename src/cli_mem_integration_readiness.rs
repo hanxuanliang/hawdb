@@ -260,6 +260,95 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 ][..]],
             ),
         ),
+        check(
+            "background_maintenance_evidence",
+            [
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_required",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_protocol_matches",
+                    ],
+                ) == Some(true),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_executable_search_projection_graph_delta_count",
+                    ],
+                )
+                .is_some(),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_admitted_search_projection_graph_delta_count",
+                    ],
+                )
+                .is_some(),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_executable_search_projection_graph_delta_operations",
+                    ],
+                )
+                .is_some(),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_admitted_search_projection_graph_delta_operations",
+                    ],
+                )
+                .is_some(),
+            ],
+            [
+                "replacement_summary.cutover_evidence.background_maintenance_required",
+                "replacement_summary.cutover_evidence.background_maintenance_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_protocol_matches",
+                "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_count",
+                "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count",
+                "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_operations",
+                "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_operations",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_blocker_codes",
+                    ][..],
+                    &[
+                        "replacement_summary",
+                        "cutover_evidence",
+                        "background_maintenance_blockers",
+                    ][..],
+                ],
+            ),
+        ),
     ];
     let ready = checks
         .iter()
@@ -398,6 +487,62 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
                 "replacement_summary.bounded_read_evidence.blocker_codes",
+            ],
+        ));
+    }
+    if bool_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "background_maintenance_required",
+        ],
+    ) != Some(true)
+        || bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_ready",
+            ],
+        ) != Some(true)
+        || bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_protocol_matches",
+            ],
+        ) != Some(true)
+        || u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_executable_search_projection_graph_delta_count",
+            ],
+        )
+        .is_none()
+        || u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "background_maintenance_admitted_search_projection_graph_delta_count",
+            ],
+        )
+        .is_none()
+    {
+        actions.push(next_action(
+            "attach_background_maintenance_report",
+            "background maintenance QoS and search-projection graph-delta evidence must be ready before Mem cutover",
+            [
+                "replacement_summary.cutover_evidence.background_maintenance_required",
+                "replacement_summary.cutover_evidence.background_maintenance_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_protocol_matches",
+                "replacement_summary.cutover_evidence.background_maintenance_executable_search_projection_graph_delta_count",
+                "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count",
+                "replacement_summary.cutover_evidence.background_maintenance_blocker_codes",
             ],
         ));
     }
@@ -597,6 +742,51 @@ mod tests {
             .any(|action| action["action"] == "attach_bounded_read_profile"));
     }
 
+    #[test]
+    fn requires_background_maintenance_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_protocol_matches"] = serde_json::json!(false);
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["background_maintenance_admitted_search_projection_graph_delta_count"] =
+            serde_json::Value::Null;
+        bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_blocker_codes"] =
+            serde_json::json!(["background_disabled"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["background_maintenance_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["background_disabled"])
+        );
+        let maintenance_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "background_maintenance_evidence")
+            .unwrap();
+        assert_eq!(
+            maintenance_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.cutover_evidence.background_maintenance_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_protocol_matches",
+                "replacement_summary.cutover_evidence.background_maintenance_admitted_search_projection_graph_delta_count"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_background_maintenance_report"));
+    }
+
     fn ready_bundle() -> serde_json::Value {
         serde_json::json!({
             "submodule": {
@@ -657,6 +847,20 @@ mod tests {
                     "operator_row_cap_enabled": true,
                     "blocking_operator_count": 0,
                     "blocker_codes": []
+                },
+                "cutover_evidence": {
+                    "background_maintenance_required": true,
+                    "background_maintenance_ready": true,
+                    "background_maintenance_protocol_matches": true,
+                    "background_maintenance_executable_search_projection_graph_delta_count": 1,
+                    "background_maintenance_admitted_search_projection_graph_delta_count": 1,
+                    "background_maintenance_deferred_search_projection_graph_delta_count": 0,
+                    "background_maintenance_rejected_search_projection_graph_delta_count": 0,
+                    "background_maintenance_executable_search_projection_graph_delta_operations": 2,
+                    "background_maintenance_admitted_search_projection_graph_delta_operations": 2,
+                    "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 7,
+                    "background_maintenance_blocker_codes": [],
+                    "background_maintenance_blockers": []
                 }
             }
         })
