@@ -35,7 +35,8 @@ use skein::{
 };
 use skein::{
     nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
-    BackgroundMaintenanceOptions, CompatibilityFixture,
+    BackgroundMaintenanceOptions, CompatibilityFixture, LocalQosPolicy, LocalQosState, WorkClass,
+    WORK_CLASS_COUNT,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
@@ -506,11 +507,50 @@ fn main() -> Result<()> {
         }
         if command == "background-maintenance-report" {
             let mut require_cutover_ready = false;
+            let mut options = BackgroundMaintenanceReportOptions::default();
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-cutover-ready" => {
                         require_cutover_ready = true;
                         args.next();
+                    }
+                    "--disable-background" => {
+                        options.policy.background_enabled = false;
+                        args.next();
+                    }
+                    "--max-background-operations" => {
+                        args.next();
+                        let raw_limit = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(background_maintenance_report_usage())
+                        })?;
+                        options.policy.max_background_operations =
+                            Some(parse_background_maintenance_limit(
+                                "--max-background-operations",
+                                &raw_limit,
+                            )?);
+                    }
+                    "--max-total-background-operations" => {
+                        args.next();
+                        let raw_limit = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(background_maintenance_report_usage())
+                        })?;
+                        options.policy.max_total_background_operations =
+                            Some(parse_background_maintenance_limit(
+                                "--max-total-background-operations",
+                                &raw_limit,
+                            )?);
+                    }
+                    "--max-projection-background-operations" => {
+                        args.next();
+                        let raw_limit = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(background_maintenance_report_usage())
+                        })?;
+                        options.policy.max_background_operations_by_class
+                            [WorkClass::Projection.as_index()] =
+                            Some(parse_background_maintenance_limit(
+                                "--max-projection-background-operations",
+                                &raw_limit,
+                            )?);
                     }
                     _ => break,
                 }
@@ -528,7 +568,7 @@ fn main() -> Result<()> {
                     ..DatabaseConfig::default()
                 },
             )?;
-            let report = background_maintenance_report_json(&db);
+            let report = background_maintenance_report_json_with_options(&db, &options);
             println!("{}", serde_json::to_string_pretty(&report).unwrap());
             if require_cutover_ready {
                 let health = background_maintenance_evidence_health_from_bundle(
@@ -979,7 +1019,8 @@ fn storage_recovery_report_usage() -> String {
 }
 
 fn background_maintenance_report_usage() -> String {
-    "background-maintenance-report requires [--require-cutover-ready] <database-path>".to_string()
+    "background-maintenance-report requires [--require-cutover-ready] [--disable-background] [--max-background-operations <n>] [--max-total-background-operations <n>] [--max-projection-background-operations <n>] <database-path>"
+        .to_string()
 }
 
 fn graph_lightning_bootstrap_manifest_usage() -> String {
@@ -1116,6 +1157,18 @@ fn parse_max_blockers(raw_limit: &str) -> Result<usize> {
         return Err(SkeinError::Semantic(
             "--max-blockers must be greater than zero".to_string(),
         ));
+    }
+    Ok(limit)
+}
+
+fn parse_background_maintenance_limit(flag: &str, raw_limit: &str) -> Result<usize> {
+    let limit = raw_limit
+        .parse::<usize>()
+        .map_err(|error| SkeinError::Semantic(format!("invalid {flag} '{raw_limit}': {error}")))?;
+    if limit == 0 {
+        return Err(SkeinError::Semantic(format!(
+            "{flag} must be greater than zero"
+        )));
     }
     Ok(limit)
 }
@@ -1778,13 +1831,23 @@ fn storage_recovery_report_json(
     })
 }
 
-fn background_maintenance_report_json(database: &Database) -> serde_json::Value {
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct BackgroundMaintenanceReportOptions {
+    policy: LocalQosPolicy,
+    state: LocalQosState,
+    maintenance: BackgroundMaintenanceOptions,
+}
+
+fn background_maintenance_report_json_with_options(
+    database: &Database,
+    options: &BackgroundMaintenanceReportOptions,
+) -> serde_json::Value {
     let search_index = SearchIndex::in_memory();
     let summary = database.background_maintenance_summary(
         Some(&search_index),
-        &skein::LocalQosPolicy::default(),
-        &skein::LocalQosState::default(),
-        BackgroundMaintenanceOptions::default(),
+        &options.policy,
+        &options.state,
+        options.maintenance.clone(),
     );
     let mut report = background_maintenance_summary_to_json(&summary);
     if let Some(object) = report.as_object_mut() {
@@ -1792,8 +1855,75 @@ fn background_maintenance_report_json(database: &Database) -> serde_json::Value 
             "protocol".to_string(),
             serde_json::Value::String("skein-background-maintenance-report".to_string()),
         );
+        object.insert(
+            "qos_policy".to_string(),
+            background_maintenance_qos_policy_json(&options.policy),
+        );
+        object.insert(
+            "qos_state".to_string(),
+            background_maintenance_qos_state_json(&options.state),
+        );
     }
     report
+}
+
+fn background_maintenance_qos_policy_json(policy: &LocalQosPolicy) -> serde_json::Value {
+    serde_json::json!({
+        "background_enabled": policy.background_enabled,
+        "max_background_operations": policy.max_background_operations,
+        "max_total_background_operations": policy.max_total_background_operations,
+        "max_background_operations_by_class": background_maintenance_class_limits_json(
+            &policy.max_background_operations_by_class,
+        ),
+    })
+}
+
+fn background_maintenance_qos_state_json(state: &LocalQosState) -> serde_json::Value {
+    serde_json::json!({
+        "running_background_operations": state.running_background_operations,
+        "running_background_operations_by_class": background_maintenance_class_running_json(
+            &state.running_background_operations_by_class,
+        ),
+    })
+}
+
+fn background_maintenance_class_limits_json(
+    limits: &[Option<usize>; WORK_CLASS_COUNT],
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for class in background_maintenance_work_classes() {
+        object.insert(
+            class.as_str().to_string(),
+            serde_json::to_value(limits[class.as_index()])
+                .expect("background maintenance class limit must serialize"),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
+fn background_maintenance_class_running_json(
+    running: &[usize; WORK_CLASS_COUNT],
+) -> serde_json::Value {
+    let mut object = serde_json::Map::new();
+    for class in background_maintenance_work_classes() {
+        object.insert(
+            class.as_str().to_string(),
+            serde_json::to_value(running[class.as_index()])
+                .expect("background maintenance class running count must serialize"),
+        );
+    }
+    serde_json::Value::Object(object)
+}
+
+fn background_maintenance_work_classes() -> [WorkClass; WORK_CLASS_COUNT] {
+    [
+        WorkClass::Query,
+        WorkClass::Mutation,
+        WorkClass::Projection,
+        WorkClass::Import,
+        WorkClass::Analytics,
+        WorkClass::Shadow,
+    ]
 }
 
 fn recovery_mode_name(recovery_mode: RecoveryMode) -> &'static str {
@@ -4049,7 +4179,7 @@ fn value_from_json(value: &serde_json::Value) -> Result<Value> {
 mod tests {
     use super::{
         add_cutover_evidence_report, add_shadow_ready_report, add_shadow_run_report,
-        add_shadow_trace_report, background_maintenance_report_json,
+        add_shadow_trace_report, background_maintenance_report_json_with_options,
         background_maintenance_report_usage, canonical_snapshot_validation_json,
         cutover_evidence_is_eligible, enforce_external_shadow_adapter_smoke_requirements,
         enforce_storage_recovery_requirements, explain_json_usage, explain_output_json,
@@ -4062,27 +4192,28 @@ mod tests {
         graph_lightning_import_status, graph_lightning_publish_staging_usage,
         graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
         graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
-        is_self_shadow_command, nowledge_cypher_migration_gate_usage, parse_max_blockers,
-        parse_max_family_items, parse_max_wal_replay_entries, parse_parameters_json,
-        parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
+        is_self_shadow_command, nowledge_cypher_migration_gate_usage,
+        parse_background_maintenance_limit, parse_max_blockers, parse_max_family_items,
+        parse_max_wal_replay_entries, parse_parameters_json, parse_shadow_timeout_ms,
+        publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
         validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
-        verify_graph_lightning_staging_catalog, PublishGraphLightningOptions,
-        StorageRecoveryRequirements,
+        verify_graph_lightning_staging_catalog, BackgroundMaintenanceReportOptions,
+        PublishGraphLightningOptions, StorageRecoveryRequirements,
     };
     use skein::{
         api::ExplainOutput,
         optimizer::{OptimizerTrace, PhysicalPlan, PlanCost, PlanCostBreakdown},
     };
     use skein::{
-        CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
-        CanonicalSnapshotIdentityAudit, CompatibilityCheck, CompatibilityCheckReport,
-        CompatibilityShadowCheckReport, CompatibilityShadowReport, CompatibilityShadowStatus,
-        Database, ExternalShadowReady, GraphLightningBootstrapManifest,
-        GraphLightningGraphStreamValidation, PlanCacheStats, RecoveryMode, StorageRecoveryReport,
-        Value, WorkClass, WorkRequest,
+        BackgroundMaintenanceOptions, CanonicalGraphSnapshotValidation,
+        CanonicalSnapshotEndpointViolation, CanonicalSnapshotIdentityAudit, CompatibilityCheck,
+        CompatibilityCheckReport, CompatibilityShadowCheckReport, CompatibilityShadowReport,
+        CompatibilityShadowStatus, Database, ExternalShadowReady, GraphLightningBootstrapManifest,
+        GraphLightningGraphStreamValidation, LocalQosPolicy, PlanCacheStats, RecoveryMode,
+        StorageRecoveryReport, Value, WorkClass, WorkRequest,
     };
     use std::collections::BTreeMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -5009,9 +5140,15 @@ mod tests {
     fn renders_background_maintenance_report_json() {
         let db = Database::new();
 
-        let json = background_maintenance_report_json(&db);
+        let json = background_maintenance_report_json_with_options(
+            &db,
+            &BackgroundMaintenanceReportOptions::default(),
+        );
 
         assert_eq!(json["protocol"], "skein-background-maintenance-report");
+        assert_eq!(json["qos_policy"]["background_enabled"], true);
+        assert_eq!(json["qos_policy"]["max_background_operations"], 1024);
+        assert_eq!(json["qos_state"]["running_background_operations"], 0);
         assert_eq!(json["total_candidates"], 0);
         assert_eq!(json["admitted_count"], 0);
         assert_eq!(json["deferred_count"], 0);
@@ -5021,9 +5158,75 @@ mod tests {
     }
 
     #[test]
+    fn background_maintenance_report_can_prove_projection_qos_deferral() {
+        let mut db = Database::new();
+        db.query("CREATE NODE TABLE Memory").unwrap();
+        db.query("CREATE (:Memory {id: 1, title: 'Graph delta one'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 2, title: 'Graph delta two'})")
+            .unwrap();
+        let mut policy = LocalQosPolicy::default();
+        policy.max_background_operations_by_class[WorkClass::Projection.as_index()] = Some(1);
+        let json = background_maintenance_report_json_with_options(
+            &db,
+            &BackgroundMaintenanceReportOptions {
+                policy,
+                maintenance: BackgroundMaintenanceOptions {
+                    include_schema_maintenance: false,
+                    include_property_index_projection: false,
+                    include_search_projection_rebuild: false,
+                    include_search_projection_metadata_repair: false,
+                    include_graph_lightning_bootstrap_export: false,
+                    include_external_content_artifact_jobs: false,
+                    ..BackgroundMaintenanceOptions::default()
+                },
+                ..BackgroundMaintenanceReportOptions::default()
+            },
+        );
+
+        assert_eq!(json["protocol"], "skein-background-maintenance-report");
+        assert_eq!(
+            json["qos_policy"]["max_background_operations_by_class"]["projection"],
+            1
+        );
+        assert_eq!(json["total_candidates"], 1);
+        assert_eq!(json["admitted_count"], 0);
+        assert_eq!(json["deferred_count"], 1);
+        assert_eq!(json["executable_search_projection_graph_delta_count"], 1);
+        assert_eq!(json["deferred_search_projection_graph_delta_count"], 1);
+        assert_eq!(json["ranked"][0]["kind"], "search_projection_graph_delta");
+        assert_eq!(json["ranked"][0]["work_class"], "projection");
+        assert_eq!(json["ranked"][0]["priority"], "background");
+        assert_eq!(json["ranked"][0]["admission"], "defer");
+        assert_eq!(
+            json["ranked"][0]["admission_code"],
+            "class_background_limit_exceeded"
+        );
+        assert_eq!(
+            json["ranked"][0]["search_projection_graph_delta_operation_count"],
+            2
+        );
+    }
+
+    #[test]
     fn background_maintenance_report_usage_mentions_cutover_ready_gate() {
         assert!(background_maintenance_report_usage().contains("--require-cutover-ready"));
+        assert!(background_maintenance_report_usage().contains("--disable-background"));
+        assert!(background_maintenance_report_usage().contains("--max-background-operations"));
+        assert!(background_maintenance_report_usage().contains("--max-total-background-operations"));
+        assert!(background_maintenance_report_usage()
+            .contains("--max-projection-background-operations"));
         assert!(background_maintenance_report_usage().contains("<database-path>"));
+    }
+
+    #[test]
+    fn background_maintenance_limit_parser_rejects_zero() {
+        assert_eq!(
+            parse_background_maintenance_limit("--limit", "3").unwrap(),
+            3
+        );
+        let error = parse_background_maintenance_limit("--limit", "0").unwrap_err();
+        assert!(error.to_string().contains("must be greater than zero"));
     }
 
     #[test]
@@ -5038,7 +5241,10 @@ mod tests {
     #[test]
     fn empty_background_maintenance_report_fails_cutover_health_with_codes() {
         let db = Database::new();
-        let report = background_maintenance_report_json(&db);
+        let report = background_maintenance_report_json_with_options(
+            &db,
+            &BackgroundMaintenanceReportOptions::default(),
+        );
         let bundle = serde_json::json!({
             "background_maintenance": report
         });
