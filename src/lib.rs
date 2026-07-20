@@ -4,6 +4,7 @@ pub mod compat;
 pub mod cypher;
 pub mod executor;
 pub mod nowledge_inventory;
+pub mod nowledge_mem;
 pub mod optimizer;
 pub mod planner;
 pub mod qos;
@@ -307,6 +308,10 @@ pub use nowledge_inventory::{
     BackgroundMaintenanceEvidenceHealth, NowledgeCypherMigrationGateJsonOptions,
     NowledgeInventoryScanOptions, ReplacementReadinessFamilyEvidenceHealth,
     StorageRecoveryEvidenceHealth,
+};
+pub use nowledge_mem::{
+    nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph, NowledgeMemGraphMode,
+    NowledgeMemSearchProjection,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
