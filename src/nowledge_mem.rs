@@ -1,5 +1,7 @@
 use crate::{
-    Database, DatabaseConfig, QueryOutput, Result, SearchIndex, SearchProjectionProbeOptions, Value,
+    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, LocalQosScheduler,
+    QueryOutput, Result, SearchIndex, SearchProjectionDeltaReport,
+    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -127,6 +129,85 @@ impl NowledgeMemEmbeddedStore {
     pub fn search_projection_mut(&mut self) -> Option<&mut NowledgeMemSearchProjection> {
         self.search_projection.as_mut()
     }
+
+    pub fn build_search_projection_graph_delta_request_from_freshness(
+        &self,
+        max_operations: Option<usize>,
+    ) -> Result<Option<SearchProjectionGraphDeltaRequest>> {
+        let search_projection = self.require_search_projection()?;
+        self.graph
+            .database()
+            .build_search_projection_graph_delta_request_from_freshness(
+                search_projection.index(),
+                max_operations,
+            )
+    }
+
+    pub fn search_projection_graph_delta_background_work_plan(
+        &self,
+        request: &SearchProjectionGraphDeltaRequest,
+        hint: BackgroundWorkHint,
+    ) -> Option<BackgroundWorkPlan> {
+        let search_projection = self.search_projection.as_ref()?;
+        self.graph
+            .database()
+            .search_projection_graph_delta_freshness_background_work_plan(
+                search_projection.index(),
+                request,
+                hint,
+            )
+    }
+
+    pub fn apply_search_projection_graph_delta(
+        &mut self,
+        request: SearchProjectionGraphDeltaRequest,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let Self {
+            graph,
+            search_projection,
+        } = self;
+        let search_projection = require_search_projection_mut(search_projection)?;
+        graph
+            .database()
+            .apply_search_projection_graph_delta(search_projection.index_mut(), request)
+    }
+
+    pub fn apply_scheduled_background_search_projection_graph_delta(
+        &mut self,
+        scheduler: &mut LocalQosScheduler,
+        request: SearchProjectionGraphDeltaRequest,
+    ) -> Result<SearchProjectionDeltaReport> {
+        let Self {
+            graph,
+            search_projection,
+        } = self;
+        let search_projection = require_search_projection_mut(search_projection)?;
+        graph
+            .database()
+            .apply_scheduled_background_search_projection_graph_delta(
+                search_projection.index_mut(),
+                scheduler,
+                request,
+            )
+    }
+
+    fn require_search_projection(&self) -> Result<&NowledgeMemSearchProjection> {
+        self.search_projection
+            .as_ref()
+            .ok_or_else(missing_search_projection_error)
+    }
+}
+
+fn missing_search_projection_error() -> SkeinError {
+    SkeinError::Storage("nowledge mem search projection is not configured".to_string())
+}
+
+fn require_search_projection_mut(
+    search_projection: &mut Option<NowledgeMemSearchProjection>,
+) -> Result<&mut NowledgeMemSearchProjection> {
+    search_projection
+        .as_mut()
+        .ok_or_else(missing_search_projection_error)
 }
 
 #[cfg(test)]
@@ -135,7 +216,10 @@ mod tests {
         nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph,
         NowledgeMemGraphMode, NowledgeMemSearchProjection,
     };
-    use crate::{Database, SearchIndex, SearchProjectionProbeOptions};
+    use crate::{
+        BackgroundWorkHint, Database, LocalQosPolicy, LocalQosScheduler, SearchIndex,
+        SearchProjectionProbeOptions, WorkClass,
+    };
 
     #[test]
     fn graph_config_tracks_shadow_vs_cutover_mode() {
@@ -173,5 +257,75 @@ mod tests {
             .probe_json(SearchProjectionProbeOptions::default());
 
         assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
+    }
+
+    #[test]
+    fn embedded_store_applies_incremental_graph_search_projection_delta() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'new', title: 'Incremental facade', content: 'Graph changes feed search projection'})")
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(SearchIndex::in_memory());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+
+        let request = store
+            .build_search_projection_graph_delta_request_from_freshness(Some(4))
+            .unwrap()
+            .expect("expected graph delta request");
+        let plan = store
+            .search_projection_graph_delta_background_work_plan(
+                &request,
+                BackgroundWorkHint::default(),
+            )
+            .expect("expected background work plan");
+
+        let report = store.apply_search_projection_graph_delta(request).unwrap();
+
+        assert_eq!(plan.request.class, WorkClass::Projection);
+        assert_eq!(report.upserted_documents, 1);
+        assert_eq!(
+            store
+                .search_projection()
+                .unwrap()
+                .index()
+                .document("memory:new")
+                .unwrap()
+                .title,
+            "Incremental facade"
+        );
+    }
+
+    #[test]
+    fn embedded_store_background_delta_uses_scheduler_qos() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'new', title: 'Scheduled facade'})")
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(SearchIndex::in_memory());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let request = store
+            .build_search_projection_graph_delta_request_from_freshness(Some(4))
+            .unwrap()
+            .expect("expected graph delta request");
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_total_background_operations: Some(0),
+            ..LocalQosPolicy::default()
+        });
+
+        let error = store
+            .apply_scheduled_background_search_projection_graph_delta(&mut scheduler, request)
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("background search projection graph delta"));
+        assert!(store
+            .search_projection()
+            .unwrap()
+            .index()
+            .document("memory:new")
+            .is_none());
     }
 }
