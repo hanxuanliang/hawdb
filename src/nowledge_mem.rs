@@ -1,7 +1,8 @@
 use crate::{
-    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, LocalQosScheduler,
-    QueryOutput, Result, SearchIndex, SearchProjectionDeltaReport,
-    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
+    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
+    KnowledgeRetrievalRequest, LocalQosScheduler, QueryOutput, Result, SearchIndex,
+    SearchProjectionDeltaReport, SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions,
+    SkeinError, Value,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -282,6 +283,17 @@ impl NowledgeMemEmbeddedStore {
             )
     }
 
+    pub fn retrieve_knowledge(
+        &self,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<KnowledgeRetrievalOutput> {
+        let search_projection = self.require_search_projection()?;
+        Ok(self
+            .graph
+            .database()
+            .retrieve_knowledge(search_projection.index(), request))
+    }
+
     fn require_search_projection(&self) -> Result<&NowledgeMemSearchProjection> {
         self.search_projection
             .as_ref()
@@ -308,10 +320,13 @@ mod tests {
         NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemSearchProjection,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
     };
+    use crate::search::SearchFusionWeights;
     use crate::{
-        BackgroundWorkHint, Database, LocalQosPolicy, LocalQosScheduler, SearchIndex,
-        SearchProjectionProbeOptions, WorkClass,
+        BackgroundWorkHint, Database, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest,
+        LocalQosPolicy, LocalQosScheduler, SearchIndex, SearchMode, SearchProjectionProbeOptions,
+        WorkClass,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn graph_config_tracks_shadow_vs_cutover_mode() {
@@ -472,6 +487,79 @@ mod tests {
             .index()
             .document("memory:new")
             .is_none());
+    }
+
+    #[test]
+    fn embedded_store_retrieves_knowledge_through_search_projection() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-search', title: 'Facade retrieval', content: 'Skein replaces LanceDB retrieval'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'entity-skein', name: 'Skein'})")
+            .unwrap();
+        graph
+            .query("MATCH (m:Memory {id: 'mem-search'}), (e:Entity {id: 'entity-skein'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(SearchIndex::in_memory());
+        let mut store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let delta = store
+            .build_search_projection_graph_delta_request_from_freshness(Some(8))
+            .unwrap()
+            .expect("expected search projection delta");
+        store.apply_search_projection_graph_delta(delta).unwrap();
+
+        let output = store
+            .retrieve_knowledge(&KnowledgeRetrievalRequest {
+                query_text: "facade retrieval".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 4,
+                graph_context_limit: 4,
+                graph_context_max_hops: 1,
+            })
+            .unwrap();
+
+        assert_eq!(output.search.total_hits, 1);
+        assert_eq!(output.search.hits[0].id, "memory:mem-search");
+        assert_eq!(output.diagnostics.projection_commit_lag, 0);
+        assert!(!output.evidence.is_empty());
+    }
+
+    #[test]
+    fn embedded_store_retrieval_requires_search_projection() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let error = store
+            .retrieve_knowledge(&KnowledgeRetrievalRequest {
+                query_text: "missing projection".to_string(),
+                query_embedding: None,
+                mode: SearchMode::Text,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 4,
+                graph_context_limit: 4,
+                graph_context_max_hops: 1,
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "storage error: nowledge mem search projection is not configured"
+        );
     }
 
     fn unique_nowledge_mem_test_dir(name: &str) -> std::path::PathBuf {
