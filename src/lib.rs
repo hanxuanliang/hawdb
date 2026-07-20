@@ -314,8 +314,9 @@ pub use nowledge_inventory::{
 };
 pub use nowledge_mem::{
     nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph, NowledgeMemGraphMode,
-    NowledgeMemOpenOptions, NowledgeMemOpenReport, NowledgeMemSearchProjection,
-    NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+    NowledgeMemOpenOptions, NowledgeMemOpenReport, NowledgeMemReadOptions, NowledgeMemReadOutput,
+    NowledgeMemReadReport, NowledgeMemSearchProjection, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+    NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,

@@ -88,6 +88,9 @@ impl NowledgeMemOpenReport {
 }
 
 pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-report";
+pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
+pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ROWS: usize = 512;
+pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ESTIMATED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
 impl NowledgeMemGraphMode {
     pub fn as_str(self) -> &'static str {
@@ -102,6 +105,58 @@ impl NowledgeMemGraphMode {
 pub struct NowledgeMemGraph {
     db: Database,
     mode: NowledgeMemGraphMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemReadOptions {
+    pub max_rows: Option<usize>,
+    pub max_estimated_payload_bytes: Option<usize>,
+}
+
+impl Default for NowledgeMemReadOptions {
+    fn default() -> Self {
+        Self {
+            max_rows: Some(DEFAULT_NOWLEDGE_MEM_READ_MAX_ROWS),
+            max_estimated_payload_bytes: Some(
+                DEFAULT_NOWLEDGE_MEM_READ_MAX_ESTIMATED_PAYLOAD_BYTES,
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemReadReport {
+    pub protocol: String,
+    pub mode: NowledgeMemGraphMode,
+    pub row_count: usize,
+    pub max_rows: Option<usize>,
+    pub estimated_payload_bytes: usize,
+    pub max_estimated_payload_bytes: Option<usize>,
+    pub row_budget_exceeded: bool,
+    pub payload_budget_exceeded: bool,
+    pub streaming: bool,
+}
+
+impl NowledgeMemReadReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "mode": self.mode.as_str(),
+            "row_count": self.row_count,
+            "max_rows": self.max_rows,
+            "estimated_payload_bytes": self.estimated_payload_bytes,
+            "max_estimated_payload_bytes": self.max_estimated_payload_bytes,
+            "row_budget_exceeded": self.row_budget_exceeded,
+            "payload_budget_exceeded": self.payload_budget_exceeded,
+            "streaming": self.streaming,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemReadOutput {
+    pub output: QueryOutput,
+    pub report: NowledgeMemReadReport,
 }
 
 impl NowledgeMemGraph {
@@ -140,6 +195,46 @@ impl NowledgeMemGraph {
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         self.db.query_with_params(cypher, parameters)
+    }
+
+    pub fn read_query(&mut self, cypher: &str) -> Result<NowledgeMemReadOutput> {
+        self.read_query_with_params(cypher, &BTreeMap::new(), &NowledgeMemReadOptions::default())
+    }
+
+    pub fn read_query_with_options(
+        &mut self,
+        cypher: &str,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.read_query_with_params(cypher, &BTreeMap::new(), options)
+    }
+
+    pub fn read_query_with_params(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        let output = self
+            .db
+            .begin_read_transaction()
+            .query_with_params(cypher, parameters)?;
+        let report = nowledge_mem_read_report(self.mode, &output, options);
+        if report.row_budget_exceeded {
+            return Err(SkeinError::Execution(format!(
+                "nowledge mem read query returned {} rows, exceeding max_rows {}",
+                report.row_count,
+                report.max_rows.unwrap_or_default()
+            )));
+        }
+        if report.payload_budget_exceeded {
+            return Err(SkeinError::Execution(format!(
+                "nowledge mem read query estimated {} payload bytes, exceeding max_estimated_payload_bytes {}",
+                report.estimated_payload_bytes,
+                report.max_estimated_payload_bytes.unwrap_or_default()
+            )));
+        }
+        Ok(NowledgeMemReadOutput { output, report })
     }
 }
 
@@ -338,6 +433,28 @@ impl NowledgeMemEmbeddedStore {
             .retrieve_knowledge(search_projection.index(), request))
     }
 
+    pub fn read_query(&mut self, cypher: &str) -> Result<NowledgeMemReadOutput> {
+        self.graph.read_query(cypher)
+    }
+
+    pub fn read_query_with_options(
+        &mut self,
+        cypher: &str,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.graph.read_query_with_options(cypher, options)
+    }
+
+    pub fn read_query_with_params(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.graph
+            .read_query_with_params(cypher, parameters, options)
+    }
+
     pub fn background_maintenance_summary(
         &self,
         policy: &LocalQosPolicy,
@@ -373,12 +490,62 @@ fn require_search_projection_mut(
         .ok_or_else(missing_search_projection_error)
 }
 
+fn nowledge_mem_read_report(
+    mode: NowledgeMemGraphMode,
+    output: &QueryOutput,
+    options: &NowledgeMemReadOptions,
+) -> NowledgeMemReadReport {
+    let estimated_payload_bytes = estimate_query_output_payload_bytes(output);
+    NowledgeMemReadReport {
+        protocol: NOWLEDGE_MEM_READ_REPORT_PROTOCOL.to_string(),
+        mode,
+        row_count: output.rows.len(),
+        max_rows: options.max_rows,
+        estimated_payload_bytes,
+        max_estimated_payload_bytes: options.max_estimated_payload_bytes,
+        row_budget_exceeded: options
+            .max_rows
+            .is_some_and(|max_rows| output.rows.len() > max_rows),
+        payload_budget_exceeded: options
+            .max_estimated_payload_bytes
+            .is_some_and(|max_bytes| estimated_payload_bytes > max_bytes),
+        streaming: false,
+    }
+}
+
+fn estimate_query_output_payload_bytes(output: &QueryOutput) -> usize {
+    output
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .map(|(key, value)| key.len() + estimate_value_payload_bytes(value))
+                .sum::<usize>()
+        })
+        .sum()
+}
+
+fn estimate_value_payload_bytes(value: &Value) -> usize {
+    match value {
+        Value::Null => 0,
+        Value::Bool(_) => 1,
+        Value::Int(_) | Value::Float(_) => std::mem::size_of::<i64>(),
+        Value::String(value) => value.len(),
+        Value::List(values) => values.iter().map(estimate_value_payload_bytes).sum(),
+        Value::Map(values) => values
+            .iter()
+            .map(|(key, value)| key.len() + estimate_value_payload_bytes(value))
+            .sum(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         nowledge_mem_graph_config, NowledgeMemEmbeddedStore, NowledgeMemGraph,
-        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemSearchProjection,
-        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
+        NowledgeMemSearchProjection, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
     };
     use crate::search::SearchFusionWeights;
     use crate::{
@@ -410,6 +577,83 @@ mod tests {
 
         assert_eq!(output.rows.len(), 1);
         assert_eq!(graph.mode(), NowledgeMemGraphMode::WritableCutover);
+    }
+
+    #[test]
+    fn graph_read_query_reports_bounded_payload() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-read', title: 'Bounded read'})")
+            .unwrap();
+
+        let read = graph
+            .read_query_with_options(
+                "MATCH (m:Memory {id: 'mem-read'}) RETURN m.title AS title",
+                &NowledgeMemReadOptions {
+                    max_rows: Some(4),
+                    max_estimated_payload_bytes: Some(128),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(read.output.rows.len(), 1);
+        assert_eq!(read.report.protocol, NOWLEDGE_MEM_READ_REPORT_PROTOCOL);
+        assert_eq!(read.report.mode, NowledgeMemGraphMode::ShadowReadOnly);
+        assert_eq!(read.report.row_count, 1);
+        assert_eq!(read.report.max_rows, Some(4));
+        assert!(read.report.estimated_payload_bytes <= 128);
+        assert!(!read.report.row_budget_exceeded);
+        assert!(!read.report.payload_budget_exceeded);
+        assert!(!read.report.streaming);
+        assert_eq!(read.report.json()["streaming"], false);
+    }
+
+    #[test]
+    fn graph_read_query_rejects_payload_budget_excess() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-large', title: 'Large read payload'})")
+            .unwrap();
+
+        let error = graph
+            .read_query_with_options(
+                "MATCH (m:Memory {id: 'mem-large'}) RETURN m.title AS title",
+                &NowledgeMemReadOptions {
+                    max_rows: Some(4),
+                    max_estimated_payload_bytes: Some(4),
+                },
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("exceeding max_estimated_payload_bytes 4"));
+    }
+
+    #[test]
+    fn embedded_store_read_query_does_not_require_search_projection() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-store-read', title: 'Store read'})")
+            .unwrap();
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let read = store
+            .read_query_with_options(
+                "MATCH (m:Memory {id: 'mem-store-read'}) RETURN m.title AS title",
+                &NowledgeMemReadOptions::default(),
+            )
+            .unwrap();
+
+        assert_eq!(read.output.rows.len(), 1);
+        assert_eq!(read.report.row_count, 1);
+        assert!(!read.report.row_budget_exceeded);
+        assert!(!read.report.payload_budget_exceeded);
     }
 
     #[test]
