@@ -351,14 +351,12 @@ fn next_action(
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let raw = std::fs::read_to_string(path).map_err(|error| {
         SkeinError::Execution(format!(
-            "failed to read Nowledge Mem integration bundle '{}': {error}",
-            path.display()
+            "failed to read Nowledge Mem integration bundle: {error}",
         ))
     })?;
     serde_json::from_str(&raw).map_err(|error| {
         SkeinError::Execution(format!(
-            "failed to parse Nowledge Mem integration bundle '{}': {error}",
-            path.display()
+            "failed to parse Nowledge Mem integration bundle: {error}",
         ))
     })
 }
