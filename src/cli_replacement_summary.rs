@@ -61,6 +61,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let search_projection_evidence_ready = search_projection_evidence.ready;
     let search_projection_shadow_evidence = search_projection_shadow_evidence_summary(bundle);
     let search_projection_shadow_evidence_ready = search_projection_shadow_evidence.ready;
+    let bounded_read_evidence = bounded_read_evidence_summary(bundle);
+    let bounded_read_evidence_ready = bounded_read_evidence.ready;
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
     let production_cutover_ready = migration_gate_decision == Some("ready")
@@ -74,6 +76,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && dual_engine_evidence_consistent
         && search_projection_evidence_ready
         && search_projection_shadow_evidence_ready
+        && bounded_read_evidence_ready
         && !background_graph_delta_evidence_missing
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
@@ -98,6 +101,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_consistent,
             search_projection_evidence_ready,
             search_projection_shadow_evidence_ready,
+            bounded_read_evidence_ready,
             background_graph_delta_evidence_missing,
         },
     );
@@ -123,6 +127,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_consistent,
             search_projection_evidence_ready,
             search_projection_shadow_evidence_ready,
+            bounded_read_evidence_ready,
             background_graph_delta_evidence_missing,
             production_cutover_ready,
         },
@@ -185,6 +190,17 @@ pub fn nowledge_replacement_summary_json_with_options(
             "primary_engine": search_projection_shadow_evidence.primary_engine,
             "shadow_engine": search_projection_shadow_evidence.shadow_engine,
             "blocker_codes": search_projection_shadow_evidence.blocker_codes,
+        },
+        "bounded_read_evidence": {
+            "present": bounded_read_evidence.present,
+            "ready": bounded_read_evidence.ready,
+            "max_rows": bounded_read_evidence.max_rows,
+            "execution_row_cap": bounded_read_evidence.execution_row_cap,
+            "row_limit_enforced_before_output": bounded_read_evidence.row_limit_enforced_before_output,
+            "operator_row_cap_enabled": bounded_read_evidence.operator_row_cap_enabled,
+            "streaming": bounded_read_evidence.streaming,
+            "blocking_operator_count": bounded_read_evidence.blocking_operator_count,
+            "blocker_codes": bounded_read_evidence.blocker_codes,
         },
         "cutover_evidence": {
             "eligible": cutover_evidence_eligible,
@@ -363,6 +379,7 @@ struct ReplacementReadinessInputs<'a> {
     dual_engine_evidence_consistent: bool,
     search_projection_evidence_ready: bool,
     search_projection_shadow_evidence_ready: bool,
+    bounded_read_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
 }
 
@@ -381,6 +398,7 @@ struct NextActionInputs<'a> {
     dual_engine_evidence_consistent: bool,
     search_projection_evidence_ready: bool,
     search_projection_shadow_evidence_ready: bool,
+    bounded_read_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
     production_cutover_ready: bool,
 }
@@ -437,6 +455,18 @@ struct SearchProjectionShadowEvidenceSummary<'a> {
     incremental_watermark_parity: Option<bool>,
     primary_engine: Option<&'a str>,
     shadow_engine: Option<&'a str>,
+    blocker_codes: serde_json::Value,
+}
+
+struct BoundedReadEvidenceSummary {
+    present: bool,
+    ready: bool,
+    max_rows: Option<u64>,
+    execution_row_cap: Option<u64>,
+    row_limit_enforced_before_output: Option<bool>,
+    operator_row_cap_enabled: Option<bool>,
+    streaming: Option<bool>,
+    blocking_operator_count: Option<u64>,
     blocker_codes: serde_json::Value,
 }
 
@@ -636,6 +666,40 @@ fn search_projection_shadow_evidence_summary(
     }
 }
 
+fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvidenceSummary {
+    let path = if json_get_path(bundle, &["bounded_read_evidence"]).is_some() {
+        &["bounded_read_evidence"][..]
+    } else {
+        &["cutover_evidence", "bounded_read_evidence"][..]
+    };
+    let present = json_get_path(bundle, path).is_some();
+    let max_rows = json_get_u64_path_from_dynamic(bundle, path, "max_rows");
+    let execution_row_cap = json_get_u64_path_from_dynamic(bundle, path, "execution_row_cap");
+    let row_limit_enforced_before_output =
+        json_get_bool_path_from_dynamic(bundle, path, "row_limit_enforced_before_output");
+    let operator_row_cap_enabled =
+        json_get_bool_path_from_dynamic(bundle, path, "operator_row_cap_enabled");
+    let streaming = json_get_bool_path_from_dynamic(bundle, path, "streaming");
+    let blocking_operator_count =
+        json_get_u64_path_from_dynamic(bundle, path, "blocking_operator_count");
+    let ready = present
+        && max_rows.is_some_and(|value| value > 0)
+        && execution_row_cap == max_rows.and_then(|value| value.checked_add(1))
+        && row_limit_enforced_before_output == Some(true)
+        && operator_row_cap_enabled == Some(true);
+    BoundedReadEvidenceSummary {
+        present,
+        ready,
+        max_rows,
+        execution_row_cap,
+        row_limit_enforced_before_output,
+        operator_row_cap_enabled,
+        streaming,
+        blocking_operator_count,
+        blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
+    }
+}
+
 fn json_get_array_path_from_dynamic(
     value: &serde_json::Value,
     base_path: &[&str],
@@ -683,6 +747,9 @@ fn nowledge_replacement_blocking_categories(
     }
     if !inputs.search_projection_shadow_evidence_ready {
         categories.insert("search_projection_shadow_evidence".to_string());
+    }
+    if !inputs.bounded_read_evidence_ready {
+        categories.insert("bounded_read_evidence".to_string());
     }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
@@ -855,6 +922,22 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
+    if !inputs.bounded_read_evidence_ready {
+        actions.push(next_action(
+            "attach_bounded_read_profile",
+            "bounded read execution profile is missing or not ready",
+            [
+                "bounded_read_evidence.present",
+                "bounded_read_evidence.ready",
+                "bounded_read_evidence.max_rows",
+                "bounded_read_evidence.execution_row_cap",
+                "bounded_read_evidence.row_limit_enforced_before_output",
+                "bounded_read_evidence.operator_row_cap_enabled",
+                "bounded_read_evidence.blocking_operator_count",
+                "bounded_read_evidence.blocker_codes",
+            ],
+        ));
+    }
     if json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]) == Some(true)
         && json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]) != Some(true)
     {
@@ -980,6 +1063,13 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     } else if !search_projection_shadow_evidence_summary(bundle).ready {
         missing.push("search_projection_shadow_evidence_ready".to_string());
     }
+    if bundle.get("bounded_read_evidence").is_none()
+        && json_get_path(bundle, &["cutover_evidence", "bounded_read_evidence"]).is_none()
+    {
+        missing.push("bounded_read_evidence".to_string());
+    } else if !bounded_read_evidence_summary(bundle).ready {
+        missing.push("bounded_read_evidence_ready".to_string());
+    }
     if bundle.get("shadow_run").is_none() {
         missing.push("shadow_run".to_string());
     }
@@ -1036,6 +1126,8 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
             "search_projection_shadow_evidence",
             "blocker_codes",
         ][..],
+        &["bounded_read_evidence", "blocker_codes"][..],
+        &["cutover_evidence", "bounded_read_evidence", "blocker_codes"][..],
     ] {
         for blocker in json_get_string_array_path(bundle, path) {
             blockers.insert(blocker);
@@ -1155,6 +1247,7 @@ mod tests {
         assert_eq!(
             summary["blocking_categories"],
             serde_json::json!([
+                "bounded_read_evidence",
                 "cutover_evidence",
                 "dual_engine_evidence",
                 "previous_wrapper_contract",
@@ -1181,6 +1274,9 @@ mod tests {
         assert_eq!(summary["blocking_categories"], serde_json::json!([]));
         assert_eq!(summary["missing_evidence"], serde_json::json!([]));
         assert_eq!(summary["next_actions"], serde_json::json!([]));
+        assert_eq!(summary["bounded_read_evidence"]["present"], true);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], true);
+        assert_eq!(summary["bounded_read_evidence"]["execution_row_cap"], 513);
         assert_eq!(
             summary["cutover_evidence"]["storage_recovery_protocol_matches"],
             true
@@ -1427,6 +1523,37 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "search_projection_shadow_evidence"));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_bounded_read_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("bounded_read_evidence");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["bounded_read_evidence"]["present"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_bounded_read_profile"));
     }
 
     #[test]
@@ -1866,6 +1993,7 @@ mod tests {
             summary["blocking_categories"],
             serde_json::json!([
                 "background_maintenance",
+                "bounded_read_evidence",
                 "cutover_evidence",
                 "dual_engine_evidence",
                 "migration_gate",
@@ -1887,6 +2015,7 @@ mod tests {
                 "dual_engine_evidence",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
+                "bounded_read_evidence",
                 "shadow_run",
                 "shadow_ready"
             ])
@@ -2002,6 +2131,20 @@ mod tests {
                         "search_projection_shadow_evidence.lifecycle_parity",
                         "search_projection_shadow_evidence.incremental_watermark_parity",
                         "search_projection_shadow_evidence.blocker_codes"
+                    ]
+                },
+                {
+                    "action": "attach_bounded_read_profile",
+                    "reason": "bounded read execution profile is missing or not ready",
+                    "evidence_fields": [
+                        "bounded_read_evidence.present",
+                        "bounded_read_evidence.ready",
+                        "bounded_read_evidence.max_rows",
+                        "bounded_read_evidence.execution_row_cap",
+                        "bounded_read_evidence.row_limit_enforced_before_output",
+                        "bounded_read_evidence.operator_row_cap_enabled",
+                        "bounded_read_evidence.blocking_operator_count",
+                        "bounded_read_evidence.blocker_codes"
                     ]
                 },
                 {
@@ -2133,6 +2276,15 @@ mod tests {
                 "embedding_identity_parity": true,
                 "lifecycle_parity": true,
                 "incremental_watermark_parity": true,
+                "blocker_codes": []
+            },
+            "bounded_read_evidence": {
+                "max_rows": 512,
+                "execution_row_cap": 513,
+                "row_limit_enforced_before_output": true,
+                "operator_row_cap_enabled": true,
+                "streaming": false,
+                "blocking_operator_count": 0,
                 "blocker_codes": []
             },
             "previous_wrapper_contract_evidence": {

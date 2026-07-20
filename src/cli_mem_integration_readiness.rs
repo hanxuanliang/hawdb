@@ -211,6 +211,55 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 ],
             ),
         ),
+        check(
+            "bounded_read_evidence",
+            [
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "bounded_read_evidence", "present"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "bounded_read_evidence", "ready"],
+                ) == Some(true),
+                u64_path(
+                    bundle,
+                    &["replacement_summary", "bounded_read_evidence", "max_rows"],
+                )
+                .is_some_and(|value| value > 0),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "row_limit_enforced_before_output",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "operator_row_cap_enabled",
+                    ],
+                ) == Some(true),
+            ],
+            [
+                "replacement_summary.bounded_read_evidence.present",
+                "replacement_summary.bounded_read_evidence.ready",
+                "replacement_summary.bounded_read_evidence.max_rows",
+                "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
+                "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
+            ],
+            blocker_codes(
+                bundle,
+                &[&[
+                    "replacement_summary",
+                    "bounded_read_evidence",
+                    "blocker_codes",
+                ][..]],
+            ),
+        ),
     ];
     let ready = checks
         .iter()
@@ -333,6 +382,25 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if bool_path(
+        bundle,
+        &["replacement_summary", "bounded_read_evidence", "ready"],
+    ) != Some(true)
+    {
+        actions.push(next_action(
+            "attach_bounded_read_profile",
+            "Skein read replacement must prove bounded execution before Mem cutover",
+            [
+                "replacement_summary.bounded_read_evidence.present",
+                "replacement_summary.bounded_read_evidence.ready",
+                "replacement_summary.bounded_read_evidence.max_rows",
+                "replacement_summary.bounded_read_evidence.execution_row_cap",
+                "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
+                "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
+                "replacement_summary.bounded_read_evidence.blocker_codes",
+            ],
+        ));
+    }
     actions
 }
 
@@ -393,6 +461,10 @@ fn non_empty_str_path(value: &serde_json::Value, path: &[&str]) -> bool {
 
 fn bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
     json_get_path(value, path).and_then(serde_json::Value::as_bool)
+}
+
+fn u64_path(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
+    json_get_path(value, path).and_then(serde_json::Value::as_u64)
 }
 
 fn str_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
@@ -485,6 +557,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn requires_bounded_read_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["bounded_read_evidence"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary"]["bounded_read_evidence"]
+            ["row_limit_enforced_before_output"] = serde_json::json!(false);
+        bundle["replacement_summary"]["bounded_read_evidence"]["blocker_codes"] =
+            serde_json::json!(["row_cap_not_enforced"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["row_cap_not_enforced"])
+        );
+        let read_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence")
+            .unwrap();
+        assert_eq!(
+            read_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.bounded_read_evidence.ready",
+                "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_bounded_read_profile"));
+    }
+
     fn ready_bundle() -> serde_json::Value {
         serde_json::json!({
             "submodule": {
@@ -534,6 +646,16 @@ mod tests {
                     "table_parity_ready": true,
                     "embedding_identity_parity": true,
                     "incremental_watermark_parity": true,
+                    "blocker_codes": []
+                },
+                "bounded_read_evidence": {
+                    "present": true,
+                    "ready": true,
+                    "max_rows": 512,
+                    "execution_row_cap": 513,
+                    "row_limit_enforced_before_output": true,
+                    "operator_row_cap_enabled": true,
+                    "blocking_operator_count": 0,
                     "blocker_codes": []
                 }
             }
