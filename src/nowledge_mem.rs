@@ -1,4 +1,6 @@
-use crate::search_projection_evidence::nowledge_search_projection_evidence_json;
+use crate::search_projection_evidence::{
+    nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
+};
 use crate::{
     BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
     BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
@@ -177,6 +179,14 @@ impl NowledgeMemSearchProjection {
         nowledge_search_projection_evidence_json(&self.probe_json(options))
     }
 
+    pub fn shadow_evidence_json(
+        &self,
+        primary_probe: &serde_json::Value,
+        options: SearchProjectionProbeOptions,
+    ) -> serde_json::Value {
+        nowledge_search_projection_shadow_evidence_json(primary_probe, &self.probe_json(options))
+    }
+
     pub fn freshness(&self) -> SearchProjectionFreshness {
         self.index.projection_freshness()
     }
@@ -305,6 +315,16 @@ impl NowledgeMemEmbeddedStore {
         options: SearchProjectionProbeOptions,
     ) -> Result<serde_json::Value> {
         Ok(self.require_search_projection()?.evidence_json(options))
+    }
+
+    pub fn search_projection_shadow_evidence_json(
+        &self,
+        primary_probe: &serde_json::Value,
+        options: SearchProjectionProbeOptions,
+    ) -> Result<serde_json::Value> {
+        Ok(self
+            .require_search_projection()?
+            .shadow_evidence_json(primary_probe, options))
     }
 
     pub fn retrieve_knowledge(
@@ -451,6 +471,54 @@ mod tests {
     }
 
     #[test]
+    fn embedded_store_exposes_search_projection_shadow_evidence() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "bge-m3".to_string(),
+                version: None,
+                dimension: 2,
+            })
+            .unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: nowledge_projection_evidence_rows(),
+                deletes: Vec::new(),
+                max_operations: None,
+                source_graph_commit_epoch: Some(17),
+            })
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let probe_options = SearchProjectionProbeOptions {
+            active_embedding_model: Some("bge-m3".to_string()),
+            active_embedding_dimension: Some(2),
+        };
+        let primary_probe = store
+            .search_projection_probe_json(probe_options.clone())
+            .unwrap();
+
+        let evidence = store
+            .search_projection_shadow_evidence_json(&primary_probe, probe_options)
+            .unwrap();
+
+        assert_eq!(
+            evidence["protocol"],
+            "skein-nowledge-search-projection-shadow-evidence"
+        );
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["primary_ready"], true);
+        assert_eq!(evidence["shadow_ready"], true);
+        assert_eq!(evidence["document_count_parity"], true);
+        assert_eq!(evidence["table_parity"]["ready"], true);
+        assert_eq!(evidence["embedding_identity_parity"], true);
+        assert_eq!(evidence["incremental_watermark_parity"], true);
+        assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
     fn embedded_store_search_projection_evidence_requires_projection() {
         let graph =
             NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
@@ -458,6 +526,25 @@ mod tests {
 
         let error = store
             .search_projection_evidence_json(SearchProjectionProbeOptions::default())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "storage error: nowledge mem search projection is not configured"
+        );
+    }
+
+    #[test]
+    fn embedded_store_search_projection_shadow_evidence_requires_projection() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let error = store
+            .search_projection_shadow_evidence_json(
+                &serde_json::json!({ "engine": "lancedb" }),
+                SearchProjectionProbeOptions::default(),
+            )
             .unwrap_err();
 
         assert_eq!(
