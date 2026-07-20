@@ -33,7 +33,7 @@ pub use analytics::{
 pub use api::{
     validate_graph_lightning_graph_stream, BackgroundMaintenanceCandidate,
     BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
-    BackgroundMaintenanceSummaryItem, CanonicalGraphSnapshotExport,
+    BackgroundMaintenanceSummaryItem, BoundedReadQueryOutput, CanonicalGraphSnapshotExport,
     CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
     CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
     CanonicalStableIdMapping, Database, DatabaseConfig, DatabaseReadTransaction,
@@ -298,6 +298,7 @@ pub use compat::{
 };
 pub use cypher::RelationshipDirection;
 pub use error::{Result, SkeinError};
+pub use executor::ReadExecutionProfile;
 pub use nowledge_inventory::{
     background_maintenance_evidence_health, background_maintenance_evidence_health_from_bundle,
     replacement_readiness_family_evidence_health,

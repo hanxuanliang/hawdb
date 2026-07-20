@@ -206,6 +206,12 @@ pub struct QueryOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundedReadQueryOutput {
+    pub output: QueryOutput,
+    pub execution_profile: executor::ReadExecutionProfile,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeGraphStatement {
     pub cypher: String,
     pub parameters: BTreeMap<String, Value>,
@@ -30150,6 +30156,17 @@ impl DatabaseReadTransaction {
         parameters: &BTreeMap<String, Value>,
         max_rows: Option<usize>,
     ) -> Result<QueryOutput> {
+        Ok(self
+            .query_with_params_bounded_profile(cypher_text, parameters, max_rows)?
+            .output)
+    }
+
+    pub fn query_with_params_bounded_profile(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        max_rows: Option<usize>,
+    ) -> Result<BoundedReadQueryOutput> {
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if matches!(body, cypher::Statement::Checkpoint) {
@@ -30171,13 +30188,17 @@ impl DatabaseReadTransaction {
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
+        let execution_profile = executor::read_execution_profile(&physical, max_rows)?;
         let rows = executor::execute_with_row_limit(
             &physical,
             &mut self.catalog,
             &mut self.store,
             max_rows,
         )?;
-        Ok(QueryOutput { rows })
+        Ok(BoundedReadQueryOutput {
+            output: QueryOutput { rows },
+            execution_profile,
+        })
     }
 
     pub fn explain_query(&self, cypher_text: &str) -> Result<ExplainOutput> {

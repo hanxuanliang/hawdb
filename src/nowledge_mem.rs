@@ -5,8 +5,9 @@ use crate::{
     BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
     BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState, QueryOutput,
-    Result, SearchIndex, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
+    ReadExecutionProfile, Result, SearchIndex, SearchProjectionDeltaReport,
+    SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions,
+    SkeinError, Value,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -130,10 +131,15 @@ pub struct NowledgeMemReadReport {
     pub mode: NowledgeMemGraphMode,
     pub row_count: usize,
     pub max_rows: Option<usize>,
+    pub execution_row_cap: Option<usize>,
     pub estimated_payload_bytes: usize,
     pub max_estimated_payload_bytes: Option<usize>,
     pub row_budget_exceeded: bool,
     pub payload_budget_exceeded: bool,
+    pub row_limit_enforced_before_output: bool,
+    pub operator_row_cap_enabled: bool,
+    pub blocking_operator_count: usize,
+    pub blocking_operator_kinds: Vec<String>,
     pub streaming: bool,
 }
 
@@ -144,10 +150,15 @@ impl NowledgeMemReadReport {
             "mode": self.mode.as_str(),
             "row_count": self.row_count,
             "max_rows": self.max_rows,
+            "execution_row_cap": self.execution_row_cap,
             "estimated_payload_bytes": self.estimated_payload_bytes,
             "max_estimated_payload_bytes": self.max_estimated_payload_bytes,
             "row_budget_exceeded": self.row_budget_exceeded,
             "payload_budget_exceeded": self.payload_budget_exceeded,
+            "row_limit_enforced_before_output": self.row_limit_enforced_before_output,
+            "operator_row_cap_enabled": self.operator_row_cap_enabled,
+            "blocking_operator_count": self.blocking_operator_count,
+            "blocking_operator_kinds": self.blocking_operator_kinds,
             "streaming": self.streaming,
         })
     }
@@ -215,12 +226,16 @@ impl NowledgeMemGraph {
         parameters: &BTreeMap<String, Value>,
         options: &NowledgeMemReadOptions,
     ) -> Result<NowledgeMemReadOutput> {
-        let output = self.db.begin_read_transaction().query_with_params_bounded(
-            cypher,
-            parameters,
-            options.max_rows,
-        )?;
-        let report = nowledge_mem_read_report(self.mode, &output, options);
+        let bounded = self
+            .db
+            .begin_read_transaction()
+            .query_with_params_bounded_profile(cypher, parameters, options.max_rows)?;
+        let report = nowledge_mem_read_report(
+            self.mode,
+            &bounded.output,
+            options,
+            &bounded.execution_profile,
+        );
         if report.row_budget_exceeded {
             return Err(SkeinError::Execution(format!(
                 "nowledge mem read query returned {} rows, exceeding max_rows {}",
@@ -235,7 +250,10 @@ impl NowledgeMemGraph {
                 report.max_estimated_payload_bytes.unwrap_or_default()
             )));
         }
-        Ok(NowledgeMemReadOutput { output, report })
+        Ok(NowledgeMemReadOutput {
+            output: bounded.output,
+            report,
+        })
     }
 }
 
@@ -495,6 +513,7 @@ fn nowledge_mem_read_report(
     mode: NowledgeMemGraphMode,
     output: &QueryOutput,
     options: &NowledgeMemReadOptions,
+    execution_profile: &ReadExecutionProfile,
 ) -> NowledgeMemReadReport {
     let estimated_payload_bytes = estimate_query_output_payload_bytes(output);
     NowledgeMemReadReport {
@@ -502,6 +521,7 @@ fn nowledge_mem_read_report(
         mode,
         row_count: output.rows.len(),
         max_rows: options.max_rows,
+        execution_row_cap: execution_profile.detection_row_cap,
         estimated_payload_bytes,
         max_estimated_payload_bytes: options.max_estimated_payload_bytes,
         row_budget_exceeded: options
@@ -510,6 +530,10 @@ fn nowledge_mem_read_report(
         payload_budget_exceeded: options
             .max_estimated_payload_bytes
             .is_some_and(|max_bytes| estimated_payload_bytes > max_bytes),
+        row_limit_enforced_before_output: execution_profile.row_limit_enforced_before_output,
+        operator_row_cap_enabled: execution_profile.operator_row_cap_enabled,
+        blocking_operator_count: execution_profile.blocking_operator_count(),
+        blocking_operator_kinds: execution_profile.blocking_operator_kinds.clone(),
         streaming: false,
     }
 }
@@ -604,10 +628,19 @@ mod tests {
         assert_eq!(read.report.mode, NowledgeMemGraphMode::ShadowReadOnly);
         assert_eq!(read.report.row_count, 1);
         assert_eq!(read.report.max_rows, Some(4));
+        assert_eq!(read.report.execution_row_cap, Some(5));
         assert!(read.report.estimated_payload_bytes <= 128);
         assert!(!read.report.row_budget_exceeded);
         assert!(!read.report.payload_budget_exceeded);
+        assert!(read.report.row_limit_enforced_before_output);
+        assert!(read.report.operator_row_cap_enabled);
+        assert_eq!(read.report.blocking_operator_count, 0);
+        assert!(read.report.blocking_operator_kinds.is_empty());
         assert!(!read.report.streaming);
+        assert_eq!(read.report.json()["execution_row_cap"], 5);
+        assert_eq!(read.report.json()["row_limit_enforced_before_output"], true);
+        assert_eq!(read.report.json()["operator_row_cap_enabled"], true);
+        assert_eq!(read.report.json()["blocking_operator_count"], 0);
         assert_eq!(read.report.json()["streaming"], false);
     }
 
@@ -706,6 +739,35 @@ mod tests {
         assert_eq!(read.output.rows.len(), 1);
         assert_eq!(read.report.row_count, 1);
         assert!(!read.report.row_budget_exceeded);
+    }
+
+    #[test]
+    fn graph_read_query_reports_blocking_operators() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-sort-profile-1', title: 'B'})")
+            .unwrap();
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-sort-profile-2', title: 'A'})")
+            .unwrap();
+
+        let read = graph
+            .read_query_with_options(
+                "MATCH (m:Memory) RETURN m.title AS title ORDER BY title LIMIT 1",
+                &NowledgeMemReadOptions {
+                    max_rows: Some(4),
+                    max_estimated_payload_bytes: Some(4096),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(read.output.rows.len(), 1);
+        assert_eq!(read.report.blocking_operator_kinds, vec!["SortExec"]);
+        assert_eq!(read.report.blocking_operator_count, 1);
+        assert_eq!(read.report.json()["blocking_operator_kinds"][0], "SortExec");
     }
 
     #[test]

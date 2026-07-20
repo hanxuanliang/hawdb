@@ -31,6 +31,15 @@ struct ExecutionLimit {
     output_rows: Option<usize>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadExecutionProfile {
+    pub max_rows: Option<usize>,
+    pub detection_row_cap: Option<usize>,
+    pub row_limit_enforced_before_output: bool,
+    pub operator_row_cap_enabled: bool,
+    pub blocking_operator_kinds: Vec<String>,
+}
+
 impl ExecutionLimit {
     fn unlimited() -> Self {
         Self { output_rows: None }
@@ -63,6 +72,12 @@ impl ExecutionLimit {
     }
 }
 
+impl ReadExecutionProfile {
+    pub fn blocking_operator_count(&self) -> usize {
+        self.blocking_operator_kinds.len()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Binding {
     values: BTreeMap<String, Value>,
@@ -87,6 +102,58 @@ pub fn execute_with_row_limit(
     let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
     let bindings = execute_bindings_with_limit(plan, catalog, store, execution_limit)?;
     collect_rows(bindings, max_rows)
+}
+
+pub fn read_execution_profile(
+    plan: &PhysicalPlan,
+    max_rows: Option<usize>,
+) -> Result<ReadExecutionProfile> {
+    let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
+    let mut blocking_operator_kinds = BTreeSet::new();
+    collect_blocking_operator_kinds(plan, &mut blocking_operator_kinds);
+    Ok(ReadExecutionProfile {
+        max_rows,
+        detection_row_cap: execution_limit.output_rows,
+        row_limit_enforced_before_output: max_rows.is_some(),
+        operator_row_cap_enabled: execution_limit.output_rows.is_some(),
+        blocking_operator_kinds: blocking_operator_kinds.into_iter().collect(),
+    })
+}
+
+fn collect_blocking_operator_kinds(plan: &PhysicalPlan, output: &mut BTreeSet<String>) {
+    match plan {
+        PhysicalPlan::GraphAlgorithm { .. } => {
+            output.insert("GraphAlgorithm".to_string());
+        }
+        PhysicalPlan::ShortestPathExec { .. } => {
+            output.insert("ShortestPathExec".to_string());
+        }
+        PhysicalPlan::AggregateExec { input, .. } => {
+            output.insert("AggregateExec".to_string());
+            collect_blocking_operator_kinds(input, output);
+        }
+        PhysicalPlan::DistinctExec { input } => {
+            output.insert("DistinctExec".to_string());
+            collect_blocking_operator_kinds(input, output);
+        }
+        PhysicalPlan::SortExec { input, .. } => {
+            output.insert("SortExec".to_string());
+            collect_blocking_operator_kinds(input, output);
+        }
+        PhysicalPlan::NodeCartesianProductExec { left, right } => {
+            collect_blocking_operator_kinds(left, output);
+            collect_blocking_operator_kinds(right, output);
+        }
+        PhysicalPlan::NodeColumnLookupExec { input, .. }
+        | PhysicalPlan::AdjacencyExpandExec { input, .. }
+        | PhysicalPlan::OptionalDegreeExec { input, .. }
+        | PhysicalPlan::FilterExec { input, .. }
+        | PhysicalPlan::ProjectExec { input, .. }
+        | PhysicalPlan::LimitExec { input, .. } => {
+            collect_blocking_operator_kinds(input, output);
+        }
+        _ => {}
+    }
 }
 
 fn collect_rows(bindings: Vec<Binding>, max_rows: Option<usize>) -> Result<Vec<Row>> {
