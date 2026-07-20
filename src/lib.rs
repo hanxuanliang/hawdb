@@ -12,6 +12,8 @@ pub mod search;
 pub mod store;
 
 mod regex_cache;
+#[path = "cli_search_projection_evidence.rs"]
+pub mod search_projection_evidence;
 
 pub mod error {
     pub use skein_core::error::*;

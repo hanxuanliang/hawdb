@@ -3,7 +3,6 @@ mod cli_fixture_contract_check;
 mod cli_mem_integration_readiness;
 mod cli_previous_wrapper_preflight;
 mod cli_replacement_summary;
-mod cli_search_projection_evidence;
 
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
@@ -13,11 +12,11 @@ use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
-use cli_search_projection_evidence::{
+use skein::nowledge_inventory::background_maintenance_summary_to_json;
+use skein::search_projection_evidence::{
     run_nowledge_search_projection_evidence, run_nowledge_search_projection_shadow_evidence,
     run_skein_search_projection_probe,
 };
-use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
     external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,

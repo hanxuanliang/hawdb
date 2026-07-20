@@ -1,5 +1,4 @@
-use crate::{Result, SkeinError};
-use skein::{SearchIndex, SearchProjectionProbeOptions};
+use crate::{Result, SearchIndex, SearchProjectionProbeOptions, SkeinError};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -471,14 +470,12 @@ fn find_table<'a>(probe: &'a serde_json::Value, name: &str) -> Option<&'a serde_
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let content = std::fs::read_to_string(path).map_err(|error| {
         SkeinError::Execution(format!(
-            "failed to read search projection evidence JSON '{}': {error}",
-            path.display()
+            "failed to read search projection evidence JSON: {error}"
         ))
     })?;
     serde_json::from_str(&content).map_err(|error| {
         SkeinError::Semantic(format!(
-            "failed to parse search projection evidence JSON '{}': {error}",
-            path.display()
+            "failed to parse search projection evidence JSON: {error}"
         ))
     })
 }
@@ -532,7 +529,7 @@ mod tests {
         nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
         run_skein_search_projection_probe,
     };
-    use skein::{
+    use crate::{
         SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
         SearchProjectionRow,
     };
@@ -686,6 +683,15 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "shadow_source_chunks_index_not_ready"));
+    }
+
+    #[test]
+    fn search_projection_evidence_read_errors_do_not_echo_paths() {
+        let path = PathBuf::from("missing-search-projection-evidence-redaction.json");
+
+        let error = super::read_json_file(&path).unwrap_err();
+
+        assert!(!error.to_string().contains("missing-search-projection"));
     }
 
     fn ready_probe() -> serde_json::Value {

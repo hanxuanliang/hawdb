@@ -1,3 +1,4 @@
+use crate::search_projection_evidence::nowledge_search_projection_evidence_json;
 use crate::{
     BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
     BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
@@ -172,6 +173,10 @@ impl NowledgeMemSearchProjection {
         self.index.nowledge_search_projection_probe_json(options)
     }
 
+    pub fn evidence_json(&self, options: SearchProjectionProbeOptions) -> serde_json::Value {
+        nowledge_search_projection_evidence_json(&self.probe_json(options))
+    }
+
     pub fn freshness(&self) -> SearchProjectionFreshness {
         self.index.projection_freshness()
     }
@@ -288,6 +293,20 @@ impl NowledgeMemEmbeddedStore {
             )
     }
 
+    pub fn search_projection_probe_json(
+        &self,
+        options: SearchProjectionProbeOptions,
+    ) -> Result<serde_json::Value> {
+        Ok(self.require_search_projection()?.probe_json(options))
+    }
+
+    pub fn search_projection_evidence_json(
+        &self,
+        options: SearchProjectionProbeOptions,
+    ) -> Result<serde_json::Value> {
+        Ok(self.require_search_projection()?.evidence_json(options))
+    }
+
     pub fn retrieve_knowledge(
         &self,
         request: &KnowledgeRetrievalRequest,
@@ -345,8 +364,9 @@ mod tests {
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
         KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
-        LocalQosScheduler, LocalQosState, SearchIndex, SearchMode, SearchProjectionProbeOptions,
-        WorkClass,
+        LocalQosScheduler, LocalQosState, SearchEmbeddingManifest, SearchIndex, SearchMode,
+        SearchProjectionDelta, SearchProjectionKind, SearchProjectionProbeOptions,
+        SearchProjectionRow, WorkClass,
     };
     use std::collections::BTreeMap;
 
@@ -386,6 +406,64 @@ mod tests {
             .probe_json(SearchProjectionProbeOptions::default());
 
         assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
+    }
+
+    #[test]
+    fn embedded_store_exposes_search_projection_replacement_evidence() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "bge-m3".to_string(),
+                version: None,
+                dimension: 2,
+            })
+            .unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: nowledge_projection_evidence_rows(),
+                deletes: Vec::new(),
+                max_operations: None,
+                source_graph_commit_epoch: Some(17),
+            })
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+
+        let evidence = store
+            .search_projection_evidence_json(SearchProjectionProbeOptions {
+                active_embedding_model: Some("bge-m3".to_string()),
+                active_embedding_dimension: Some(2),
+            })
+            .unwrap();
+
+        assert_eq!(
+            evidence["protocol"],
+            "skein-nowledge-search-projection-evidence"
+        );
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["covered_table_count"], 6);
+        assert_eq!(evidence["required_table_count"], 6);
+        assert_eq!(evidence["source_chunk_ready"], true);
+        assert_eq!(evidence["incremental_update_ready"], true);
+        assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn embedded_store_search_projection_evidence_requires_projection() {
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let error = store
+            .search_projection_evidence_json(SearchProjectionProbeOptions::default())
+            .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "storage error: nowledge mem search projection is not configured"
+        );
     }
 
     #[test]
@@ -634,6 +712,33 @@ mod tests {
             item.search_projection_graph_delta_delete_document_count,
             Some(0)
         );
+    }
+
+    fn nowledge_projection_evidence_rows() -> Vec<SearchProjectionRow> {
+        vec![
+            nowledge_projection_evidence_row(SearchProjectionKind::Memory, "mem_1", true),
+            nowledge_projection_evidence_row(SearchProjectionKind::Message, "msg_1", false),
+            nowledge_projection_evidence_row(SearchProjectionKind::Community, "community_1", true),
+            nowledge_projection_evidence_row(SearchProjectionKind::Entity, "entity_1", true),
+            nowledge_projection_evidence_row(SearchProjectionKind::Source, "source_1", true),
+            nowledge_projection_evidence_row(SearchProjectionKind::SourceChunk, "chunk_1", true),
+        ]
+    }
+
+    fn nowledge_projection_evidence_row(
+        kind: SearchProjectionKind,
+        external_id: &str,
+        include_embedding: bool,
+    ) -> SearchProjectionRow {
+        SearchProjectionRow {
+            kind,
+            external_id: external_id.to_string(),
+            title: format!("{external_id} title"),
+            body: format!("{external_id} body"),
+            embedding: include_embedding.then_some(vec![1.0, 0.0]),
+            source_id: Some("source_1".to_string()),
+            metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+        }
     }
 
     fn unique_nowledge_mem_test_dir(name: &str) -> std::path::PathBuf {
