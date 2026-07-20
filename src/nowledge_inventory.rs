@@ -2402,6 +2402,8 @@ mod tests {
             "previous_wrapper"
         );
         assert_eq!(bundle["shadow_trace"]["request_count"], 2);
+        assert_eq!(bundle["shadow_trace"]["path"], "<redacted>");
+        assert_eq!(bundle["shadow_trace"]["path_redacted"], true);
         assert_eq!(bundle["shadow_trace"]["summary_available"], true);
         assert_eq!(bundle["shadow_trace"]["request_op_counts"]["ready"], 1);
         assert_eq!(

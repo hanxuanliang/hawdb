@@ -4892,7 +4892,8 @@ mod tests {
 
         add_shadow_trace_report(&mut bundle, trace_path.to_str().unwrap(), 3).unwrap();
 
-        assert_eq!(bundle["shadow_trace"]["path"], trace_path.to_str().unwrap());
+        assert_eq!(bundle["shadow_trace"]["path"], "<redacted>");
+        assert_eq!(bundle["shadow_trace"]["path_redacted"], true);
         assert_eq!(bundle["shadow_trace"]["request_count"], 3);
         assert_eq!(bundle["shadow_trace"]["summary_available"], true);
         assert_eq!(bundle["shadow_trace"]["trace_record_count"], 5);

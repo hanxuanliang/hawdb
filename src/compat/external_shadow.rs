@@ -682,9 +682,12 @@ pub fn external_shadow_trace_report_json(
     trace_path: &str,
     request_count: u64,
 ) -> serde_json::Value {
+    const REDACTED_TRACE_PATH: &str = "<redacted>";
+
     match summarize_external_shadow_trace(trace_path) {
         Ok(summary) => serde_json::json!({
-            "path": trace_path,
+            "path": REDACTED_TRACE_PATH,
+            "path_redacted": true,
             "request_count": request_count,
             "summary_available": true,
             "trace_record_count": summary.trace_record_count,
@@ -700,7 +703,8 @@ pub fn external_shadow_trace_report_json(
             "pending_op_counts": summary.pending_op_counts,
         }),
         Err(error) => serde_json::json!({
-            "path": trace_path,
+            "path": REDACTED_TRACE_PATH,
+            "path_redacted": true,
             "request_count": request_count,
             "summary_available": false,
             "summary_error": error.to_string(),
