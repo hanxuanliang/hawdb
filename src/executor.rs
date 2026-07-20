@@ -26,6 +26,43 @@ pub type Row = BTreeMap<String, Value>;
 type ValueRangeBound = (Value, bool);
 type ValueRangeBounds = (Option<ValueRangeBound>, Option<ValueRangeBound>);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ExecutionLimit {
+    output_rows: Option<usize>,
+}
+
+impl ExecutionLimit {
+    fn unlimited() -> Self {
+        Self { output_rows: None }
+    }
+
+    fn from_user_max_rows(max_rows: Option<usize>) -> Result<Self> {
+        let Some(max_rows) = max_rows else {
+            return Ok(Self::unlimited());
+        };
+        let output_rows = max_rows.checked_add(1).ok_or_else(|| {
+            SkeinError::Execution("read query row limit is too large".to_string())
+        })?;
+        Ok(Self {
+            output_rows: Some(output_rows),
+        })
+    }
+
+    fn child_for_limit(self, offset: usize, limit: Option<usize>) -> Self {
+        let output_rows = match (self.output_rows, limit) {
+            (Some(cap), Some(limit)) => Some(offset.saturating_add(cap.min(limit))),
+            (Some(cap), None) => Some(offset.saturating_add(cap)),
+            (None, Some(limit)) => Some(offset.saturating_add(limit)),
+            (None, None) => None,
+        };
+        Self { output_rows }
+    }
+
+    fn is_reached(self, len: usize) -> bool {
+        self.output_rows.is_some_and(|cap| len >= cap)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Binding {
     values: BTreeMap<String, Value>,
@@ -47,7 +84,8 @@ pub fn execute_with_row_limit(
     store: &mut GraphStore,
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
-    let bindings = execute_bindings(plan, catalog, store)?;
+    let execution_limit = ExecutionLimit::from_user_max_rows(max_rows)?;
+    let bindings = execute_bindings_with_limit(plan, catalog, store, execution_limit)?;
     collect_rows(bindings, max_rows)
 }
 
@@ -656,6 +694,15 @@ fn execute_bindings(
     plan: &PhysicalPlan,
     catalog: &mut Catalog,
     store: &mut GraphStore,
+) -> Result<Vec<Binding>> {
+    execute_bindings_with_limit(plan, catalog, store, ExecutionLimit::unlimited())
+}
+
+fn execute_bindings_with_limit(
+    plan: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    execution_limit: ExecutionLimit,
 ) -> Result<Vec<Binding>> {
     match plan {
         PhysicalPlan::CreateNodeLabel { label } => {
@@ -1647,6 +1694,7 @@ fn execute_bindings(
             Ok(store
                 .scan_nodes(None)
                 .filter(|node| node_matches_label_pattern(node, label_ids.as_deref()))
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
                 .cloned()
                 .map(|node| Binding {
                     values: BTreeMap::new(),
@@ -1658,7 +1706,7 @@ fn execute_bindings(
         PhysicalPlan::NodeCartesianProductExec { left, right } => {
             let left = execute_bindings(left, catalog, store)?;
             let right = execute_bindings(right, catalog, store)?;
-            let mut output = Vec::with_capacity(left.len().saturating_mul(right.len()));
+            let mut output = Vec::new();
             for left_binding in &left {
                 for right_binding in &right {
                     let mut values = left_binding.values.clone();
@@ -1672,6 +1720,9 @@ fn execute_bindings(
                         nodes,
                         relationships,
                     });
+                    if execution_limit.is_reached(output.len()) {
+                        return Ok(output);
+                    }
                 }
             }
             Ok(output)
@@ -1705,12 +1756,18 @@ fn execute_bindings(
                         next.nodes.insert(variable.clone(), node.clone());
                         output.push(next);
                         matched = true;
+                        if execution_limit.is_reached(output.len()) {
+                            return Ok(output);
+                        }
                     }
                 }
                 if *optional && !matched {
                     let mut next = binding;
                     next.nodes.insert(variable.clone(), null_lookup_node());
                     output.push(next);
+                    if execution_limit.is_reached(output.len()) {
+                        return Ok(output);
+                    }
                 }
             }
             Ok(output)
@@ -1726,6 +1783,7 @@ fn execute_bindings(
             };
             Ok(store
                 .seek_nodes_by_property(label_id, property, value)
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
                 .cloned()
                 .map(|node| Binding {
                     values: BTreeMap::new(),
@@ -1753,6 +1811,9 @@ fn execute_bindings(
                             nodes: BTreeMap::from([(variable.clone(), node.clone())]),
                             relationships: BTreeMap::new(),
                         });
+                        if execution_limit.is_reached(output.len()) {
+                            return Ok(output);
+                        }
                     }
                 }
             }
@@ -1769,6 +1830,7 @@ fn execute_bindings(
             Ok(store
                 .seek_nodes_by_composite_property(label_id, predicates)
                 .into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
                 .cloned()
                 .map(|node| Binding {
                     values: BTreeMap::new(),
@@ -1790,6 +1852,7 @@ fn execute_bindings(
             Ok(store
                 .seek_nodes_by_property_range(label_id, property, lower.as_ref(), upper.as_ref())
                 .into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
                 .cloned()
                 .map(|node| Binding {
                     values: BTreeMap::new(),
@@ -1810,6 +1873,7 @@ fn execute_bindings(
             Ok(store
                 .seek_nodes_by_full_text_property(label_id, property, query)
                 .into_iter()
+                .take(execution_limit.output_rows.unwrap_or(usize::MAX))
                 .cloned()
                 .map(|node| Binding {
                     values: BTreeMap::new(),
@@ -1877,6 +1941,9 @@ fn execute_bindings(
                             nodes,
                             relationships,
                         });
+                        if execution_limit.is_reached(output.len()) {
+                            return Ok(output);
+                        }
                     }
                 } else {
                     let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
@@ -1898,6 +1965,9 @@ fn execute_bindings(
                             nodes,
                             relationships: binding.relationships.clone(),
                         });
+                        if execution_limit.is_reached(output.len()) {
+                            return Ok(output);
+                        }
                     }
                 }
                 if *optional && output.len() == output_len_before {
@@ -1908,6 +1978,9 @@ fn execute_bindings(
                         nodes,
                         relationships: binding.relationships,
                     });
+                    if execution_limit.is_reached(output.len()) {
+                        return Ok(output);
+                    }
                 }
             }
             Ok(output)
@@ -2037,28 +2110,36 @@ fn execute_bindings(
         ),
         PhysicalPlan::FilterExec { predicate, input } => {
             let input = execute_bindings(input, catalog, store)?;
-            Ok(input
-                .into_iter()
-                .filter(|binding| evaluate_predicate(predicate, catalog, store, binding))
-                .collect())
+            let mut output = Vec::new();
+            for binding in input {
+                if evaluate_predicate(predicate, catalog, store, &binding) {
+                    output.push(binding);
+                    if execution_limit.is_reached(output.len()) {
+                        return Ok(output);
+                    }
+                }
+            }
+            Ok(output)
         }
         PhysicalPlan::ProjectExec { items, input } => {
-            let input = execute_bindings(input, catalog, store)?;
-            input
-                .into_iter()
-                .map(|binding| {
-                    let mut values = BTreeMap::new();
-                    for item in items {
-                        let value = project_value(item, catalog, &binding)?;
-                        insert_projected_value(&mut values, &item.name, value);
-                    }
-                    Ok(Binding {
-                        values,
-                        nodes: binding.nodes,
-                        relationships: binding.relationships,
-                    })
-                })
-                .collect()
+            let input = execute_bindings_with_limit(input, catalog, store, execution_limit)?;
+            let mut output = Vec::new();
+            for binding in input {
+                let mut values = BTreeMap::new();
+                for item in items {
+                    let value = project_value(item, catalog, &binding)?;
+                    insert_projected_value(&mut values, &item.name, value);
+                }
+                output.push(Binding {
+                    values,
+                    nodes: binding.nodes,
+                    relationships: binding.relationships,
+                });
+                if execution_limit.is_reached(output.len()) {
+                    return Ok(output);
+                }
+            }
+            Ok(output)
         }
         PhysicalPlan::AggregateExec {
             group_keys,
@@ -2079,14 +2160,15 @@ fn execute_bindings(
         }
         PhysicalPlan::LimitExec {
             offset,
-            limit,
+            limit: query_limit,
             input,
         } => {
-            let input = execute_bindings(input, catalog, store)?;
+            let child_limit = execution_limit.child_for_limit(*offset, *query_limit);
+            let input = execute_bindings_with_limit(input, catalog, store, child_limit)?;
             let rows = input
                 .into_iter()
                 .skip(*offset)
-                .take(limit.unwrap_or(usize::MAX))
+                .take(query_limit.unwrap_or(usize::MAX))
                 .collect();
             Ok(rows)
         }

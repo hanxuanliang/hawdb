@@ -681,6 +681,34 @@ mod tests {
     }
 
     #[test]
+    fn graph_read_query_allows_cypher_limit_within_row_budget() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-read-limit-pass-1', title: 'Limit one'})")
+            .unwrap();
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-read-limit-pass-2', title: 'Limit two'})")
+            .unwrap();
+
+        let read = graph
+            .read_query_with_options(
+                "MATCH (m:Memory) RETURN m.id AS id LIMIT 1",
+                &NowledgeMemReadOptions {
+                    max_rows: Some(1),
+                    max_estimated_payload_bytes: Some(4096),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(read.output.rows.len(), 1);
+        assert_eq!(read.report.row_count, 1);
+        assert!(!read.report.row_budget_exceeded);
+    }
+
+    #[test]
     fn embedded_store_read_query_does_not_require_search_projection() {
         let db = Database::new();
         let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
