@@ -508,8 +508,7 @@ impl ExternalShadowCommand {
                     .open(path)
                     .map_err(|error| {
                         SkeinError::Execution(format!(
-                            "failed to open external shadow trace '{}': {error}",
-                            path.display()
+                            "failed to open external shadow trace: {error}"
                         ))
                     })
             })
@@ -702,12 +701,13 @@ pub fn external_shadow_trace_report_json(
             "error_op_counts": summary.error_op_counts,
             "pending_op_counts": summary.pending_op_counts,
         }),
-        Err(error) => serde_json::json!({
+        Err(_error) => serde_json::json!({
             "path": REDACTED_TRACE_PATH,
             "path_redacted": true,
             "request_count": request_count,
             "summary_available": false,
-            "summary_error": error.to_string(),
+            "summary_error": "trace summary unavailable",
+            "summary_error_code": "trace_summary_unavailable",
         }),
     }
 }
@@ -764,9 +764,7 @@ pub fn external_shadow_ready_missing_capabilities(
 
 fn summarize_external_shadow_trace(trace_path: &str) -> Result<ExternalShadowTraceSummary> {
     let file = File::open(trace_path).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to open external shadow trace '{trace_path}': {error}"
-        ))
+        SkeinError::Execution(format!("failed to open external shadow trace: {error}"))
     })?;
     let mut summary = ExternalShadowTraceSummary::default();
     let mut request_sequences = std::collections::BTreeSet::new();
@@ -1754,5 +1752,20 @@ mod protocol_server_tests {
             response["reason"],
             "projected graph metadata is not exposed"
         );
+    }
+
+    #[test]
+    fn trace_report_redacts_unavailable_trace_errors() {
+        let trace_path = "redaction-target-shadow-trace.jsonl";
+
+        let report = external_shadow_trace_report_json(trace_path, 1);
+        let encoded = serde_json::to_string(&report).unwrap();
+
+        assert_eq!(report["path"], "<redacted>");
+        assert_eq!(report["path_redacted"], true);
+        assert_eq!(report["summary_available"], false);
+        assert_eq!(report["summary_error"], "trace summary unavailable");
+        assert_eq!(report["summary_error_code"], "trace_summary_unavailable");
+        assert!(!encoded.contains(trace_path));
     }
 }

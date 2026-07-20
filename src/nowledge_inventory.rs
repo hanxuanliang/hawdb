@@ -1346,10 +1346,7 @@ fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
         ))
     })? {
         let entry = entry.map_err(|error| {
-            SkeinError::Execution(format!(
-                "failed to read directory entry under '{}': {error}",
-                root.display()
-            ))
+            SkeinError::Execution(format!("failed to read directory entry: {error}"))
         })?;
         let path = entry.path();
         let file_name = path
@@ -1359,9 +1356,9 @@ fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
         if file_name == "target" || file_name == ".git" {
             continue;
         }
-        let metadata = entry.metadata().map_err(|error| {
-            SkeinError::Execution(format!("failed to stat '{}': {error}", path.display()))
-        })?;
+        let metadata = entry
+            .metadata()
+            .map_err(|error| SkeinError::Execution(format!("failed to stat entry: {error}")))?;
         if metadata.is_dir() {
             collect_rust_files(&path, output)?;
         } else if metadata.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
