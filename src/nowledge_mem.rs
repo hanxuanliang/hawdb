@@ -1,8 +1,9 @@
 use crate::{
-    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
-    KnowledgeRetrievalRequest, LocalQosScheduler, QueryOutput, Result, SearchIndex,
-    SearchProjectionDeltaReport, SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions,
-    SkeinError, Value,
+    BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
+    BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
+    KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState, QueryOutput,
+    Result, SearchIndex, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -170,6 +171,10 @@ impl NowledgeMemSearchProjection {
     pub fn probe_json(&self, options: SearchProjectionProbeOptions) -> serde_json::Value {
         self.index.nowledge_search_projection_probe_json(options)
     }
+
+    pub fn freshness(&self) -> SearchProjectionFreshness {
+        self.index.projection_freshness()
+    }
 }
 
 #[derive(Debug)]
@@ -294,6 +299,22 @@ impl NowledgeMemEmbeddedStore {
             .retrieve_knowledge(search_projection.index(), request))
     }
 
+    pub fn background_maintenance_summary(
+        &self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: BackgroundMaintenanceOptions,
+    ) -> BackgroundMaintenanceSummary {
+        self.graph.database().background_maintenance_summary(
+            self.search_projection
+                .as_ref()
+                .map(NowledgeMemSearchProjection::index),
+            policy,
+            state,
+            options,
+        )
+    }
+
     fn require_search_projection(&self) -> Result<&NowledgeMemSearchProjection> {
         self.search_projection
             .as_ref()
@@ -322,8 +343,9 @@ mod tests {
     };
     use crate::search::SearchFusionWeights;
     use crate::{
-        BackgroundWorkHint, Database, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest,
-        LocalQosPolicy, LocalQosScheduler, SearchIndex, SearchMode, SearchProjectionProbeOptions,
+        BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
+        KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
+        LocalQosScheduler, LocalQosState, SearchIndex, SearchMode, SearchProjectionProbeOptions,
         WorkClass,
     };
     use std::collections::BTreeMap;
@@ -559,6 +581,58 @@ mod tests {
         assert_eq!(
             error.to_string(),
             "storage error: nowledge mem search projection is not configured"
+        );
+    }
+
+    #[test]
+    fn embedded_store_reports_background_maintenance_summary() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-maintenance', title: 'Maintenance summary'})")
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(SearchIndex::in_memory());
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+
+        let summary = store.background_maintenance_summary(
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            BackgroundMaintenanceOptions {
+                include_schema_maintenance: false,
+                include_property_index_projection: false,
+                include_search_projection_rebuild: false,
+                include_search_projection_metadata_repair: false,
+                include_graph_lightning_bootstrap_export: false,
+                include_external_content_artifact_jobs: false,
+                ..BackgroundMaintenanceOptions::default()
+            },
+        );
+
+        assert_eq!(summary.total_candidates, 1);
+        assert_eq!(summary.admitted_count, 1);
+        assert_eq!(
+            summary.top_admitted_kind,
+            Some(BackgroundMaintenanceKind::SearchProjectionGraphDelta)
+        );
+        assert_eq!(summary.executable_search_projection_graph_delta_count, 1);
+        assert_eq!(summary.admitted_search_projection_graph_delta_count, 1);
+        let item = &summary.ranked[0];
+        assert_eq!(
+            summary.max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+            item.search_projection_graph_delta_complete_through_graph_commit_epoch
+        );
+        assert!(summary
+            .max_search_projection_graph_delta_complete_through_graph_commit_epoch
+            .is_some());
+        assert_eq!(item.name, "search_projection_graph_delta");
+        assert_eq!(item.admission_name, "admit");
+        assert_eq!(
+            item.search_projection_graph_delta_upsert_node_count,
+            Some(1)
+        );
+        assert_eq!(
+            item.search_projection_graph_delta_delete_document_count,
+            Some(0)
         );
     }
 

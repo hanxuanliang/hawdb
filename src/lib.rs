@@ -30,7 +30,8 @@ pub use analytics::{
 };
 pub use api::{
     validate_graph_lightning_graph_stream, BackgroundMaintenanceCandidate,
-    BackgroundMaintenanceKind, BackgroundMaintenanceOptions, CanonicalGraphSnapshotExport,
+    BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
+    BackgroundMaintenanceSummaryItem, CanonicalGraphSnapshotExport,
     CanonicalGraphSnapshotValidation, CanonicalSnapshotEndpointViolation,
     CanonicalSnapshotIdentityAudit, CanonicalSnapshotNode, CanonicalSnapshotRelationship,
     CanonicalStableIdMapping, Database, DatabaseConfig, DatabaseReadTransaction,
