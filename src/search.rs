@@ -290,6 +290,16 @@ pub struct SearchCandidateSetReport {
     pub policy_epoch: Option<u64>,
     pub filtered_out_count: usize,
     pub metadata_filters: BTreeMap<String, String>,
+    pub metadata_predicate_pushdown: SearchPredicatePushdownReport,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SearchPredicatePushdownReport {
+    pub input_predicate_count: usize,
+    pub pushed_predicate_count: usize,
+    pub residual_predicate_count: usize,
+    pub unsatisfiable: bool,
+    pub parse_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1194,12 +1204,13 @@ impl SearchIndex {
         let mut vector_fallback_reasons = Vec::new();
         let limit = options.limit;
         let document_count = self.documents.len();
-        let predicate_set =
-            search_scan_predicate_set_from_metadata_filters(&options.metadata_filters);
+        let predicate_pushdown = search_metadata_predicate_pushdown(&options.metadata_filters);
         let filtered_documents = self
             .documents
             .values()
-            .filter(|document| search_document_matches_predicates(document, &predicate_set))
+            .filter(|document| {
+                search_document_matches_predicates(document, &predicate_pushdown.predicates)
+            })
             .collect::<Vec<_>>();
         let filtered_document_count = filtered_documents.len();
         let candidate_set = SearchCandidateSetReport {
@@ -1211,6 +1222,7 @@ impl SearchIndex {
             policy_epoch: options.policy_epoch,
             filtered_out_count: document_count.saturating_sub(filtered_document_count),
             metadata_filters: options.metadata_filters.clone(),
+            metadata_predicate_pushdown: predicate_pushdown.report,
         };
         let vector_available = match (query_embedding, self.embedding_dimension) {
             (Some(vector), Some(dimension)) if vector.len() == dimension => true,
@@ -1983,17 +1995,35 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn search_scan_predicate_set_from_metadata_filters(
+pub(crate) struct SearchMetadataPredicatePushdown {
+    pub predicates: SearchPredicateSet,
+    pub report: SearchPredicatePushdownReport,
+}
+
+pub(crate) fn search_metadata_predicate_pushdown(
     filters: &BTreeMap<String, String>,
-) -> SearchPredicateSet {
-    let predicates = SearchPredicateSet::from_metadata_filters(filters)
-        .unwrap_or_else(|_| SearchPredicateSet::unsatisfiable());
+) -> SearchMetadataPredicatePushdown {
+    let (predicates, parse_error) = match SearchPredicateSet::from_metadata_filters(filters) {
+        Ok(predicates) => (predicates, None),
+        Err(error) => (SearchPredicateSet::unsatisfiable(), Some(error.to_string())),
+    };
+    let input_predicate_count = filters.len();
     let pushdown = push_search_predicates(&predicates, SearchScanPredicateSupport::default());
     debug_assert!(
         pushdown.residual().is_empty(),
         "default search scan support should push every metadata predicate"
     );
-    pushdown.pushed().clone()
+    let report = SearchPredicatePushdownReport {
+        input_predicate_count,
+        pushed_predicate_count: pushdown.pushed().predicates().len(),
+        residual_predicate_count: pushdown.residual().predicates().len(),
+        unsatisfiable: pushdown.pushed().is_unsatisfiable(),
+        parse_error,
+    };
+    SearchMetadataPredicatePushdown {
+        predicates: pushdown.pushed().clone(),
+        report,
+    }
 }
 
 fn search_document_matches_predicates(
@@ -3241,6 +3271,38 @@ mod tests {
         assert_eq!(result.total_hits, 1);
         assert_eq!(result.filtered_document_count, 1);
         assert_eq!(result.hits[0].id, "memory:fact");
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .input_predicate_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pushed_predicate_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .residual_predicate_count,
+            0
+        );
+        assert!(
+            !result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .unsatisfiable
+        );
+        assert!(result
+            .candidate_set
+            .metadata_predicate_pushdown
+            .parse_error
+            .is_none());
     }
 
     #[test]
@@ -3333,6 +3395,32 @@ mod tests {
         assert_eq!(result.total_hits, 0);
         assert_eq!(result.filtered_document_count, 0);
         assert_eq!(result.candidate_set.filtered_out_count, 1);
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .input_predicate_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pushed_predicate_count,
+            0
+        );
+        assert!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .unsatisfiable
+        );
+        assert!(result
+            .candidate_set
+            .metadata_predicate_pushdown
+            .parse_error
+            .as_deref()
+            .is_some_and(|error| error.contains("expected JSON string array")));
     }
 
     #[test]

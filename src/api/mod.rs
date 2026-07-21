@@ -18,12 +18,13 @@ use crate::schema::{
     TableDescriptor,
 };
 use crate::search::{
-    projection_row_from_node, MetadataRepairOptions, MetadataRepairSummary,
-    SearchCandidateSetReport, SearchDerivedArtifactReport, SearchEmptyReasonCode,
-    SearchFallbackReasonCode, SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode,
-    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
-    SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
+    projection_row_from_node, search_metadata_predicate_pushdown, MetadataRepairOptions,
+    MetadataRepairSummary, SearchCandidateSetReport, SearchDerivedArtifactReport,
+    SearchEmptyReasonCode, SearchFallbackReasonCode, SearchFusionWeights, SearchIndex,
+    SearchMatchedSpan, SearchMode, SearchPredicatePushdownReport, SearchProjectionDelta,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
+    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchTruncationReasonCode,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -51,10 +52,7 @@ pub use skein_api_types::{
     KnowledgeMemoryEvolvesRelationCountOutput, KnowledgeMemoryEvolvesRelationCountRequest,
     KnowledgeMemoryEvolvesRelationCountRow, KnowledgeNeighborDirection,
 };
-use skein_optimizer::{
-    push_search_predicates, SearchPredicate, SearchPredicateOp, SearchPredicateSet,
-    SearchScanPredicateSupport,
-};
+use skein_optimizer::{SearchPredicate, SearchPredicateOp, SearchPredicateSet};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
@@ -8645,6 +8643,7 @@ fn knowledge_graph_seed_input_candidate_set_report(
     filtered_out_count: usize,
     metadata_filters: BTreeMap<String, String>,
 ) -> SearchCandidateSetReport {
+    let metadata_predicate_pushdown = search_metadata_predicate_pushdown(&metadata_filters).report;
     SearchCandidateSetReport {
         id_space: "canonical_graph_node_id".to_string(),
         representation: "filtered_node_ids".to_string(),
@@ -8654,6 +8653,7 @@ fn knowledge_graph_seed_input_candidate_set_report(
         policy_epoch: None,
         filtered_out_count,
         metadata_filters,
+        metadata_predicate_pushdown,
     }
 }
 
@@ -8670,6 +8670,7 @@ fn knowledge_graph_context_input_candidate_set_report(
         policy_epoch: None,
         filtered_out_count: 0,
         metadata_filters: BTreeMap::new(),
+        metadata_predicate_pushdown: SearchPredicatePushdownReport::default(),
     }
 }
 
@@ -9035,14 +9036,8 @@ fn knowledge_graph_seed_matches_filters(
     node: &NodeRecord,
     metadata_filters: &BTreeMap<String, String>,
 ) -> bool {
-    let predicates = SearchPredicateSet::from_metadata_filters(metadata_filters)
-        .unwrap_or_else(|_| SearchPredicateSet::unsatisfiable());
-    let pushdown = push_search_predicates(&predicates, SearchScanPredicateSupport::default());
-    debug_assert!(
-        pushdown.residual().is_empty(),
-        "default graph seed scan support should push every metadata predicate"
-    );
-    knowledge_graph_seed_matches_predicates(catalog, node, pushdown.pushed())
+    let pushdown = search_metadata_predicate_pushdown(metadata_filters);
+    knowledge_graph_seed_matches_predicates(catalog, node, &pushdown.predicates)
 }
 
 fn knowledge_graph_seed_matches_predicates(
@@ -26765,6 +26760,7 @@ fn knowledge_traversal_input_candidate_set_report(
         policy_epoch: None,
         filtered_out_count: 0,
         metadata_filters: BTreeMap::new(),
+        metadata_predicate_pushdown: SearchPredicatePushdownReport::default(),
     }
 }
 

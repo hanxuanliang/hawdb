@@ -2774,6 +2774,52 @@ fn knowledge_retrieval_metadata_filters_support_typed_in_and_not_in() {
             .filtered_out_count,
         2
     );
+    assert_eq!(
+        output
+            .diagnostics
+            .search_candidate_set
+            .metadata_predicate_pushdown
+            .input_predicate_count,
+        2
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .search_candidate_set
+            .metadata_predicate_pushdown
+            .pushed_predicate_count,
+        2
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .metadata_predicate_pushdown
+            .input_predicate_count,
+        2
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .metadata_predicate_pushdown
+            .pushed_predicate_count,
+        2
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .metadata_predicate_pushdown
+            .residual_predicate_count,
+        0
+    );
+    assert!(output
+        .diagnostics
+        .graph_seed_input_candidate_set
+        .metadata_predicate_pushdown
+        .parse_error
+        .is_none());
 }
 
 #[test]
@@ -2818,6 +2864,34 @@ fn malformed_typed_metadata_filter_fails_closed_for_search_and_graph_seeds() {
             .filtered_out_count,
         1
     );
+    assert!(
+        output
+            .diagnostics
+            .search_candidate_set
+            .metadata_predicate_pushdown
+            .unsatisfiable
+    );
+    assert!(output
+        .diagnostics
+        .search_candidate_set
+        .metadata_predicate_pushdown
+        .parse_error
+        .as_deref()
+        .is_some_and(|error| error.contains("expected JSON string array")));
+    assert!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .metadata_predicate_pushdown
+            .unsatisfiable
+    );
+    assert!(output
+        .diagnostics
+        .graph_seed_input_candidate_set
+        .metadata_predicate_pushdown
+        .parse_error
+        .as_deref()
+        .is_some_and(|error| error.contains("expected JSON string array")));
     assert!(output.graph_seeds.is_empty());
 }
 
