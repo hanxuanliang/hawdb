@@ -51,6 +51,10 @@ pub use skein_api_types::{
     KnowledgeMemoryEvolvesRelationCountOutput, KnowledgeMemoryEvolvesRelationCountRequest,
     KnowledgeMemoryEvolvesRelationCountRow, KnowledgeNeighborDirection,
 };
+use skein_optimizer::{
+    push_search_predicates, SearchPredicate, SearchPredicateOp, SearchPredicateSet,
+    SearchScanPredicateSupport,
+};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
@@ -9031,12 +9035,62 @@ fn knowledge_graph_seed_matches_filters(
     node: &NodeRecord,
     metadata_filters: &BTreeMap<String, String>,
 ) -> bool {
-    metadata_filters
-        .iter()
-        .all(|(key, value)| knowledge_graph_seed_matches_filter(catalog, node, key, value))
+    let predicates = SearchPredicateSet::from_metadata_filters(metadata_filters)
+        .unwrap_or_else(|_| SearchPredicateSet::unsatisfiable());
+    let pushdown = push_search_predicates(&predicates, SearchScanPredicateSupport::default());
+    debug_assert!(
+        pushdown.residual().is_empty(),
+        "default graph seed scan support should push every metadata predicate"
+    );
+    knowledge_graph_seed_matches_predicates(catalog, node, pushdown.pushed())
 }
 
-fn knowledge_graph_seed_matches_filter(
+fn knowledge_graph_seed_matches_predicates(
+    catalog: &Catalog,
+    node: &NodeRecord,
+    predicates: &SearchPredicateSet,
+) -> bool {
+    if predicates.is_unsatisfiable() {
+        return false;
+    }
+    predicates
+        .predicates()
+        .iter()
+        .all(|predicate| knowledge_graph_seed_matches_predicate(catalog, node, predicate))
+}
+
+fn knowledge_graph_seed_matches_predicate(
+    catalog: &Catalog,
+    node: &NodeRecord,
+    predicate: &SearchPredicate,
+) -> bool {
+    match predicate.op() {
+        SearchPredicateOp::Eq(expected) => knowledge_graph_seed_matches_filter_value(
+            catalog,
+            node,
+            predicate.field().name(),
+            expected.as_str(),
+        ),
+        SearchPredicateOp::In(expected_values) => expected_values.iter().any(|expected| {
+            knowledge_graph_seed_matches_filter_value(
+                catalog,
+                node,
+                predicate.field().name(),
+                expected.as_str(),
+            )
+        }),
+        SearchPredicateOp::NotIn(excluded_values) => excluded_values.iter().all(|excluded| {
+            !knowledge_graph_seed_matches_filter_value(
+                catalog,
+                node,
+                predicate.field().name(),
+                excluded.as_str(),
+            )
+        }),
+    }
+}
+
+fn knowledge_graph_seed_matches_filter_value(
     catalog: &Catalog,
     node: &NodeRecord,
     key: &str,

@@ -2718,6 +2718,110 @@ fn knowledge_retrieval_source_filter_skips_empty_source_ids() {
 }
 
 #[test]
+fn knowledge_retrieval_metadata_filters_support_typed_in_and_not_in() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'fact_1', title: 'Typed filter graph', content: 'typed predicate retrieval', unit_type: 'fact', lifecycle_state: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'task_1', title: 'Typed filter graph', content: 'typed predicate retrieval', unit_type: 'task', lifecycle_state: 'active'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'deleted_1', title: 'Typed filter graph', content: 'typed predicate retrieval', unit_type: 'fact', lifecycle_state: 'deleted'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "typed predicate retrieval".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 10,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::from([
+                (
+                    "unit_type__in".to_string(),
+                    r#"["fact","learning"]"#.to_string(),
+                ),
+                (
+                    "lifecycle_state__not_in".to_string(),
+                    r#"["deleted","forgotten"]"#.to_string(),
+                ),
+            ]),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 10,
+            graph_context_limit: 0,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert_eq!(output.search.total_hits, 1);
+    assert_eq!(output.diagnostics.search_filtered_document_count, 1);
+    assert_eq!(output.diagnostics.graph_seed_candidate_count, 1);
+    assert_eq!(output.graph_seeds.len(), 1);
+    assert_eq!(output.search.hits[0].external_id.as_deref(), Some("fact_1"));
+    assert_eq!(
+        output.graph_seeds[0].entity.external_id.as_deref(),
+        Some("fact_1")
+    );
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .filtered_out_count,
+        2
+    );
+}
+
+#[test]
+fn malformed_typed_metadata_filter_fails_closed_for_search_and_graph_seeds() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem_1', title: 'Typed filter graph', content: 'malformed predicate retrieval', lifecycle_state: 'active'})")
+        .unwrap();
+
+    let mut search_index = SearchIndex::in_memory();
+    db.rebuild_search_projection(&mut search_index, SearchRebuildOptions::default())
+        .unwrap();
+
+    let output = db.retrieve_knowledge(
+        &search_index,
+        &KnowledgeRetrievalRequest {
+            query_text: "malformed predicate retrieval".to_string(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit: 10,
+            rank_window: None,
+            search_fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::from([(
+                "lifecycle_state__not_in".to_string(),
+                "deleted,forgotten".to_string(),
+            )]),
+            candidate_limit: None,
+            candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+            graph_seed_limit: 10,
+            graph_context_limit: 0,
+            graph_context_max_hops: 1,
+        },
+    );
+
+    assert_eq!(output.search.total_hits, 0);
+    assert_eq!(output.diagnostics.search_filtered_document_count, 0);
+    assert_eq!(output.diagnostics.graph_seed_candidate_count, 0);
+    assert_eq!(output.diagnostics.graph_seed_returned_count, 0);
+    assert_eq!(
+        output
+            .diagnostics
+            .graph_seed_input_candidate_set
+            .filtered_out_count,
+        1
+    );
+    assert!(output.graph_seeds.is_empty());
+}
+
+#[test]
 fn knowledge_retrieval_binds_idless_search_hits_to_canonical_nodes() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {title: 'Anonymous graph', content: 'idless projection retrieval'})-[:MENTIONS]->(:Entity {id: 'entity_1', name: 'Skein'})")
