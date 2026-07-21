@@ -29,6 +29,10 @@ const BM25_B: f64 = 0.75;
 const RRF_K: f64 = 60.0;
 const SEARCH_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
 const SEARCH_COMPRESSION_LEVEL: i32 = 3;
+#[cfg(not(test))]
+const SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS: usize = 128;
+#[cfg(test)]
+const SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS: usize = 2;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchDocument {
@@ -300,6 +304,9 @@ pub struct SearchPredicatePushdownReport {
     pub residual_predicate_count: usize,
     pub unsatisfiable: bool,
     pub parse_error: Option<String>,
+    pub segment_count: usize,
+    pub pruned_segment_count: usize,
+    pub scanned_segment_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -1204,14 +1211,15 @@ impl SearchIndex {
         let mut vector_fallback_reasons = Vec::new();
         let limit = options.limit;
         let document_count = self.documents.len();
-        let predicate_pushdown = search_metadata_predicate_pushdown(&options.metadata_filters);
-        let filtered_documents = self
-            .documents
-            .values()
-            .filter(|document| {
-                search_document_matches_predicates(document, &predicate_pushdown.predicates)
-            })
-            .collect::<Vec<_>>();
+        let mut predicate_pushdown = search_metadata_predicate_pushdown(&options.metadata_filters);
+        let filtered = filter_search_documents_with_segment_pruning(
+            self.documents.values(),
+            &predicate_pushdown.predicates,
+        );
+        predicate_pushdown.report.segment_count = filtered.segment_count;
+        predicate_pushdown.report.pruned_segment_count = filtered.pruned_segment_count;
+        predicate_pushdown.report.scanned_segment_count = filtered.scanned_segment_count;
+        let filtered_documents = filtered.documents;
         let filtered_document_count = filtered_documents.len();
         let candidate_set = SearchCandidateSetReport {
             id_space: "search_projection_document_id".to_string(),
@@ -2019,6 +2027,9 @@ pub(crate) fn search_metadata_predicate_pushdown(
         residual_predicate_count: pushdown.residual().predicates().len(),
         unsatisfiable: pushdown.pushed().is_unsatisfiable(),
         parse_error,
+        segment_count: 0,
+        pruned_segment_count: 0,
+        scanned_segment_count: 0,
     };
     SearchMetadataPredicatePushdown {
         predicates: pushdown.pushed().clone(),
@@ -2037,6 +2048,190 @@ fn search_document_matches_predicates(
         .predicates()
         .iter()
         .all(|predicate| search_document_matches_predicate(document, predicate))
+}
+
+struct FilteredSearchDocuments<'a> {
+    documents: Vec<&'a SearchDocument>,
+    segment_count: usize,
+    pruned_segment_count: usize,
+    scanned_segment_count: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SearchFilterSegmentSummary {
+    document_count: usize,
+    present_counts: BTreeMap<String, usize>,
+    values: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn filter_search_documents_with_segment_pruning<'a>(
+    documents: impl Iterator<Item = &'a SearchDocument>,
+    predicates: &SearchPredicateSet,
+) -> FilteredSearchDocuments<'a> {
+    if predicates.is_empty() {
+        return FilteredSearchDocuments {
+            documents: documents.collect(),
+            segment_count: 0,
+            pruned_segment_count: 0,
+            scanned_segment_count: 0,
+        };
+    }
+
+    let predicate_fields = search_predicate_fields(predicates);
+    let mut filtered_documents = Vec::new();
+    let mut segment_documents = Vec::with_capacity(SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS);
+    let mut segment_count = 0;
+    let mut pruned_segment_count = 0;
+    let mut scanned_segment_count = 0;
+
+    for document in documents {
+        segment_documents.push(document);
+        if segment_documents.len() == SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS {
+            filter_search_document_segment(
+                &mut filtered_documents,
+                &mut segment_count,
+                &mut pruned_segment_count,
+                &mut scanned_segment_count,
+                &segment_documents,
+                &predicate_fields,
+                predicates,
+            );
+            segment_documents.clear();
+        }
+    }
+
+    if !segment_documents.is_empty() {
+        filter_search_document_segment(
+            &mut filtered_documents,
+            &mut segment_count,
+            &mut pruned_segment_count,
+            &mut scanned_segment_count,
+            &segment_documents,
+            &predicate_fields,
+            predicates,
+        );
+    }
+
+    FilteredSearchDocuments {
+        documents: filtered_documents,
+        segment_count,
+        pruned_segment_count,
+        scanned_segment_count,
+    }
+}
+
+fn filter_search_document_segment<'a>(
+    output: &mut Vec<&'a SearchDocument>,
+    segment_count: &mut usize,
+    pruned_segment_count: &mut usize,
+    scanned_segment_count: &mut usize,
+    segment_documents: &[&'a SearchDocument],
+    predicate_fields: &BTreeSet<String>,
+    predicates: &SearchPredicateSet,
+) {
+    *segment_count += 1;
+    let summary = SearchFilterSegmentSummary::from_documents(segment_documents, predicate_fields);
+    if !summary.may_match_predicates(predicates) {
+        *pruned_segment_count += 1;
+        return;
+    }
+    *scanned_segment_count += 1;
+    output.extend(
+        segment_documents
+            .iter()
+            .copied()
+            .filter(|document| search_document_matches_predicates(document, predicates)),
+    );
+}
+
+fn search_predicate_fields(predicates: &SearchPredicateSet) -> BTreeSet<String> {
+    predicates
+        .predicates()
+        .iter()
+        .map(|predicate| predicate.field().name().to_string())
+        .collect()
+}
+
+impl SearchFilterSegmentSummary {
+    fn from_documents(documents: &[&SearchDocument], fields: &BTreeSet<String>) -> Self {
+        let mut present_counts = BTreeMap::new();
+        let mut values = BTreeMap::<String, BTreeSet<String>>::new();
+        for document in documents {
+            for field in fields {
+                let Some(value) = search_document_field_value(document, field) else {
+                    continue;
+                };
+                *present_counts.entry(field.clone()).or_insert(0) += 1;
+                values
+                    .entry(field.clone())
+                    .or_default()
+                    .insert(value.to_string());
+            }
+        }
+        Self {
+            document_count: documents.len(),
+            present_counts,
+            values,
+        }
+    }
+
+    fn may_match_predicates(&self, predicates: &SearchPredicateSet) -> bool {
+        if predicates.is_unsatisfiable() {
+            return false;
+        }
+        predicates
+            .predicates()
+            .iter()
+            .all(|predicate| self.may_match_predicate(predicate))
+    }
+
+    fn may_match_predicate(&self, predicate: &SearchPredicate) -> bool {
+        match predicate.op() {
+            SearchPredicateOp::Eq(expected) => self
+                .values_may_match_any(predicate.field().name(), std::iter::once(expected.as_str())),
+            SearchPredicateOp::In(expected_values) => self.values_may_match_any(
+                predicate.field().name(),
+                expected_values.iter().map(|value| value.as_str()),
+            ),
+            SearchPredicateOp::NotIn(excluded_values) => {
+                self.values_may_match_not_in(predicate.field().name(), excluded_values)
+            }
+        }
+    }
+
+    fn values_may_match_any<'a>(
+        &self,
+        field: &str,
+        expected_values: impl Iterator<Item = &'a str>,
+    ) -> bool {
+        let Some(actual_values) = self.values.get(field) else {
+            return false;
+        };
+        expected_values.into_iter().any(|expected| {
+            actual_values
+                .iter()
+                .any(|actual| metadata_value_matches(field, actual, expected))
+        })
+    }
+
+    fn values_may_match_not_in(
+        &self,
+        field: &str,
+        excluded_values: &BTreeSet<skein_optimizer::SearchScalarValue>,
+    ) -> bool {
+        let present_count = self.present_counts.get(field).copied().unwrap_or_default();
+        if present_count < self.document_count {
+            return true;
+        }
+        let Some(actual_values) = self.values.get(field) else {
+            return true;
+        };
+        actual_values.iter().any(|actual| {
+            excluded_values
+                .iter()
+                .all(|excluded| !metadata_value_matches(field, actual, excluded.as_str()))
+        })
+    }
 }
 
 fn search_document_matches_predicate(
@@ -3171,6 +3366,18 @@ mod tests {
             .unwrap();
         index
             .upsert(SearchDocument {
+                id: "memory:thread_0".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: Some(vec![0.0, 1.0]),
+                metadata: BTreeMap::from([
+                    ("kind".to_string(), "memory".to_string()),
+                    ("source_id".to_string(), "thread_2".to_string()),
+                ]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
                 id: "memory:thread_2".to_string(),
                 title: "Graph memory".to_string(),
                 content: "graph projection diagnostics".to_string(),
@@ -3199,7 +3406,7 @@ mod tests {
         );
 
         assert_eq!(result.total_hits, 1);
-        assert_eq!(result.document_count, 2);
+        assert_eq!(result.document_count, 3);
         assert_eq!(result.filtered_document_count, 1);
         assert_eq!(
             result.candidate_set.id_space,
@@ -3213,7 +3420,28 @@ mod tests {
             None
         );
         assert_eq!(result.candidate_set.policy_epoch, None);
-        assert_eq!(result.candidate_set.filtered_out_count, 1);
+        assert_eq!(result.candidate_set.filtered_out_count, 2);
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            2
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
+            1
+        );
         assert_eq!(
             result.candidate_set.metadata_filters,
             BTreeMap::from([("source_id".to_string(), "thread_1".to_string())])
@@ -3421,6 +3649,27 @@ mod tests {
             .parse_error
             .as_deref()
             .is_some_and(|error| error.contains("expected JSON string array")));
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
+            0
+        );
     }
 
     #[test]
