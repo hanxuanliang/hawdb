@@ -6,6 +6,10 @@ use crate::qos::{
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeId, NodeRecord};
 use crate::value::Value;
+use skein_optimizer::{
+    push_search_predicates, SearchPredicate, SearchPredicateOp, SearchPredicateSet,
+    SearchScanPredicateSupport,
+};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -1190,10 +1194,12 @@ impl SearchIndex {
         let mut vector_fallback_reasons = Vec::new();
         let limit = options.limit;
         let document_count = self.documents.len();
+        let predicate_set =
+            search_scan_predicate_set_from_metadata_filters(&options.metadata_filters);
         let filtered_documents = self
             .documents
             .values()
-            .filter(|document| metadata_matches(document, &options.metadata_filters))
+            .filter(|document| search_document_matches_predicates(document, &predicate_set))
             .collect::<Vec<_>>();
         let filtered_document_count = filtered_documents.len();
         let candidate_set = SearchCandidateSetReport {
@@ -1977,31 +1983,72 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn metadata_matches(document: &SearchDocument, filters: &BTreeMap<String, String>) -> bool {
-    filters
-        .iter()
-        .all(|(key, value)| metadata_value_matches(document, key, value))
+fn search_scan_predicate_set_from_metadata_filters(
+    filters: &BTreeMap<String, String>,
+) -> SearchPredicateSet {
+    let predicates = SearchPredicateSet::from_metadata_filters(filters)
+        .unwrap_or_else(|_| SearchPredicateSet::unsatisfiable());
+    let pushdown = push_search_predicates(&predicates, SearchScanPredicateSupport::default());
+    debug_assert!(
+        pushdown.residual().is_empty(),
+        "default search scan support should push every metadata predicate"
+    );
+    pushdown.pushed().clone()
 }
 
-fn metadata_value_matches(document: &SearchDocument, key: &str, expected: &str) -> bool {
+fn search_document_matches_predicates(
+    document: &SearchDocument,
+    predicates: &SearchPredicateSet,
+) -> bool {
+    if predicates.is_unsatisfiable() {
+        return false;
+    }
+    predicates
+        .predicates()
+        .iter()
+        .all(|predicate| search_document_matches_predicate(document, predicate))
+}
+
+fn search_document_matches_predicate(
+    document: &SearchDocument,
+    predicate: &SearchPredicate,
+) -> bool {
+    let actual = search_document_field_value(document, predicate.field().name());
+    match predicate.op() {
+        SearchPredicateOp::Eq(expected) => actual.is_some_and(|actual| {
+            metadata_value_matches(predicate.field().name(), actual, expected.as_str())
+        }),
+        SearchPredicateOp::In(expected_values) => actual.is_some_and(|actual| {
+            expected_values.iter().any(|expected| {
+                metadata_value_matches(predicate.field().name(), actual, expected.as_str())
+            })
+        }),
+        SearchPredicateOp::NotIn(excluded_values) => actual.is_none_or(|actual| {
+            excluded_values.iter().all(|excluded| {
+                !metadata_value_matches(predicate.field().name(), actual, excluded.as_str())
+            })
+        }),
+    }
+}
+
+fn search_document_field_value<'a>(document: &'a SearchDocument, key: &str) -> Option<&'a str> {
     match key {
-        "kind" => document
-            .metadata
-            .get(key)
-            .is_some_and(|actual| metadata_kind_matches(actual.as_str(), expected)),
-        "space_id" => {
-            let actual = document
+        "space_id" => Some(
+            document
                 .metadata
                 .get(key)
                 .map(String::as_str)
                 .filter(|value| !value.is_empty())
-                .unwrap_or(DEFAULT_SPACE_ID);
-            actual == expected
-        }
-        _ => document
-            .metadata
-            .get(key)
-            .is_some_and(|actual| actual == expected),
+                .unwrap_or(DEFAULT_SPACE_ID),
+        ),
+        _ => document.metadata.get(key).map(String::as_str),
+    }
+}
+
+fn metadata_value_matches(key: &str, actual: &str, expected: &str) -> bool {
+    match key {
+        "kind" => metadata_kind_matches(actual, expected),
+        _ => actual == expected,
     }
 }
 
@@ -3151,6 +3198,141 @@ mod tests {
         assert_eq!(text.candidate_count, 1);
         assert_eq!(text.candidate_set.cardinality, 1);
         assert_eq!(text.top_hit_ids, vec!["memory:thread_1".to_string()]);
+    }
+
+    #[test]
+    fn search_with_options_applies_metadata_in_filters_before_ranking() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:fact".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("unit_type".to_string(), "fact".to_string())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:task".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("unit_type".to_string(), "task".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "unit_type__in".to_string(),
+                    r#"["fact","learning"]"#.to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.filtered_document_count, 1);
+        assert_eq!(result.hits[0].id, "memory:fact");
+    }
+
+    #[test]
+    fn search_with_options_applies_metadata_not_in_filters_before_ranking() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:active".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("lifecycle_state".to_string(), "active".to_string())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:deleted".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("lifecycle_state".to_string(), "deleted".to_string())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:legacy".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::new(),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "lifecycle_state__not_in".to_string(),
+                    r#"["deleted","forgotten"]"#.to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+        let hit_ids = result
+            .hits
+            .iter()
+            .map(|hit| hit.id.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(result.filtered_document_count, 2);
+        assert!(hit_ids.contains("memory:active"));
+        assert!(hit_ids.contains("memory:legacy"));
+        assert!(!hit_ids.contains("memory:deleted"));
+    }
+
+    #[test]
+    fn malformed_metadata_list_filter_fails_closed() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:active".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("lifecycle_state".to_string(), "active".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "lifecycle_state__not_in".to_string(),
+                    "deleted,forgotten".to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 0);
+        assert_eq!(result.filtered_document_count, 0);
+        assert_eq!(result.candidate_set.filtered_out_count, 1);
     }
 
     #[test]

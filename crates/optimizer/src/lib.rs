@@ -1,6 +1,7 @@
 pub mod cost;
 pub mod memo;
 pub mod operator;
+pub mod predicate;
 pub mod properties;
 pub mod rule;
 pub mod search;
@@ -11,6 +12,11 @@ pub use memo::{GroupId, Memo, MemoGroup};
 pub use operator::{
     plan_class_counts, plan_operator_counts, visit_plan, PhysicalPlanClass, PhysicalPlanKind,
     PlanChildren, PlanNode,
+};
+pub use predicate::{
+    push_search_predicates, SearchFieldRef, SearchPredicate, SearchPredicateOp,
+    SearchPredicateParseError, SearchPredicatePushdown, SearchPredicateSet, SearchScalarValue,
+    SearchScanPredicateSupport,
 };
 pub use properties::{Distribution, PhysicalProperties, RequiredProperties};
 pub use rule::{

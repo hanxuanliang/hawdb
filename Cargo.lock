@@ -218,6 +218,9 @@ dependencies = [
 [[package]]
 name = "skein-optimizer"
 version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "skein-plan-cache"

@@ -164,7 +164,7 @@ fn collect_rows(bindings: Vec<Binding>, max_rows: Option<usize>) -> Result<Vec<R
     for binding in bindings {
         if rows.len() == max_rows {
             return Err(SkeinError::Execution(format!(
-                "read query returned more than {max_rows} rows"
+                "read query returned more than {max_rows} rows, exceeding max_read_result_rows {max_rows}"
             )));
         }
         rows.push(binding.values);
