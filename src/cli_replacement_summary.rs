@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 pub fn nowledge_replacement_summary_usage() -> String {
-    "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] <migration-gate-json>"
+    "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
         .to_string()
 }
 
@@ -2207,6 +2207,11 @@ mod tests {
         assert!(nowledge_replacement_summary_usage().contains("--compact"));
         assert!(nowledge_replacement_summary_usage().contains("--max-family-items"));
         assert!(nowledge_replacement_summary_usage().contains("--max-blockers"));
+        assert!(nowledge_replacement_summary_usage().contains("--search-projection-evidence-json"));
+        assert!(nowledge_replacement_summary_usage()
+            .contains("--search-projection-shadow-evidence-json"));
+        assert!(nowledge_replacement_summary_usage().contains("--bounded-read-evidence-json"));
+        assert!(nowledge_replacement_summary_usage().contains("--query-family-evidence-json"));
     }
 
     fn production_ready_bundle() -> serde_json::Value {

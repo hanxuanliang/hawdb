@@ -12,6 +12,9 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   --nowledge-root <dir> \
   --wrapper-identity <id> \
   [--shadow-timeout-ms <ms>] \
+  [--search-projection-evidence-json <path>] \
+  [--search-projection-shadow-evidence-json <path>] \
+  [--bounded-read-evidence-json <path>] \
   -- <wrapper-command> [args...]
 
 Runs the Skein-side Nowledge previous-wrapper production preflight bundle.
@@ -24,6 +27,9 @@ preflight_root=
 nowledge_root=
 wrapper_identity=
 shadow_timeout_ms=
+search_projection_evidence_json=
+search_projection_shadow_evidence_json=
+bounded_read_evidence_json=
 
 while (($# > 0)); do
   case "$1" in
@@ -41,6 +47,18 @@ while (($# > 0)); do
       ;;
     --shadow-timeout-ms)
       shadow_timeout_ms="${2:-}"
+      shift 2
+      ;;
+    --search-projection-evidence-json)
+      search_projection_evidence_json="${2:-}"
+      shift 2
+      ;;
+    --search-projection-shadow-evidence-json)
+      search_projection_shadow_evidence_json="${2:-}"
+      shift 2
+      ;;
+    --bounded-read-evidence-json)
+      bounded_read_evidence_json="${2:-}"
       shift 2
       ;;
     --help|-h)
@@ -72,6 +90,16 @@ if [[ ! -d "$nowledge_root" ]]; then
   echo "--nowledge-root does not exist or is not a directory: $nowledge_root" >&2
   exit 2
 fi
+
+for evidence_path in \
+  "$search_projection_evidence_json" \
+  "$search_projection_shadow_evidence_json" \
+  "$bounded_read_evidence_json"; do
+  if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
+    echo "evidence JSON does not exist or is not a file: $evidence_path" >&2
+    exit 2
+  fi
+done
 
 mkdir -p "$preflight_root"
 
@@ -156,8 +184,33 @@ run_skein nowledge-cypher-migration-gate \
   "${adapter_command[@]}" \
   > "$preflight_root/migration-gate.json"
 
+run_skein nowledge-query-family-evidence \
+  --require-ready \
+  "$preflight_root/migration-gate.json" \
+  > "$preflight_root/query-family-evidence.json"
+
+replacement_summary_evidence_args=(
+  --query-family-evidence-json "$preflight_root/query-family-evidence.json"
+)
+if [[ -n "$search_projection_evidence_json" ]]; then
+  replacement_summary_evidence_args+=(
+    --search-projection-evidence-json "$search_projection_evidence_json"
+  )
+fi
+if [[ -n "$search_projection_shadow_evidence_json" ]]; then
+  replacement_summary_evidence_args+=(
+    --search-projection-shadow-evidence-json "$search_projection_shadow_evidence_json"
+  )
+fi
+if [[ -n "$bounded_read_evidence_json" ]]; then
+  replacement_summary_evidence_args+=(
+    --bounded-read-evidence-json "$bounded_read_evidence_json"
+  )
+fi
+
 run_skein nowledge-replacement-summary \
   --require-production-ready \
+  "${replacement_summary_evidence_args[@]}" \
   "$preflight_root/migration-gate.json" \
   > "$preflight_root/replacement-summary.json"
 

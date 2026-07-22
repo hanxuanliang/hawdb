@@ -501,6 +501,10 @@ fn main() -> Result<()> {
             let mut require_production_ready = false;
             let mut options = NowledgeReplacementSummaryOptions::default();
             let mut custom_summary_options = false;
+            let mut search_projection_evidence_path = None;
+            let mut search_projection_shadow_evidence_path = None;
+            let mut bounded_read_evidence_path = None;
+            let mut query_family_evidence_path = None;
             while let Some(flag) = args.peek() {
                 match flag.as_str() {
                     "--require-production-ready" => {
@@ -529,6 +533,31 @@ fn main() -> Result<()> {
                         options.max_blockers = Some(parse_max_blockers(&raw_limit)?);
                         custom_summary_options = true;
                     }
+                    "--search-projection-evidence-json" => {
+                        args.next();
+                        search_projection_evidence_path = Some(args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_replacement_summary_usage())
+                        })?);
+                    }
+                    "--search-projection-shadow-evidence-json" => {
+                        args.next();
+                        search_projection_shadow_evidence_path =
+                            Some(args.next().ok_or_else(|| {
+                                SkeinError::Semantic(nowledge_replacement_summary_usage())
+                            })?);
+                    }
+                    "--bounded-read-evidence-json" => {
+                        args.next();
+                        bounded_read_evidence_path = Some(args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_replacement_summary_usage())
+                        })?);
+                    }
+                    "--query-family-evidence-json" => {
+                        args.next();
+                        query_family_evidence_path = Some(args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_replacement_summary_usage())
+                        })?);
+                    }
                     _ => break,
                 }
             }
@@ -538,7 +567,14 @@ fn main() -> Result<()> {
             if args.next().is_some() {
                 return Err(SkeinError::Semantic(nowledge_replacement_summary_usage()));
             }
-            let bundle = read_json_file(Path::new(&bundle_path))?;
+            let mut bundle = read_json_file(Path::new(&bundle_path))?;
+            merge_replacement_summary_evidence(
+                &mut bundle,
+                search_projection_evidence_path.as_deref(),
+                search_projection_shadow_evidence_path.as_deref(),
+                bounded_read_evidence_path.as_deref(),
+                query_family_evidence_path.as_deref(),
+            )?;
             let summary = if custom_summary_options {
                 nowledge_replacement_summary_json_with_options(&bundle, options)
             } else {
@@ -1211,6 +1247,73 @@ fn parse_max_blockers(raw_limit: &str) -> Result<usize> {
         ));
     }
     Ok(limit)
+}
+
+fn merge_replacement_summary_evidence(
+    bundle: &mut serde_json::Value,
+    search_projection_evidence_path: Option<&str>,
+    search_projection_shadow_evidence_path: Option<&str>,
+    bounded_read_evidence_path: Option<&str>,
+    query_family_evidence_path: Option<&str>,
+) -> Result<()> {
+    if let Some(path) = search_projection_evidence_path {
+        insert_replacement_summary_artifact(
+            bundle,
+            "search_projection_evidence",
+            read_json_file(Path::new(path))?,
+        )?;
+    }
+    if let Some(path) = search_projection_shadow_evidence_path {
+        insert_replacement_summary_artifact(
+            bundle,
+            "search_projection_shadow_evidence",
+            read_json_file(Path::new(path))?,
+        )?;
+    }
+    if let Some(path) = bounded_read_evidence_path {
+        insert_replacement_summary_artifact(
+            bundle,
+            "bounded_read_evidence",
+            read_json_file(Path::new(path))?,
+        )?;
+    }
+    if let Some(path) = query_family_evidence_path {
+        let query_family_evidence = read_json_file(Path::new(path))?;
+        let families = query_family_evidence
+            .get("replacement_readiness_by_query_family")
+            .cloned()
+            .ok_or_else(|| {
+                SkeinError::Semantic(
+                    "query family evidence missing replacement_readiness_by_query_family"
+                        .to_string(),
+                )
+            })?;
+        insert_replacement_summary_artifact(
+            bundle,
+            "query_family_evidence",
+            query_family_evidence,
+        )?;
+        insert_replacement_summary_artifact(
+            bundle,
+            "replacement_readiness_by_query_family",
+            families,
+        )?;
+    }
+    Ok(())
+}
+
+fn insert_replacement_summary_artifact(
+    bundle: &mut serde_json::Value,
+    key: &str,
+    value: serde_json::Value,
+) -> Result<()> {
+    bundle
+        .as_object_mut()
+        .ok_or_else(|| {
+            SkeinError::Semantic("replacement summary bundle must be a JSON object".to_string())
+        })?
+        .insert(key.to_string(), value);
+    Ok(())
 }
 
 fn parse_background_maintenance_limit(flag: &str, raw_limit: &str) -> Result<usize> {
@@ -4244,10 +4347,10 @@ mod tests {
         graph_lightning_import_status, graph_lightning_publish_staging_usage,
         graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
         graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
-        is_self_shadow_command, nowledge_cypher_migration_gate_usage,
-        parse_background_maintenance_limit, parse_max_blockers, parse_max_family_items,
-        parse_max_wal_replay_entries, parse_parameters_json, parse_shadow_timeout_ms,
-        publish_graph_lightning_staging_catalog,
+        is_self_shadow_command, merge_replacement_summary_evidence,
+        nowledge_cypher_migration_gate_usage, parse_background_maintenance_limit,
+        parse_max_blockers, parse_max_family_items, parse_max_wal_replay_entries,
+        parse_parameters_json, parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
@@ -4369,6 +4472,83 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--max-blockers must be greater than zero"));
+    }
+
+    #[test]
+    fn merges_replacement_summary_evidence_artifacts() {
+        let search_path = unique_json_file("search_projection_evidence");
+        let shadow_path = unique_json_file("search_projection_shadow_evidence");
+        let bounded_path = unique_json_file("bounded_read_evidence");
+        let family_path = unique_json_file("query_family_evidence");
+        std::fs::write(
+            &search_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-search-projection-evidence-v1",
+                "ready": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &shadow_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-search-projection-shadow-evidence",
+                "ready": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &bounded_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                "ready": true
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &family_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-query-family-evidence-v1",
+                "replacement_readiness_by_query_family": [
+                    {
+                        "query_family": "read",
+                        "replacement_readiness_per_million": 1000000
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let mut bundle = serde_json::json!({
+            "protocol": "skein-nowledge-cypher-migration-gate"
+        });
+
+        merge_replacement_summary_evidence(
+            &mut bundle,
+            Some(search_path.to_str().unwrap()),
+            Some(shadow_path.to_str().unwrap()),
+            Some(bounded_path.to_str().unwrap()),
+            Some(family_path.to_str().unwrap()),
+        )
+        .unwrap();
+
+        assert_eq!(bundle["search_projection_evidence"]["ready"], true);
+        assert_eq!(bundle["search_projection_shadow_evidence"]["ready"], true);
+        assert_eq!(bundle["bounded_read_evidence"]["ready"], true);
+        assert_eq!(
+            bundle["query_family_evidence"]["protocol"],
+            "skein-nowledge-query-family-evidence-v1"
+        );
+        assert_eq!(
+            bundle["replacement_readiness_by_query_family"][0]["query_family"],
+            "read"
+        );
+        std::fs::remove_file(search_path).unwrap();
+        std::fs::remove_file(shadow_path).unwrap();
+        std::fs::remove_file(bounded_path).unwrap();
+        std::fs::remove_file(family_path).unwrap();
     }
 
     #[test]
@@ -7306,6 +7486,14 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("skein-{name}-{nanos}"))
+    }
+
+    fn unique_json_file(name: &str) -> std::path::PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein-{name}-{nanos}.json"))
     }
 
     fn adapter_smoke_report(
