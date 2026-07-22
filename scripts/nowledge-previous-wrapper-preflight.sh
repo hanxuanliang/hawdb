@@ -15,6 +15,12 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--search-projection-evidence-json <path>] \
   [--search-projection-shadow-evidence-json <path>] \
   [--bounded-read-evidence-json <path>] \
+  [--bounded-read-report-json <path>] \
+  [--bounded-read-database <path>] \
+  [--bounded-read-cypher <cypher>] \
+  [--bounded-read-params-json <json-object>] \
+  [--bounded-read-max-rows <n>] \
+  [--bounded-read-max-estimated-payload-bytes <n>] \
   -- <wrapper-command> [args...]
 
 Runs the Skein-side Nowledge previous-wrapper production preflight bundle.
@@ -30,6 +36,12 @@ shadow_timeout_ms=
 search_projection_evidence_json=
 search_projection_shadow_evidence_json=
 bounded_read_evidence_json=
+bounded_read_report_json=
+bounded_read_database=
+bounded_read_cypher=
+bounded_read_params_json=
+bounded_read_max_rows=
+bounded_read_max_estimated_payload_bytes=
 
 while (($# > 0)); do
   case "$1" in
@@ -59,6 +71,30 @@ while (($# > 0)); do
       ;;
     --bounded-read-evidence-json)
       bounded_read_evidence_json="${2:-}"
+      shift 2
+      ;;
+    --bounded-read-report-json)
+      bounded_read_report_json="${2:-}"
+      shift 2
+      ;;
+    --bounded-read-database)
+      bounded_read_database="${2:-}"
+      shift 2
+      ;;
+    --bounded-read-cypher)
+      bounded_read_cypher="${2:-}"
+      shift 2
+      ;;
+    --bounded-read-params-json)
+      bounded_read_params_json="${2:-}"
+      shift 2
+      ;;
+    --bounded-read-max-rows)
+      bounded_read_max_rows="${2:-}"
+      shift 2
+      ;;
+    --bounded-read-max-estimated-payload-bytes)
+      bounded_read_max_estimated_payload_bytes="${2:-}"
       shift 2
       ;;
     --help|-h)
@@ -94,12 +130,33 @@ fi
 for evidence_path in \
   "$search_projection_evidence_json" \
   "$search_projection_shadow_evidence_json" \
-  "$bounded_read_evidence_json"; do
+  "$bounded_read_evidence_json" \
+  "$bounded_read_report_json"; do
   if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
     echo "evidence JSON does not exist or is not a file: $evidence_path" >&2
     exit 2
   fi
 done
+
+if [[ -n "$bounded_read_evidence_json" && ( -n "$bounded_read_report_json" || -n "$bounded_read_cypher" ) ]]; then
+  echo "--bounded-read-evidence-json cannot be combined with bounded read report or query generation" >&2
+  exit 2
+fi
+
+if [[ -n "$bounded_read_report_json" && -n "$bounded_read_cypher" ]]; then
+  echo "--bounded-read-report-json cannot be combined with --bounded-read-cypher" >&2
+  exit 2
+fi
+
+if [[ -z "$bounded_read_cypher" && ( -n "$bounded_read_database" || -n "$bounded_read_params_json" || -n "$bounded_read_max_rows" || -n "$bounded_read_max_estimated_payload_bytes" ) ]]; then
+  echo "bounded read query options require --bounded-read-cypher" >&2
+  exit 2
+fi
+
+if [[ -n "$bounded_read_database" && ! -e "$bounded_read_database" ]]; then
+  echo "--bounded-read-database does not exist: $bounded_read_database" >&2
+  exit 2
+fi
 
 mkdir -p "$preflight_root"
 
@@ -188,6 +245,39 @@ run_skein nowledge-query-family-evidence \
   --require-ready \
   "$preflight_root/migration-gate.json" \
   > "$preflight_root/query-family-evidence.json"
+
+if [[ -z "$bounded_read_evidence_json" ]]; then
+  if [[ -n "$bounded_read_report_json" ]]; then
+    run_skein nowledge-bounded-read-evidence \
+      --require-ready \
+      "$bounded_read_report_json" \
+      > "$preflight_root/bounded-read-evidence.json"
+    bounded_read_evidence_json="$preflight_root/bounded-read-evidence.json"
+  elif [[ -n "$bounded_read_cypher" ]]; then
+    bounded_read_report_args=()
+    if [[ -n "$bounded_read_params_json" ]]; then
+      bounded_read_report_args+=(--params-json "$bounded_read_params_json")
+    fi
+    if [[ -n "$bounded_read_max_rows" ]]; then
+      bounded_read_report_args+=(--max-rows "$bounded_read_max_rows")
+    fi
+    if [[ -n "$bounded_read_max_estimated_payload_bytes" ]]; then
+      bounded_read_report_args+=(
+        --max-estimated-payload-bytes "$bounded_read_max_estimated_payload_bytes"
+      )
+    fi
+    run_skein nowledge-bounded-read-report \
+      "${bounded_read_report_args[@]}" \
+      "${bounded_read_database:-$skein_preflight_db}" \
+      "$bounded_read_cypher" \
+      > "$preflight_root/bounded-read-report.json"
+    run_skein nowledge-bounded-read-evidence \
+      --require-ready \
+      "$preflight_root/bounded-read-report.json" \
+      > "$preflight_root/bounded-read-evidence.json"
+    bounded_read_evidence_json="$preflight_root/bounded-read-evidence.json"
+  fi
+fi
 
 replacement_summary_evidence_args=(
   --query-family-evidence-json "$preflight_root/query-family-evidence.json"
