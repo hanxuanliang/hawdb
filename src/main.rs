@@ -6,6 +6,7 @@ mod cli_mem_integration_readiness;
 mod cli_previous_wrapper_preflight;
 mod cli_query_family_evidence;
 mod cli_replacement_summary;
+mod cli_storage_recovery_evidence;
 
 use cli_background_maintenance_evidence::run_nowledge_background_maintenance_evidence;
 use cli_bounded_read_evidence::run_nowledge_bounded_read_evidence;
@@ -18,6 +19,7 @@ use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
+use cli_storage_recovery_evidence::run_nowledge_storage_recovery_evidence;
 use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::search_projection_evidence::{
     run_nowledge_search_projection_evidence, run_nowledge_search_projection_shadow_evidence,
@@ -156,6 +158,17 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge bounded read evidence is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-storage-recovery-evidence" {
+            let (json, require_ready) = run_nowledge_storage_recovery_evidence(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge storage recovery evidence is not ready".to_string(),
                 ));
             }
             return Ok(());
