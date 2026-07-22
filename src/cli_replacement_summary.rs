@@ -197,6 +197,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         "bounded_read_evidence": {
             "present": bounded_read_evidence.present,
             "ready": bounded_read_evidence.ready,
+            "mode": bounded_read_evidence.mode,
             "max_rows": bounded_read_evidence.max_rows,
             "execution_row_cap": bounded_read_evidence.execution_row_cap,
             "row_limit_enforced_before_output": bounded_read_evidence.row_limit_enforced_before_output,
@@ -468,9 +469,10 @@ struct SearchProjectionShadowEvidenceSummary<'a> {
     blocker_codes: serde_json::Value,
 }
 
-struct BoundedReadEvidenceSummary {
+struct BoundedReadEvidenceSummary<'a> {
     present: bool,
     ready: bool,
+    mode: Option<&'a str>,
     max_rows: Option<u64>,
     execution_row_cap: Option<u64>,
     row_limit_enforced_before_output: Option<bool>,
@@ -687,13 +689,14 @@ fn search_projection_shadow_evidence_summary(
     }
 }
 
-fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvidenceSummary {
+fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvidenceSummary<'_> {
     let path = if json_get_path(bundle, &["bounded_read_evidence"]).is_some() {
         &["bounded_read_evidence"][..]
     } else {
         &["cutover_evidence", "bounded_read_evidence"][..]
     };
     let present = json_get_path(bundle, path).is_some();
+    let mode = json_get_str_path_from_dynamic(bundle, path, "mode");
     let max_rows = json_get_u64_path_from_dynamic(bundle, path, "max_rows");
     let execution_row_cap = json_get_u64_path_from_dynamic(bundle, path, "execution_row_cap");
     let row_limit_enforced_before_output =
@@ -704,6 +707,7 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     let blocking_operator_count =
         json_get_u64_path_from_dynamic(bundle, path, "blocking_operator_count");
     let ready = present
+        && mode == Some("shadow_read_only")
         && max_rows.is_some_and(|value| value > 0)
         && execution_row_cap == max_rows.and_then(|value| value.checked_add(1))
         && row_limit_enforced_before_output == Some(true)
@@ -711,6 +715,7 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     BoundedReadEvidenceSummary {
         present,
         ready,
+        mode,
         max_rows,
         execution_row_cap,
         row_limit_enforced_before_output,
@@ -953,6 +958,7 @@ fn nowledge_replacement_next_actions(
             [
                 "bounded_read_evidence.present",
                 "bounded_read_evidence.ready",
+                "bounded_read_evidence.mode",
                 "bounded_read_evidence.max_rows",
                 "bounded_read_evidence.execution_row_cap",
                 "bounded_read_evidence.row_limit_enforced_before_output",
@@ -1300,6 +1306,7 @@ mod tests {
         assert_eq!(summary["next_actions"], serde_json::json!([]));
         assert_eq!(summary["bounded_read_evidence"]["present"], true);
         assert_eq!(summary["bounded_read_evidence"]["ready"], true);
+        assert_eq!(summary["bounded_read_evidence"]["mode"], "shadow_read_only");
         assert_eq!(summary["bounded_read_evidence"]["execution_row_cap"], 513);
         assert_eq!(
             summary["cutover_evidence"]["storage_recovery_protocol_matches"],
@@ -1594,6 +1601,30 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_bounded_read_profile"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_shadow_read_only_bounded_read_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["bounded_read_evidence"]["mode"] = serde_json::json!("writable_cutover");
+        bundle["bounded_read_evidence"]["blocker_codes"] =
+            serde_json::json!(["not_shadow_read_only"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["mode"], "writable_cutover");
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence_ready"));
     }
 
     #[test]
@@ -2182,6 +2213,7 @@ mod tests {
                     "evidence_fields": [
                         "bounded_read_evidence.present",
                         "bounded_read_evidence.ready",
+                        "bounded_read_evidence.mode",
                         "bounded_read_evidence.max_rows",
                         "bounded_read_evidence.execution_row_cap",
                         "bounded_read_evidence.row_limit_enforced_before_output",
@@ -2334,6 +2366,7 @@ mod tests {
                 "blocker_codes": []
             },
             "bounded_read_evidence": {
+                "mode": "shadow_read_only",
                 "max_rows": 512,
                 "execution_row_cap": 513,
                 "row_limit_enforced_before_output": true,

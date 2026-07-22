@@ -180,6 +180,7 @@ pub fn nowledge_mem_bounded_read_evidence_json(
         "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
         "present": true,
         "ready": ready,
+        "mode": report.mode.as_str(),
         "max_rows": report.max_rows,
         "execution_row_cap": report.execution_row_cap,
         "row_limit_enforced_before_output": report.row_limit_enforced_before_output,
@@ -206,6 +207,9 @@ fn nowledge_mem_bounded_read_blocker_codes(report: &NowledgeMemReadReport) -> Ve
             None
         }
     };
+    if report.mode != NowledgeMemGraphMode::ShadowReadOnly {
+        blockers.push("not_shadow_read_only");
+    }
 
     match (report.execution_row_cap, expected_row_cap) {
         (Some(execution_row_cap), Some(expected_row_cap))
@@ -711,6 +715,10 @@ mod tests {
             read.report.bounded_read_evidence_json()["protocol"],
             NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL
         );
+        assert_eq!(
+            read.report.bounded_read_evidence_json()["mode"],
+            "shadow_read_only"
+        );
         assert_eq!(read.report.bounded_read_evidence_json()["ready"], true);
     }
 
@@ -750,6 +758,35 @@ mod tests {
                 "row_limit_not_enforced_before_output",
                 "operator_row_cap_disabled"
             ])
+        );
+    }
+
+    #[test]
+    fn bounded_read_evidence_requires_shadow_read_only_mode() {
+        let report = NowledgeMemReadReport {
+            protocol: NOWLEDGE_MEM_READ_REPORT_PROTOCOL.to_string(),
+            mode: NowledgeMemGraphMode::WritableCutover,
+            row_count: 2,
+            max_rows: Some(512),
+            execution_row_cap: Some(513),
+            estimated_payload_bytes: 128,
+            max_estimated_payload_bytes: Some(4 * 1024 * 1024),
+            row_budget_exceeded: false,
+            payload_budget_exceeded: false,
+            row_limit_enforced_before_output: true,
+            operator_row_cap_enabled: true,
+            blocking_operator_count: 0,
+            blocking_operator_kinds: Vec::new(),
+            streaming: false,
+        };
+
+        let evidence = nowledge_mem_bounded_read_evidence_json(&report);
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["mode"], "writable_cutover");
+        assert_eq!(
+            evidence["blocker_codes"],
+            serde_json::json!(["not_shadow_read_only"])
         );
     }
 

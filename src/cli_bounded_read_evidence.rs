@@ -146,6 +146,7 @@ mod tests {
             "skein-nowledge-mem-bounded-read-evidence-v1"
         );
         assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["mode"], "shadow_read_only");
         assert_eq!(evidence["execution_row_cap"], 513);
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
         std::fs::remove_file(path).unwrap();
