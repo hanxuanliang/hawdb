@@ -59,6 +59,7 @@ fn nowledge_storage_recovery_evidence_json(
         "storage_recovery_present": health.present,
         "storage_recovery_ready": health.ready,
         "storage_recovery_protocol_matches": health.protocol_matches,
+        "storage_recovery_durable": health.durable_recovery_observed,
         "storage_recovery_durable_recovery_observed": health.durable_recovery_observed,
         "storage_recovery_checkpoint_boundary_present": health.checkpoint_boundary_present,
         "storage_recovery_wal_replay_bounded": health.wal_replay_bounded,
@@ -109,6 +110,7 @@ mod tests {
         assert_eq!(evidence["storage_recovery_required"], true);
         assert_eq!(evidence["storage_recovery_ready"], true);
         assert_eq!(evidence["storage_recovery_protocol_matches"], true);
+        assert_eq!(evidence["storage_recovery_durable"], true);
         assert_eq!(
             evidence["storage_recovery_checkpoint_boundary_present"],
             true

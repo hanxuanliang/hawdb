@@ -211,6 +211,10 @@ pub fn nowledge_replacement_summary_json_with_options(
             "storage_recovery_required": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_required"]),
             "storage_recovery_ready": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_ready"]),
             "storage_recovery_protocol_matches": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_protocol_matches"]),
+            "storage_recovery_durable": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_durable"]),
+            "storage_recovery_checkpoint_boundary_present": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_checkpoint_boundary_present"]),
+            "storage_recovery_wal_replay_bounded": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_wal_replay_bounded"]),
+            "storage_recovery_torn_tail_clean": json_get_bool_path(bundle, &["cutover_evidence", "storage_recovery_torn_tail_clean"]),
             "storage_recovery_blocker_codes": json_get_array_path(bundle, &["cutover_evidence", "storage_recovery_blocker_codes"]),
             "background_maintenance_required": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_required"]),
             "background_maintenance_ready": json_get_bool_path(bundle, &["cutover_evidence", "background_maintenance_ready"]),
@@ -1289,6 +1293,22 @@ mod tests {
             true
         );
         assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_durable"],
+            true
+        );
+        assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_checkpoint_boundary_present"],
+            true
+        );
+        assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_wal_replay_bounded"],
+            true
+        );
+        assert_eq!(
+            summary["cutover_evidence"]["storage_recovery_torn_tail_clean"],
+            true
+        );
+        assert_eq!(
             summary["cutover_evidence"]["background_maintenance_protocol_matches"],
             true
         );
@@ -2218,6 +2238,10 @@ mod tests {
                 "storage_recovery_present": true,
                 "storage_recovery_ready": true,
                 "storage_recovery_protocol_matches": true,
+                "storage_recovery_durable": true,
+                "storage_recovery_checkpoint_boundary_present": true,
+                "storage_recovery_wal_replay_bounded": true,
+                "storage_recovery_torn_tail_clean": true,
                 "storage_recovery_blocker_codes": [],
                 "storage_recovery_blockers": [],
                 "background_maintenance_required": true,
