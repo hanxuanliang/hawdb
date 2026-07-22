@@ -3059,8 +3059,12 @@ fn search_document_field_value<'a>(document: &'a SearchDocument, key: &str) -> O
 fn metadata_value_matches(key: &str, actual: &str, expected: &str) -> bool {
     match key {
         "kind" => metadata_kind_matches(actual, expected),
-        _ => actual == expected,
+        _ => normalize_metadata_filter_value(actual) == normalize_metadata_filter_value(expected),
     }
+}
+
+fn normalize_metadata_filter_value(value: &str) -> String {
+    value.trim().to_lowercase()
 }
 
 fn metadata_numeric_value(value: &str) -> Option<f64> {
@@ -4518,6 +4522,47 @@ mod tests {
         assert_eq!(text.candidate_count, 1);
         assert_eq!(text.candidate_set.cardinality, 1);
         assert_eq!(text.top_hit_ids, vec!["memory:thread_1".to_string()]);
+    }
+
+    #[test]
+    fn search_metadata_filters_match_casefolded_values() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:acme".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("customer".to_string(), " Acme ".to_string())]),
+            })
+            .unwrap();
+        index
+            .upsert(SearchDocument {
+                id: "memory:other".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("customer".to_string(), "Other".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("customer".to_string(), "acme".to_string())]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.hits[0].id, "memory:acme");
+        assert_eq!(result.filtered_document_count, 1);
+        assert_eq!(result.candidate_set.filtered_out_count, 1);
     }
 
     #[test]
