@@ -386,6 +386,16 @@ pub enum CompressedVectorSearchMode {
     Required,
 }
 
+impl CompressedVectorSearchMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::Preferred => "preferred",
+            Self::Required => "required",
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum VectorSearchBackend<'a> {
     Scalar,

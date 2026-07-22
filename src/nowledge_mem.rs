@@ -1,3 +1,4 @@
+use crate::search::CompressedVectorSearchMode;
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
 };
@@ -19,8 +20,16 @@ pub enum NowledgeMemGraphMode {
 }
 
 pub fn nowledge_mem_graph_config(mode: NowledgeMemGraphMode) -> DatabaseConfig {
+    nowledge_mem_graph_config_with_search_mode(mode, CompressedVectorSearchMode::Disabled)
+}
+
+pub fn nowledge_mem_graph_config_with_search_mode(
+    mode: NowledgeMemGraphMode,
+    compressed_vector_search_mode: CompressedVectorSearchMode,
+) -> DatabaseConfig {
     DatabaseConfig {
         read_only: matches!(mode, NowledgeMemGraphMode::ShadowReadOnly),
+        compressed_vector_search_mode,
         ..DatabaseConfig::default()
     }
 }
@@ -30,6 +39,7 @@ pub struct NowledgeMemOpenOptions {
     pub graph_path: PathBuf,
     pub search_projection_path: Option<PathBuf>,
     pub mode: NowledgeMemGraphMode,
+    pub compressed_vector_search_mode: CompressedVectorSearchMode,
 }
 
 impl NowledgeMemOpenOptions {
@@ -38,6 +48,7 @@ impl NowledgeMemOpenOptions {
             graph_path: graph_path.into(),
             search_projection_path: None,
             mode,
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
         }
     }
 
@@ -50,7 +61,13 @@ impl NowledgeMemOpenOptions {
             graph_path: graph_path.into(),
             search_projection_path: Some(search_projection_path.into()),
             mode,
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
         }
+    }
+
+    pub fn with_compressed_vector_search_mode(mut self, mode: CompressedVectorSearchMode) -> Self {
+        self.compressed_vector_search_mode = mode;
+        self
     }
 
     pub fn sanitized_report(&self) -> NowledgeMemOpenReport {
@@ -59,6 +76,7 @@ impl NowledgeMemOpenOptions {
             mode: self.mode,
             graph_configured: true,
             search_projection_configured: self.search_projection_path.is_some(),
+            compressed_vector_search_mode: self.compressed_vector_search_mode,
             graph_opened: false,
             search_projection_opened: false,
         }
@@ -71,6 +89,7 @@ pub struct NowledgeMemOpenReport {
     pub mode: NowledgeMemGraphMode,
     pub graph_configured: bool,
     pub search_projection_configured: bool,
+    pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub graph_opened: bool,
     pub search_projection_opened: bool,
 }
@@ -82,6 +101,7 @@ impl NowledgeMemOpenReport {
             "mode": self.mode.as_str(),
             "graph_configured": self.graph_configured,
             "search_projection_configured": self.search_projection_configured,
+            "compressed_vector_search_mode": self.compressed_vector_search_mode.as_str(),
             "graph_opened": self.graph_opened,
             "search_projection_opened": self.search_projection_opened,
         })
@@ -244,6 +264,16 @@ impl NowledgeMemGraph {
         Ok(Self { db, mode })
     }
 
+    pub fn open_with_config(path: impl AsRef<Path>, config: DatabaseConfig) -> Result<Self> {
+        let mode = if config.read_only {
+            NowledgeMemGraphMode::ShadowReadOnly
+        } else {
+            NowledgeMemGraphMode::WritableCutover
+        };
+        let db = Database::open_with_config(path, config)?;
+        Ok(Self { db, mode })
+    }
+
     pub fn from_database(db: Database, mode: NowledgeMemGraphMode) -> Self {
         Self { db, mode }
     }
@@ -395,7 +425,13 @@ impl NowledgeMemEmbeddedStore {
         options: NowledgeMemOpenOptions,
     ) -> Result<(Self, NowledgeMemOpenReport)> {
         let mut report = options.sanitized_report();
-        let graph = NowledgeMemGraph::open(&options.graph_path, options.mode)?;
+        let graph = NowledgeMemGraph::open_with_config(
+            &options.graph_path,
+            nowledge_mem_graph_config_with_search_mode(
+                options.mode,
+                options.compressed_vector_search_mode,
+            ),
+        )?;
         report.graph_opened = true;
         let search_projection = match options.search_projection_path.as_ref() {
             Some(path) => {
@@ -636,11 +672,13 @@ fn estimate_value_payload_bytes(value: &Value) -> usize {
 mod tests {
     use super::{
         nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config,
-        NowledgeMemEmbeddedStore, NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions,
-        NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemSearchProjection,
+        nowledge_mem_graph_config_with_search_mode, NowledgeMemEmbeddedStore, NowledgeMemGraph,
+        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
+        NowledgeMemReadReport, NowledgeMemSearchProjection,
         NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
     };
+    use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
@@ -655,6 +693,19 @@ mod tests {
     fn graph_config_tracks_shadow_vs_cutover_mode() {
         assert!(nowledge_mem_graph_config(NowledgeMemGraphMode::ShadowReadOnly).read_only);
         assert!(!nowledge_mem_graph_config(NowledgeMemGraphMode::WritableCutover).read_only);
+        assert_eq!(
+            nowledge_mem_graph_config(NowledgeMemGraphMode::ShadowReadOnly)
+                .compressed_vector_search_mode,
+            CompressedVectorSearchMode::Disabled
+        );
+        assert_eq!(
+            nowledge_mem_graph_config_with_search_mode(
+                NowledgeMemGraphMode::ShadowReadOnly,
+                CompressedVectorSearchMode::Required,
+            )
+            .compressed_vector_search_mode,
+            CompressedVectorSearchMode::Required
+        );
     }
 
     #[test]
@@ -961,7 +1012,7 @@ mod tests {
             .apply_embedding_manifest(SearchEmbeddingManifest {
                 model: "bge-m3".to_string(),
                 version: None,
-                dimension: 2,
+                dimension: 8,
             })
             .unwrap();
         index
@@ -980,7 +1031,7 @@ mod tests {
         let evidence = store
             .search_projection_evidence_json(SearchProjectionProbeOptions {
                 active_embedding_model: Some("bge-m3".to_string()),
-                active_embedding_dimension: Some(2),
+                active_embedding_dimension: Some(8),
             })
             .unwrap();
 
@@ -988,11 +1039,26 @@ mod tests {
             evidence["protocol"],
             "skein-nowledge-search-projection-evidence"
         );
+        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["ready"], true);
+        #[cfg(not(feature = "turbovec"))]
+        {
+            assert_eq!(evidence["ready"], false);
+            assert_eq!(
+                evidence["compressed_vector_projection_ready"],
+                serde_json::json!(false)
+            );
+            assert!(evidence["blocker_codes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == "compressed_vector_projection_not_ready"));
+        }
         assert_eq!(evidence["covered_table_count"], 6);
         assert_eq!(evidence["required_table_count"], 6);
         assert_eq!(evidence["source_chunk_ready"], true);
         assert_eq!(evidence["incremental_update_ready"], true);
+        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
@@ -1003,7 +1069,7 @@ mod tests {
             .apply_embedding_manifest(SearchEmbeddingManifest {
                 model: "bge-m3".to_string(),
                 version: None,
-                dimension: 2,
+                dimension: 8,
             })
             .unwrap();
         index
@@ -1020,7 +1086,7 @@ mod tests {
         let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
         let probe_options = SearchProjectionProbeOptions {
             active_embedding_model: Some("bge-m3".to_string()),
-            active_embedding_dimension: Some(2),
+            active_embedding_dimension: Some(8),
         };
         let primary_probe = store
             .search_projection_probe_json(probe_options.clone())
@@ -1034,13 +1100,24 @@ mod tests {
             evidence["protocol"],
             "skein-nowledge-search-projection-shadow-evidence"
         );
-        assert_eq!(evidence["ready"], true);
-        assert_eq!(evidence["primary_ready"], true);
-        assert_eq!(evidence["shadow_ready"], true);
+        #[cfg(feature = "turbovec")]
+        {
+            assert_eq!(evidence["ready"], true);
+            assert_eq!(evidence["primary_ready"], true);
+            assert_eq!(evidence["shadow_ready"], true);
+        }
+        #[cfg(not(feature = "turbovec"))]
+        {
+            assert_eq!(evidence["ready"], false);
+            assert_eq!(evidence["primary_ready"], false);
+            assert_eq!(evidence["shadow_ready"], false);
+            assert!(!evidence["blocker_codes"].as_array().unwrap().is_empty());
+        }
         assert_eq!(evidence["document_count_parity"], true);
         assert_eq!(evidence["table_parity"]["ready"], true);
         assert_eq!(evidence["embedding_identity_parity"], true);
         assert_eq!(evidence["incremental_watermark_parity"], true);
+        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
@@ -1093,8 +1170,25 @@ mod tests {
         assert_eq!(report["mode"], "shadow_read_only");
         assert_eq!(report["graph_configured"], true);
         assert_eq!(report["search_projection_configured"], true);
+        assert_eq!(report["compressed_vector_search_mode"], "disabled");
         assert!(report.get("graph_path").is_none());
         assert!(report.get("search_projection_path").is_none());
+        assert!(!report.to_string().contains("redacted_graph_path"));
+        assert!(!report.to_string().contains("redacted_search_path"));
+    }
+
+    #[test]
+    fn open_options_report_exposes_advanced_compressed_vector_search_mode() {
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            "redacted_graph_path",
+            "redacted_search_path",
+            NowledgeMemGraphMode::ShadowReadOnly,
+        )
+        .with_compressed_vector_search_mode(CompressedVectorSearchMode::Preferred);
+
+        let report = options.sanitized_report().json();
+
+        assert_eq!(report["compressed_vector_search_mode"], "preferred");
         assert!(!report.to_string().contains("redacted_graph_path"));
         assert!(!report.to_string().contains("redacted_search_path"));
     }
@@ -1118,6 +1212,10 @@ mod tests {
 
         assert_eq!(report.protocol, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL);
         assert_eq!(report.mode, NowledgeMemGraphMode::WritableCutover);
+        assert_eq!(
+            report.compressed_vector_search_mode,
+            CompressedVectorSearchMode::Disabled
+        );
         assert!(report.graph_opened);
         assert!(report.search_projection_opened);
         assert!(store.search_projection().is_some());
@@ -1247,6 +1345,82 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "turbovec")]
+    fn embedded_store_open_options_can_prefer_compressed_vector_search() {
+        let root = unique_nowledge_mem_test_dir("compressed_vector_open_options");
+        let graph_path = root.join("graph");
+        let search_path = root.join("search");
+        {
+            let mut db = Database::open(&graph_path).unwrap();
+            db.query(
+                "CREATE (:Memory {id: 'mem-vector', title: 'Vector facade', content: 'Compressed vector retrieval'})",
+            )
+            .unwrap();
+            db.checkpoint().unwrap();
+        }
+        {
+            let mut index = SearchIndex::open(&search_path).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 8,
+                })
+                .unwrap();
+            index
+                .apply_projection_delta(SearchProjectionDelta {
+                    upserts: vec![SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: "mem-vector".to_string(),
+                        title: "Vector facade".to_string(),
+                        body: "Compressed vector retrieval".to_string(),
+                        embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                        source_id: None,
+                        metadata: BTreeMap::new(),
+                    }],
+                    deletes: Vec::new(),
+                    max_operations: None,
+                    source_graph_commit_epoch: Some(1),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let options = NowledgeMemOpenOptions::with_search_projection(
+            graph_path,
+            search_path,
+            NowledgeMemGraphMode::ShadowReadOnly,
+        )
+        .with_compressed_vector_search_mode(CompressedVectorSearchMode::Preferred);
+
+        let (store, report) = NowledgeMemEmbeddedStore::open_with_options(options).unwrap();
+        let output = store
+            .retrieve_knowledge(&KnowledgeRetrievalRequest {
+                query_text: String::new(),
+                query_embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+                mode: SearchMode::Vector,
+                limit: 10,
+                rank_window: None,
+                search_fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                candidate_limit: None,
+                candidate_scoring: KnowledgeCandidateScoringPolicy::Max,
+                graph_seed_limit: 0,
+                graph_context_limit: 0,
+                graph_context_max_hops: 0,
+            })
+            .unwrap();
+
+        assert_eq!(
+            report.compressed_vector_search_mode,
+            CompressedVectorSearchMode::Preferred
+        );
+        assert_eq!(output.search.hits[0].id, "memory:mem-vector");
+        assert_eq!(output.search.retrievers[0].backend, "turbovec_projection");
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn embedded_store_retrieval_requires_search_projection() {
         let graph =
             NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
@@ -1348,7 +1522,7 @@ mod tests {
             external_id: external_id.to_string(),
             title: format!("{external_id} title"),
             body: format!("{external_id} body"),
-            embedding: include_embedding.then_some(vec![1.0, 0.0]),
+            embedding: include_embedding.then_some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             source_id: Some("source_1".to_string()),
             metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
         }
