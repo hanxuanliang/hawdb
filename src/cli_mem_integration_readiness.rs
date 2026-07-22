@@ -754,39 +754,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
-    if bool_path(
-        bundle,
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_required",
-        ],
-    ) != Some(true)
-        || bool_path(
-            bundle,
-            &[
-                "replacement_summary",
-                "cutover_evidence",
-                "storage_recovery_ready",
-            ],
-        ) != Some(true)
-        || bool_path(
-            bundle,
-            &[
-                "replacement_summary",
-                "cutover_evidence",
-                "storage_recovery_protocol_matches",
-            ],
-        ) != Some(true)
-        || bool_path(
-            bundle,
-            &[
-                "replacement_summary",
-                "cutover_evidence",
-                "storage_recovery_wal_replay_bounded",
-            ],
-        ) != Some(true)
-    {
+    if !replacement_summary_storage_recovery_ready(bundle) {
         actions.push(next_action(
             "attach_storage_recovery_report",
             "storage recovery evidence must prove durable bounded WAL replay before Mem cutover",
@@ -969,6 +937,48 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
             bundle,
             &["replacement_summary", "bounded_read_evidence", "streaming"],
         ) == Some(false)
+}
+
+fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
+    [
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_required",
+        ][..],
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_ready",
+        ][..],
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_protocol_matches",
+        ][..],
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_durable",
+        ][..],
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_checkpoint_boundary_present",
+        ][..],
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_wal_replay_bounded",
+        ][..],
+        &[
+            "replacement_summary",
+            "cutover_evidence",
+            "storage_recovery_torn_tail_clean",
+        ][..],
+    ]
+    .iter()
+    .all(|path| bool_path(bundle, path) == Some(true))
 }
 
 fn bounded_read_execution_cap_matches(bundle: &serde_json::Value) -> bool {
@@ -1464,6 +1474,44 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.cutover_evidence.storage_recovery_ready",
                 "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_storage_recovery_report"));
+    }
+
+    #[test]
+    fn rejects_inconsistent_storage_recovery_summary_even_if_ready_flag_is_true() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_durable"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["storage_recovery_checkpoint_boundary_present"] = serde_json::json!(false);
+        bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_torn_tail_clean"] =
+            serde_json::json!(false);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["storage_recovery_evidence"])
+        );
+        let storage_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "storage_recovery_evidence")
+            .unwrap();
+        assert_eq!(
+            storage_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.cutover_evidence.storage_recovery_durable",
+                "replacement_summary.cutover_evidence.storage_recovery_checkpoint_boundary_present",
+                "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean"
             ])
         );
         assert!(report["next_actions"]
