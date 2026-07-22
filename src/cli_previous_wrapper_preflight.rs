@@ -398,6 +398,10 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 ) == Some(true),
                 bool_path(
                     &replacement_summary,
+                    &["search_projection_evidence", "predicate_pushdown_ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
                     &["search_projection_shadow_evidence", "present"],
                 ) == Some(true),
                 bool_path(
@@ -469,6 +473,7 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "search_projection_evidence.metadata_repair_marker_ready",
                 "search_projection_evidence.incremental_update_ready",
                 "search_projection_evidence.source_chunk_ready",
+                "search_projection_evidence.predicate_pushdown_ready",
                 "search_projection_shadow_evidence.present",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
@@ -844,6 +849,14 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "search_projection_predicate_pushdown_ready",
+        bool_path(
+            replacement_summary,
+            &["search_projection_evidence", "predicate_pushdown_ready"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "search_projection_shadow_evidence_ready",
         bool_path(
             replacement_summary,
@@ -1158,6 +1171,7 @@ mod tests {
         assert_release_summary_field(summary, "search_projection_embedding_identity_ready", true);
         assert_release_summary_field(summary, "search_projection_fail_soft_ready", true);
         assert_release_summary_field(summary, "search_projection_incremental_update_ready", true);
+        assert_release_summary_field(summary, "search_projection_predicate_pushdown_ready", true);
         assert_release_summary_field(summary, "search_projection_shadow_evidence_ready", true);
         assert_release_summary_field(summary, "search_projection_shadow_primary_ready", true);
         assert_release_summary_field(summary, "search_projection_shadow_shadow_ready", true);
@@ -1248,6 +1262,7 @@ mod tests {
                 "search_projection_evidence.metadata_repair_marker_ready",
                 "search_projection_evidence.incremental_update_ready",
                 "search_projection_evidence.source_chunk_ready",
+                "search_projection_evidence.predicate_pushdown_ready",
                 "search_projection_shadow_evidence.present",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
@@ -1786,6 +1801,7 @@ mod tests {
             "metadata_repair_marker_ready": true,
             "incremental_update_ready": true,
             "source_chunk_ready": true,
+            "predicate_pushdown_ready": true,
             "blocker_codes": []
         })
     }

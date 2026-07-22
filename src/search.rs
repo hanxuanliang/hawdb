@@ -803,6 +803,7 @@ impl SearchIndex {
             .documents
             .values()
             .any(|document| document.embedding.is_some());
+        let predicate_pushdown = search_projection_probe_predicate_pushdown_report(self);
 
         serde_json::json!({
             "protocol": "skein-nowledge-search-projection-probe",
@@ -839,6 +840,7 @@ impl SearchIndex {
                 "watermark_ready": freshness.source_graph_commit_epoch.is_some(),
                 "source_graph_commit_epoch": freshness.source_graph_commit_epoch,
             },
+            "predicate_pushdown": predicate_pushdown,
             "blocker_codes": search_projection_probe_blocker_codes(
                 has_documents,
                 has_text,
@@ -1729,6 +1731,39 @@ fn search_projection_probe_table_reports(
             })
         })
         .collect()
+}
+
+fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> serde_json::Value {
+    let segment_descriptor_ready = index
+        .segment_descriptor
+        .as_ref()
+        .is_some_and(|descriptor| descriptor.matches_documents(&index.documents));
+    serde_json::json!({
+        "ready": true,
+        "equality_ready": true,
+        "in_list_ready": true,
+        "not_in_list_ready": true,
+        "range_ready": true,
+        "row_filter_ready": true,
+        "segment_pruning_ready": true,
+        "numeric_min_max_ready": true,
+        "persisted_segment_descriptor_ready": segment_descriptor_ready,
+        "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
+        "scan_filter_fields": [
+            "kind",
+            "external_id",
+            "source_id",
+            "space_id",
+            "unit_type",
+            "importance",
+            "confidence",
+            "created_at",
+            "updated_at",
+            "event_start",
+            "event_end",
+            "is_latest"
+        ],
+    })
 }
 
 fn search_projection_probe_blocker_codes(

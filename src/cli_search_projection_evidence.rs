@@ -165,6 +165,8 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         bool_path(&lifecycle, &["metadata_repair_marker_ready"]) == Some(true);
     let incremental_update = incremental_update_report(probe);
     let incremental_update_ready = bool_path(&incremental_update, &["ready"]) == Some(true);
+    let predicate_pushdown = predicate_pushdown_report(probe);
+    let predicate_pushdown_ready = bool_path(&predicate_pushdown, &["ready"]) == Some(true);
     let derived_projection = bool_path(probe, &["derived_projection"])
         .or_else(|| bool_path(probe, &["projection", "derived"]))
         == Some(true);
@@ -201,6 +203,9 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
     if !source_chunk_ready {
         blocker_codes.insert("source_chunks_index_not_ready".to_string());
     }
+    if !predicate_pushdown_ready {
+        blocker_codes.insert("predicate_pushdown_not_ready".to_string());
+    }
 
     let ready = blocker_codes.is_empty();
     serde_json::json!({
@@ -219,11 +224,13 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         "metadata_repair_marker_ready": metadata_repair_marker_ready,
         "incremental_update_ready": incremental_update_ready,
         "source_chunk_ready": source_chunk_ready,
+        "predicate_pushdown_ready": predicate_pushdown_ready,
         "tables": table_reports,
         "embedding_identity": embedding_identity,
         "fail_soft": fail_soft,
         "lifecycle": lifecycle,
         "incremental_update": incremental_update,
+        "predicate_pushdown": predicate_pushdown,
         "blocker_codes": blocker_codes.into_iter().collect::<Vec<_>>(),
     })
 }
@@ -241,6 +248,8 @@ pub fn nowledge_search_projection_shadow_evidence_json(
         == value_path(&shadow_evidence, &["embedding_identity"]);
     let lifecycle_parity = value_path(&primary_evidence, &["lifecycle"])
         == value_path(&shadow_evidence, &["lifecycle"]);
+    let predicate_pushdown_parity =
+        predicate_pushdown_parity_matches(&primary_evidence, &shadow_evidence);
     let incremental_watermark_parity = u64_path(
         primary_probe,
         &["incremental_update", "source_graph_commit_epoch"],
@@ -272,6 +281,9 @@ pub fn nowledge_search_projection_shadow_evidence_json(
     if !incremental_watermark_parity {
         blocker_codes.insert("incremental_watermark_mismatch".to_string());
     }
+    if !predicate_pushdown_parity {
+        blocker_codes.insert("predicate_pushdown_mismatch".to_string());
+    }
     let ready = blocker_codes.is_empty();
     serde_json::json!({
         "protocol": "skein-nowledge-search-projection-shadow-evidence",
@@ -287,6 +299,7 @@ pub fn nowledge_search_projection_shadow_evidence_json(
         "embedding_identity_parity": embedding_identity_parity,
         "lifecycle_parity": lifecycle_parity,
         "incremental_watermark_parity": incremental_watermark_parity,
+        "predicate_pushdown_parity": predicate_pushdown_parity,
         "primary_evidence": primary_evidence,
         "shadow_evidence": shadow_evidence,
         "blocker_codes": blocker_codes.into_iter().collect::<Vec<_>>(),
@@ -330,6 +343,30 @@ fn search_projection_table_parity(
         "ready": ready,
         "tables": tables,
     })
+}
+
+fn predicate_pushdown_parity_matches(
+    primary_evidence: &serde_json::Value,
+    shadow_evidence: &serde_json::Value,
+) -> bool {
+    let fields = [
+        "ready",
+        "equality_ready",
+        "in_list_ready",
+        "not_in_list_ready",
+        "range_ready",
+        "row_filter_ready",
+        "segment_pruning_ready",
+        "numeric_min_max_ready",
+        "required_ops_ready",
+    ];
+    fields.iter().all(|field| {
+        bool_path(primary_evidence, &["predicate_pushdown", field])
+            == bool_path(shadow_evidence, &["predicate_pushdown", field])
+    }) && array_path(primary_evidence, &["predicate_pushdown", "required_ops"])
+        == array_path(shadow_evidence, &["predicate_pushdown", "required_ops"])
+        && array_path(primary_evidence, &["predicate_pushdown", "supported_ops"])
+            == array_path(shadow_evidence, &["predicate_pushdown", "supported_ops"])
 }
 
 fn collect_prefixed_evidence_blockers(
@@ -447,6 +484,49 @@ fn incremental_update_report(probe: &serde_json::Value) -> serde_json::Value {
     })
 }
 
+fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
+    let predicate = value_path(probe, &["predicate_pushdown"])
+        .or_else(|| value_path(probe, &["scan_filter"]))
+        .unwrap_or(&serde_json::Value::Null);
+    let equality_ready = bool_path(predicate, &["equality_ready"]).unwrap_or(false);
+    let in_list_ready = bool_path(predicate, &["in_list_ready"]).unwrap_or(false);
+    let not_in_list_ready = bool_path(predicate, &["not_in_list_ready"]).unwrap_or(false);
+    let range_ready = bool_path(predicate, &["range_ready"]).unwrap_or(false);
+    let row_filter_ready = bool_path(predicate, &["row_filter_ready"]).unwrap_or(false);
+    let segment_pruning_ready = bool_path(predicate, &["segment_pruning_ready"]).unwrap_or(false);
+    let numeric_min_max_ready = bool_path(predicate, &["numeric_min_max_ready"]).unwrap_or(false);
+    let persisted_segment_descriptor_ready =
+        bool_path(predicate, &["persisted_segment_descriptor_ready"]).unwrap_or(false);
+    let supported_ops = array_path(predicate, &["supported_ops"]).unwrap_or_default();
+    let required_ops = ["eq", "in", "not_in", "gt", "gte", "lt", "lte"];
+    let required_ops_ready = required_ops
+        .iter()
+        .all(|required| supported_ops.iter().any(|op| op == required));
+    let ready = equality_ready
+        && in_list_ready
+        && not_in_list_ready
+        && range_ready
+        && row_filter_ready
+        && segment_pruning_ready
+        && numeric_min_max_ready
+        && required_ops_ready;
+    serde_json::json!({
+        "ready": ready,
+        "equality_ready": equality_ready,
+        "in_list_ready": in_list_ready,
+        "not_in_list_ready": not_in_list_ready,
+        "range_ready": range_ready,
+        "row_filter_ready": row_filter_ready,
+        "segment_pruning_ready": segment_pruning_ready,
+        "numeric_min_max_ready": numeric_min_max_ready,
+        "persisted_segment_descriptor_ready": persisted_segment_descriptor_ready,
+        "required_ops_ready": required_ops_ready,
+        "required_ops": required_ops,
+        "supported_ops": supported_ops,
+        "scan_filter_fields": array_path(predicate, &["scan_filter_fields"]).unwrap_or_default(),
+    })
+}
+
 fn collect_probe_blockers(probe: &serde_json::Value, blockers: &mut BTreeSet<String>) {
     for code in array_path(probe, &["blocker_codes"]).unwrap_or_default() {
         blockers.insert(code);
@@ -554,6 +634,7 @@ mod tests {
         assert_eq!(report["metadata_repair_marker_ready"], true);
         assert_eq!(report["incremental_update_ready"], true);
         assert_eq!(report["source_chunk_ready"], true);
+        assert_eq!(report["predicate_pushdown_ready"], true);
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
     }
 
@@ -598,6 +679,21 @@ mod tests {
     }
 
     #[test]
+    fn search_projection_evidence_fails_closed_for_missing_predicate_pushdown() {
+        let mut probe = ready_probe();
+        probe.as_object_mut().unwrap().remove("predicate_pushdown");
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["predicate_pushdown_ready"], false);
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["predicate_pushdown_not_ready"])
+        );
+    }
+
+    #[test]
     fn skein_probe_output_feeds_search_projection_evidence() {
         let path = unique_test_dir("search_projection_probe_command");
         {
@@ -638,6 +734,11 @@ mod tests {
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["covered_table_count"], 6);
         assert_eq!(evidence["source_chunk_ready"], true);
+        assert_eq!(evidence["predicate_pushdown_ready"], true);
+        assert_eq!(
+            probe["predicate_pushdown"]["supported_ops"],
+            serde_json::json!(["eq", "in", "not_in", "gt", "gte", "lt", "lte"])
+        );
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -657,6 +758,19 @@ mod tests {
         assert_eq!(report["lifecycle_parity"], true);
         assert_eq!(report["incremental_watermark_parity"], true);
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_projection_shadow_evidence_ignores_descriptor_state_for_predicate_parity() {
+        let mut primary = ready_probe();
+        primary["predicate_pushdown"]["persisted_segment_descriptor_ready"] =
+            serde_json::json!(false);
+        let shadow = ready_probe();
+
+        let report = nowledge_search_projection_shadow_evidence_json(&primary, &shadow);
+
+        assert_eq!(report["ready"], true);
+        assert_eq!(report["predicate_pushdown_parity"], true);
     }
 
     #[test]
@@ -728,6 +842,32 @@ mod tests {
                 "delete_ready": true,
                 "watermark_ready": true,
                 "source_graph_commit_epoch": 7
+            },
+            "predicate_pushdown": {
+                "ready": true,
+                "equality_ready": true,
+                "in_list_ready": true,
+                "not_in_list_ready": true,
+                "range_ready": true,
+                "row_filter_ready": true,
+                "segment_pruning_ready": true,
+                "numeric_min_max_ready": true,
+                "persisted_segment_descriptor_ready": true,
+                "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
+                "scan_filter_fields": [
+                    "kind",
+                    "external_id",
+                    "source_id",
+                    "space_id",
+                    "unit_type",
+                    "importance",
+                    "confidence",
+                    "created_at",
+                    "updated_at",
+                    "event_start",
+                    "event_end",
+                    "is_latest"
+                ]
             }
         })
     }

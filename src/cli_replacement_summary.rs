@@ -175,6 +175,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "metadata_repair_marker_ready": search_projection_evidence.metadata_repair_marker_ready,
             "incremental_update_ready": search_projection_evidence.incremental_update_ready,
             "source_chunk_ready": search_projection_evidence.source_chunk_ready,
+            "predicate_pushdown_ready": search_projection_evidence.predicate_pushdown_ready,
             "blocker_codes": search_projection_evidence.blocker_codes,
         },
         "search_projection_shadow_evidence": {
@@ -440,6 +441,7 @@ struct SearchProjectionEvidenceSummary {
     metadata_repair_marker_ready: Option<bool>,
     incremental_update_ready: Option<bool>,
     source_chunk_ready: Option<bool>,
+    predicate_pushdown_ready: Option<bool>,
     blocker_codes: serde_json::Value,
 }
 
@@ -586,6 +588,8 @@ fn search_projection_evidence_summary(
     let incremental_update_ready =
         json_get_bool_path_from_dynamic(bundle, path, "incremental_update_ready");
     let source_chunk_ready = json_get_bool_path_from_dynamic(bundle, path, "source_chunk_ready");
+    let predicate_pushdown_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "predicate_pushdown_ready");
     let ready = present
         && derived_projection == Some(true)
         && all_tables_covered == Some(true)
@@ -598,7 +602,8 @@ fn search_projection_evidence_summary(
         && rebuild_marker_ready == Some(true)
         && metadata_repair_marker_ready == Some(true)
         && incremental_update_ready == Some(true)
-        && source_chunk_ready == Some(true);
+        && source_chunk_ready == Some(true)
+        && predicate_pushdown_ready == Some(true);
     SearchProjectionEvidenceSummary {
         present,
         ready,
@@ -614,6 +619,7 @@ fn search_projection_evidence_summary(
         metadata_repair_marker_ready,
         incremental_update_ready,
         source_chunk_ready,
+        predicate_pushdown_ready,
         blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
     }
 }
@@ -900,6 +906,7 @@ fn nowledge_replacement_next_actions(
                 "search_projection_evidence.metadata_repair_marker_ready",
                 "search_projection_evidence.incremental_update_ready",
                 "search_projection_evidence.source_chunk_ready",
+                "search_projection_evidence.predicate_pushdown_ready",
                 "search_projection_evidence.blocker_codes",
             ],
         ));
@@ -2114,6 +2121,7 @@ mod tests {
                         "search_projection_evidence.metadata_repair_marker_ready",
                         "search_projection_evidence.incremental_update_ready",
                         "search_projection_evidence.source_chunk_ready",
+                        "search_projection_evidence.predicate_pushdown_ready",
                         "search_projection_evidence.blocker_codes"
                     ]
                 },
@@ -2261,6 +2269,7 @@ mod tests {
                 "metadata_repair_marker_ready": true,
                 "incremental_update_ready": true,
                 "source_chunk_ready": true,
+                "predicate_pushdown_ready": true,
                 "blocker_codes": []
             },
             "search_projection_shadow_evidence": {
