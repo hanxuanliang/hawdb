@@ -423,6 +423,62 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ),
         ),
         check(
+            "bounded_read_evidence_alignment",
+            [
+                bool_path(bundle, &["bounded_read_evidence", "ready"]) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "evidence_ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "summary_ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "protocol_matches"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "readiness_matches"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "mode_matches"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "max_rows_matches"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_bounded_read_alignment", "streaming_matches"],
+                ) == Some(true),
+            ],
+            [
+                "bounded_read_evidence.ready",
+                "replacement_summary_bounded_read_alignment.ready",
+                "replacement_summary_bounded_read_alignment.evidence_ready",
+                "replacement_summary_bounded_read_alignment.summary_ready",
+                "replacement_summary_bounded_read_alignment.protocol_matches",
+                "replacement_summary_bounded_read_alignment.readiness_matches",
+                "replacement_summary_bounded_read_alignment.mode_matches",
+                "replacement_summary_bounded_read_alignment.max_rows_matches",
+                "replacement_summary_bounded_read_alignment.streaming_matches",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &["bounded_read_evidence", "blocker_codes"][..],
+                    &["replacement_summary_bounded_read_alignment", "blocker_codes"][..],
+                ],
+            ),
+        ),
+        check(
             "background_maintenance_evidence",
             [
                 bool_path(
@@ -815,6 +871,19 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if !bounded_read_alignment_ready(bundle) {
+        actions.push(next_action(
+            "regenerate_bounded_read_alignment",
+            "live bounded-read evidence must match the replacement summary before Mem cutover",
+            [
+                "bounded_read_evidence.ready",
+                "replacement_summary_bounded_read_alignment.ready",
+                "replacement_summary_bounded_read_alignment.evidence_ready",
+                "replacement_summary_bounded_read_alignment.summary_ready",
+                "replacement_summary_bounded_read_alignment.blocker_codes",
+            ],
+        ));
+    }
     if !replacement_summary_storage_recovery_ready(bundle) {
         actions.push(next_action(
             "attach_storage_recovery_report",
@@ -1021,6 +1090,40 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
             bundle,
             &["replacement_summary", "bounded_read_evidence", "streaming"],
         ) == Some(false)
+}
+
+fn bounded_read_alignment_ready(bundle: &serde_json::Value) -> bool {
+    bool_path(bundle, &["bounded_read_evidence", "ready"]) == Some(true)
+        && [
+            &["replacement_summary_bounded_read_alignment", "ready"][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "evidence_ready",
+            ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "summary_ready",
+            ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "protocol_matches",
+            ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "readiness_matches",
+            ][..],
+            &["replacement_summary_bounded_read_alignment", "mode_matches"][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "max_rows_matches",
+            ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "streaming_matches",
+            ][..],
+        ]
+        .iter()
+        .all(|path| bool_path(bundle, path) == Some(true))
 }
 
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
@@ -1510,6 +1613,56 @@ mod tests {
     }
 
     #[test]
+    fn rejects_stale_bounded_read_summary_when_live_evidence_is_not_ready() {
+        let mut bundle = ready_bundle();
+        bundle["bounded_read_evidence"]["ready"] = serde_json::json!(false);
+        bundle["bounded_read_evidence"]["blocker_codes"] =
+            serde_json::json!(["skein_shadow_runtime_not_open"]);
+        bundle["replacement_summary_bounded_read_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["evidence_ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["readiness_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["blocker_codes"] =
+            serde_json::json!(["replacement_summary_bounded_read_evidence_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence_alignment"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!([
+                "replacement_summary_bounded_read_evidence_mismatch",
+                "skein_shadow_runtime_not_open"
+            ])
+        );
+        let alignment_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence_alignment")
+            .unwrap();
+        assert_eq!(
+            alignment_check["failed_evidence_fields"],
+            serde_json::json!([
+                "bounded_read_evidence.ready",
+                "replacement_summary_bounded_read_alignment.ready",
+                "replacement_summary_bounded_read_alignment.evidence_ready",
+                "replacement_summary_bounded_read_alignment.readiness_matches"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "regenerate_bounded_read_alignment"));
+    }
+
+    #[test]
     fn rejects_inconsistent_bounded_read_summary_even_if_ready_flag_is_true() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["bounded_read_evidence"]["mode"] =
@@ -1778,6 +1931,31 @@ mod tests {
                 "ready": true,
                 "blocker_codes": [],
                 "failed_checks": []
+            },
+            "bounded_read_evidence": {
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                "ready": true,
+                "mode": "shadow_read_only",
+                "max_rows": 512,
+                "execution_row_cap": 513,
+                "row_limit_enforced_before_output": true,
+                "operator_row_cap_enabled": true,
+                "blocking_operator_count": 0,
+                "streaming": false,
+                "blocker_codes": []
+            },
+            "replacement_summary_bounded_read_alignment": {
+                "ready": true,
+                "evidence_present": true,
+                "summary_present": true,
+                "evidence_ready": true,
+                "summary_ready": true,
+                "protocol_matches": true,
+                "readiness_matches": true,
+                "mode_matches": true,
+                "max_rows_matches": true,
+                "streaming_matches": true,
+                "blocker_codes": []
             },
             "replacement_summary": {
                 "protocol": "skein-nowledge-replacement-summary",
