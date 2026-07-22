@@ -7909,7 +7909,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         search_index: &SearchIndex,
         request: &KnowledgeRetrievalRequest,
     ) -> KnowledgeRetrievalOutput {
-        let search = search_index.search_with_options(
+        let search = search_index.search_with_options_prefer_compressed_vector_projection(
             &request.query_text,
             request.query_embedding.as_deref(),
             request.mode,
