@@ -1,4 +1,7 @@
-use skein::{replacement_readiness_family_evidence_health_from_bundle, Result, SkeinError};
+use skein::{
+    replacement_readiness_family_evidence_health_from_bundle, Result, SkeinError,
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+};
 use std::path::Path;
 
 pub fn nowledge_query_family_evidence_usage() -> String {
@@ -40,6 +43,8 @@ fn nowledge_query_family_evidence_json(input: &serde_json::Value) -> Result<serd
         "min_replacement_readiness_per_million": health.min_replacement_readiness_per_million,
         "invalid_family_count": health.invalid_family_count,
         "blocked_query_families": health.blocked_query_families,
+        "required_query_families": REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        "missing_required_query_families": health.missing_required_query_families,
         "blocker_codes": blocker_codes,
         "blockers": health.blockers,
         "replacement_readiness_by_query_family": families,
@@ -69,6 +74,9 @@ fn query_family_blocker_codes(
     }
     if !health.blocked_query_families.is_empty() {
         blockers.push("blocked_query_families");
+    }
+    if !health.missing_required_query_families.is_empty() {
+        blockers.push("missing_required_query_families");
     }
     blockers
 }
@@ -112,11 +120,52 @@ mod tests {
         assert_eq!(evidence["min_replacement_readiness_per_million"], 1_000_000);
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
         assert_eq!(
+            evidence["missing_required_query_families"],
+            serde_json::json!([])
+        );
+        assert_eq!(
             evidence["replacement_readiness_by_query_family"]
                 .as_array()
                 .unwrap()
                 .len(),
-            2
+            4
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn query_family_evidence_command_fails_closed_for_missing_required_families() {
+        let path = unique_test_file("query_family_missing_required");
+        let families = serde_json::json!([
+            {
+                "query_family": "read",
+                "replacement_readiness_per_million": 1000000
+            },
+            {
+                "query_family": "mutation",
+                "replacement_readiness_per_million": 1000000
+            }
+        ]);
+        std::fs::write(&path, families.to_string()).unwrap();
+
+        let (evidence, _) = run_nowledge_query_family_evidence(
+            [path.to_str().unwrap()].into_iter().map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(
+            evidence["blocker_codes"],
+            serde_json::json!(["missing_required_query_families"])
+        );
+        assert_eq!(
+            evidence["missing_required_query_families"],
+            serde_json::json!([
+                "memory_lookup",
+                "graph_traversal",
+                "projected_graph",
+                "search_projection"
+            ])
         );
         std::fs::remove_file(path).unwrap();
     }
@@ -126,11 +175,19 @@ mod tests {
         let path = unique_test_file("query_family_blocked");
         let families = serde_json::json!([
             {
-                "query_family": "mutation",
+                "query_family": "graph_traversal",
                 "replacement_readiness_per_million": 500000
             },
             {
-                "query_family": "read",
+                "query_family": "memory_lookup",
+                "replacement_readiness_per_million": 1000000
+            },
+            {
+                "query_family": "projected_graph",
+                "replacement_readiness_per_million": 1000000
+            },
+            {
+                "query_family": "search_projection",
                 "replacement_readiness_per_million": 1000000
             }
         ]);
@@ -144,7 +201,7 @@ mod tests {
         assert_eq!(evidence["ready"], false);
         assert_eq!(
             evidence["blocked_query_families"],
-            serde_json::json!(["mutation"])
+            serde_json::json!(["graph_traversal"])
         );
         assert_eq!(
             evidence["blocker_codes"],
@@ -171,11 +228,19 @@ mod tests {
         serde_json::json!({
             "replacement_readiness_by_query_family": [
                 {
-                    "query_family": "read",
+                    "query_family": "memory_lookup",
                     "replacement_readiness_per_million": 1000000
                 },
                 {
-                    "query_family": "mutation",
+                    "query_family": "graph_traversal",
+                    "replacement_readiness_per_million": 1000000
+                },
+                {
+                    "query_family": "projected_graph",
+                    "replacement_readiness_per_million": 1000000
+                },
+                {
+                    "query_family": "search_projection",
                     "replacement_readiness_per_million": 1000000
                 }
             ]

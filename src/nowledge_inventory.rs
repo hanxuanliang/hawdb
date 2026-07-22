@@ -82,8 +82,16 @@ pub struct ReplacementReadinessFamilyEvidenceHealth {
     pub min_replacement_readiness_per_million: Option<u64>,
     pub invalid_family_count: u64,
     pub blocked_query_families: Vec<String>,
+    pub missing_required_query_families: Vec<String>,
     pub blockers: Vec<String>,
 }
+
+pub const REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES: &[&str] = &[
+    "memory_lookup",
+    "graph_traversal",
+    "projected_graph",
+    "search_projection",
+];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RustStringLiteral {
@@ -730,6 +738,7 @@ pub fn replacement_readiness_family_evidence_health(
             min_replacement_readiness_per_million: None,
             invalid_family_count: 0,
             blocked_query_families: Vec::new(),
+            missing_required_query_families: Vec::new(),
             blockers: Vec::new(),
         };
     };
@@ -770,6 +779,19 @@ pub fn replacement_readiness_family_evidence_health(
                 .map(str::to_string)
         })
         .collect::<Vec<_>>();
+    let present_query_families = families
+        .iter()
+        .filter_map(|family| {
+            family
+                .get("query_family")
+                .and_then(serde_json::Value::as_str)
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    let missing_required_query_families = REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES
+        .iter()
+        .filter(|family| !present_query_families.contains(**family))
+        .map(|family| (*family).to_string())
+        .collect::<Vec<_>>();
     let mut blockers = Vec::new();
     if invalid_family_count > 0 {
         blockers.push("replacement readiness family report has invalid entries".to_string());
@@ -780,6 +802,12 @@ pub fn replacement_readiness_family_evidence_health(
             blocked_query_families.join(", ")
         ));
     }
+    if !missing_required_query_families.is_empty() {
+        blockers.push(format!(
+            "replacement readiness is missing required query families: {}",
+            missing_required_query_families.join(", ")
+        ));
+    }
 
     ReplacementReadinessFamilyEvidenceHealth {
         present: true,
@@ -787,6 +815,7 @@ pub fn replacement_readiness_family_evidence_health(
         min_replacement_readiness_per_million,
         invalid_family_count,
         blocked_query_families,
+        missing_required_query_families,
         blockers,
     }
 }
@@ -2781,8 +2810,20 @@ mod tests {
         assert_eq!(health.invalid_family_count, 0);
         assert_eq!(health.blocked_query_families, vec!["mutation".to_string()]);
         assert_eq!(
+            health.missing_required_query_families,
+            vec![
+                "memory_lookup".to_string(),
+                "graph_traversal".to_string(),
+                "projected_graph".to_string(),
+                "search_projection".to_string()
+            ]
+        );
+        assert_eq!(
             health.blockers,
-            vec!["replacement readiness is incomplete for query families: mutation".to_string()]
+            vec![
+                "replacement readiness is incomplete for query families: mutation".to_string(),
+                "replacement readiness is missing required query families: memory_lookup, graph_traversal, projected_graph, search_projection".to_string()
+            ]
         );
     }
 
@@ -2795,6 +2836,7 @@ mod tests {
         assert_eq!(health.min_replacement_readiness_per_million, None);
         assert_eq!(health.invalid_family_count, 0);
         assert!(health.blocked_query_families.is_empty());
+        assert!(health.missing_required_query_families.is_empty());
         assert!(health.blockers.is_empty());
     }
 
@@ -2812,9 +2854,51 @@ mod tests {
         assert!(!health.ready);
         assert_eq!(health.invalid_family_count, 1);
         assert_eq!(
-            health.blockers,
-            vec!["replacement readiness family report has invalid entries".to_string()]
+            health.missing_required_query_families,
+            vec![
+                "memory_lookup".to_string(),
+                "graph_traversal".to_string(),
+                "projected_graph".to_string(),
+                "search_projection".to_string()
+            ]
         );
+        assert_eq!(
+            health.blockers,
+            vec![
+                "replacement readiness family report has invalid entries".to_string(),
+                "replacement readiness is missing required query families: memory_lookup, graph_traversal, projected_graph, search_projection".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn replacement_readiness_family_evidence_health_requires_nowledge_families() {
+        let families = serde_json::json!([
+            {
+                "query_family": "memory_lookup",
+                "replacement_readiness_per_million": 1_000_000
+            },
+            {
+                "query_family": "graph_traversal",
+                "replacement_readiness_per_million": 1_000_000
+            },
+            {
+                "query_family": "projected_graph",
+                "replacement_readiness_per_million": 1_000_000
+            },
+            {
+                "query_family": "search_projection",
+                "replacement_readiness_per_million": 1_000_000
+            }
+        ]);
+
+        let health = super::replacement_readiness_family_evidence_health(Some(&families));
+
+        assert!(health.present);
+        assert!(health.ready);
+        assert!(health.blocked_query_families.is_empty());
+        assert!(health.missing_required_query_families.is_empty());
+        assert!(health.blockers.is_empty());
     }
 
     #[test]

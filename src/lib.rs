@@ -311,7 +311,7 @@ pub use nowledge_inventory::{
     storage_recovery_evidence_health, storage_recovery_evidence_health_from_bundle,
     BackgroundMaintenanceEvidenceHealth, NowledgeCypherMigrationGateJsonOptions,
     NowledgeInventoryScanOptions, ReplacementReadinessFamilyEvidenceHealth,
-    StorageRecoveryEvidenceHealth,
+    StorageRecoveryEvidenceHealth, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 pub use nowledge_mem::{
     nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config, NowledgeMemEmbeddedStore,

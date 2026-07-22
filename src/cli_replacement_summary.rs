@@ -1,3 +1,7 @@
+use skein::{
+    replacement_readiness_family_evidence_health_from_bundle,
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+};
 use std::collections::BTreeSet;
 
 pub fn nowledge_replacement_summary_usage() -> String {
@@ -65,6 +69,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let bounded_read_evidence_ready = bounded_read_evidence.ready;
     let background_graph_delta_evidence_missing =
         background_maintenance_graph_delta_evidence_missing(bundle);
+    let family_health = replacement_readiness_family_evidence_health_from_bundle(bundle);
+    let family_evidence_ready = family_health.present && family_health.ready;
     let production_cutover_ready = migration_gate_decision == Some("ready")
         && cutover_decision == Some("ready")
         && cutover_evidence_eligible
@@ -78,6 +84,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && search_projection_shadow_evidence_ready
         && bounded_read_evidence_ready
         && !background_graph_delta_evidence_missing
+        && family_evidence_ready
         && replacement_readiness_per_million == Some(1_000_000);
     let production_replacement_per_million = if production_cutover_ready {
         1_000_000
@@ -103,6 +110,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             search_projection_shadow_evidence_ready,
             bounded_read_evidence_ready,
             background_graph_delta_evidence_missing,
+            family_evidence_ready,
         },
     );
     let blockers = nowledge_replacement_blockers(bundle);
@@ -129,6 +137,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             search_projection_shadow_evidence_ready,
             bounded_read_evidence_ready,
             background_graph_delta_evidence_missing,
+            family_evidence_ready,
             production_cutover_ready,
         },
     );
@@ -323,6 +332,7 @@ fn replacement_readiness_family_summary(
     bundle: &serde_json::Value,
     omitted_count: usize,
 ) -> serde_json::Value {
+    let health = replacement_readiness_family_evidence_health_from_bundle(bundle);
     let families = bundle
         .get("replacement_readiness_by_query_family")
         .and_then(serde_json::Value::as_array)
@@ -369,6 +379,8 @@ fn replacement_readiness_family_summary(
         "omitted_count": omitted_count,
         "min_replacement_readiness_per_million": min_replacement_readiness_per_million,
         "blocked_query_families": blocked_query_families,
+        "required_query_families": REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        "missing_required_query_families": health.missing_required_query_families,
     })
 }
 
@@ -389,6 +401,7 @@ struct ReplacementReadinessInputs<'a> {
     search_projection_shadow_evidence_ready: bool,
     bounded_read_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
+    family_evidence_ready: bool,
 }
 
 struct NextActionInputs<'a> {
@@ -408,6 +421,7 @@ struct NextActionInputs<'a> {
     search_projection_shadow_evidence_ready: bool,
     bounded_read_evidence_ready: bool,
     background_graph_delta_evidence_missing: bool,
+    family_evidence_ready: bool,
     production_cutover_ready: bool,
 }
 
@@ -753,6 +767,9 @@ fn nowledge_replacement_blocking_categories(
     if inputs.replacement_readiness_per_million != Some(1_000_000) {
         categories.insert("query_family_readiness".to_string());
     }
+    if !inputs.family_evidence_ready {
+        categories.insert("query_family_readiness".to_string());
+    }
     if inputs.migration_gate_decision != Some("ready") {
         categories.insert("migration_gate".to_string());
     }
@@ -828,12 +845,11 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
-    if inputs.replacement_readiness_per_million != Some(1_000_000)
-        || has_blocked_replacement_family(bundle)
+    if inputs.replacement_readiness_per_million != Some(1_000_000) || !inputs.family_evidence_ready
     {
         actions.push(next_action(
             "close_blocked_query_families",
-            "one or more query families are below full replacement readiness",
+            "one or more required query families are missing or below full replacement readiness",
             [
                 "replacement_readiness_per_million",
                 "replacement_readiness_by_query_family",
@@ -1007,20 +1023,6 @@ fn nowledge_replacement_next_actions(
     actions
 }
 
-fn has_blocked_replacement_family(bundle: &serde_json::Value) -> bool {
-    bundle
-        .get("replacement_readiness_by_query_family")
-        .and_then(serde_json::Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|family| {
-            family
-                .get("replacement_readiness_per_million")
-                .and_then(serde_json::Value::as_u64)
-                != Some(1_000_000)
-        })
-}
-
 fn next_action(
     action: &str,
     reason: &str,
@@ -1063,6 +1065,8 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
         .is_none()
     {
         missing.push("replacement_readiness_by_query_family".to_string());
+    } else if !replacement_readiness_family_evidence_health_from_bundle(bundle).ready {
+        missing.push("replacement_readiness_by_query_family_ready".to_string());
     }
     if bundle.get("previous_wrapper_contract_evidence").is_none() {
         missing.push("previous_wrapper_contract_evidence".to_string());
@@ -1281,6 +1285,7 @@ mod tests {
                 "cutover_evidence",
                 "dual_engine_evidence",
                 "previous_wrapper_contract",
+                "query_family_readiness",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
                 "shadow_parity"
@@ -1422,6 +1427,50 @@ mod tests {
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_required_query_families() {
+        let mut bundle = production_ready_bundle();
+        bundle["replacement_readiness_by_query_family"] = serde_json::json!([
+            {
+                "query_family": "read",
+                "replacement_readiness_per_million": 1_000_000
+            },
+            {
+                "query_family": "mutation",
+                "replacement_readiness_per_million": 1_000_000
+            }
+        ]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "query_family_readiness"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "replacement_readiness_by_query_family_ready"));
+        assert_eq!(
+            summary["replacement_readiness_family_summary"]["missing_required_query_families"],
+            serde_json::json!([
+                "memory_lookup",
+                "graph_traversal",
+                "projected_graph",
+                "search_projection"
+            ])
+        );
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "close_blocked_query_families"));
     }
 
     #[test]
@@ -1880,15 +1929,15 @@ mod tests {
         );
         assert_eq!(
             summary["replacement_readiness_family_summary"]["total_count"],
-            1
+            4
         );
         assert_eq!(
             summary["replacement_readiness_family_summary"]["ready_count"],
-            1
+            4
         );
         assert_eq!(
             summary["replacement_readiness_family_summary"]["omitted_count"],
-            1
+            4
         );
         assert_eq!(summary["production_cutover_ready"], true);
     }
@@ -2081,6 +2130,7 @@ mod tests {
             serde_json::json!([
                 "storage_recovery",
                 "background_maintenance",
+                "replacement_readiness_by_query_family_ready",
                 "previous_wrapper_contract_evidence",
                 "full_contract_evidence",
                 "dual_engine_evidence",
@@ -2109,7 +2159,7 @@ mod tests {
             serde_json::json!([
                 {
                     "action": "close_blocked_query_families",
-                    "reason": "one or more query families are below full replacement readiness",
+                    "reason": "one or more required query families are missing or below full replacement readiness",
                     "evidence_fields": [
                         "replacement_readiness_per_million",
                         "replacement_readiness_by_query_family"
@@ -2388,6 +2438,18 @@ mod tests {
             "replacement_readiness_by_query_family": [
                 {
                     "query_family": "memory_lookup",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
+                    "query_family": "graph_traversal",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
+                    "query_family": "projected_graph",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
+                    "query_family": "search_projection",
                     "replacement_readiness_per_million": 1_000_000
                 }
             ]
