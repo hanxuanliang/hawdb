@@ -22,8 +22,9 @@ use cli_replacement_summary::{
 use cli_storage_recovery_evidence::run_nowledge_storage_recovery_evidence;
 use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::search_projection_evidence::{
-    run_nowledge_search_projection_evidence, run_nowledge_search_projection_shadow_evidence,
-    run_skein_search_projection_probe,
+    nowledge_search_projection_probe_contract_json,
+    nowledge_search_projection_probe_contract_usage, run_nowledge_search_projection_evidence,
+    run_nowledge_search_projection_shadow_evidence, run_skein_search_projection_probe,
 };
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
@@ -134,6 +135,16 @@ fn main() -> Result<()> {
                     "nowledge search projection evidence is not ready".to_string(),
                 ));
             }
+            return Ok(());
+        }
+        if command == "nowledge-search-projection-probe-contract" {
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(
+                    nowledge_search_projection_probe_contract_usage(),
+                ));
+            }
+            let json = nowledge_search_projection_probe_contract_json();
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
         }
         if command == "skein-search-projection-probe" {

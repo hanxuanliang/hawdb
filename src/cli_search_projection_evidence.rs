@@ -34,6 +34,73 @@ pub fn nowledge_search_projection_shadow_evidence_usage() -> String {
         .to_string()
 }
 
+pub fn nowledge_search_projection_probe_contract_usage() -> String {
+    "nowledge-search-projection-probe-contract requires no arguments".to_string()
+}
+
+pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "skein-nowledge-search-projection-probe-contract-v1",
+        "purpose": "primary LanceDB and shadow Skein probes must use this shape before search projection shadow evidence can pass",
+        "required_tables": REQUIRED_TABLES,
+        "vector_tables": VECTOR_TABLES,
+        "required_predicate_pushdown_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
+        "required_top_level_fields": [
+            "engine",
+            "derived_projection",
+            "document_count",
+            "tables",
+            "embedding_manifest",
+            "fail_soft",
+            "lifecycle",
+            "incremental_update",
+            "predicate_pushdown"
+        ],
+        "table_fields": [
+            "name",
+            "present",
+            "fts_ready",
+            "vector_ready",
+            "row_count",
+            "blocker_codes"
+        ],
+        "embedding_manifest_fields": [
+            "model",
+            "dimension",
+            "active_model",
+            "active_dimension"
+        ],
+        "fail_soft_fields": [
+            "fts_to_vector_ready",
+            "vector_to_fts_ready",
+            "no_500_on_leg_failure"
+        ],
+        "lifecycle_fields": [
+            "rebuild_marker_ready",
+            "metadata_repair_marker_ready"
+        ],
+        "incremental_update_fields": [
+            "ready",
+            "upsert_ready",
+            "delete_ready",
+            "watermark_ready",
+            "source_graph_commit_epoch"
+        ],
+        "predicate_pushdown_fields": [
+            "equality_ready",
+            "in_list_ready",
+            "not_in_list_ready",
+            "range_ready",
+            "row_filter_ready",
+            "segment_pruning_ready",
+            "numeric_min_max_ready",
+            "supported_ops",
+            "scan_filter_fields"
+        ],
+        "example_primary_probe": ready_probe_template("lancedb"),
+    })
+}
+
 pub fn run_nowledge_search_projection_evidence(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(serde_json::Value, bool)> {
@@ -379,6 +446,67 @@ fn collect_prefixed_evidence_blockers(
     }
 }
 
+fn ready_probe_template(engine: &str) -> serde_json::Value {
+    serde_json::json!({
+        "engine": engine,
+        "derived_projection": true,
+        "document_count": 6,
+        "tables": [
+            ready_probe_table("memories_index", true),
+            ready_probe_table("messages_index", false),
+            ready_probe_table("communities_index", true),
+            ready_probe_table("entities_index", true),
+            ready_probe_table("sources_index", true),
+            ready_probe_table("source_chunks_index", true)
+        ],
+        "embedding_manifest": {
+            "model": "bge-m3",
+            "dimension": 1024,
+            "active_model": "bge-m3",
+            "active_dimension": 1024
+        },
+        "fail_soft": {
+            "fts_to_vector_ready": true,
+            "vector_to_fts_ready": true,
+            "no_500_on_leg_failure": true
+        },
+        "lifecycle": {
+            "rebuild_marker_ready": true,
+            "metadata_repair_marker_ready": true
+        },
+        "incremental_update": {
+            "ready": true,
+            "upsert_ready": true,
+            "delete_ready": true,
+            "watermark_ready": true,
+            "source_graph_commit_epoch": 7
+        },
+        "predicate_pushdown": {
+            "equality_ready": true,
+            "in_list_ready": true,
+            "not_in_list_ready": true,
+            "range_ready": true,
+            "row_filter_ready": true,
+            "segment_pruning_ready": true,
+            "numeric_min_max_ready": true,
+            "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
+            "scan_filter_fields": ["unit_type", "metadata", "importance", "confidence", "history", "latest"]
+        },
+        "blocker_codes": []
+    })
+}
+
+fn ready_probe_table(name: &str, vector_ready: bool) -> serde_json::Value {
+    serde_json::json!({
+        "name": name,
+        "present": true,
+        "fts_ready": true,
+        "vector_ready": vector_ready,
+        "row_count": 1,
+        "blocker_codes": []
+    })
+}
+
 fn required_table_reports(probe: &serde_json::Value) -> Vec<serde_json::Value> {
     REQUIRED_TABLES
         .iter()
@@ -606,8 +734,8 @@ fn array_path(value: &serde_json::Value, path: &[&str]) -> Option<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
-        run_skein_search_projection_probe,
+        nowledge_search_projection_evidence_json, nowledge_search_projection_probe_contract_json,
+        nowledge_search_projection_shadow_evidence_json, run_skein_search_projection_probe,
     };
     use crate::{
         SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
@@ -636,6 +764,32 @@ mod tests {
         assert_eq!(report["source_chunk_ready"], true);
         assert_eq!(report["predicate_pushdown_ready"], true);
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn probe_contract_example_feeds_search_projection_evidence() {
+        let contract = nowledge_search_projection_probe_contract_json();
+        let example = &contract["example_primary_probe"];
+        let evidence = nowledge_search_projection_evidence_json(example);
+
+        assert_eq!(
+            contract["protocol"],
+            "skein-nowledge-search-projection-probe-contract-v1"
+        );
+        assert_eq!(example["engine"], "lancedb");
+        assert_eq!(
+            contract["required_tables"],
+            serde_json::json!([
+                "memories_index",
+                "messages_index",
+                "communities_index",
+                "entities_index",
+                "sources_index",
+                "source_chunks_index"
+            ])
+        );
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["predicate_pushdown_ready"], true);
     }
 
     #[test]
