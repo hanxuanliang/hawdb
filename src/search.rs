@@ -2089,21 +2089,28 @@ struct FilteredSearchDocuments<'a> {
     persisted_segment_descriptor_used: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct SearchNumericRange {
+    min: f64,
+    max: f64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 struct SearchFilterSegmentSummary {
     document_count: usize,
     present_counts: BTreeMap<String, usize>,
     values: BTreeMap<String, BTreeSet<String>>,
+    numeric_ranges: BTreeMap<String, SearchNumericRange>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct SearchSegmentDescriptor {
     target_documents: usize,
     document_count: usize,
     segments: Vec<SearchSegmentDescriptorEntry>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct SearchSegmentDescriptorEntry {
     first_document_id: String,
     last_document_id: String,
@@ -2111,10 +2118,11 @@ struct SearchSegmentDescriptorEntry {
     metadata: BTreeMap<String, SearchSegmentFieldSummary>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 struct SearchSegmentFieldSummary {
     present_count: usize,
     values: BTreeSet<String>,
+    numeric_range: Option<SearchNumericRange>,
 }
 
 fn filter_search_documents_with_segment_pruning<'a>(
@@ -2250,6 +2258,7 @@ impl SearchFilterSegmentSummary {
     fn from_documents(documents: &[&SearchDocument], fields: &BTreeSet<String>) -> Self {
         let mut present_counts = BTreeMap::new();
         let mut values = BTreeMap::<String, BTreeSet<String>>::new();
+        let mut numeric_ranges = BTreeMap::<String, SearchNumericRange>::new();
         for document in documents {
             for field in fields {
                 let Some(value) = search_document_field_value(document, field) else {
@@ -2260,12 +2269,19 @@ impl SearchFilterSegmentSummary {
                     .entry(field.clone())
                     .or_default()
                     .insert(value.to_string());
+                if let Some(number) = metadata_numeric_value(value) {
+                    numeric_ranges
+                        .entry(field.clone())
+                        .and_modify(|range| *range = range.with_value(number))
+                        .or_insert_with(|| SearchNumericRange::point(number));
+                }
             }
         }
         Self {
             document_count: documents.len(),
             present_counts,
             values,
+            numeric_ranges,
         }
     }
 
@@ -2290,6 +2306,14 @@ impl SearchFilterSegmentSummary {
             SearchPredicateOp::NotIn(excluded_values) => {
                 self.values_may_match_not_in(predicate.field().name(), excluded_values)
             }
+            SearchPredicateOp::Gt(expected)
+            | SearchPredicateOp::Gte(expected)
+            | SearchPredicateOp::Lt(expected)
+            | SearchPredicateOp::Lte(expected) => self.numeric_range_may_match(
+                predicate.field().name(),
+                predicate.op(),
+                expected.as_str(),
+            ),
         }
     }
 
@@ -2325,6 +2349,26 @@ impl SearchFilterSegmentSummary {
                 .iter()
                 .all(|excluded| !metadata_value_matches(field, actual, excluded.as_str()))
         })
+    }
+
+    fn numeric_range_may_match(&self, field: &str, op: &SearchPredicateOp, expected: &str) -> bool {
+        metadata_numeric_range_may_match(self.numeric_ranges.get(field).copied(), op, expected)
+    }
+}
+
+impl SearchNumericRange {
+    fn point(value: f64) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+
+    fn with_value(self, value: f64) -> Self {
+        Self {
+            min: self.min.min(value),
+            max: self.max.max(value),
+        }
     }
 }
 
@@ -2391,6 +2435,7 @@ impl SearchSegmentDescriptorEntry {
                 let summary = metadata.entry(field.clone()).or_default();
                 summary.present_count += 1;
                 summary.values.insert(value.to_string());
+                summary.update_numeric(value);
             }
         }
         Self {
@@ -2422,6 +2467,14 @@ impl SearchSegmentDescriptorEntry {
             SearchPredicateOp::NotIn(excluded_values) => {
                 self.values_may_match_not_in(predicate.field().name(), excluded_values)
             }
+            SearchPredicateOp::Gt(expected)
+            | SearchPredicateOp::Gte(expected)
+            | SearchPredicateOp::Lt(expected)
+            | SearchPredicateOp::Lte(expected) => self.numeric_range_may_match(
+                predicate.field().name(),
+                predicate.op(),
+                expected.as_str(),
+            ),
         }
     }
 
@@ -2458,14 +2511,27 @@ impl SearchSegmentDescriptorEntry {
                 .all(|excluded| !metadata_value_matches(field, actual, excluded.as_str()))
         })
     }
+
+    fn numeric_range_may_match(&self, field: &str, op: &SearchPredicateOp, expected: &str) -> bool {
+        metadata_numeric_range_may_match(
+            self.metadata
+                .get(field)
+                .and_then(|summary| summary.numeric_range),
+            op,
+            expected,
+        )
+    }
 }
 
-impl Default for SearchSegmentFieldSummary {
-    fn default() -> Self {
-        Self {
-            present_count: 0,
-            values: BTreeSet::new(),
-        }
+impl SearchSegmentFieldSummary {
+    fn update_numeric(&mut self, value: &str) {
+        let Some(number) = metadata_numeric_value(value) else {
+            return;
+        };
+        self.numeric_range = Some(match self.numeric_range {
+            Some(range) => range.with_value(number),
+            None => SearchNumericRange::point(number),
+        });
     }
 }
 
@@ -2497,6 +2563,18 @@ fn search_document_matches_predicate(
                 !metadata_value_matches(predicate.field().name(), actual, excluded.as_str())
             })
         }),
+        SearchPredicateOp::Gt(expected) => {
+            actual.is_some_and(|actual| metadata_numeric_gt(actual, expected.as_str()))
+        }
+        SearchPredicateOp::Gte(expected) => {
+            actual.is_some_and(|actual| metadata_numeric_gte(actual, expected.as_str()))
+        }
+        SearchPredicateOp::Lt(expected) => {
+            actual.is_some_and(|actual| metadata_numeric_lt(actual, expected.as_str()))
+        }
+        SearchPredicateOp::Lte(expected) => {
+            actual.is_some_and(|actual| metadata_numeric_lte(actual, expected.as_str()))
+        }
     }
 }
 
@@ -2518,6 +2596,54 @@ fn metadata_value_matches(key: &str, actual: &str, expected: &str) -> bool {
     match key {
         "kind" => metadata_kind_matches(actual, expected),
         _ => actual == expected,
+    }
+}
+
+fn metadata_numeric_value(value: &str) -> Option<f64> {
+    let number = value.parse::<f64>().ok()?;
+    number.is_finite().then_some(number)
+}
+
+fn metadata_numeric_gt(actual: &str, expected: &str) -> bool {
+    metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual > expected)
+}
+
+fn metadata_numeric_gte(actual: &str, expected: &str) -> bool {
+    metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual >= expected)
+}
+
+fn metadata_numeric_lt(actual: &str, expected: &str) -> bool {
+    metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual < expected)
+}
+
+fn metadata_numeric_lte(actual: &str, expected: &str) -> bool {
+    metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual <= expected)
+}
+
+fn metadata_numeric_pair(actual: &str, expected: &str) -> Option<(f64, f64)> {
+    Some((
+        metadata_numeric_value(actual)?,
+        metadata_numeric_value(expected)?,
+    ))
+}
+
+fn metadata_numeric_range_may_match(
+    range: Option<SearchNumericRange>,
+    op: &SearchPredicateOp,
+    expected: &str,
+) -> bool {
+    let Some(range) = range else {
+        return false;
+    };
+    let Some(expected) = metadata_numeric_value(expected) else {
+        return false;
+    };
+    match op {
+        SearchPredicateOp::Gt(_) => range.max > expected,
+        SearchPredicateOp::Gte(_) => range.max >= expected,
+        SearchPredicateOp::Lt(_) => range.min < expected,
+        SearchPredicateOp::Lte(_) => range.min <= expected,
+        SearchPredicateOp::Eq(_) | SearchPredicateOp::In(_) | SearchPredicateOp::NotIn(_) => true,
     }
 }
 
@@ -3130,11 +3256,14 @@ fn encode_search_segment_descriptor_body(descriptor: &SearchSegmentDescriptor) -
             segment.document_count
         ));
         for (field, summary) in &segment.metadata {
+            let (numeric_min, numeric_max) = encode_search_numeric_range(summary.numeric_range);
             body.push_str(&format!(
-                "field\t{}\t{}\t{}\n",
+                "field\t{}\t{}\t{}\t{}\t{}\n",
                 encode_string(field),
                 summary.present_count,
-                encode_segment_values(&summary.values)
+                encode_segment_values(&summary.values),
+                numeric_min,
+                numeric_max
             ));
         }
     }
@@ -3192,6 +3321,29 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
                             "search segment field present count",
                         )?,
                         values: decode_segment_values(raw_values)?,
+                        numeric_range: None,
+                    },
+                );
+            }
+            ["field", raw_field, raw_present_count, raw_values, raw_numeric_min, raw_numeric_max] =>
+            {
+                let Some(segment) = current_segment.as_mut() else {
+                    return Err(SkeinError::Storage(
+                        "search segment descriptor field appeared before segment".to_string(),
+                    ));
+                };
+                segment.metadata.insert(
+                    decode_string(raw_field)?,
+                    SearchSegmentFieldSummary {
+                        present_count: parse_usize(
+                            raw_present_count,
+                            "search segment field present count",
+                        )?,
+                        values: decode_segment_values(raw_values)?,
+                        numeric_range: decode_search_numeric_range(
+                            raw_numeric_min,
+                            raw_numeric_max,
+                        )?,
                     },
                 );
             }
@@ -3231,6 +3383,42 @@ fn decode_segment_values(input: &str) -> Result<BTreeSet<String>> {
         return Ok(BTreeSet::new());
     }
     input.split(',').map(decode_string).collect()
+}
+
+fn encode_search_numeric_range(range: Option<SearchNumericRange>) -> (String, String) {
+    range
+        .map(|range| (range.min.to_string(), range.max.to_string()))
+        .unwrap_or_else(|| (String::new(), String::new()))
+}
+
+fn decode_search_numeric_range(raw_min: &str, raw_max: &str) -> Result<Option<SearchNumericRange>> {
+    match (raw_min.is_empty(), raw_max.is_empty()) {
+        (true, true) => Ok(None),
+        (false, false) => {
+            let min = parse_finite_f64(raw_min, "search segment field numeric min")?;
+            let max = parse_finite_f64(raw_max, "search segment field numeric max")?;
+            if min > max {
+                return Err(SkeinError::Storage(
+                    "search segment field numeric min is greater than max".to_string(),
+                ));
+            }
+            Ok(Some(SearchNumericRange { min, max }))
+        }
+        _ => Err(SkeinError::Storage(
+            "search segment field numeric range is incomplete".to_string(),
+        )),
+    }
+}
+
+fn parse_finite_f64(raw: &str, name: &str) -> Result<f64> {
+    let value = raw
+        .parse::<f64>()
+        .map_err(|_| SkeinError::Storage(format!("invalid {name}: {raw}")))?;
+    if value.is_finite() {
+        Ok(value)
+    } else {
+        Err(SkeinError::Storage(format!("invalid {name}: {raw}")))
+    }
 }
 
 fn encode_string(input: &str) -> String {
@@ -3980,6 +4168,111 @@ mod tests {
         assert!(hit_ids.contains("memory:active"));
         assert!(hit_ids.contains("memory:legacy"));
         assert!(!hit_ids.contains("memory:deleted"));
+    }
+
+    #[test]
+    fn search_with_options_applies_numeric_range_filters_before_ranking() {
+        let mut index = SearchIndex::in_memory();
+        for (id, created_at) in [
+            ("memory:0_old_0", "1"),
+            ("memory:0_old_1", "2"),
+            ("memory:1_new_0", "10"),
+        ] {
+            index
+                .upsert(SearchDocument {
+                    id: id.to_string(),
+                    title: "Graph memory".to_string(),
+                    content: "graph projection diagnostics".to_string(),
+                    embedding: None,
+                    metadata: BTreeMap::from([("created_at".to_string(), created_at.to_string())]),
+                })
+                .unwrap();
+        }
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("created_at__gt".to_string(), "5".to_string())]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.filtered_document_count, 1);
+        assert_eq!(result.hits[0].id, "memory:1_new_0");
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            2
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
+            1
+        );
+    }
+
+    #[test]
+    fn malformed_numeric_range_filter_fails_closed() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(SearchDocument {
+                id: "memory:active".to_string(),
+                title: "Graph memory".to_string(),
+                content: "graph projection diagnostics".to_string(),
+                embedding: None,
+                metadata: BTreeMap::from([("created_at".to_string(), "10".to_string())]),
+            })
+            .unwrap();
+
+        let result = index.search_with_options(
+            "graph",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "created_at__gte".to_string(),
+                    "not-a-number".to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 0);
+        assert_eq!(result.filtered_document_count, 0);
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
+            0
+        );
     }
 
     #[test]
@@ -5486,6 +5779,103 @@ mod tests {
                 .candidate_set
                 .metadata_predicate_pushdown
                 .pruned_segment_count,
+            1
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_segment_descriptor_prunes_numeric_range_filters() {
+        let path = unique_test_dir("search_segment_descriptor_numeric_range");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for (id, created_at) in [
+                ("memory:0_old_0", "1"),
+                ("memory:0_old_1", "2"),
+                ("memory:1_new_0", "10"),
+            ] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: "Graph memory".to_string(),
+                        content: "segment descriptor range retrieval".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::from([(
+                            "created_at".to_string(),
+                            created_at.to_string(),
+                        )]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let descriptor =
+            std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
+        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V1\n"));
+        let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
+        assert_eq!(
+            descriptor.segments[0]
+                .metadata
+                .get("created_at")
+                .and_then(|summary| summary.numeric_range),
+            Some(SearchNumericRange { min: 1.0, max: 2.0 })
+        );
+        assert_eq!(
+            descriptor.segments[1]
+                .metadata
+                .get("created_at")
+                .and_then(|summary| summary.numeric_range),
+            Some(SearchNumericRange {
+                min: 10.0,
+                max: 10.0
+            })
+        );
+
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index.search_with_options(
+            "segment descriptor range retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "created_at__gte".to_string(),
+                    "10".to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.hits[0].id, "memory:1_new_0");
+        assert!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .persisted_segment_descriptor_used
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            2
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
             1
         );
         std::fs::remove_dir_all(path).unwrap();

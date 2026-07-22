@@ -4,6 +4,10 @@ use std::fmt;
 
 const IN_SUFFIX: &str = "__in";
 const NOT_IN_SUFFIX: &str = "__not_in";
+const GT_SUFFIX: &str = "__gt";
+const GTE_SUFFIX: &str = "__gte";
+const LT_SUFFIX: &str = "__lt";
+const LTE_SUFFIX: &str = "__lte";
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct SearchFieldRef {
@@ -20,6 +24,10 @@ pub enum SearchPredicateOp {
     Eq(SearchScalarValue),
     In(BTreeSet<SearchScalarValue>),
     NotIn(BTreeSet<SearchScalarValue>),
+    Gt(SearchScalarValue),
+    Gte(SearchScalarValue),
+    Lt(SearchScalarValue),
+    Lte(SearchScalarValue),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +47,7 @@ pub struct SearchScanPredicateSupport {
     pub equality: bool,
     pub in_list: bool,
     pub not_in_list: bool,
+    pub range: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -100,6 +109,34 @@ impl SearchPredicate {
         }
     }
 
+    pub fn gt(field: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            field: SearchFieldRef::new(field),
+            op: SearchPredicateOp::Gt(SearchScalarValue::string(value)),
+        }
+    }
+
+    pub fn gte(field: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            field: SearchFieldRef::new(field),
+            op: SearchPredicateOp::Gte(SearchScalarValue::string(value)),
+        }
+    }
+
+    pub fn lt(field: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            field: SearchFieldRef::new(field),
+            op: SearchPredicateOp::Lt(SearchScalarValue::string(value)),
+        }
+    }
+
+    pub fn lte(field: impl Into<String>, value: impl Into<String>) -> Self {
+        Self {
+            field: SearchFieldRef::new(field),
+            op: SearchPredicateOp::Lte(SearchScalarValue::string(value)),
+        }
+    }
+
     pub fn field(&self) -> &SearchFieldRef {
         &self.field
     }
@@ -113,6 +150,10 @@ impl SearchPredicate {
             SearchPredicateOp::Eq(_) => support.equality,
             SearchPredicateOp::In(_) => support.in_list,
             SearchPredicateOp::NotIn(_) => support.not_in_list,
+            SearchPredicateOp::Gt(_)
+            | SearchPredicateOp::Gte(_)
+            | SearchPredicateOp::Lt(_)
+            | SearchPredicateOp::Lte(_) => support.range,
         }
     }
 }
@@ -152,6 +193,14 @@ impl SearchPredicateSet {
                 if !values.is_empty() {
                     predicates.push(SearchPredicate::not_in_list(field, values));
                 }
+            } else if let Some(field) = key.strip_suffix(GTE_SUFFIX) {
+                predicates.push(SearchPredicate::gte(field, value));
+            } else if let Some(field) = key.strip_suffix(GT_SUFFIX) {
+                predicates.push(SearchPredicate::gt(field, value));
+            } else if let Some(field) = key.strip_suffix(LTE_SUFFIX) {
+                predicates.push(SearchPredicate::lte(field, value));
+            } else if let Some(field) = key.strip_suffix(LT_SUFFIX) {
+                predicates.push(SearchPredicate::lt(field, value));
             } else {
                 predicates.push(SearchPredicate::eq(key, value));
             }
@@ -178,6 +227,7 @@ impl Default for SearchScanPredicateSupport {
             equality: true,
             in_list: true,
             not_in_list: true,
+            range: true,
         }
     }
 }
@@ -287,22 +337,32 @@ mod tests {
                 "unit_type__in".to_string(),
                 r#"["fact","learning"]"#.to_string(),
             ),
+            ("created_at__gte".to_string(), "1710000000".to_string()),
+            ("updated_at__lt".to_string(), "1720000000".to_string()),
         ]);
 
         let predicates = SearchPredicateSet::from_metadata_filters(&filters).unwrap();
 
-        assert_eq!(predicates.predicates().len(), 3);
+        assert_eq!(predicates.predicates().len(), 5);
         assert!(matches!(
             predicates.predicates()[0].op(),
-            SearchPredicateOp::Eq(_)
+            SearchPredicateOp::Gte(_)
         ));
         assert!(matches!(
             predicates.predicates()[1].op(),
-            SearchPredicateOp::NotIn(values) if values.len() == 2
+            SearchPredicateOp::Eq(_)
         ));
         assert!(matches!(
             predicates.predicates()[2].op(),
+            SearchPredicateOp::NotIn(values) if values.len() == 2
+        ));
+        assert!(matches!(
+            predicates.predicates()[3].op(),
             SearchPredicateOp::In(values) if values.len() == 2
+        ));
+        assert!(matches!(
+            predicates.predicates()[4].op(),
+            SearchPredicateOp::Lt(_)
         ));
     }
 
@@ -336,6 +396,7 @@ mod tests {
                 equality: true,
                 in_list: true,
                 not_in_list: false,
+                range: true,
             },
         );
 
@@ -353,5 +414,31 @@ mod tests {
         .unwrap();
 
         assert!(predicates.is_unsatisfiable());
+    }
+
+    #[test]
+    fn predicate_pushdown_splits_unsupported_range_predicates() {
+        let predicates = SearchPredicateSet::from_metadata_filters(&BTreeMap::from([
+            ("kind".to_string(), "memory".to_string()),
+            ("created_at__gte".to_string(), "1710000000".to_string()),
+        ]))
+        .unwrap();
+
+        let pushdown = push_search_predicates(
+            &predicates,
+            SearchScanPredicateSupport {
+                equality: true,
+                in_list: true,
+                not_in_list: true,
+                range: false,
+            },
+        );
+
+        assert_eq!(pushdown.pushed().predicates().len(), 1);
+        assert_eq!(pushdown.residual().predicates().len(), 1);
+        assert!(matches!(
+            pushdown.residual().predicates()[0].op(),
+            SearchPredicateOp::Gte(_)
+        ));
     }
 }

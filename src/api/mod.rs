@@ -9082,7 +9082,68 @@ fn knowledge_graph_seed_matches_predicate(
                 excluded.as_str(),
             )
         }),
+        SearchPredicateOp::Gt(expected) => knowledge_graph_seed_matches_numeric_filter(
+            node,
+            predicate.field().name(),
+            expected.as_str(),
+            |actual, expected| actual > expected,
+        ),
+        SearchPredicateOp::Gte(expected) => knowledge_graph_seed_matches_numeric_filter(
+            node,
+            predicate.field().name(),
+            expected.as_str(),
+            |actual, expected| actual >= expected,
+        ),
+        SearchPredicateOp::Lt(expected) => knowledge_graph_seed_matches_numeric_filter(
+            node,
+            predicate.field().name(),
+            expected.as_str(),
+            |actual, expected| actual < expected,
+        ),
+        SearchPredicateOp::Lte(expected) => knowledge_graph_seed_matches_numeric_filter(
+            node,
+            predicate.field().name(),
+            expected.as_str(),
+            |actual, expected| actual <= expected,
+        ),
     }
+}
+
+fn knowledge_graph_seed_matches_numeric_filter(
+    node: &NodeRecord,
+    key: &str,
+    expected: &str,
+    matches: impl FnOnce(f64, f64) -> bool,
+) -> bool {
+    let Some(actual) = knowledge_graph_seed_filter_numeric_value(node, key) else {
+        return false;
+    };
+    let Some(expected) = parse_metadata_filter_number(expected) else {
+        return false;
+    };
+    matches(actual, expected)
+}
+
+fn knowledge_graph_seed_filter_numeric_value(node: &NodeRecord, key: &str) -> Option<f64> {
+    match key {
+        "kind" => None,
+        "external_id" => parse_metadata_filter_number(&projected_node_external_id(node)),
+        "source_id" => node_projection_source_id(node)
+            .as_deref()
+            .and_then(parse_metadata_filter_number),
+        "space_id" => parse_metadata_filter_number(&normalized_node_space_id(node)),
+        _ => node
+            .properties
+            .get(key)
+            .map(value_to_external_id)
+            .as_deref()
+            .and_then(parse_metadata_filter_number),
+    }
+}
+
+fn parse_metadata_filter_number(value: &str) -> Option<f64> {
+    let number = value.parse::<f64>().ok()?;
+    number.is_finite().then_some(number)
 }
 
 fn knowledge_graph_seed_matches_filter_value(
