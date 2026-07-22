@@ -10,6 +10,23 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
+const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
+    "/graph/overview",
+    "/graph/explore",
+    "/graph/expand/{node_id}",
+    "/graph/live-preview",
+    "/graph/live-preview/{node_id}",
+    "/graph/community-members/{community_id}",
+    "/library/community/{community_id}/subgraph",
+    "/library/community/{community_id}/recent-memories",
+    "/library/community/{community_id}/related",
+    "/graph/analysis",
+    "/graph/augmentation/state",
+    "/graph/augmentation/pagerank/plan",
+    "/graph/node-details/{node_id}",
+    "/graph/orphans",
+    "/graph/shortest-path",
+];
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
@@ -400,6 +417,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &["replacement_summary", "bounded_read_evidence", "streaming"],
                 ) == Some(false),
+                bounded_read_route_coverage_ready(bundle),
             ],
             [
                 "replacement_summary.bounded_read_evidence.present",
@@ -412,6 +430,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
                 "replacement_summary.bounded_read_evidence.blocking_operator_count",
                 "replacement_summary.bounded_read_evidence.streaming",
+                "replacement_summary.bounded_read_evidence.covered_routes",
             ],
             blocker_codes(
                 bundle,
@@ -458,6 +477,13 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &["replacement_summary_bounded_read_alignment", "streaming_matches"],
                 ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "covered_routes_matches",
+                    ],
+                ) == Some(true),
             ],
             [
                 "bounded_read_evidence.ready",
@@ -469,6 +495,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary_bounded_read_alignment.mode_matches",
                 "replacement_summary_bounded_read_alignment.max_rows_matches",
                 "replacement_summary_bounded_read_alignment.streaming_matches",
+                "replacement_summary_bounded_read_alignment.covered_routes_matches",
             ],
             blocker_codes(
                 bundle,
@@ -1090,6 +1117,7 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
             bundle,
             &["replacement_summary", "bounded_read_evidence", "streaming"],
         ) == Some(false)
+        && bounded_read_route_coverage_ready(bundle)
 }
 
 fn bounded_read_alignment_ready(bundle: &serde_json::Value) -> bool {
@@ -1121,9 +1149,36 @@ fn bounded_read_alignment_ready(bundle: &serde_json::Value) -> bool {
                 "replacement_summary_bounded_read_alignment",
                 "streaming_matches",
             ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "covered_routes_matches",
+            ][..],
         ]
         .iter()
         .all(|path| bool_path(bundle, path) == Some(true))
+}
+
+fn bounded_read_route_coverage_ready(bundle: &serde_json::Value) -> bool {
+    let covered_routes = string_array_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "bounded_read_evidence",
+            "covered_routes",
+        ],
+    );
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .all(|route| covered_routes.iter().any(|covered| covered == route))
+        && string_array_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "missing_covered_routes",
+            ],
+        )
+        .is_empty()
 }
 
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
@@ -1613,6 +1668,33 @@ mod tests {
     }
 
     #[test]
+    fn requires_bounded_read_route_coverage() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["bounded_read_evidence"]["covered_routes"] =
+            serde_json::json!(["/graph/overview"]);
+        bundle["replacement_summary"]["bounded_read_evidence"]["missing_covered_routes"] =
+            serde_json::json!(["/graph/explore"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence"])
+        );
+        let read_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence")
+            .unwrap();
+        assert_eq!(
+            read_check["failed_evidence_fields"],
+            serde_json::json!(["replacement_summary.bounded_read_evidence.covered_routes"])
+        );
+    }
+
+    #[test]
     fn rejects_stale_bounded_read_summary_when_live_evidence_is_not_ready() {
         let mut bundle = ready_bundle();
         bundle["bounded_read_evidence"]["ready"] = serde_json::json!(false);
@@ -1660,6 +1742,37 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "regenerate_bounded_read_alignment"));
+    }
+
+    #[test]
+    fn rejects_stale_bounded_read_summary_when_route_coverage_differs() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_bounded_read_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["covered_routes_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["blocker_codes"] =
+            serde_json::json!(["replacement_summary_bounded_read_evidence_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence_alignment"])
+        );
+        let alignment_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence_alignment")
+            .unwrap();
+        assert_eq!(
+            alignment_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary_bounded_read_alignment.ready",
+                "replacement_summary_bounded_read_alignment.covered_routes_matches"
+            ])
+        );
     }
 
     #[test]
@@ -1942,6 +2055,23 @@ mod tests {
                 "operator_row_cap_enabled": true,
                 "blocking_operator_count": 0,
                 "streaming": false,
+                "covered_routes": [
+                    "/graph/overview",
+                    "/graph/explore",
+                    "/graph/expand/{node_id}",
+                    "/graph/live-preview",
+                    "/graph/live-preview/{node_id}",
+                    "/graph/community-members/{community_id}",
+                    "/library/community/{community_id}/subgraph",
+                    "/library/community/{community_id}/recent-memories",
+                    "/library/community/{community_id}/related",
+                    "/graph/analysis",
+                    "/graph/augmentation/state",
+                    "/graph/augmentation/pagerank/plan",
+                    "/graph/node-details/{node_id}",
+                    "/graph/orphans",
+                    "/graph/shortest-path"
+                ],
                 "blocker_codes": []
             },
             "replacement_summary_bounded_read_alignment": {
@@ -1955,6 +2085,7 @@ mod tests {
                 "mode_matches": true,
                 "max_rows_matches": true,
                 "streaming_matches": true,
+                "covered_routes_matches": true,
                 "blocker_codes": []
             },
             "replacement_summary": {
@@ -2017,6 +2148,24 @@ mod tests {
                     "operator_row_cap_enabled": true,
                     "blocking_operator_count": 0,
                     "streaming": false,
+                    "covered_routes": [
+                        "/graph/overview",
+                        "/graph/explore",
+                        "/graph/expand/{node_id}",
+                        "/graph/live-preview",
+                        "/graph/live-preview/{node_id}",
+                        "/graph/community-members/{community_id}",
+                        "/library/community/{community_id}/subgraph",
+                        "/library/community/{community_id}/recent-memories",
+                        "/library/community/{community_id}/related",
+                        "/graph/analysis",
+                        "/graph/augmentation/state",
+                        "/graph/augmentation/pagerank/plan",
+                        "/graph/node-details/{node_id}",
+                        "/graph/orphans",
+                        "/graph/shortest-path"
+                    ],
+                    "missing_covered_routes": [],
                     "blocker_codes": []
                 },
                 "cutover_evidence": {

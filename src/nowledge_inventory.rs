@@ -36,6 +36,7 @@ pub struct NowledgeCypherMigrationGateJsonOptions {
     pub storage_recovery: Option<serde_json::Value>,
     pub background_maintenance_required: bool,
     pub background_maintenance: Option<serde_json::Value>,
+    pub replacement_readiness_by_query_family: Option<serde_json::Value>,
     pub previous_wrapper_contract_evidence: Option<serde_json::Value>,
     pub rollback: CompatibilityRollbackEvidence,
 }
@@ -273,6 +274,12 @@ pub fn scan_nowledge_query_inventory_cypher_migration_gate_with_options_to_json(
         );
     } else {
         insert_background_maintenance_summary_json(&mut json, &primary)?;
+    }
+    if let Some(replacement_readiness) = options.replacement_readiness_by_query_family.as_ref() {
+        migration_gate_json_object(&mut json)?.insert(
+            "replacement_readiness_by_query_family".to_string(),
+            replacement_readiness.clone(),
+        );
     }
     add_shadow_metadata_to_migration_gate_json(&mut json, &shadow_engine_name, options)?;
     Ok(json)
@@ -2391,6 +2398,9 @@ mod tests {
                     }
                 })),
                 background_maintenance_required: true,
+                replacement_readiness_by_query_family: Some(
+                    ready_replacement_readiness_by_query_family(),
+                ),
                 previous_wrapper_contract_evidence: Some(serde_json::json!({
                     "ready": true,
                     "evidence_kind": "previous_wrapper_contract",
@@ -2871,9 +2881,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn replacement_readiness_family_evidence_health_requires_nowledge_families() {
-        let families = serde_json::json!([
+    fn ready_replacement_readiness_by_query_family() -> serde_json::Value {
+        serde_json::json!([
             {
                 "query_family": "memory_lookup",
                 "replacement_readiness_per_million": 1_000_000
@@ -2890,7 +2899,12 @@ mod tests {
                 "query_family": "search_projection",
                 "replacement_readiness_per_million": 1_000_000
             }
-        ]);
+        ])
+    }
+
+    #[test]
+    fn replacement_readiness_family_evidence_health_requires_nowledge_families() {
+        let families = ready_replacement_readiness_by_query_family();
 
         let health = super::replacement_readiness_family_evidence_health(Some(&families));
 

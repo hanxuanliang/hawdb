@@ -10,6 +10,23 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
+const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
+    "/graph/overview",
+    "/graph/explore",
+    "/graph/expand/{node_id}",
+    "/graph/live-preview",
+    "/graph/live-preview/{node_id}",
+    "/graph/community-members/{community_id}",
+    "/library/community/{community_id}/subgraph",
+    "/library/community/{community_id}/recent-memories",
+    "/library/community/{community_id}/related",
+    "/graph/analysis",
+    "/graph/augmentation/state",
+    "/graph/augmentation/pagerank/plan",
+    "/graph/node-details/{node_id}",
+    "/graph/orphans",
+    "/graph/shortest-path",
+];
 
 pub fn nowledge_replacement_summary_usage() -> String {
     "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
@@ -223,6 +240,9 @@ pub fn nowledge_replacement_summary_json_with_options(
             "operator_row_cap_enabled": bounded_read_evidence.operator_row_cap_enabled,
             "streaming": bounded_read_evidence.streaming,
             "blocking_operator_count": bounded_read_evidence.blocking_operator_count,
+            "covered_routes": bounded_read_evidence.covered_routes,
+            "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "missing_covered_routes": bounded_read_evidence.missing_covered_routes,
             "blocker_codes": bounded_read_evidence.blocker_codes,
         },
         "cutover_evidence": {
@@ -506,6 +526,8 @@ struct BoundedReadEvidenceSummary<'a> {
     operator_row_cap_enabled: Option<bool>,
     streaming: Option<bool>,
     blocking_operator_count: Option<u64>,
+    covered_routes: Vec<String>,
+    missing_covered_routes: Vec<&'static str>,
     blocker_codes: serde_json::Value,
 }
 
@@ -740,13 +762,24 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     let streaming = json_get_bool_path_from_dynamic(bundle, path, "streaming");
     let blocking_operator_count =
         json_get_u64_path_from_dynamic(bundle, path, "blocking_operator_count");
+    let covered_routes = json_get_string_array_path_from_dynamic(bundle, path, "covered_routes");
+    let covered_route_set = covered_routes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let missing_covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !covered_route_set.contains(route))
+        .collect::<Vec<_>>();
     let ready = present
         && protocol.as_deref() == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL)
         && mode == Some("shadow_read_only")
         && max_rows.is_some_and(|value| value > 0)
         && execution_row_cap == max_rows.and_then(|value| value.checked_add(1))
         && row_limit_enforced_before_output == Some(true)
-        && operator_row_cap_enabled == Some(true);
+        && operator_row_cap_enabled == Some(true)
+        && missing_covered_routes.is_empty();
     BoundedReadEvidenceSummary {
         protocol,
         present,
@@ -758,8 +791,20 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         operator_row_cap_enabled,
         streaming,
         blocking_operator_count,
+        covered_routes,
+        missing_covered_routes,
         blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
     }
+}
+
+fn json_get_string_array_path_from_dynamic(
+    value: &serde_json::Value,
+    base_path: &[&str],
+    field: &str,
+) -> Vec<String> {
+    let mut path = base_path.to_vec();
+    path.push(field);
+    json_get_string_array_path(value, &path)
 }
 
 fn json_get_array_path_from_dynamic(
@@ -1005,6 +1050,7 @@ fn nowledge_replacement_next_actions(
                 "bounded_read_evidence.row_limit_enforced_before_output",
                 "bounded_read_evidence.operator_row_cap_enabled",
                 "bounded_read_evidence.blocking_operator_count",
+                "bounded_read_evidence.covered_routes",
                 "bounded_read_evidence.blocker_codes",
             ],
         ));
@@ -1756,6 +1802,58 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_bounded_read_route_coverage() {
+        let mut bundle = production_ready_bundle();
+        bundle["bounded_read_evidence"]["covered_routes"] = serde_json::json!([
+            "/graph/overview",
+            "/graph/expand/{node_id}",
+            "/graph/live-preview",
+            "/graph/live-preview/{node_id}",
+            "/graph/community-members/{community_id}",
+            "/library/community/{community_id}/subgraph",
+            "/library/community/{community_id}/recent-memories",
+            "/library/community/{community_id}/related",
+            "/graph/analysis",
+            "/graph/augmentation/state",
+            "/graph/augmentation/pagerank/plan",
+            "/graph/node-details/{node_id}",
+            "/graph/orphans",
+            "/graph/shortest-path"
+        ]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert_eq!(
+            summary["bounded_read_evidence"]["missing_covered_routes"],
+            serde_json::json!(["/graph/explore"])
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence_ready"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_bounded_read_profile"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "bounded_read_evidence.covered_routes")
+            }));
+    }
+
+    #[test]
     fn replacement_summary_requires_bounded_read_evidence_protocol() {
         let mut bundle = production_ready_bundle();
         bundle["bounded_read_evidence"]["protocol"] = serde_json::json!("handwritten");
@@ -2375,6 +2473,7 @@ mod tests {
                         "bounded_read_evidence.row_limit_enforced_before_output",
                         "bounded_read_evidence.operator_row_cap_enabled",
                         "bounded_read_evidence.blocking_operator_count",
+                        "bounded_read_evidence.covered_routes",
                         "bounded_read_evidence.blocker_codes"
                     ]
                 },
@@ -2532,6 +2631,23 @@ mod tests {
                 "operator_row_cap_enabled": true,
                 "streaming": false,
                 "blocking_operator_count": 0,
+                "covered_routes": [
+                    "/graph/overview",
+                    "/graph/explore",
+                    "/graph/expand/{node_id}",
+                    "/graph/live-preview",
+                    "/graph/live-preview/{node_id}",
+                    "/graph/community-members/{community_id}",
+                    "/library/community/{community_id}/subgraph",
+                    "/library/community/{community_id}/recent-memories",
+                    "/library/community/{community_id}/related",
+                    "/graph/analysis",
+                    "/graph/augmentation/state",
+                    "/graph/augmentation/pagerank/plan",
+                    "/graph/node-details/{node_id}",
+                    "/graph/orphans",
+                    "/graph/shortest-path"
+                ],
                 "blocker_codes": []
             },
             "previous_wrapper_contract_evidence": {
