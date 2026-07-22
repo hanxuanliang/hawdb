@@ -186,6 +186,54 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &[
                         "replacement_summary",
+                        "search_projection_evidence",
+                        "fts_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_evidence",
+                        "vector_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_evidence",
+                        "incremental_update_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_evidence",
+                        "predicate_pushdown_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_evidence",
+                        "compressed_vector_projection_required",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_evidence",
+                        "compressed_vector_projection_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
                         "search_projection_shadow_evidence",
                         "present",
                     ],
@@ -233,6 +281,12 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ],
             [
                 "replacement_summary.search_projection_evidence.ready",
+                "replacement_summary.search_projection_evidence.fts_ready",
+                "replacement_summary.search_projection_evidence.vector_ready",
+                "replacement_summary.search_projection_evidence.incremental_update_ready",
+                "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
+                "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
+                "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
                 "replacement_summary.search_projection_shadow_evidence.present",
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.document_count_parity",
@@ -614,19 +668,18 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
-    if bool_path(
-        bundle,
-        &[
-            "replacement_summary",
-            "search_projection_shadow_evidence",
-            "ready",
-        ],
-    ) != Some(true)
-    {
+    if !replacement_summary_search_projection_ready(bundle) {
         actions.push(next_action(
-            "run_search_projection_shadow_evidence",
-            "LanceDB and Skein search projection parity must be proven side-by-side",
+            "attach_search_projection_replacement_evidence",
+            "LanceDB replacement evidence must prove FTS, vector, incremental, predicate pushdown, compressed projection, and shadow parity",
             [
+                "replacement_summary.search_projection_evidence.ready",
+                "replacement_summary.search_projection_evidence.fts_ready",
+                "replacement_summary.search_projection_evidence.vector_ready",
+                "replacement_summary.search_projection_evidence.incremental_update_ready",
+                "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
+                "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
+                "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.blocker_codes",
             ],
@@ -813,6 +866,49 @@ fn replacement_summary_required_query_families_present(bundle: &serde_json::Valu
         .all(|required| families.iter().any(|family| family == required))
 }
 
+fn replacement_summary_search_projection_ready(bundle: &serde_json::Value) -> bool {
+    [
+        &["replacement_summary", "search_projection_evidence", "ready"][..],
+        &[
+            "replacement_summary",
+            "search_projection_evidence",
+            "fts_ready",
+        ][..],
+        &[
+            "replacement_summary",
+            "search_projection_evidence",
+            "vector_ready",
+        ][..],
+        &[
+            "replacement_summary",
+            "search_projection_evidence",
+            "incremental_update_ready",
+        ][..],
+        &[
+            "replacement_summary",
+            "search_projection_evidence",
+            "predicate_pushdown_ready",
+        ][..],
+        &[
+            "replacement_summary",
+            "search_projection_evidence",
+            "compressed_vector_projection_required",
+        ][..],
+        &[
+            "replacement_summary",
+            "search_projection_evidence",
+            "compressed_vector_projection_ready",
+        ][..],
+        &[
+            "replacement_summary",
+            "search_projection_shadow_evidence",
+            "ready",
+        ][..],
+    ]
+    .iter()
+    .all(|path| bool_path(bundle, path) == Some(true))
+}
+
 fn string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {
     json_get_path(value, path)
         .and_then(serde_json::Value::as_array)
@@ -921,6 +1017,44 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.document_count_parity"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_search_projection_replacement_evidence"));
+    }
+
+    #[test]
+    fn requires_compressed_vector_projection_readiness() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_evidence"]
+            ["compressed_vector_projection_ready"] = serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_evidence"]["blocker_codes"] =
+            serde_json::json!(["compressed_vector_projection_not_ready"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["compressed_vector_projection_not_ready"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_evidence.compressed_vector_projection_ready"
             ])
         );
     }
@@ -1168,6 +1302,12 @@ mod tests {
                 },
                 "search_projection_evidence": {
                     "ready": true,
+                    "fts_ready": true,
+                    "vector_ready": true,
+                    "incremental_update_ready": true,
+                    "predicate_pushdown_ready": true,
+                    "compressed_vector_projection_required": true,
+                    "compressed_vector_projection_ready": true,
                     "blocker_codes": []
                 },
                 "search_projection_shadow_evidence": {
