@@ -3,6 +3,7 @@ use std::path::Path;
 
 const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
+const SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL: &str = "skein-nowledge-replacement-summary";
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
@@ -43,6 +44,13 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             "integration_bundle_protocol",
             [str_path(bundle, &["protocol"]) == Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL)],
             ["protocol"],
+            Vec::new(),
+        ),
+        check(
+            "replacement_summary_protocol",
+            [str_path(bundle, &["replacement_summary", "protocol"])
+                == Some(SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL)],
+            ["replacement_summary.protocol"],
             Vec::new(),
         ),
         check(
@@ -696,6 +704,15 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if str_path(bundle, &["replacement_summary", "protocol"])
+        != Some(SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL)
+    {
+        actions.push(next_action(
+            "produce_replacement_summary",
+            "replacement summary must use the Skein Nowledge replacement-summary protocol",
+            ["replacement_summary.protocol"],
+        ));
+    }
     if !replacement_summary_required_query_families_present(bundle)
         || !string_array_path(
             bundle,
@@ -1157,6 +1174,43 @@ mod tests {
     }
 
     #[test]
+    fn requires_replacement_summary_protocol() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]
+            .as_object_mut()
+            .unwrap()
+            .remove("protocol");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary_protocol"])
+        );
+        let summary_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "replacement_summary_protocol")
+            .unwrap();
+        assert_eq!(
+            summary_check["failed_evidence_fields"],
+            serde_json::json!(["replacement_summary.protocol"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "produce_replacement_summary"
+                && action["evidence_fields"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|field| field == "replacement_summary.protocol")));
+    }
+
+    #[test]
     fn fails_closed_without_submodule_and_coexistence() {
         let mut bundle = ready_bundle();
         bundle["submodule"]["present"] = serde_json::json!(false);
@@ -1594,6 +1648,7 @@ mod tests {
                 "failed_checks": []
             },
             "replacement_summary": {
+                "protocol": "skein-nowledge-replacement-summary",
                 "production_cutover_ready": true,
                 "blocking_categories": [],
                 "missing_evidence": [],
