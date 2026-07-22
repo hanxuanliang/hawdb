@@ -4,6 +4,13 @@ use skein::{
 };
 use std::collections::BTreeSet;
 
+const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-evidence";
+const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-shadow-evidence";
+const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-mem-bounded-read-evidence-v1";
+
 pub fn nowledge_replacement_summary_usage() -> String {
     "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
         .to_string()
@@ -170,6 +177,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "matched_per_million": dual_engine_evidence.matched_per_million,
         },
         "search_projection_evidence": {
+            "protocol": search_projection_evidence.protocol,
             "present": search_projection_evidence.present,
             "ready": search_projection_evidence.ready,
             "derived_projection": search_projection_evidence.derived_projection,
@@ -190,6 +198,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "blocker_codes": search_projection_evidence.blocker_codes,
         },
         "search_projection_shadow_evidence": {
+            "protocol": search_projection_shadow_evidence.protocol,
             "present": search_projection_shadow_evidence.present,
             "ready": search_projection_shadow_evidence.ready,
             "primary_ready": search_projection_shadow_evidence.primary_ready,
@@ -204,6 +213,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             "blocker_codes": search_projection_shadow_evidence.blocker_codes,
         },
         "bounded_read_evidence": {
+            "protocol": bounded_read_evidence.protocol,
             "present": bounded_read_evidence.present,
             "ready": bounded_read_evidence.ready,
             "mode": bounded_read_evidence.mode,
@@ -448,6 +458,7 @@ struct ShadowEvidenceSummary<'a> {
 }
 
 struct SearchProjectionEvidenceSummary {
+    protocol: Option<String>,
     present: bool,
     ready: bool,
     derived_projection: Option<bool>,
@@ -469,6 +480,7 @@ struct SearchProjectionEvidenceSummary {
 }
 
 struct SearchProjectionShadowEvidenceSummary<'a> {
+    protocol: Option<String>,
     present: bool,
     ready: bool,
     primary_ready: Option<bool>,
@@ -484,6 +496,7 @@ struct SearchProjectionShadowEvidenceSummary<'a> {
 }
 
 struct BoundedReadEvidenceSummary<'a> {
+    protocol: Option<String>,
     present: bool,
     ready: bool,
     mode: Option<&'a str>,
@@ -596,6 +609,7 @@ fn search_projection_evidence_summary(
         &["cutover_evidence", "search_projection_evidence"][..]
     };
     let present = json_get_path(bundle, path).is_some();
+    let protocol = json_get_str_path_from_dynamic(bundle, path, "protocol").map(str::to_string);
     let covered_table_count = json_get_u64_path_from_dynamic(bundle, path, "covered_table_count");
     let required_table_count = json_get_u64_path_from_dynamic(bundle, path, "required_table_count");
     let derived_projection = json_get_bool_path_from_dynamic(bundle, path, "derived_projection");
@@ -619,6 +633,7 @@ fn search_projection_evidence_summary(
     let compressed_vector_projection_ready =
         json_get_bool_path_from_dynamic(bundle, path, "compressed_vector_projection_ready");
     let ready = present
+        && protocol.as_deref() == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL)
         && derived_projection == Some(true)
         && all_tables_covered == Some(true)
         && covered_table_count.is_some_and(|count| count > 0)
@@ -634,6 +649,7 @@ fn search_projection_evidence_summary(
         && predicate_pushdown_ready == Some(true)
         && compressed_vector_projection_ready.unwrap_or(true);
     SearchProjectionEvidenceSummary {
+        protocol,
         present,
         ready,
         derived_projection,
@@ -664,6 +680,7 @@ fn search_projection_shadow_evidence_summary(
         &["cutover_evidence", "search_projection_shadow_evidence"][..]
     };
     let present = json_get_path(bundle, path).is_some();
+    let protocol = json_get_str_path_from_dynamic(bundle, path, "protocol").map(str::to_string);
     let primary_ready = json_get_bool_path_from_dynamic(bundle, path, "primary_ready");
     let shadow_ready = json_get_bool_path_from_dynamic(bundle, path, "shadow_ready");
     let document_count_parity =
@@ -680,6 +697,7 @@ fn search_projection_shadow_evidence_summary(
     let incremental_watermark_parity =
         json_get_bool_path_from_dynamic(bundle, path, "incremental_watermark_parity");
     let ready = present
+        && protocol.as_deref() == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL)
         && primary_ready == Some(true)
         && shadow_ready == Some(true)
         && document_count_parity == Some(true)
@@ -688,6 +706,7 @@ fn search_projection_shadow_evidence_summary(
         && lifecycle_parity == Some(true)
         && incremental_watermark_parity == Some(true);
     SearchProjectionShadowEvidenceSummary {
+        protocol,
         present,
         ready,
         primary_ready,
@@ -710,6 +729,7 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         &["cutover_evidence", "bounded_read_evidence"][..]
     };
     let present = json_get_path(bundle, path).is_some();
+    let protocol = json_get_str_path_from_dynamic(bundle, path, "protocol").map(str::to_string);
     let mode = json_get_str_path_from_dynamic(bundle, path, "mode");
     let max_rows = json_get_u64_path_from_dynamic(bundle, path, "max_rows");
     let execution_row_cap = json_get_u64_path_from_dynamic(bundle, path, "execution_row_cap");
@@ -721,12 +741,14 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     let blocking_operator_count =
         json_get_u64_path_from_dynamic(bundle, path, "blocking_operator_count");
     let ready = present
+        && protocol.as_deref() == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL)
         && mode == Some("shadow_read_only")
         && max_rows.is_some_and(|value| value > 0)
         && execution_row_cap == max_rows.and_then(|value| value.checked_add(1))
         && row_limit_enforced_before_output == Some(true)
         && operator_row_cap_enabled == Some(true);
     BoundedReadEvidenceSummary {
+        protocol,
         present,
         ready,
         mode,
@@ -928,6 +950,7 @@ fn nowledge_replacement_next_actions(
             "attach_search_projection_replacement_evidence",
             "LanceDB replacement evidence is missing or not ready",
             [
+                "search_projection_evidence.protocol",
                 "search_projection_evidence.present",
                 "search_projection_evidence.ready",
                 "search_projection_evidence.derived_projection",
@@ -954,6 +977,7 @@ fn nowledge_replacement_next_actions(
             "run_search_projection_shadow_evidence",
             "LanceDB/Skein search projection side-by-side evidence is missing or not ready",
             [
+                "search_projection_shadow_evidence.protocol",
                 "search_projection_shadow_evidence.present",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
@@ -972,6 +996,7 @@ fn nowledge_replacement_next_actions(
             "attach_bounded_read_profile",
             "bounded read execution profile is missing or not ready",
             [
+                "bounded_read_evidence.protocol",
                 "bounded_read_evidence.present",
                 "bounded_read_evidence.ready",
                 "bounded_read_evidence.mode",
@@ -1545,6 +1570,33 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_search_projection_evidence_protocol() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_evidence"]["protocol"] = serde_json::json!("handwritten");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_projection_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_evidence"]["protocol"],
+            "handwritten"
+        );
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_search_projection_replacement_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "search_projection_evidence.protocol")
+            }));
+    }
+
+    #[test]
     fn replacement_summary_blocks_production_without_search_projection_shadow_evidence() {
         let mut bundle = production_ready_bundle();
         bundle
@@ -1622,6 +1674,33 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_search_projection_shadow_evidence_protocol() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_shadow_evidence"]["protocol"] = serde_json::json!("handwritten");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["protocol"],
+            "handwritten"
+        );
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "run_search_projection_shadow_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "search_projection_shadow_evidence.protocol")
+            }));
+    }
+
+    #[test]
     fn replacement_summary_blocks_production_without_bounded_read_evidence() {
         let mut bundle = production_ready_bundle();
         bundle
@@ -1674,6 +1753,30 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "bounded_read_evidence_ready"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_bounded_read_evidence_protocol() {
+        let mut bundle = production_ready_bundle();
+        bundle["bounded_read_evidence"]["protocol"] = serde_json::json!("handwritten");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["protocol"], "handwritten");
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_bounded_read_profile"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "bounded_read_evidence.protocol")
+            }));
     }
 
     #[test]
@@ -2221,6 +2324,7 @@ mod tests {
                     "action": "attach_search_projection_replacement_evidence",
                     "reason": "LanceDB replacement evidence is missing or not ready",
                     "evidence_fields": [
+                        "search_projection_evidence.protocol",
                         "search_projection_evidence.present",
                         "search_projection_evidence.ready",
                         "search_projection_evidence.derived_projection",
@@ -2245,6 +2349,7 @@ mod tests {
                     "action": "run_search_projection_shadow_evidence",
                     "reason": "LanceDB/Skein search projection side-by-side evidence is missing or not ready",
                     "evidence_fields": [
+                        "search_projection_shadow_evidence.protocol",
                         "search_projection_shadow_evidence.present",
                         "search_projection_shadow_evidence.ready",
                         "search_projection_shadow_evidence.primary_ready",
@@ -2261,6 +2366,7 @@ mod tests {
                     "action": "attach_bounded_read_profile",
                     "reason": "bounded read execution profile is missing or not ready",
                     "evidence_fields": [
+                        "bounded_read_evidence.protocol",
                         "bounded_read_evidence.present",
                         "bounded_read_evidence.ready",
                         "bounded_read_evidence.mode",
@@ -2382,6 +2488,7 @@ mod tests {
                 "matched_per_million": 1_000_000
             },
             "search_projection_evidence": {
+                "protocol": "skein-nowledge-search-projection-evidence",
                 "ready": true,
                 "derived_projection": true,
                 "all_tables_covered": true,
@@ -2401,6 +2508,7 @@ mod tests {
                 "blocker_codes": []
             },
             "search_projection_shadow_evidence": {
+                "protocol": "skein-nowledge-search-projection-shadow-evidence",
                 "ready": true,
                 "primary_engine": "lancedb",
                 "shadow_engine": "skein",
@@ -2416,6 +2524,7 @@ mod tests {
                 "blocker_codes": []
             },
             "bounded_read_evidence": {
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
                 "mode": "shadow_read_only",
                 "max_rows": 512,
                 "execution_row_cap": 513,

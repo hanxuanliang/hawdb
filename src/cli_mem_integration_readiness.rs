@@ -4,6 +4,12 @@ use std::path::Path;
 const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
 const SKEIN_NOWLEDGE_REPLACEMENT_SUMMARY_PROTOCOL: &str = "skein-nowledge-replacement-summary";
+const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-evidence";
+const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-projection-shadow-evidence";
+const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-mem-bounded-read-evidence-v1";
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
@@ -199,6 +205,10 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &["replacement_summary", "search_projection_evidence", "ready"],
                 ) == Some(true),
+                str_path(
+                    bundle,
+                    &["replacement_summary", "search_projection_evidence", "protocol"],
+                ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL),
                 bool_path(
                     bundle,
                     &[
@@ -255,6 +265,14 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                         "present",
                     ],
                 ) == Some(true),
+                str_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "protocol",
+                    ],
+                ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL),
                 bool_path(
                     bundle,
                     &[
@@ -298,6 +316,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ],
             [
                 "replacement_summary.search_projection_evidence.ready",
+                "replacement_summary.search_projection_evidence.protocol",
                 "replacement_summary.search_projection_evidence.fts_ready",
                 "replacement_summary.search_projection_evidence.vector_ready",
                 "replacement_summary.search_projection_evidence.incremental_update_ready",
@@ -305,6 +324,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
                 "replacement_summary.search_projection_shadow_evidence.present",
+                "replacement_summary.search_projection_shadow_evidence.protocol",
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.document_count_parity",
                 "replacement_summary.search_projection_shadow_evidence.table_parity_ready",
@@ -334,6 +354,10 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &["replacement_summary", "bounded_read_evidence", "present"],
                 ) == Some(true),
+                str_path(
+                    bundle,
+                    &["replacement_summary", "bounded_read_evidence", "protocol"],
+                ) == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL),
                 bool_path(
                     bundle,
                     &["replacement_summary", "bounded_read_evidence", "ready"],
@@ -379,6 +403,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ],
             [
                 "replacement_summary.bounded_read_evidence.present",
+                "replacement_summary.bounded_read_evidence.protocol",
                 "replacement_summary.bounded_read_evidence.ready",
                 "replacement_summary.bounded_read_evidence.max_rows",
                 "replacement_summary.bounded_read_evidence.mode",
@@ -758,12 +783,14 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             "LanceDB replacement evidence must prove FTS, vector, incremental, predicate pushdown, compressed projection, and shadow parity",
             [
                 "replacement_summary.search_projection_evidence.ready",
+                "replacement_summary.search_projection_evidence.protocol",
                 "replacement_summary.search_projection_evidence.fts_ready",
                 "replacement_summary.search_projection_evidence.vector_ready",
                 "replacement_summary.search_projection_evidence.incremental_update_ready",
                 "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
+                "replacement_summary.search_projection_shadow_evidence.protocol",
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.blocker_codes",
             ],
@@ -775,6 +802,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             "Skein read replacement must prove bounded execution before Mem cutover",
             [
                 "replacement_summary.bounded_read_evidence.present",
+                "replacement_summary.bounded_read_evidence.protocol",
                 "replacement_summary.bounded_read_evidence.ready",
                 "replacement_summary.bounded_read_evidence.mode",
                 "replacement_summary.bounded_read_evidence.max_rows",
@@ -881,6 +909,25 @@ fn replacement_summary_required_query_families_present(bundle: &serde_json::Valu
 }
 
 fn replacement_summary_search_projection_ready(bundle: &serde_json::Value) -> bool {
+    if str_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "search_projection_evidence",
+            "protocol",
+        ],
+    ) != Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL)
+        || str_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "protocol",
+            ],
+        ) != Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL)
+    {
+        return false;
+    }
     [
         &["replacement_summary", "search_projection_evidence", "ready"][..],
         &[
@@ -928,6 +975,10 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
         bundle,
         &["replacement_summary", "bounded_read_evidence", "present"],
     ) == Some(true)
+        && str_path(
+            bundle,
+            &["replacement_summary", "bounded_read_evidence", "protocol"],
+        ) == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL)
         && bool_path(
             bundle,
             &["replacement_summary", "bounded_read_evidence", "ready"],
@@ -1313,6 +1364,50 @@ mod tests {
     }
 
     #[test]
+    fn requires_search_projection_evidence_protocols() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_evidence"]["protocol"] =
+            serde_json::json!("handwritten");
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["protocol"] =
+            serde_json::json!("handwritten");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_evidence.protocol",
+                "replacement_summary.search_projection_shadow_evidence.protocol"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_search_projection_replacement_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| {
+                            field == "replacement_summary.search_projection_evidence.protocol"
+                        })
+            }));
+    }
+
+    #[test]
     fn requires_explicit_required_query_family_readiness() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]
@@ -1453,6 +1548,43 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_bounded_read_profile"));
+    }
+
+    #[test]
+    fn requires_bounded_read_evidence_protocol() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["bounded_read_evidence"]["protocol"] =
+            serde_json::json!("handwritten");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence"])
+        );
+        let read_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence")
+            .unwrap();
+        assert_eq!(
+            read_check["failed_evidence_fields"],
+            serde_json::json!(["replacement_summary.bounded_read_evidence.protocol"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_bounded_read_profile"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "replacement_summary.bounded_read_evidence.protocol")
+            }));
     }
 
     #[test]
@@ -1676,6 +1808,7 @@ mod tests {
                     "missing_required_query_families": []
                 },
                 "search_projection_evidence": {
+                    "protocol": "skein-nowledge-search-projection-evidence",
                     "ready": true,
                     "fts_ready": true,
                     "vector_ready": true,
@@ -1686,6 +1819,7 @@ mod tests {
                     "blocker_codes": []
                 },
                 "search_projection_shadow_evidence": {
+                    "protocol": "skein-nowledge-search-projection-shadow-evidence",
                     "present": true,
                     "ready": true,
                     "document_count_parity": true,
@@ -1695,6 +1829,7 @@ mod tests {
                     "blocker_codes": []
                 },
                 "bounded_read_evidence": {
+                    "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
                     "present": true,
                     "ready": true,
                     "mode": "shadow_read_only",
