@@ -1,3 +1,4 @@
+mod cli_background_maintenance_evidence;
 mod cli_bounded_read_evidence;
 mod cli_fixture_contract;
 mod cli_fixture_contract_check;
@@ -5,6 +6,7 @@ mod cli_mem_integration_readiness;
 mod cli_previous_wrapper_preflight;
 mod cli_replacement_summary;
 
+use cli_background_maintenance_evidence::run_nowledge_background_maintenance_evidence;
 use cli_bounded_read_evidence::run_nowledge_bounded_read_evidence;
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
@@ -152,6 +154,17 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge bounded read evidence is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-background-maintenance-evidence" {
+            let (json, require_ready) = run_nowledge_background_maintenance_evidence(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge background maintenance evidence is not ready".to_string(),
                 ));
             }
             return Ok(());
