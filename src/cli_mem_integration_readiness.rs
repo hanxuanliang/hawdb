@@ -326,6 +326,11 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     &["replacement_summary", "bounded_read_evidence", "max_rows"],
                 )
                 .is_some_and(|value| value > 0),
+                str_path(
+                    bundle,
+                    &["replacement_summary", "bounded_read_evidence", "mode"],
+                ) == Some("shadow_read_only"),
+                bounded_read_execution_cap_matches(bundle),
                 bool_path(
                     bundle,
                     &[
@@ -342,13 +347,29 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                         "operator_row_cap_enabled",
                     ],
                 ) == Some(true),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "blocking_operator_count",
+                    ],
+                ) == Some(0),
+                bool_path(
+                    bundle,
+                    &["replacement_summary", "bounded_read_evidence", "streaming"],
+                ) == Some(false),
             ],
             [
                 "replacement_summary.bounded_read_evidence.present",
                 "replacement_summary.bounded_read_evidence.ready",
                 "replacement_summary.bounded_read_evidence.max_rows",
+                "replacement_summary.bounded_read_evidence.mode",
+                "replacement_summary.bounded_read_evidence.execution_row_cap",
                 "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
+                "replacement_summary.bounded_read_evidence.blocking_operator_count",
+                "replacement_summary.bounded_read_evidence.streaming",
             ],
             blocker_codes(
                 bundle,
@@ -685,21 +706,20 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
-    if bool_path(
-        bundle,
-        &["replacement_summary", "bounded_read_evidence", "ready"],
-    ) != Some(true)
-    {
+    if !replacement_summary_bounded_read_ready(bundle) {
         actions.push(next_action(
             "attach_bounded_read_profile",
             "Skein read replacement must prove bounded execution before Mem cutover",
             [
                 "replacement_summary.bounded_read_evidence.present",
                 "replacement_summary.bounded_read_evidence.ready",
+                "replacement_summary.bounded_read_evidence.mode",
                 "replacement_summary.bounded_read_evidence.max_rows",
                 "replacement_summary.bounded_read_evidence.execution_row_cap",
                 "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
+                "replacement_summary.bounded_read_evidence.blocking_operator_count",
+                "replacement_summary.bounded_read_evidence.streaming",
                 "replacement_summary.bounded_read_evidence.blocker_codes",
             ],
         ));
@@ -907,6 +927,71 @@ fn replacement_summary_search_projection_ready(bundle: &serde_json::Value) -> bo
     ]
     .iter()
     .all(|path| bool_path(bundle, path) == Some(true))
+}
+
+fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
+    bool_path(
+        bundle,
+        &["replacement_summary", "bounded_read_evidence", "present"],
+    ) == Some(true)
+        && bool_path(
+            bundle,
+            &["replacement_summary", "bounded_read_evidence", "ready"],
+        ) == Some(true)
+        && u64_path(
+            bundle,
+            &["replacement_summary", "bounded_read_evidence", "max_rows"],
+        )
+        .is_some_and(|value| value > 0)
+        && str_path(
+            bundle,
+            &["replacement_summary", "bounded_read_evidence", "mode"],
+        ) == Some("shadow_read_only")
+        && bounded_read_execution_cap_matches(bundle)
+        && bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "row_limit_enforced_before_output",
+            ],
+        ) == Some(true)
+        && bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "operator_row_cap_enabled",
+            ],
+        ) == Some(true)
+        && u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "blocking_operator_count",
+            ],
+        ) == Some(0)
+        && bool_path(
+            bundle,
+            &["replacement_summary", "bounded_read_evidence", "streaming"],
+        ) == Some(false)
+}
+
+fn bounded_read_execution_cap_matches(bundle: &serde_json::Value) -> bool {
+    let max_rows = u64_path(
+        bundle,
+        &["replacement_summary", "bounded_read_evidence", "max_rows"],
+    );
+    let execution_row_cap = u64_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "bounded_read_evidence",
+            "execution_row_cap",
+        ],
+    );
+    max_rows.and_then(|value| value.checked_add(1)) == execution_row_cap
 }
 
 fn string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {
@@ -1162,6 +1247,47 @@ mod tests {
     }
 
     #[test]
+    fn rejects_inconsistent_bounded_read_summary_even_if_ready_flag_is_true() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["bounded_read_evidence"]["mode"] =
+            serde_json::json!("writable_cutover");
+        bundle["replacement_summary"]["bounded_read_evidence"]["execution_row_cap"] =
+            serde_json::json!(512);
+        bundle["replacement_summary"]["bounded_read_evidence"]["blocking_operator_count"] =
+            serde_json::json!(1);
+        bundle["replacement_summary"]["bounded_read_evidence"]["streaming"] =
+            serde_json::json!(true);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence"])
+        );
+        let read_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence")
+            .unwrap();
+        assert_eq!(
+            read_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.bounded_read_evidence.mode",
+                "replacement_summary.bounded_read_evidence.execution_row_cap",
+                "replacement_summary.bounded_read_evidence.blocking_operator_count",
+                "replacement_summary.bounded_read_evidence.streaming"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_bounded_read_profile"));
+    }
+
+    #[test]
     fn requires_background_maintenance_evidence() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_ready"] =
@@ -1322,11 +1448,13 @@ mod tests {
                 "bounded_read_evidence": {
                     "present": true,
                     "ready": true,
+                    "mode": "shadow_read_only",
                     "max_rows": 512,
                     "execution_row_cap": 513,
                     "row_limit_enforced_before_output": true,
                     "operator_row_cap_enabled": true,
                     "blocking_operator_count": 0,
+                    "streaming": false,
                     "blocker_codes": []
                 },
                 "cutover_evidence": {
