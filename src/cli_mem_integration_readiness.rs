@@ -10,6 +10,7 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
+const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
@@ -423,6 +424,33 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ),
         ),
         check(
+            "graph_route_readiness",
+            [
+                str_path(bundle, &["graph_route_readiness", "protocol"])
+                    == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL),
+                u64_path(bundle, &["graph_route_readiness", "route_count"])
+                    .is_some_and(|value| value > 0),
+                bool_path(bundle, &["graph_route_readiness", "route_primary_ready"]) == Some(true),
+                graph_route_primary_ready_count_matches(bundle),
+                string_array_path(bundle, &["graph_route_readiness", "route_primary_blocker_codes"])
+                    .is_empty(),
+            ],
+            [
+                "graph_route_readiness.protocol",
+                "graph_route_readiness.route_count",
+                "graph_route_readiness.route_primary_ready",
+                "graph_route_readiness.primary_ready_route_count",
+                "graph_route_readiness.route_primary_blocker_codes",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &["graph_route_readiness", "blocker_codes"][..],
+                    &["graph_route_readiness", "route_primary_blocker_codes"][..],
+                ],
+            ),
+        ),
+        check(
             "background_maintenance_evidence",
             [
                 bool_path(
@@ -815,6 +843,19 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if !graph_route_readiness_ready(bundle) {
+        actions.push(next_action(
+            "attach_graph_route_readiness_evidence",
+            "Nowledge Mem graph cutover requires route-level primary-read readiness evidence",
+            [
+                "graph_route_readiness.protocol",
+                "graph_route_readiness.route_count",
+                "graph_route_readiness.route_primary_ready",
+                "graph_route_readiness.primary_ready_route_count",
+                "graph_route_readiness.route_primary_blocker_codes",
+            ],
+        ));
+    }
     if !replacement_summary_storage_recovery_ready(bundle) {
         actions.push(next_action(
             "attach_storage_recovery_report",
@@ -1021,6 +1062,29 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
             bundle,
             &["replacement_summary", "bounded_read_evidence", "streaming"],
         ) == Some(false)
+}
+
+fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
+    str_path(bundle, &["graph_route_readiness", "protocol"])
+        == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL)
+        && u64_path(bundle, &["graph_route_readiness", "route_count"])
+            .is_some_and(|value| value > 0)
+        && bool_path(bundle, &["graph_route_readiness", "route_primary_ready"]) == Some(true)
+        && graph_route_primary_ready_count_matches(bundle)
+        && string_array_path(
+            bundle,
+            &["graph_route_readiness", "route_primary_blocker_codes"],
+        )
+        .is_empty()
+}
+
+fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
+    let route_count = u64_path(bundle, &["graph_route_readiness", "route_count"]);
+    let primary_ready_route_count = u64_path(
+        bundle,
+        &["graph_route_readiness", "primary_ready_route_count"],
+    );
+    route_count.is_some_and(|value| value > 0) && route_count == primary_ready_route_count
 }
 
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
@@ -1588,6 +1652,102 @@ mod tests {
     }
 
     #[test]
+    fn requires_graph_route_readiness_evidence() {
+        let mut bundle = ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("graph_route_readiness");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!([
+                "graph_route_readiness.protocol",
+                "graph_route_readiness.route_count",
+                "graph_route_readiness.route_primary_ready",
+                "graph_route_readiness.primary_ready_route_count"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_graph_route_readiness_evidence"));
+    }
+
+    #[test]
+    fn rejects_graph_route_readiness_without_primary_route_coverage() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["route_primary_ready"] = serde_json::json!(false);
+        bundle["graph_route_readiness"]["primary_ready_route_count"] = serde_json::json!(13);
+        bundle["graph_route_readiness"]["route_primary_blocker_codes"] =
+            serde_json::json!(["graph_route_primary_not_enabled"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["graph_route_primary_not_enabled"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!([
+                "graph_route_readiness.route_primary_ready",
+                "graph_route_readiness.primary_ready_route_count",
+                "graph_route_readiness.route_primary_blocker_codes"
+            ])
+        );
+    }
+
+    #[test]
+    fn requires_graph_route_readiness_protocol() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["protocol"] = serde_json::json!("handwritten");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.protocol"])
+        );
+    }
+
+    #[test]
     fn requires_background_maintenance_evidence() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_ready"] =
@@ -1778,6 +1938,22 @@ mod tests {
                 "ready": true,
                 "blocker_codes": [],
                 "failed_checks": []
+            },
+            "graph_route_readiness": {
+                "protocol": "nmem-graph-route-readiness-v1",
+                "route_count": 15,
+                "shadow_compare_route_count": 15,
+                "primary_ready_route_count": 15,
+                "route_primary_ready": true,
+                "route_primary_blocker_codes": [],
+                "routes": [
+                    {
+                        "route": "/graph/overview",
+                        "shadow_compare_ready": true,
+                        "primary_ready": true,
+                        "blocker_codes": []
+                    }
+                ]
             },
             "replacement_summary": {
                 "protocol": "skein-nowledge-replacement-summary",
