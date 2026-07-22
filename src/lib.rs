@@ -317,9 +317,10 @@ pub use nowledge_mem::{
     nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config,
     nowledge_mem_graph_config_with_search_mode, NowledgeMemEmbeddedStore, NowledgeMemGraph,
     NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemOpenReport, NowledgeMemReadOptions,
-    NowledgeMemReadOutput, NowledgeMemReadReport, NowledgeMemSearchProjection,
+    NowledgeMemReadOutput, NowledgeMemReadReport, NowledgeMemRetrievalOutput,
+    NowledgeMemRetrievalReport, NowledgeMemSearchProjection,
     NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-    NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+    NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,

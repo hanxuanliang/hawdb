@@ -110,6 +110,7 @@ impl NowledgeMemOpenReport {
 
 pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-report";
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
+pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ROWS: usize = 512;
@@ -256,6 +257,71 @@ fn nowledge_mem_bounded_read_blocker_codes(report: &NowledgeMemReadReport) -> Ve
 pub struct NowledgeMemReadOutput {
     pub output: QueryOutput,
     pub report: NowledgeMemReadReport,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemRetrievalReport {
+    pub protocol: String,
+    pub mode: NowledgeMemGraphMode,
+    pub compressed_vector_search_mode: CompressedVectorSearchMode,
+    pub graph_commit_epoch: u64,
+    pub projection_source_graph_commit_epoch: Option<u64>,
+    pub projection_commit_lag: u64,
+    pub projection_stale: bool,
+    pub search_document_count: usize,
+    pub search_filtered_document_count: usize,
+    pub search_total_hits: usize,
+    pub candidate_count: usize,
+    pub candidate_total_count: usize,
+    pub evidence_count: usize,
+    pub graph_seed_count: usize,
+    pub graph_context_path_count: usize,
+    pub search_backend: Option<String>,
+    pub vector_backend: Option<String>,
+    pub text_backend: Option<String>,
+    pub search_fallback_reason_codes: Vec<String>,
+    pub retriever_fallback_reason_codes: Vec<String>,
+    pub knowledge_fallback_reason_codes: Vec<String>,
+    pub truncation_reason_codes: Vec<String>,
+    pub warning_count: usize,
+    pub warnings: Vec<String>,
+}
+
+impl NowledgeMemRetrievalReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "mode": self.mode.as_str(),
+            "compressed_vector_search_mode": self.compressed_vector_search_mode.as_str(),
+            "graph_commit_epoch": self.graph_commit_epoch,
+            "projection_source_graph_commit_epoch": self.projection_source_graph_commit_epoch,
+            "projection_commit_lag": self.projection_commit_lag,
+            "projection_stale": self.projection_stale,
+            "search_document_count": self.search_document_count,
+            "search_filtered_document_count": self.search_filtered_document_count,
+            "search_total_hits": self.search_total_hits,
+            "candidate_count": self.candidate_count,
+            "candidate_total_count": self.candidate_total_count,
+            "evidence_count": self.evidence_count,
+            "graph_seed_count": self.graph_seed_count,
+            "graph_context_path_count": self.graph_context_path_count,
+            "search_backend": self.search_backend,
+            "vector_backend": self.vector_backend,
+            "text_backend": self.text_backend,
+            "search_fallback_reason_codes": self.search_fallback_reason_codes,
+            "retriever_fallback_reason_codes": self.retriever_fallback_reason_codes,
+            "knowledge_fallback_reason_codes": self.knowledge_fallback_reason_codes,
+            "truncation_reason_codes": self.truncation_reason_codes,
+            "warning_count": self.warning_count,
+            "warnings": self.warnings,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemRetrievalOutput {
+    pub output: KnowledgeRetrievalOutput,
+    pub report: NowledgeMemRetrievalReport,
 }
 
 impl NowledgeMemGraph {
@@ -549,11 +615,24 @@ impl NowledgeMemEmbeddedStore {
         &self,
         request: &KnowledgeRetrievalRequest,
     ) -> Result<KnowledgeRetrievalOutput> {
+        Ok(self.retrieve_knowledge_with_report(request)?.output)
+    }
+
+    pub fn retrieve_knowledge_with_report(
+        &self,
+        request: &KnowledgeRetrievalRequest,
+    ) -> Result<NowledgeMemRetrievalOutput> {
         let search_projection = self.require_search_projection()?;
-        Ok(self
+        let output = self
             .graph
             .database()
-            .retrieve_knowledge(search_projection.index(), request))
+            .retrieve_knowledge(search_projection.index(), request);
+        let report = nowledge_mem_retrieval_report(
+            self.graph.mode(),
+            self.graph.database().config().compressed_vector_search_mode,
+            &output,
+        );
+        Ok(NowledgeMemRetrievalOutput { output, report })
     }
 
     pub fn read_query(&mut self, cypher: &str) -> Result<NowledgeMemReadOutput> {
@@ -611,6 +690,105 @@ fn require_search_projection_mut(
     search_projection
         .as_mut()
         .ok_or_else(missing_search_projection_error)
+}
+
+fn nowledge_mem_retrieval_report(
+    mode: NowledgeMemGraphMode,
+    compressed_vector_search_mode: CompressedVectorSearchMode,
+    output: &KnowledgeRetrievalOutput,
+) -> NowledgeMemRetrievalReport {
+    let vector_backend = output
+        .search
+        .retrievers
+        .iter()
+        .find(|retriever| retriever.name == "vector")
+        .map(|retriever| retriever.backend.clone());
+    let text_backend = output
+        .search
+        .retrievers
+        .iter()
+        .find(|retriever| retriever.name == "text")
+        .map(|retriever| retriever.backend.clone());
+    let search_backend = vector_backend
+        .clone()
+        .or_else(|| text_backend.clone())
+        .or_else(|| {
+            output
+                .search
+                .retrievers
+                .first()
+                .map(|retriever| retriever.backend.clone())
+        });
+    let knowledge_fallback_reason_codes = output
+        .diagnostics
+        .graph_context_fallback_reason_codes
+        .iter()
+        .map(|code| code.as_str().to_string())
+        .collect::<Vec<_>>();
+    let retriever_fallback_reason_codes = output
+        .retrievers
+        .iter()
+        .flat_map(|retriever| retriever.fallback_reason_codes.iter())
+        .map(|code| code.as_str().to_string())
+        .collect::<Vec<_>>();
+    let truncation_reason_codes = output
+        .diagnostics
+        .search_truncation_reason_codes
+        .iter()
+        .map(|code| code.as_str().to_string())
+        .chain(
+            output
+                .diagnostics
+                .graph_seed_truncation_reason_codes
+                .iter()
+                .map(|code| code.as_str().to_string()),
+        )
+        .chain(
+            output
+                .diagnostics
+                .graph_context_truncation_reason_codes
+                .iter()
+                .map(|code| code.as_str().to_string()),
+        )
+        .chain(
+            output
+                .diagnostics
+                .candidate_truncation_reason_codes
+                .iter()
+                .map(|code| code.as_str().to_string()),
+        )
+        .collect::<Vec<_>>();
+    NowledgeMemRetrievalReport {
+        protocol: NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL.to_string(),
+        mode,
+        compressed_vector_search_mode,
+        graph_commit_epoch: output.graph_commit_epoch,
+        projection_source_graph_commit_epoch: output.projection_freshness.source_graph_commit_epoch,
+        projection_commit_lag: output.diagnostics.projection_commit_lag,
+        projection_stale: output.diagnostics.projection_stale,
+        search_document_count: output.search.document_count,
+        search_filtered_document_count: output.search.filtered_document_count,
+        search_total_hits: output.search.total_hits,
+        candidate_count: output.candidates.len(),
+        candidate_total_count: output.diagnostics.candidate_total_count,
+        evidence_count: output.evidence.len(),
+        graph_seed_count: output.graph_seeds.len(),
+        graph_context_path_count: output.graph_context_paths.len(),
+        search_backend,
+        vector_backend,
+        text_backend,
+        search_fallback_reason_codes: output
+            .diagnostics
+            .search_fallback_reason_codes
+            .iter()
+            .map(|code| code.as_str().to_string())
+            .collect(),
+        retriever_fallback_reason_codes,
+        knowledge_fallback_reason_codes,
+        truncation_reason_codes,
+        warning_count: output.diagnostics.warnings.len(),
+        warnings: output.diagnostics.warnings.clone(),
+    }
 }
 
 fn nowledge_mem_read_report(
@@ -676,7 +854,7 @@ mod tests {
         NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
         NowledgeMemReadReport, NowledgeMemSearchProjection,
         NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -1321,8 +1499,8 @@ mod tests {
             .expect("expected search projection delta");
         store.apply_search_projection_graph_delta(delta).unwrap();
 
-        let output = store
-            .retrieve_knowledge(&KnowledgeRetrievalRequest {
+        let retrieval = store
+            .retrieve_knowledge_with_report(&KnowledgeRetrievalRequest {
                 query_text: "facade retrieval".to_string(),
                 query_embedding: None,
                 mode: SearchMode::Text,
@@ -1337,11 +1515,27 @@ mod tests {
                 graph_context_max_hops: 1,
             })
             .unwrap();
+        let output = retrieval.output;
+        let report = retrieval.report;
 
         assert_eq!(output.search.total_hits, 1);
         assert_eq!(output.search.hits[0].id, "memory:mem-search");
         assert_eq!(output.diagnostics.projection_commit_lag, 0);
         assert!(!output.evidence.is_empty());
+        assert_eq!(report.protocol, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL);
+        assert_eq!(report.mode, NowledgeMemGraphMode::WritableCutover);
+        assert_eq!(
+            report.compressed_vector_search_mode,
+            CompressedVectorSearchMode::Disabled
+        );
+        assert_eq!(report.search_total_hits, 1);
+        assert!(report.candidate_count >= 1);
+        assert!(report.evidence_count >= 1);
+        assert_eq!(report.text_backend, Some("bm25_text".to_string()));
+        assert_eq!(
+            report.json()["protocol"],
+            NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL
+        );
     }
 
     #[test]
@@ -1393,8 +1587,8 @@ mod tests {
         .with_compressed_vector_search_mode(CompressedVectorSearchMode::Preferred);
 
         let (store, report) = NowledgeMemEmbeddedStore::open_with_options(options).unwrap();
-        let output = store
-            .retrieve_knowledge(&KnowledgeRetrievalRequest {
+        let retrieval = store
+            .retrieve_knowledge_with_report(&KnowledgeRetrievalRequest {
                 query_text: String::new(),
                 query_embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
                 mode: SearchMode::Vector,
@@ -1409,6 +1603,7 @@ mod tests {
                 graph_context_max_hops: 0,
             })
             .unwrap();
+        let output = retrieval.output;
 
         assert_eq!(
             report.compressed_vector_search_mode,
@@ -1416,6 +1611,18 @@ mod tests {
         );
         assert_eq!(output.search.hits[0].id, "memory:mem-vector");
         assert_eq!(output.search.retrievers[0].backend, "turbovec_projection");
+        assert_eq!(
+            retrieval.report.compressed_vector_search_mode,
+            CompressedVectorSearchMode::Preferred
+        );
+        assert_eq!(
+            retrieval.report.vector_backend,
+            Some("turbovec_projection".to_string())
+        );
+        assert_eq!(
+            retrieval.report.json()["vector_backend"],
+            "turbovec_projection"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
