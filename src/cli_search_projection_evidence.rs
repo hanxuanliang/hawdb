@@ -234,6 +234,11 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
     let incremental_update_ready = bool_path(&incremental_update, &["ready"]) == Some(true);
     let predicate_pushdown = predicate_pushdown_report(probe);
     let predicate_pushdown_ready = bool_path(&predicate_pushdown, &["ready"]) == Some(true);
+    let compressed_vector_projection = compressed_vector_projection_report(probe);
+    let compressed_vector_projection_required =
+        vector_ready && is_skein_search_projection_probe(probe);
+    let compressed_vector_projection_ready = !compressed_vector_projection_required
+        || bool_path(&compressed_vector_projection, &["ready"]) == Some(true);
     let derived_projection = bool_path(probe, &["derived_projection"])
         .or_else(|| bool_path(probe, &["projection", "derived"]))
         == Some(true);
@@ -273,6 +278,9 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
     if !predicate_pushdown_ready {
         blocker_codes.insert("predicate_pushdown_not_ready".to_string());
     }
+    if !compressed_vector_projection_ready {
+        blocker_codes.insert("compressed_vector_projection_not_ready".to_string());
+    }
 
     let ready = blocker_codes.is_empty();
     serde_json::json!({
@@ -292,12 +300,15 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         "incremental_update_ready": incremental_update_ready,
         "source_chunk_ready": source_chunk_ready,
         "predicate_pushdown_ready": predicate_pushdown_ready,
+        "compressed_vector_projection_required": compressed_vector_projection_required,
+        "compressed_vector_projection_ready": compressed_vector_projection_ready,
         "tables": table_reports,
         "embedding_identity": embedding_identity,
         "fail_soft": fail_soft,
         "lifecycle": lifecycle,
         "incremental_update": incremental_update,
         "predicate_pushdown": predicate_pushdown,
+        "compressed_vector_projection": compressed_vector_projection,
         "blocker_codes": blocker_codes.into_iter().collect::<Vec<_>>(),
     })
 }
@@ -446,6 +457,29 @@ fn collect_prefixed_evidence_blockers(
     }
 }
 
+fn is_skein_search_projection_probe(probe: &serde_json::Value) -> bool {
+    str_path(probe, &["protocol"]) == Some("skein-nowledge-search-projection-probe")
+        || str_path(probe, &["engine"]) == Some("skein")
+}
+
+fn compressed_vector_projection_report(probe: &serde_json::Value) -> serde_json::Value {
+    let projection =
+        value_path(probe, &["compressed_vector_projection"]).unwrap_or(&serde_json::Value::Null);
+    let ready = bool_path(projection, &["ready"]).unwrap_or(false);
+    serde_json::json!({
+        "ready": ready,
+        "engine": str_path(projection, &["engine"]),
+        "compiled": bool_path(projection, &["compiled"]),
+        "bit_width": u64_path(projection, &["bit_width"]),
+        "dimension": u64_path(projection, &["dimension"]),
+        "document_count": u64_path(projection, &["document_count"]),
+        "supports_allowlist": bool_path(projection, &["supports_allowlist"]).unwrap_or(false),
+        "persisted_artifact_used": bool_path(projection, &["persisted_artifact_used"]).unwrap_or(false),
+        "artifact_rebuilt_from_snapshot": bool_path(projection, &["artifact_rebuilt_from_snapshot"]).unwrap_or(false),
+        "blocker_codes": array_path(projection, &["blocker_codes"]).unwrap_or_default(),
+    })
+}
+
 fn ready_probe_template(engine: &str) -> serde_json::Value {
     serde_json::json!({
         "engine": engine,
@@ -491,6 +525,18 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "numeric_min_max_ready": true,
             "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
             "scan_filter_fields": ["unit_type", "metadata", "importance", "confidence", "history", "latest"]
+        },
+        "compressed_vector_projection": {
+            "engine": "turbovec",
+            "compiled": true,
+            "ready": true,
+            "bit_width": 4,
+            "dimension": 1024,
+            "document_count": 5,
+            "supports_allowlist": true,
+            "persisted_artifact_used": true,
+            "artifact_rebuilt_from_snapshot": false,
+            "blocker_codes": []
         },
         "blocker_codes": []
     })
@@ -763,6 +809,8 @@ mod tests {
         assert_eq!(report["incremental_update_ready"], true);
         assert_eq!(report["source_chunk_ready"], true);
         assert_eq!(report["predicate_pushdown_ready"], true);
+        assert_eq!(report["compressed_vector_projection_required"], true);
+        assert_eq!(report["compressed_vector_projection_ready"], true);
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
     }
 
@@ -790,6 +838,32 @@ mod tests {
         );
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["predicate_pushdown_ready"], true);
+        assert_eq!(evidence["compressed_vector_projection_required"], false);
+        assert_eq!(evidence["compressed_vector_projection_ready"], true);
+    }
+
+    #[test]
+    fn search_projection_evidence_requires_compressed_vector_projection_for_skein_probe() {
+        let mut probe = ready_probe();
+        probe["compressed_vector_projection"]["ready"] = serde_json::json!(false);
+        probe["compressed_vector_projection"]["compiled"] = serde_json::json!(false);
+        probe["compressed_vector_projection"]["blocker_codes"] =
+            serde_json::json!(["turbovec_feature_disabled"]);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["compressed_vector_projection_required"], true);
+        assert_eq!(report["compressed_vector_projection_ready"], false);
+        assert_eq!(
+            report["compressed_vector_projection"]["blocker_codes"],
+            serde_json::json!(["turbovec_feature_disabled"])
+        );
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "compressed_vector_projection_not_ready"));
     }
 
     #[test]
@@ -856,7 +930,7 @@ mod tests {
                 .apply_embedding_manifest(SearchEmbeddingManifest {
                     model: "bge-m3".to_string(),
                     version: None,
-                    dimension: 2,
+                    dimension: 8,
                 })
                 .unwrap();
             index
@@ -875,7 +949,7 @@ mod tests {
                 "--active-model",
                 "bge-m3",
                 "--active-dimension",
-                "2",
+                "8",
                 path.to_str().unwrap(),
             ]
             .into_iter()
@@ -885,14 +959,28 @@ mod tests {
         let evidence = nowledge_search_projection_evidence_json(&probe);
 
         assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
+        #[cfg(feature = "turbovec")]
         assert_eq!(evidence["ready"], true);
+        #[cfg(not(feature = "turbovec"))]
+        assert_eq!(evidence["ready"], false);
         assert_eq!(evidence["covered_table_count"], 6);
         assert_eq!(evidence["source_chunk_ready"], true);
         assert_eq!(evidence["predicate_pushdown_ready"], true);
+        assert_eq!(evidence["compressed_vector_projection_required"], true);
+        #[cfg(feature = "turbovec")]
+        assert_eq!(evidence["compressed_vector_projection_ready"], true);
+        #[cfg(not(feature = "turbovec"))]
+        assert_eq!(evidence["compressed_vector_projection_ready"], false);
         assert_eq!(
             probe["predicate_pushdown"]["supported_ops"],
             serde_json::json!(["eq", "in", "not_in", "gt", "gte", "lt", "lte"])
         );
+        #[cfg(not(feature = "turbovec"))]
+        assert!(evidence["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "compressed_vector_projection_not_ready"));
         std::fs::remove_dir_all(path).unwrap();
     }
 
@@ -1022,6 +1110,18 @@ mod tests {
                     "event_end",
                     "is_latest"
                 ]
+            },
+            "compressed_vector_projection": {
+                "engine": "turbovec",
+                "compiled": true,
+                "ready": true,
+                "bit_width": 4,
+                "dimension": 1024,
+                "document_count": 5,
+                "supports_allowlist": true,
+                "persisted_artifact_used": true,
+                "artifact_rebuilt_from_snapshot": false,
+                "blocker_codes": []
             }
         })
     }
@@ -1053,7 +1153,7 @@ mod tests {
             external_id: external_id.to_string(),
             title: format!("{external_id} title"),
             body: format!("{external_id} body"),
-            embedding: Some(vec![1.0, 0.0]),
+            embedding: Some(vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
             source_id: Some("source_1".to_string()),
             metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
         }
