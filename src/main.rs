@@ -37,9 +37,10 @@ use skein::{
     CompatibilityRollbackEvidence, CompatibilityShadowReport, CompatibilityShadowStatus,
     CypherFixtureCheck, CypherFixtureStatement, Database, DatabaseConfig, ExpectedRows,
     ExternalShadowCommand, ExternalShadowReady, GraphLightningBootstrapManifest,
-    NowledgeCypherMigrationGateJsonOptions, ProjectedGraphFixtureCheck, RecoveryMode, Result,
-    SearchIndex, SkeinError, StorageRecoveryReport, Value,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
+    NowledgeCypherMigrationGateJsonOptions, NowledgeMemGraph, NowledgeMemGraphMode,
+    NowledgeMemReadOptions, ProjectedGraphFixtureCheck, RecoveryMode, Result, SearchIndex,
+    SkeinError, StorageRecoveryReport, Value, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 use skein::{
     nowledge_memory_core_fixture, run_compatibility_fixture_with_shadow,
@@ -160,6 +161,51 @@ fn main() -> Result<()> {
                     "nowledge bounded read evidence is not ready".to_string(),
                 ));
             }
+            return Ok(());
+        }
+        if command == "nowledge-bounded-read-report" {
+            let mut parameters = BTreeMap::new();
+            let mut options = NowledgeMemReadOptions::default();
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--params-json" => {
+                        args.next();
+                        let raw_parameters = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_bounded_read_report_usage())
+                        })?;
+                        parameters = parse_parameters_json(&raw_parameters)?;
+                    }
+                    "--max-rows" => {
+                        args.next();
+                        let raw_limit = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_bounded_read_report_usage())
+                        })?;
+                        options.max_rows = Some(parse_positive_usize("--max-rows", &raw_limit)?);
+                    }
+                    "--max-estimated-payload-bytes" => {
+                        args.next();
+                        let raw_limit = args.next().ok_or_else(|| {
+                            SkeinError::Semantic(nowledge_bounded_read_report_usage())
+                        })?;
+                        options.max_estimated_payload_bytes = Some(parse_positive_usize(
+                            "--max-estimated-payload-bytes",
+                            &raw_limit,
+                        )?);
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(nowledge_bounded_read_report_usage()))?;
+            let query = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(nowledge_bounded_read_report_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(nowledge_bounded_read_report_usage()));
+            }
+            let json = nowledge_bounded_read_report_json(&path, &query, &parameters, &options)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
         }
         if command == "nowledge-storage-recovery-evidence" {
@@ -1106,6 +1152,21 @@ fn storage_recovery_report_usage() -> String {
         .to_string()
 }
 
+fn nowledge_bounded_read_report_usage() -> String {
+    "nowledge-bounded-read-report requires [--params-json <json-object>] [--max-rows <n>] [--max-estimated-payload-bytes <n>] <database-path> <cypher>".to_string()
+}
+
+fn nowledge_bounded_read_report_json(
+    path: impl AsRef<Path>,
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
+    options: &NowledgeMemReadOptions,
+) -> Result<serde_json::Value> {
+    let mut graph = NowledgeMemGraph::open(path, NowledgeMemGraphMode::ShadowReadOnly)?;
+    let read = graph.read_query_with_params(query, parameters, options)?;
+    Ok(read.report.json())
+}
+
 fn background_maintenance_report_usage() -> String {
     "background-maintenance-report requires [--require-cutover-ready] [--disable-background] [--max-background-operations <n>] [--max-total-background-operations <n>] [--max-projection-background-operations <n>] <database-path>"
         .to_string()
@@ -1247,6 +1308,18 @@ fn parse_max_blockers(raw_limit: &str) -> Result<usize> {
         ));
     }
     Ok(limit)
+}
+
+fn parse_positive_usize(flag: &str, raw_value: &str) -> Result<usize> {
+    let value = raw_value
+        .parse::<usize>()
+        .map_err(|error| SkeinError::Semantic(format!("invalid {flag} '{raw_value}': {error}")))?;
+    if value == 0 {
+        return Err(SkeinError::Semantic(format!(
+            "{flag} must be greater than zero"
+        )));
+    }
+    Ok(value)
 }
 
 fn merge_replacement_summary_evidence(
@@ -4348,9 +4421,11 @@ mod tests {
         graph_lightning_stage_bootstrap_usage, graph_lightning_verify_export_usage,
         graph_lightning_verify_published_usage, graph_lightning_verify_staging_usage,
         is_self_shadow_command, merge_replacement_summary_evidence,
+        nowledge_bounded_read_report_json, nowledge_bounded_read_report_usage,
         nowledge_cypher_migration_gate_usage, parse_background_maintenance_limit,
         parse_max_blockers, parse_max_family_items, parse_max_wal_replay_entries,
-        parse_parameters_json, parse_shadow_timeout_ms, publish_graph_lightning_staging_catalog,
+        parse_parameters_json, parse_positive_usize, parse_shadow_timeout_ms,
+        publish_graph_lightning_staging_catalog,
         publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
         stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
         stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
@@ -4367,8 +4442,8 @@ mod tests {
         CanonicalSnapshotEndpointViolation, CanonicalSnapshotIdentityAudit, CompatibilityCheck,
         CompatibilityCheckReport, CompatibilityShadowCheckReport, CompatibilityShadowReport,
         CompatibilityShadowStatus, Database, ExternalShadowReady, GraphLightningBootstrapManifest,
-        GraphLightningGraphStreamValidation, LocalQosPolicy, PlanCacheStats, RecoveryMode,
-        StorageRecoveryReport, Value, WorkClass, WorkRequest,
+        GraphLightningGraphStreamValidation, LocalQosPolicy, NowledgeMemReadOptions,
+        PlanCacheStats, RecoveryMode, StorageRecoveryReport, Value, WorkClass, WorkRequest,
     };
     use std::collections::BTreeMap;
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -4472,6 +4547,58 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--max-blockers must be greater than zero"));
+    }
+
+    #[test]
+    fn nowledge_bounded_read_report_json_reads_shadow_database() {
+        let db_path = unique_main_test_dir("bounded-read-report");
+        {
+            let mut db = Database::open(&db_path).unwrap();
+            db.query("CREATE (:Memory {id: 'mem-read-report', title: 'bounded'})")
+                .unwrap();
+        }
+
+        let report = nowledge_bounded_read_report_json(
+            &db_path,
+            "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
+            &BTreeMap::from([(
+                "id".to_string(),
+                Value::String("mem-read-report".to_string()),
+            )]),
+            &NowledgeMemReadOptions {
+                max_rows: Some(4),
+                max_estimated_payload_bytes: Some(1024),
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report["protocol"], "skein-nowledge-mem-read-report");
+        assert_eq!(report["mode"], "shadow_read_only");
+        assert_eq!(report["row_count"], 1);
+        assert_eq!(report["max_rows"], 4);
+        assert_eq!(report["execution_row_cap"], 5);
+        assert_eq!(report["row_limit_enforced_before_output"], true);
+        assert_eq!(report["operator_row_cap_enabled"], true);
+        assert!(report.get("rows").is_none());
+        std::fs::remove_dir_all(db_path).unwrap();
+    }
+
+    #[test]
+    fn validates_nowledge_bounded_read_report_usage_text() {
+        assert!(nowledge_bounded_read_report_usage().contains("--params-json"));
+        assert!(nowledge_bounded_read_report_usage().contains("--max-rows"));
+        assert!(nowledge_bounded_read_report_usage().contains("--max-estimated-payload-bytes"));
+        assert!(nowledge_bounded_read_report_usage().contains("<database-path>"));
+        assert!(nowledge_bounded_read_report_usage().contains("<cypher>"));
+    }
+
+    #[test]
+    fn parses_positive_usize() {
+        assert_eq!(parse_positive_usize("--limit", "7").unwrap(), 7);
+        let error = parse_positive_usize("--limit", "0").unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("--limit must be greater than zero"));
     }
 
     #[test]
