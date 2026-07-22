@@ -37,13 +37,14 @@ impl Default for FixtureContractCommandCheckOptions {
 }
 
 pub fn nowledge_fixture_contract_command_check_usage() -> String {
-    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--wrapper-identity <id>] [--stop-after-first-failure] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]".to_string()
+    "nowledge-fixture-contract-command-check requires [--require-full-contract] [--wrapper-identity <id>] [--previous-wrapper-contract-evidence-output <path>] [--stop-after-first-failure] [--start-check <zero-based-index>] [--check-name <name>] [--max-checks <n>] [--command-timeout-ms <ms>] [--allow-primary-only-project-graph] <contract-json> [--persistent-command] <program> [args...]".to_string()
 }
 
 pub fn run_nowledge_fixture_contract_command_check(
     mut args: impl Iterator<Item = String>,
 ) -> Result<serde_json::Value> {
     let mut options = FixtureContractCommandCheckOptions::default();
+    let mut previous_wrapper_contract_evidence_output = None;
     let mut positional = Vec::new();
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -88,6 +89,17 @@ pub fn run_nowledge_fixture_contract_command_check(
                 }
                 options.wrapper_identity = Some(value);
             }
+            "--previous-wrapper-contract-evidence-output" => {
+                let value = args.next().ok_or_else(|| {
+                    SkeinError::Semantic(nowledge_fixture_contract_command_check_usage())
+                })?;
+                if value.trim().is_empty() {
+                    return Err(SkeinError::Semantic(
+                        "--previous-wrapper-contract-evidence-output must not be empty".to_string(),
+                    ));
+                }
+                previous_wrapper_contract_evidence_output = Some(value);
+            }
             "--stop-after-first-failure" => {
                 options.stop_after_first_failure = true;
             }
@@ -121,7 +133,11 @@ pub fn run_nowledge_fixture_contract_command_check(
         )
     };
     let contract = read_contract(contract_path)?;
-    check_contract_command(&contract, program, &command_args, &options)
+    let report = check_contract_command(&contract, program, &command_args, &options)?;
+    if let Some(path) = previous_wrapper_contract_evidence_output {
+        write_previous_wrapper_contract_evidence(&report, &path)?;
+    }
+    Ok(report)
 }
 
 fn read_contract(path: &str) -> Result<serde_json::Value> {
@@ -131,6 +147,24 @@ fn read_contract(path: &str) -> Result<serde_json::Value> {
     serde_json::from_str(&raw).map_err(|error| {
         SkeinError::Execution(format!(
             "failed to parse fixture contract '{path}': {error}"
+        ))
+    })
+}
+
+fn write_previous_wrapper_contract_evidence(report: &serde_json::Value, path: &str) -> Result<()> {
+    let evidence = report
+        .get("previous_wrapper_contract_evidence")
+        .ok_or_else(|| {
+            SkeinError::Semantic(
+                "contract command check missing previous-wrapper evidence".to_string(),
+            )
+        })?;
+    let rendered = serde_json::to_string_pretty(evidence)
+        .expect("previous-wrapper contract evidence must be serializable");
+    std::fs::write(path, format!("{rendered}\n")).map_err(|error| {
+        SkeinError::Execution(format!(
+            "failed to write previous-wrapper contract evidence: {}",
+            error.kind()
         ))
     })
 }
@@ -1036,7 +1070,12 @@ fn json_debug(value: Option<&serde_json::Value>) -> serde_json::Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_contract_command, FixtureCommandMode, FixtureContractCommandCheckOptions};
+    use super::{
+        check_contract_command, run_nowledge_fixture_contract_command_check, FixtureCommandMode,
+        FixtureContractCommandCheckOptions,
+    };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn contract_command_check_reports_row_count_mismatch() {
@@ -1067,17 +1106,8 @@ mod tests {
             ]
         });
         let options = FixtureContractCommandCheckOptions::default();
-        let report = check_contract_command(
-            &contract,
-            "python3",
-            &[
-                "-c".to_string(),
-                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
-                    .to_string(),
-            ],
-            &options,
-        )
-        .unwrap();
+        let command_args = empty_rows_shell_args();
+        let report = check_contract_command(&contract, "/bin/sh", &command_args, &options).unwrap();
 
         assert_eq!(report["matched_checks"], 0);
         assert_eq!(report["failed_checks"], 1);
@@ -1139,17 +1169,8 @@ mod tests {
             start_check: 1,
             ..FixtureContractCommandCheckOptions::default()
         };
-        let report = check_contract_command(
-            &contract,
-            "python3",
-            &[
-                "-c".to_string(),
-                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
-                    .to_string(),
-            ],
-            &options,
-        )
-        .unwrap();
+        let command_args = empty_rows_shell_args();
+        let report = check_contract_command(&contract, "/bin/sh", &command_args, &options).unwrap();
 
         assert_eq!(report["selected_checks"], 1);
         assert_eq!(report["checked_checks"], 1);
@@ -1219,17 +1240,8 @@ mod tests {
             require_full_contract: true,
             ..FixtureContractCommandCheckOptions::default()
         };
-        let report = check_contract_command(
-            &contract,
-            "python3",
-            &[
-                "-c".to_string(),
-                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
-                    .to_string(),
-            ],
-            &options,
-        )
-        .unwrap();
+        let command_args = empty_rows_shell_args();
+        let report = check_contract_command(&contract, "/bin/sh", &command_args, &options).unwrap();
 
         assert_eq!(report["selected_subset_ready"], true);
         assert_eq!(report["full_contract_ready"], false);
@@ -1277,7 +1289,8 @@ mod tests {
             check_name: Some("missing".to_string()),
             ..FixtureContractCommandCheckOptions::default()
         };
-        let report = check_contract_command(&contract, "python3", &[], &options).unwrap();
+        let command_args = empty_rows_shell_args();
+        let report = check_contract_command(&contract, "/bin/sh", &command_args, &options).unwrap();
 
         assert_eq!(report["selected_checks"], 0);
         assert_eq!(report["checked_checks"], 0);
@@ -1405,17 +1418,8 @@ mod tests {
             wrapper_identity: Some("nowledge-previous-wrapper:test".to_string()),
             ..FixtureContractCommandCheckOptions::default()
         };
-        let report = check_contract_command(
-            &contract,
-            "python3",
-            &[
-                "-c".to_string(),
-                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
-                    .to_string(),
-            ],
-            &options,
-        )
-        .unwrap();
+        let command_args = empty_rows_shell_args();
+        let report = check_contract_command(&contract, "/bin/sh", &command_args, &options).unwrap();
 
         assert_eq!(report["full_contract_ready"], true);
         assert_eq!(report["required_contract_ready"], true);
@@ -1436,6 +1440,41 @@ mod tests {
             report["previous_wrapper_contract_evidence"]["blocker_codes"],
             serde_json::json!([])
         );
+    }
+
+    #[test]
+    fn contract_command_check_can_write_previous_wrapper_contract_evidence() {
+        let contract_path = unique_test_file("fixture_contract");
+        let evidence_path = unique_test_file("previous_wrapper_contract_evidence");
+        std::fs::write(&contract_path, mini_contract().to_string()).unwrap();
+
+        let report = run_nowledge_fixture_contract_command_check(
+            [
+                "--require-full-contract",
+                "--wrapper-identity",
+                "nowledge-previous-wrapper:test",
+                "--previous-wrapper-contract-evidence-output",
+                evidence_path.to_str().unwrap(),
+                contract_path.to_str().unwrap(),
+                "/bin/sh",
+                "-c",
+                "cat >/dev/null; printf '{\"rows\":[]}\\n'",
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        let evidence: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&evidence_path).unwrap()).unwrap();
+        assert_eq!(report["previous_wrapper_contract_evidence"], evidence);
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(
+            evidence["wrapper_identity"],
+            "nowledge-previous-wrapper:test"
+        );
+        std::fs::remove_file(contract_path).unwrap();
+        std::fs::remove_file(evidence_path).unwrap();
     }
 
     #[test]
@@ -1488,17 +1527,8 @@ mod tests {
             stop_after_first_failure: true,
             ..FixtureContractCommandCheckOptions::default()
         };
-        let report = check_contract_command(
-            &contract,
-            "python3",
-            &[
-                "-c".to_string(),
-                "import json,sys; json.load(sys.stdin); print(json.dumps({'rows': []}))"
-                    .to_string(),
-            ],
-            &options,
-        )
-        .unwrap();
+        let command_args = empty_rows_shell_args();
+        let report = check_contract_command(&contract, "/bin/sh", &command_args, &options).unwrap();
 
         assert_eq!(report["checked_checks"], 1);
         assert_eq!(report["failed_checks"], 1);
@@ -1516,5 +1546,49 @@ mod tests {
             report["failure_summary"]["stopped_after_first_failure"],
             true
         );
+    }
+
+    fn mini_contract() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-fixture-contract",
+            "fixture": "mini",
+            "check_count": 1,
+            "setup": [],
+            "checks": [
+                {
+                    "index": 0,
+                    "kind": "cypher",
+                    "name": "first",
+                    "execution_mode": "database",
+                    "setup": [],
+                    "statement": {
+                        "command_request": {
+                            "op": "query",
+                            "cypher": "MATCH (n) RETURN n",
+                            "parameters": {}
+                        }
+                    },
+                    "expected_rows": {
+                        "kind": "row_count",
+                        "count": 0
+                    }
+                }
+            ]
+        })
+    }
+
+    fn unique_test_file(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}.json", std::process::id()))
+    }
+
+    fn empty_rows_shell_args() -> Vec<String> {
+        vec![
+            "-c".to_string(),
+            "cat >/dev/null; printf '{\"rows\":[]}\\n'".to_string(),
+        ]
     }
 }

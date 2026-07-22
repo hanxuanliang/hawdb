@@ -100,6 +100,7 @@ run_skein nowledge-fixture-contract nowledge-memory-core \
 run_skein nowledge-fixture-contract-command-check \
   --require-full-contract \
   --wrapper-identity "$wrapper_identity" \
+  --previous-wrapper-contract-evidence-output "$preflight_root/previous-wrapper-contract-evidence.json" \
   "$preflight_root/contract.json" \
   --persistent-command "${wrapper_command[@]}" \
   > "$preflight_root/contract-evidence.json"
@@ -124,23 +125,20 @@ run_skein storage-recovery-report \
   "$skein_preflight_db" \
   > "$preflight_root/storage-recovery.json"
 
+run_skein nowledge-storage-recovery-evidence \
+  --require-ready \
+  "$preflight_root/storage-recovery.json" \
+  > "$preflight_root/storage-recovery-evidence.json"
+
 run_skein background-maintenance-report \
   --require-cutover-ready \
   "$skein_preflight_db" \
   > "$preflight_root/background-maintenance.json"
 
-python3 - "$preflight_root/contract-evidence.json" \
-  "$preflight_root/previous-wrapper-contract-evidence.json" <<'PY'
-import json
-import sys
-
-with open(sys.argv[1], encoding="utf-8") as file:
-    report = json.load(file)
-
-with open(sys.argv[2], "w", encoding="utf-8") as file:
-    json.dump(report["previous_wrapper_contract_evidence"], file, indent=2)
-    file.write("\n")
-PY
+run_skein nowledge-background-maintenance-evidence \
+  --require-ready \
+  "$preflight_root/background-maintenance.json" \
+  > "$preflight_root/background-maintenance-evidence.json"
 
 run_skein nowledge-cypher-migration-gate \
   --require-ready \
