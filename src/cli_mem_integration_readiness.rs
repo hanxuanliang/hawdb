@@ -1,6 +1,9 @@
 use skein::{Result, SkeinError, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES};
 use std::path::Path;
 
+const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
+    "nowledge-mem-skein-integration-bundle";
+
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
         .to_string()
@@ -36,6 +39,12 @@ pub fn run_nowledge_mem_integration_readiness(
 
 pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> serde_json::Value {
     let checks = vec![
+        check(
+            "integration_bundle_protocol",
+            [str_path(bundle, &["protocol"]) == Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL)],
+            ["protocol"],
+            Vec::new(),
+        ),
         check(
             "skein_submodule",
             [
@@ -629,6 +638,13 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
         return Vec::new();
     }
     let mut actions = Vec::new();
+    if str_path(bundle, &["protocol"]) != Some(NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL) {
+        actions.push(next_action(
+            "regenerate_skein_integration_bundle",
+            "Nowledge Mem integration readiness requires the versioned integration bundle protocol",
+            ["protocol"],
+        ));
+    }
     if bool_path(bundle, &["submodule", "present"]) != Some(true) {
         actions.push(next_action(
             "add_skein_submodule",
@@ -1112,6 +1128,35 @@ mod tests {
     }
 
     #[test]
+    fn requires_versioned_integration_bundle_protocol() {
+        let mut bundle = ready_bundle();
+        bundle.as_object_mut().unwrap().remove("protocol");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["integration_bundle_protocol"])
+        );
+        let protocol_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "integration_bundle_protocol")
+            .unwrap();
+        assert_eq!(
+            protocol_check["failed_evidence_fields"],
+            serde_json::json!(["protocol"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "regenerate_skein_integration_bundle"));
+    }
+
+    #[test]
     fn fails_closed_without_submodule_and_coexistence() {
         let mut bundle = ready_bundle();
         bundle["submodule"]["present"] = serde_json::json!(false);
@@ -1523,6 +1568,7 @@ mod tests {
 
     fn ready_bundle() -> serde_json::Value {
         serde_json::json!({
+            "protocol": "nowledge-mem-skein-integration-bundle",
             "submodule": {
                 "present": true,
                 "path": "vendor/skein",
