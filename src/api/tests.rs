@@ -1828,6 +1828,7 @@ fn retrieves_knowledge_through_database_facade() {
         .find(|report| report.name == "text")
         .expect("text knowledge retriever report");
     assert_eq!(text_retriever.candidate_count, 2);
+    assert_eq!(text_retriever.backend, "bm25_text");
     assert_eq!(text_retriever.limit, Some(1));
     assert_eq!(text_retriever.rank_window, None);
     assert_eq!(text_retriever.fusion_weight, Some(1.0));
@@ -1841,6 +1842,7 @@ fn retrieves_knowledge_through_database_facade() {
         text_retriever.candidate_set,
         search_text_retriever.candidate_set
     );
+    assert_eq!(text_retriever.backend, search_text_retriever.backend);
     assert_eq!(
         text_retriever.top_candidates[0].kind.as_deref(),
         Some("memory")
@@ -1932,6 +1934,7 @@ fn retrieves_knowledge_through_database_facade() {
         .find(|report| report.name == "graph_seed")
         .expect("graph seed retriever report");
     assert!(graph_seed_report.available);
+    assert_eq!(graph_seed_report.backend, "graph_seed_expand");
     assert_eq!(graph_seed_report.candidate_count, 2);
     assert_eq!(
         graph_seed_report.input_candidate_set.id_space,

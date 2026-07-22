@@ -320,6 +320,7 @@ pub struct SearchPredicatePushdownReport {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SearchRetrieverReport {
     pub name: String,
+    pub backend: String,
     pub available: bool,
     pub input_candidate_set: SearchCandidateSetReport,
     pub candidate_count: usize,
@@ -378,6 +379,18 @@ enum VectorSearchBackend<'a> {
     _Lifetime(std::marker::PhantomData<&'a ()>),
     #[cfg(feature = "turbovec")]
     Turbovec(&'a turbovec_projection::TurbovecSearchProjection),
+}
+
+impl VectorSearchBackend<'_> {
+    fn report_name(self) -> &'static str {
+        match self {
+            Self::Scalar => "scalar_vector_scan",
+            #[cfg(not(feature = "turbovec"))]
+            Self::_Lifetime(_) => "scalar_vector_scan",
+            #[cfg(feature = "turbovec")]
+            Self::Turbovec(_) => "turbovec_projection",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1415,6 +1428,7 @@ impl SearchIndex {
         let retrievers = vec![
             SearchRetrieverReport {
                 name: "vector".to_string(),
+                backend: vector_backend.report_name().to_string(),
                 available: vector_available && mode != SearchMode::Text,
                 input_candidate_set: candidate_set.clone(),
                 candidate_count: vector_scores.len(),
@@ -1430,6 +1444,7 @@ impl SearchIndex {
             },
             SearchRetrieverReport {
                 name: "text".to_string(),
+                backend: "bm25_text".to_string(),
                 available: text_available && mode != SearchMode::Vector,
                 input_candidate_set: candidate_set.clone(),
                 candidate_count: text_scores.len(),
@@ -4024,6 +4039,8 @@ mod tests {
             .expect("expected text retriever report");
         assert!(vector.available);
         assert!(text.available);
+        assert_eq!(vector.backend, "scalar_vector_scan");
+        assert_eq!(text.backend, "bm25_text");
         assert_eq!(vector.input_candidate_set, result.candidate_set);
         assert_eq!(text.input_candidate_set, result.candidate_set);
         assert_eq!(
@@ -6573,6 +6590,7 @@ mod tests {
         assert_eq!(result.hits.len(), 1);
         assert_eq!(result.hits[0].id, "memory:a");
         assert_eq!(result.retrievers[0].name, "vector");
+        assert_eq!(result.retrievers[0].backend, "turbovec_projection");
         assert!(result.retrievers[0].available);
         assert_eq!(result.candidate_set.cardinality, 1);
         assert_eq!(result.candidate_set.filtered_out_count, 1);

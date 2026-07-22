@@ -1230,6 +1230,7 @@ impl KnowledgeRetrievalEmptyReasonCode {
 #[derive(Debug, Clone, PartialEq)]
 pub struct KnowledgeRetrieverReport {
     pub name: String,
+    pub backend: String,
     pub available: bool,
     pub input_candidate_set: SearchCandidateSetReport,
     pub candidate_count: usize,
@@ -8393,6 +8394,7 @@ fn knowledge_retriever_reports(
         .iter()
         .map(|report| KnowledgeRetrieverReport {
             name: report.name.clone(),
+            backend: report.backend.clone(),
             available: report.available,
             input_candidate_set: report.input_candidate_set.clone(),
             candidate_count: report.candidate_count,
@@ -8447,6 +8449,7 @@ fn knowledge_retriever_reports(
         .collect::<Vec<_>>();
     reports.push(KnowledgeRetrieverReport {
         name: "graph_seed".to_string(),
+        backend: "graph_seed_expand".to_string(),
         available: graph_seed_input.limit > 0,
         input_candidate_set: knowledge_graph_seed_input_candidate_set_report(
             graph_seed_input.input_candidate_count,
