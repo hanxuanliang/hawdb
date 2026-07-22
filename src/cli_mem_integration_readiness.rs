@@ -1,4 +1,4 @@
-use skein::{Result, SkeinError};
+use skein::{Result, SkeinError, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES};
 use std::path::Path;
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
@@ -127,6 +127,51 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     &["replacement_summary", "blocking_categories"][..],
                     &["replacement_summary", "missing_evidence"][..],
                     &["replacement_summary", "dual_engine_evidence", "blocker_codes"][..],
+                ],
+            ),
+        ),
+        check(
+            "query_family_replacement_evidence",
+            [
+                replacement_summary_required_query_families_present(bundle),
+                string_array_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "replacement_readiness_family_summary",
+                        "missing_required_query_families",
+                    ],
+                )
+                .is_empty(),
+                string_array_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "replacement_readiness_family_summary",
+                        "blocked_query_families",
+                    ],
+                )
+                .is_empty(),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "replacement_readiness_family_summary",
+                        "min_replacement_readiness_per_million",
+                    ],
+                ) == Some(1_000_000),
+            ],
+            [
+                "replacement_summary.replacement_readiness_family_summary.required_query_families",
+                "replacement_summary.replacement_readiness_family_summary.missing_required_query_families",
+                "replacement_summary.replacement_readiness_family_summary.blocked_query_families",
+                "replacement_summary.replacement_readiness_family_summary.min_replacement_readiness_per_million",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &["replacement_summary", "blocking_categories"][..],
+                    &["replacement_summary", "missing_evidence"][..],
                 ],
             ),
         ),
@@ -530,6 +575,45 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if !replacement_summary_required_query_families_present(bundle)
+        || !string_array_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "replacement_readiness_family_summary",
+                "missing_required_query_families",
+            ],
+        )
+        .is_empty()
+        || !string_array_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "replacement_readiness_family_summary",
+                "blocked_query_families",
+            ],
+        )
+        .is_empty()
+        || u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "replacement_readiness_family_summary",
+                "min_replacement_readiness_per_million",
+            ],
+        ) != Some(1_000_000)
+    {
+        actions.push(next_action(
+            "close_required_query_families",
+            "Nowledge Mem cutover requires explicit readiness for every required query family",
+            [
+                "replacement_summary.replacement_readiness_family_summary.required_query_families",
+                "replacement_summary.replacement_readiness_family_summary.missing_required_query_families",
+                "replacement_summary.replacement_readiness_family_summary.blocked_query_families",
+                "replacement_summary.replacement_readiness_family_summary.min_replacement_readiness_per_million",
+            ],
+        ));
+    }
     if bool_path(
         bundle,
         &[
@@ -715,6 +799,20 @@ fn blocker_codes(value: &serde_json::Value, paths: &[&[&str]]) -> Vec<String> {
         .collect()
 }
 
+fn replacement_summary_required_query_families_present(bundle: &serde_json::Value) -> bool {
+    let families = string_array_path(
+        bundle,
+        &[
+            "replacement_summary",
+            "replacement_readiness_family_summary",
+            "required_query_families",
+        ],
+    );
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES
+        .iter()
+        .all(|required| families.iter().any(|family| family == required))
+}
+
 fn string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {
     json_get_path(value, path)
         .and_then(serde_json::Value::as_array)
@@ -823,6 +921,68 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.document_count_parity"
+            ])
+        );
+    }
+
+    #[test]
+    fn requires_explicit_required_query_family_readiness() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]
+            .as_object_mut()
+            .unwrap()
+            .remove("replacement_readiness_family_summary");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_family_replacement_evidence"])
+        );
+        let family_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_family_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            family_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.replacement_readiness_family_summary.required_query_families",
+                "replacement_summary.replacement_readiness_family_summary.min_replacement_readiness_per_million"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "close_required_query_families"));
+    }
+
+    #[test]
+    fn rejects_missing_required_query_family_even_if_cutover_flag_is_true() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["replacement_readiness_family_summary"]
+            ["missing_required_query_families"] = serde_json::json!(["projected_graph"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_family_replacement_evidence"])
+        );
+        let family_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_family_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            family_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.replacement_readiness_family_summary.missing_required_query_families"
             ])
         );
     }
@@ -990,6 +1150,21 @@ mod tests {
                     "present": true,
                     "ready": true,
                     "consistent": true
+                },
+                "replacement_readiness_family_summary": {
+                    "total_count": 4,
+                    "ready_count": 4,
+                    "blocked_count": 0,
+                    "omitted_count": 0,
+                    "min_replacement_readiness_per_million": 1_000_000,
+                    "blocked_query_families": [],
+                    "required_query_families": [
+                        "memory_lookup",
+                        "graph_traversal",
+                        "projected_graph",
+                        "search_projection"
+                    ],
+                    "missing_required_query_families": []
                 },
                 "search_projection_evidence": {
                     "ready": true,

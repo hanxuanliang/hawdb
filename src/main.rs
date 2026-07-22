@@ -1799,6 +1799,11 @@ fn add_cutover_evidence_report(
     );
     insert_json(
         &mut evidence,
+        "replacement_readiness_missing_required_query_families",
+        replacement_family_health.missing_required_query_families,
+    );
+    insert_json(
+        &mut evidence,
         "replacement_readiness_blockers",
         replacement_family_health.blockers,
     );
