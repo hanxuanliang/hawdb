@@ -379,9 +379,17 @@ pub struct SearchQueryOptions {
     pub policy_epoch: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompressedVectorSearchMode {
+    Disabled,
+    Preferred,
+    Required,
+}
+
 #[derive(Clone, Copy)]
 enum VectorSearchBackend<'a> {
     Scalar,
+    CompressedRequiredUnavailable,
     #[cfg(not(feature = "turbovec"))]
     _Lifetime(std::marker::PhantomData<&'a ()>),
     #[cfg(feature = "turbovec")]
@@ -392,6 +400,7 @@ impl VectorSearchBackend<'_> {
     fn report_name(self) -> &'static str {
         match self {
             Self::Scalar => "scalar_vector_scan",
+            Self::CompressedRequiredUnavailable => "compressed_vector_projection_required",
             #[cfg(not(feature = "turbovec"))]
             Self::_Lifetime(_) => "scalar_vector_scan",
             #[cfg(feature = "turbovec")]
@@ -1302,6 +1311,34 @@ impl SearchIndex {
         mode: SearchMode,
         options: SearchQueryOptions,
     ) -> SearchResultSet {
+        self.search_with_options_compressed_vector_projection_mode(
+            query_text,
+            query_embedding,
+            mode,
+            options,
+            CompressedVectorSearchMode::Preferred,
+        )
+    }
+
+    pub fn search_with_options_compressed_vector_projection_mode(
+        &self,
+        query_text: &str,
+        query_embedding: Option<&[f32]>,
+        mode: SearchMode,
+        options: SearchQueryOptions,
+        compressed_vector_search_mode: CompressedVectorSearchMode,
+    ) -> SearchResultSet {
+        if compressed_vector_search_mode == CompressedVectorSearchMode::Disabled {
+            return self.search_with_options_using_vector_backend(
+                query_text,
+                query_embedding,
+                mode,
+                options,
+                VectorSearchBackend::Scalar,
+                None,
+            );
+        }
+
         #[cfg(feature = "turbovec")]
         {
             if mode != SearchMode::Text && query_embedding.is_some() {
@@ -1318,6 +1355,18 @@ impl SearchIndex {
                     }
                     Ok(None) => {}
                     Err(error) => {
+                        if compressed_vector_search_mode == CompressedVectorSearchMode::Required {
+                            return self.search_with_options_using_vector_backend(
+                                query_text,
+                                query_embedding,
+                                mode,
+                                options,
+                                VectorSearchBackend::CompressedRequiredUnavailable,
+                                Some(format!(
+                                    "compressed vector projection required but unavailable: {error}"
+                                )),
+                            );
+                        }
                         return self.search_with_options_using_vector_backend(
                             query_text,
                             query_embedding,
@@ -1331,6 +1380,20 @@ impl SearchIndex {
                     }
                 }
             }
+        }
+
+        if compressed_vector_search_mode == CompressedVectorSearchMode::Required
+            && mode != SearchMode::Text
+            && query_embedding.is_some()
+        {
+            return self.search_with_options_using_vector_backend(
+                query_text,
+                query_embedding,
+                mode,
+                options,
+                VectorSearchBackend::CompressedRequiredUnavailable,
+                None,
+            );
         }
 
         self.search_with_options_using_vector_backend(
@@ -1440,10 +1503,6 @@ impl SearchIndex {
             } else {
                 (Vec::new(), Vec::new())
             };
-        let mut fallback_reason_codes = vector_fallback_reason_codes.clone();
-        fallback_reason_codes.extend(text_fallback_reason_codes.iter().copied());
-        let mut fallback_reasons = vector_fallback_reasons.clone();
-        fallback_reasons.extend(text_fallback_reasons.iter().cloned());
         let text_corpus = if text_available && mode != SearchMode::Vector {
             Some(TextCorpusStats::from_documents(
                 filtered_documents.iter().copied(),
@@ -1483,6 +1542,10 @@ impl SearchIndex {
                 text_scores.insert(document.id.clone(), text_score);
             }
         }
+        let mut fallback_reason_codes = vector_fallback_reason_codes.clone();
+        fallback_reason_codes.extend(text_fallback_reason_codes.iter().copied());
+        let mut fallback_reasons = vector_fallback_reasons.clone();
+        fallback_reasons.extend(text_fallback_reasons.iter().cloned());
 
         let vector_ranks = ranked_scores(&vector_scores);
         let text_ranks = ranked_scores(&text_scores);
@@ -2206,10 +2269,19 @@ fn vector_scores_for_backend(
     fallback_reasons: &mut Vec<String>,
 ) -> BTreeMap<String, f64> {
     #[cfg(not(feature = "turbovec"))]
-    let _ = (limit, rank_window, fallback_reason_codes, fallback_reasons);
+    let _ = (limit, rank_window);
 
     match backend {
         VectorSearchBackend::Scalar => scalar_vector_scores(query_embedding, documents),
+        VectorSearchBackend::CompressedRequiredUnavailable => {
+            fallback_reason_codes
+                .push(SearchFallbackReasonCode::CompressedVectorProjectionUnavailable);
+            fallback_reasons.push(
+                "compressed vector projection required but unavailable; scalar vector scan disabled"
+                    .to_string(),
+            );
+            BTreeMap::new()
+        }
         #[cfg(not(feature = "turbovec"))]
         VectorSearchBackend::_Lifetime(_) => unreachable!("lifetime marker is never constructed"),
         #[cfg(feature = "turbovec")]
@@ -6239,6 +6311,85 @@ mod tests {
             .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
 
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    #[cfg(feature = "turbovec")]
+    fn compressed_vector_projection_disabled_uses_scalar_even_when_artifact_exists() {
+        let path = unique_test_dir("search_turbovec_disabled_uses_scalar");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            index
+                .upsert(doc(
+                    "memory:a",
+                    "Vector A",
+                    "Compressed projection",
+                    [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+                ))
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index.search_with_options_compressed_vector_projection_mode(
+            "",
+            Some(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            CompressedVectorSearchMode::Disabled,
+        );
+
+        assert_eq!(result.hits[0].id, "memory:a");
+        assert_eq!(result.retrievers[0].backend, "scalar_vector_scan");
+        assert!(result.retrievers[0].fallback_reason_codes.is_empty());
+
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn compressed_vector_projection_required_does_not_use_scalar_fallback() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .upsert(doc(
+                "memory:a",
+                "Vector A",
+                "Compressed projection",
+                [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            ))
+            .unwrap();
+
+        let result = index.search_with_options_compressed_vector_projection_mode(
+            "",
+            Some(&[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]),
+            SearchMode::Vector,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::new(),
+                policy_epoch: None,
+            },
+            CompressedVectorSearchMode::Required,
+        );
+
+        assert!(result.hits.is_empty());
+        assert_eq!(
+            result.retrievers[0].backend,
+            "compressed_vector_projection_required"
+        );
+        assert_eq!(result.retrievers[0].candidate_count, 0);
+        assert!(result.retrievers[0]
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
+        assert!(result
+            .fallback_reason_codes
+            .contains(&SearchFallbackReasonCode::CompressedVectorProjectionUnavailable));
     }
 
     #[test]

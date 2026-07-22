@@ -332,12 +332,13 @@ pub use schema::{
     TableKind,
 };
 pub use search::{
-    MetadataRepairOptions, MetadataRepairSummary, SearchAnalyzerLexicon,
-    SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest, SearchEmptyReasonCode,
-    SearchFallbackReasonCode, SearchHit, SearchIndex, SearchMode, SearchProjectionDelta,
-    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionKind,
-    SearchProjectionProbeOptions, SearchProjectionRow, SearchRebuildOptions, SearchRebuildSummary,
-    SearchResultSet, SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
+    CompressedVectorSearchMode, MetadataRepairOptions, MetadataRepairSummary,
+    SearchAnalyzerLexicon, SearchDerivedArtifactReport, SearchDocument, SearchEmbeddingManifest,
+    SearchEmptyReasonCode, SearchFallbackReasonCode, SearchHit, SearchIndex, SearchMode,
+    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow, SearchRebuildOptions,
+    SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
+    SearchTruncationReasonCode,
 };
 pub use skein_optimizer::{
     Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,

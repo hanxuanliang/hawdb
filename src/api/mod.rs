@@ -18,13 +18,13 @@ use crate::schema::{
     TableDescriptor,
 };
 use crate::search::{
-    projection_row_from_node, search_metadata_predicate_pushdown, MetadataRepairOptions,
-    MetadataRepairSummary, SearchCandidateSetReport, SearchDerivedArtifactReport,
-    SearchEmptyReasonCode, SearchFallbackReasonCode, SearchFusionWeights, SearchIndex,
-    SearchMatchedSpan, SearchMode, SearchPredicatePushdownReport, SearchProjectionDelta,
-    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchQueryOptions,
-    SearchRebuildOptions, SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
-    SearchTruncationReasonCode,
+    projection_row_from_node, search_metadata_predicate_pushdown, CompressedVectorSearchMode,
+    MetadataRepairOptions, MetadataRepairSummary, SearchCandidateSetReport,
+    SearchDerivedArtifactReport, SearchEmptyReasonCode, SearchFallbackReasonCode,
+    SearchFusionWeights, SearchIndex, SearchMatchedSpan, SearchMode, SearchPredicatePushdownReport,
+    SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchQueryOptions, SearchRebuildOptions, SearchRebuildSummary, SearchResultSet,
+    SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
 };
 use crate::store::{
     AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
@@ -93,6 +93,7 @@ pub struct DatabaseConfig {
     pub max_wal_replay_entries: Option<usize>,
     pub max_search_projection_change_log_entries: Option<usize>,
     pub max_plan_cache_entries: Option<usize>,
+    pub compressed_vector_search_mode: CompressedVectorSearchMode,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +115,7 @@ impl Default for DatabaseConfig {
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
             max_plan_cache_entries: Some(DEFAULT_PLAN_CACHE_MAX_ENTRIES),
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
         }
     }
 }
@@ -6731,6 +6733,7 @@ impl Database {
         KnowledgeRetrievalGraphContext {
             catalog: &self.catalog,
             store: &self.store,
+            compressed_vector_search_mode: self.config.compressed_vector_search_mode,
         }
         .retrieve_knowledge(search_index, request)
     }
@@ -7901,6 +7904,7 @@ impl Database {
 struct KnowledgeRetrievalGraphContext<'a> {
     catalog: &'a Catalog,
     store: &'a GraphStore,
+    compressed_vector_search_mode: CompressedVectorSearchMode,
 }
 
 impl KnowledgeRetrievalGraphContext<'_> {
@@ -7909,7 +7913,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
         search_index: &SearchIndex,
         request: &KnowledgeRetrievalRequest,
     ) -> KnowledgeRetrievalOutput {
-        let search = search_index.search_with_options_prefer_compressed_vector_projection(
+        let search = search_index.search_with_options_compressed_vector_projection_mode(
             &request.query_text,
             request.query_embedding.as_deref(),
             request.mode,
@@ -7920,6 +7924,7 @@ impl KnowledgeRetrievalGraphContext<'_> {
                 metadata_filters: request.metadata_filters.clone(),
                 policy_epoch: None,
             },
+            self.compressed_vector_search_mode,
         );
         let graph_seed_search = self.search_knowledge_graph_seeds(
             &request.query_text,
@@ -30417,6 +30422,7 @@ impl DatabaseReadTransaction {
         KnowledgeRetrievalGraphContext {
             catalog: &self.catalog,
             store: &self.store,
+            compressed_vector_search_mode: self.config.compressed_vector_search_mode,
         }
         .retrieve_knowledge(search_index, request)
     }
