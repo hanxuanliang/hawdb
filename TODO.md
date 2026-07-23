@@ -15,8 +15,10 @@ query family, or cutover gate requires them.
   - Add the remaining route families only after confirming they are still active
     Nowledge Mem call sites.
 - [ ] Move graph read traffic through the query runtime boundary.
-  - Keep Kuzu/Ladybug as primary until each route has stable Skein shadow
-    evidence.
+  - Mem should dual-write to Kuzu/Ladybug and Skein from the start of the
+    migration window, then choose the read engine through configuration.
+  - Keep Kuzu/Ladybug as the default read engine until each active route has
+    stable Skein shadow evidence.
   - Avoid direct hand-written execution paths in application routes when the
     AST, fast-path detector, optimizer, and executor can own the path.
 - [ ] Complete dual-engine cutover readiness.
@@ -90,8 +92,10 @@ query family, or cutover gate requires them.
   memory pressure.
 - [ ] Add explain output that includes semantic checks, selected fast path,
   optimizer budget, chosen indexes, scan-pruning decisions, and resource class.
-- [ ] Add typed preflight or harness commands for all replacement artifacts so
-  Python-only validation scripts can be retired from the critical path.
+- [ ] Add query-runtime preflight or harness commands for replacement artifacts
+  so Python-only validation scripts can be retired from the critical path.
+  - Do not add new query-shape-specific typed APIs unless they are required for
+    compatibility with an existing caller during migration.
 
 ## P1: Performance From Architecture
 
