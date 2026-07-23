@@ -5670,12 +5670,25 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
+        self.query_with_params_trace(cypher_text, parameters, false)
+            .map(|(output, _)| output)
+    }
+
+    pub(crate) fn query_with_params_trace(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        capture_trace: bool,
+    ) -> Result<(QueryOutput, Option<OptimizerTrace>)> {
         let started = std::time::Instant::now();
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if let cypher::Statement::SetSystemVariable(set) = body {
             reject_system_variable_parameters(parameters)?;
-            return self.system_variables.apply_set_system_variable(set);
+            return self
+                .system_variables
+                .apply_set_system_variable(set)
+                .map(|output| (output, None));
         }
         if matches!(body, cypher::Statement::Checkpoint) {
             if !parameters.is_empty() {
@@ -5684,11 +5697,12 @@ impl Database {
                 ));
             }
             self.checkpoint()?;
-            return Ok(QueryOutput { rows: Vec::new() });
+            return Ok((QueryOutput { rows: Vec::new() }, None));
         }
         let query_result = (|| {
             query_work_request_for_statement(&self.system_variables, &statement)?;
-            let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+            let (physical, trace) =
+                self.optimized_query_plan(cypher_text, &statement, parameters)?;
             let is_mutation = executor::is_mutation_plan(&physical)?;
             if is_mutation {
                 self.ensure_writable()?;
@@ -5703,14 +5717,18 @@ impl Database {
                     self.config.max_read_result_rows,
                 )?
             };
-            Ok(QueryOutput { rows })
+            Ok((QueryOutput { rows }, capture_trace.then_some(trace)))
         })();
+        let statement_result = match &query_result {
+            Ok((output, _)) => Ok(output),
+            Err(error) => Err(error),
+        };
         self.record_statement_execution(
             "cypher",
             cypher_text,
             statement_kind(body),
             started,
-            &query_result,
+            statement_result,
         );
         query_result
     }
@@ -5721,7 +5739,7 @@ impl Database {
         query_text: &str,
         statement_kind: &str,
         started: std::time::Instant,
-        result: &Result<QueryOutput>,
+        result: std::result::Result<&QueryOutput, &SkeinError>,
     ) {
         let elapsed_micros = started.elapsed().as_micros();
         let execution = match result {
@@ -5821,7 +5839,7 @@ impl Database {
             cypher_text,
             statement_kind(body),
             started,
-            &query_result,
+            query_result.as_ref(),
         );
         query_result
     }

@@ -325,7 +325,7 @@ pub struct NowledgeMemQueryReportOptions {
     pub slow_log_threshold_micros: Option<u128>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct NowledgeMemReadinessOptions {
     pub bounded_read_probe: Option<NowledgeGraphStatement>,
     pub read_options: NowledgeMemReadOptions,
@@ -334,20 +334,6 @@ pub struct NowledgeMemReadinessOptions {
     pub qos_policy: LocalQosPolicy,
     pub qos_state: LocalQosState,
     pub background_maintenance_options: BackgroundMaintenanceOptions,
-}
-
-impl Default for NowledgeMemReadinessOptions {
-    fn default() -> Self {
-        Self {
-            bounded_read_probe: None,
-            read_options: NowledgeMemReadOptions::default(),
-            search_projection_probe_options: SearchProjectionProbeOptions::default(),
-            primary_search_projection_probe: None,
-            qos_policy: LocalQosPolicy::default(),
-            qos_state: LocalQosState::default(),
-            background_maintenance_options: BackgroundMaintenanceOptions::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -493,13 +479,10 @@ impl NowledgeMemGraph {
         parameters: &BTreeMap<String, Value>,
         options: NowledgeMemQueryReportOptions,
     ) -> Result<NowledgeMemQueryOutput> {
-        let trace = if options.capture_physical_plan {
-            Some(self.db.explain_query_with_params(cypher, parameters)?.trace)
-        } else {
-            None
-        };
         let started = Instant::now();
-        let output = self.db.query_with_params(cypher, parameters)?;
+        let (output, trace) =
+            self.db
+                .query_with_params_trace(cypher, parameters, options.capture_physical_plan)?;
         let elapsed_micros = started.elapsed().as_micros();
         let report =
             nowledge_mem_query_report(self.mode, cypher, trace.as_ref(), options, elapsed_micros)?;
@@ -1476,6 +1459,40 @@ mod tests {
             query.report.json()["physical_operator_counts"]["SortExec"],
             1
         );
+    }
+
+    #[test]
+    fn graph_query_with_report_captures_plan_without_extra_cache_lookup() {
+        let db = Database::new_with_config(DatabaseConfig {
+            max_plan_cache_entries: Some(8),
+            ..DatabaseConfig::default()
+        });
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-report-cache-1', title: 'B'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'mem-report-cache-2', title: 'A'})")
+            .unwrap();
+        let before = graph.database().plan_cache_stats();
+
+        let query = graph
+            .query_with_params_with_report_options(
+                "MATCH (m:Memory) RETURN m.title AS title ORDER BY title LIMIT 1",
+                &BTreeMap::new(),
+                NowledgeMemQueryReportOptions {
+                    capture_physical_plan: true,
+                    slow_log_threshold_micros: None,
+                },
+            )
+            .unwrap();
+        let after = graph.database().plan_cache_stats();
+
+        assert_eq!(query.output.rows.len(), 1);
+        assert!(query.report.physical_plan_captured);
+        assert_eq!(after.entries, before.entries + 1);
+        assert_eq!(after.misses, before.misses + 1);
+        assert_eq!(after.hits, before.hits);
     }
 
     #[test]
