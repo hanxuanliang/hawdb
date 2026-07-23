@@ -1,4 +1,7 @@
-use skein::{Result, SkeinError, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES};
+use skein::{
+    Result, SkeinError, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+};
 use std::path::Path;
 
 const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
@@ -10,23 +13,6 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
-const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
-    "/graph/overview",
-    "/graph/explore",
-    "/graph/expand/{node_id}",
-    "/graph/live-preview",
-    "/graph/live-preview/{node_id}",
-    "/graph/community-members/{community_id}",
-    "/library/community/{community_id}/subgraph",
-    "/library/community/{community_id}/recent-memories",
-    "/library/community/{community_id}/related",
-    "/graph/analysis",
-    "/graph/augmentation/state",
-    "/graph/augmentation/pagerank/plan",
-    "/graph/node-details/{node_id}",
-    "/graph/orphans",
-    "/graph/shortest-path",
-];
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {

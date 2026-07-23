@@ -16,7 +16,7 @@ use crate::{
     },
     store::{RecoveryMode, StorageRecoveryReport},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -122,6 +122,23 @@ pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-ret
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
+pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
+    "/graph/overview",
+    "/graph/explore",
+    "/graph/expand/{node_id}",
+    "/graph/live-preview",
+    "/graph/live-preview/{node_id}",
+    "/graph/community-members/{community_id}",
+    "/library/community/{community_id}/subgraph",
+    "/library/community/{community_id}/recent-memories",
+    "/library/community/{community_id}/related",
+    "/graph/analysis",
+    "/graph/augmentation/state",
+    "/graph/augmentation/pagerank/plan",
+    "/graph/node-details/{node_id}",
+    "/graph/orphans",
+    "/graph/shortest-path",
+];
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ROWS: usize = 512;
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ESTIMATED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
@@ -203,7 +220,19 @@ impl NowledgeMemReadReport {
 pub fn nowledge_mem_bounded_read_evidence_json(
     report: &NowledgeMemReadReport,
 ) -> serde_json::Value {
+    nowledge_mem_bounded_read_evidence_json_with_routes(report, &[])
+}
+
+pub fn nowledge_mem_bounded_read_evidence_json_with_routes(
+    report: &NowledgeMemReadReport,
+    covered_routes: &[String],
+) -> serde_json::Value {
     let blocker_codes = nowledge_mem_bounded_read_blocker_codes(report);
+    let missing_covered_routes = missing_nowledge_mem_bounded_read_routes(covered_routes);
+    let blocker_codes = blocker_codes
+        .into_iter()
+        .chain((!missing_covered_routes.is_empty()).then_some("missing_covered_routes"))
+        .collect::<Vec<_>>();
     let ready = blocker_codes.is_empty();
 
     serde_json::json!({
@@ -220,6 +249,9 @@ pub fn nowledge_mem_bounded_read_evidence_json(
         "blocking_operator_kinds": report.blocking_operator_kinds,
         "row_budget_exceeded": report.row_budget_exceeded,
         "payload_budget_exceeded": report.payload_budget_exceeded,
+        "covered_routes": covered_routes,
+        "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        "missing_covered_routes": missing_covered_routes,
         "blocker_codes": blocker_codes,
     })
 }
@@ -260,6 +292,18 @@ fn nowledge_mem_bounded_read_blocker_codes(report: &NowledgeMemReadReport) -> Ve
         blockers.push("payload_budget_exceeded");
     }
     blockers
+}
+
+fn missing_nowledge_mem_bounded_read_routes(covered_routes: &[String]) -> Vec<&'static str> {
+    let covered_routes = covered_routes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !covered_routes.contains(route))
+        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,6 +380,7 @@ pub struct NowledgeMemQueryReportOptions {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NowledgeMemReadinessOptions {
     pub bounded_read_probe: Option<NowledgeGraphStatement>,
+    pub covered_routes: Vec<String>,
     pub read_options: NowledgeMemReadOptions,
     pub search_projection_probe_options: SearchProjectionProbeOptions,
     pub primary_search_projection_probe: Option<serde_json::Value>,
@@ -914,7 +959,10 @@ impl NowledgeMemEmbeddedStore {
             });
         };
         match self.read_query_with_params(&probe.cypher, &probe.parameters, &options.read_options) {
-            Ok(read) => read.report.bounded_read_evidence_json(),
+            Ok(read) => nowledge_mem_bounded_read_evidence_json_with_routes(
+                &read.report,
+                &options.covered_routes,
+            ),
             Err(_) => serde_json::json!({
                 "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
                 "present": true,
@@ -1439,7 +1487,8 @@ fn estimate_value_payload_bytes(value: &Value) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config,
+        nowledge_mem_bounded_read_evidence_json,
+        nowledge_mem_bounded_read_evidence_json_with_routes, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode, NowledgeMemEmbeddedStore, NowledgeMemGraph,
         NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
         NowledgeMemQueryReportOptions, NowledgeMemReadOptions, NowledgeMemReadReport,
@@ -1447,6 +1496,7 @@ mod tests {
         NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -1680,7 +1730,20 @@ mod tests {
             read.report.bounded_read_evidence_json()["mode"],
             "shadow_read_only"
         );
-        assert_eq!(read.report.bounded_read_evidence_json()["ready"], true);
+        assert_eq!(read.report.bounded_read_evidence_json()["ready"], false);
+        assert_eq!(
+            read.report.bounded_read_evidence_json()["blocker_codes"],
+            serde_json::json!(["missing_covered_routes"])
+        );
+        let covered_routes = full_bounded_read_routes();
+        let evidence =
+            nowledge_mem_bounded_read_evidence_json_with_routes(&read.report, &covered_routes);
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(
+            evidence["covered_routes"],
+            serde_json::json!(covered_routes)
+        );
+        assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
     }
 
     #[test]
@@ -1717,7 +1780,8 @@ mod tests {
             serde_json::json!([
                 "missing_execution_row_cap",
                 "row_limit_not_enforced_before_output",
-                "operator_row_cap_disabled"
+                "operator_row_cap_disabled",
+                "missing_covered_routes"
             ])
         );
     }
@@ -1747,7 +1811,7 @@ mod tests {
         assert_eq!(evidence["mode"], "writable_cutover");
         assert_eq!(
             evidence["blocker_codes"],
-            serde_json::json!(["not_shadow_read_only"])
+            serde_json::json!(["not_shadow_read_only", "missing_covered_routes"])
         );
     }
 
@@ -1973,6 +2037,7 @@ mod tests {
                     .to_string(),
                 parameters: BTreeMap::new(),
             }),
+            covered_routes: full_bounded_read_routes(),
             ..NowledgeMemReadinessOptions::default()
         });
 
@@ -1983,6 +2048,10 @@ mod tests {
             "shadow_read_only"
         );
         assert_eq!(readiness["bounded_read_evidence"]["execution_row_cap"], 513);
+        assert_eq!(
+            readiness["bounded_read_evidence"]["missing_covered_routes"],
+            serde_json::json!([])
+        );
         assert_eq!(
             readiness["background_maintenance"]["total_candidates"]
                 .as_u64()
@@ -2566,6 +2635,13 @@ mod tests {
             source_id: Some("source_1".to_string()),
             metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
         }
+    }
+
+    fn full_bounded_read_routes() -> Vec<String> {
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| (*route).to_string())
+            .collect()
     }
 
     fn unique_nowledge_mem_test_dir(name: &str) -> std::path::PathBuf {

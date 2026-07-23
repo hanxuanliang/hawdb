@@ -597,6 +597,23 @@ Pass the resulting JSON to `nowledge-cypher-migration-gate` with
 caller-owned durable database preflight instead of the fixture-local
 `background_maintenance` summary.
 
+For bounded graph-read evidence, first generate a read report and then compile
+it with route coverage:
+
+```text
+skein nowledge-bounded-read-report <database-path> <cypher> > read-report.json
+skein nowledge-bounded-read-evidence \
+  --covered-routes-json covered-routes.json \
+  read-report.json > bounded-read-evidence.json
+```
+
+`covered-routes.json` may be either a JSON array of route identifiers or an
+object with a `covered_routes` string array. The emitted evidence includes
+`covered_routes`, `required_covered_routes`, and `missing_covered_routes`.
+Missing production graph-read routes add the stable
+`missing_covered_routes` blocker and keep bounded-read readiness false, so a
+single bounded query probe cannot be mistaken for full route cutover coverage.
+
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
 automation that must reject self-shadow smoke runs, missing shadow parity
