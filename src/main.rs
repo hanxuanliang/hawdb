@@ -4289,6 +4289,13 @@ fn explain_output_json(
             "class": output.work_request.class.as_str(),
             "estimated_operations": output.work_request.estimated_operations,
         },
+        "plan_cache_lookup": {
+            "event": output.plan_cache_lookup.as_str(),
+            "bypass_reason": output
+                .plan_cache_lookup
+                .bypass_reason()
+                .map(|reason| reason.as_str()),
+        },
         "plan_cache_stats": {
             "max_entries": plan_cache_stats.max_entries,
             "entries": plan_cache_stats.entries,
@@ -5646,6 +5653,7 @@ mod tests {
                 label: "Memory".to_string(),
             },
             work_request: WorkRequest::background(WorkClass::Analytics, 64),
+            plan_cache_lookup: skein::PlanCacheLookup::Miss,
             trace: OptimizerTrace {
                 groups: 1,
                 search_mode: skein::optimizer::SearchMode::Memo,
@@ -5718,6 +5726,11 @@ mod tests {
         assert_eq!(json["work_request"]["priority"], "background");
         assert_eq!(json["work_request"]["class"], "analytics");
         assert_eq!(json["work_request"]["estimated_operations"], 64);
+        assert_eq!(json["plan_cache_lookup"]["event"], "miss");
+        assert_eq!(
+            json["plan_cache_lookup"]["bypass_reason"],
+            serde_json::Value::Null
+        );
         assert_eq!(json["plan_cache_stats"]["max_entries"], 128);
         assert_eq!(json["plan_cache_stats"]["entries"], 1);
         assert_eq!(json["plan_cache_stats"]["hits"], 2);

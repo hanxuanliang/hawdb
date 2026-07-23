@@ -6,9 +6,9 @@ use crate::{
     cypher, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
     BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
-    NowledgeGraphStatement, QueryOutput, ReadExecutionProfile, Result, SearchIndex,
-    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionGraphDeltaRequest,
-    SearchProjectionProbeOptions, SkeinError, Value,
+    NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
+    SearchIndex, SearchProjectionDeltaReport, SearchProjectionFreshness,
+    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
 };
 use crate::{
     nowledge_inventory::background_maintenance_summary_to_json,
@@ -291,6 +291,8 @@ pub struct NowledgeMemQueryReport {
     pub slow_log_threshold_micros: Option<u128>,
     pub slow_log_candidate: bool,
     pub physical_plan_captured: bool,
+    pub plan_cache_lookup: Option<String>,
+    pub plan_cache_bypass_reason: Option<String>,
     pub physical_operator_counts: BTreeMap<String, usize>,
     pub optimizer_decision_count: usize,
 }
@@ -307,6 +309,8 @@ impl NowledgeMemQueryReport {
             "slow_log_threshold_micros": self.slow_log_threshold_micros,
             "slow_log_candidate": self.slow_log_candidate,
             "physical_plan_captured": self.physical_plan_captured,
+            "plan_cache_lookup": self.plan_cache_lookup,
+            "plan_cache_bypass_reason": self.plan_cache_bypass_reason,
             "physical_operator_counts": self.physical_operator_counts,
             "optimizer_decision_count": self.optimizer_decision_count,
         })
@@ -480,12 +484,18 @@ impl NowledgeMemGraph {
         options: NowledgeMemQueryReportOptions,
     ) -> Result<NowledgeMemQueryOutput> {
         let started = Instant::now();
-        let (output, trace) =
+        let (output, execution_trace) =
             self.db
                 .query_with_params_trace(cypher, parameters, options.capture_physical_plan)?;
         let elapsed_micros = started.elapsed().as_micros();
-        let report =
-            nowledge_mem_query_report(self.mode, cypher, trace.as_ref(), options, elapsed_micros)?;
+        let report = nowledge_mem_query_report(
+            self.mode,
+            cypher,
+            execution_trace.optimizer_trace.as_ref(),
+            execution_trace.plan_cache_lookup,
+            options,
+            elapsed_micros,
+        )?;
         Ok(NowledgeMemQueryOutput { output, report })
     }
 
@@ -920,6 +930,7 @@ fn nowledge_mem_query_report(
     mode: NowledgeMemGraphMode,
     cypher_text: &str,
     trace: Option<&crate::optimizer::OptimizerTrace>,
+    plan_cache_lookup: Option<PlanCacheLookup>,
     options: NowledgeMemQueryReportOptions,
     elapsed_micros: u128,
 ) -> Result<NowledgeMemQueryReport> {
@@ -937,6 +948,10 @@ fn nowledge_mem_query_report(
         slow_log_threshold_micros: options.slow_log_threshold_micros,
         slow_log_candidate,
         physical_plan_captured: trace.is_some(),
+        plan_cache_lookup: plan_cache_lookup.map(|lookup| lookup.as_str().to_string()),
+        plan_cache_bypass_reason: plan_cache_lookup
+            .and_then(|lookup| lookup.bypass_reason())
+            .map(|reason| reason.as_str().to_string()),
         physical_operator_counts: trace
             .map(|trace| trace.selected_plan_operator_counts.clone())
             .unwrap_or_default(),
@@ -1452,8 +1467,11 @@ mod tests {
             .report
             .physical_operator_counts
             .contains_key("SortExec"));
+        assert_eq!(query.report.plan_cache_lookup.as_deref(), Some("miss"));
+        assert_eq!(query.report.plan_cache_bypass_reason, None);
         assert!(query.report.slow_log_candidate);
         assert_eq!(query.report.json()["physical_plan_captured"], true);
+        assert_eq!(query.report.json()["plan_cache_lookup"], "miss");
         assert_eq!(query.report.json()["slow_log_candidate"], true);
         assert_eq!(
             query.report.json()["physical_operator_counts"]["SortExec"],
@@ -1490,6 +1508,8 @@ mod tests {
 
         assert_eq!(query.output.rows.len(), 1);
         assert!(query.report.physical_plan_captured);
+        assert_eq!(query.report.plan_cache_lookup.as_deref(), Some("miss"));
+        assert_eq!(query.report.plan_cache_bypass_reason, None);
         assert_eq!(after.entries, before.entries + 1);
         assert_eq!(after.misses, before.misses + 1);
         assert_eq!(after.hits, before.hits);

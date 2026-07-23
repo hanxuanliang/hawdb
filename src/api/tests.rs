@@ -107,8 +107,8 @@ use super::{
     KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
     KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -25323,6 +25323,8 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
     let first = db.explain_query_with_params(query, &parameters).unwrap();
     let second = db.explain_query_with_params(query, &parameters).unwrap();
 
+    assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Hit);
     assert!(
         first
             .trace
@@ -25825,6 +25827,7 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
         .unwrap();
     let after_commit = db.explain_query(query).unwrap();
 
+    assert_eq!(after_commit.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(
         after_commit
             .trace
@@ -25853,6 +25856,9 @@ fn plan_cache_misses_after_index_descriptor_changes() {
     db.query("CREATE INDEX ON :Memory(id)").unwrap();
     let after_index = db.explain_query(query).unwrap();
 
+    assert_eq!(before_index.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(cached_before_index.plan_cache_lookup, PlanCacheLookup::Hit);
+    assert_eq!(after_index.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(before_index.trace.selected_plan.contains("SeqNodeScan"));
     assert!(!before_index.trace.selected_plan.contains("IndexNodeSeek"));
     assert!(cached_before_index
@@ -25895,6 +25901,8 @@ fn plan_cache_evicts_least_frequently_used_plan() {
     let hot = db.explain_query(q1).unwrap();
     let evicted = db.explain_query(q2).unwrap();
 
+    assert_eq!(hot.plan_cache_lookup, PlanCacheLookup::Hit);
+    assert_eq!(evicted.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(hot
         .trace
         .decisions
@@ -25928,6 +25936,8 @@ fn plan_cache_can_be_disabled_with_zero_capacity() {
     let first = db.explain_query(query).unwrap();
     let second = db.explain_query(query).unwrap();
 
+    assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(
         first
             .trace
@@ -25965,6 +25975,10 @@ fn plan_cache_records_bypassed_mutation_explain_separately() {
         .explain_query("CREATE (:Memory {id: 1, title: 'Bypassed'})")
         .unwrap();
 
+    assert_eq!(
+        output.plan_cache_lookup,
+        PlanCacheLookup::Bypass(PlanCacheBypassReason::StatementNotCacheable)
+    );
     assert!(output
         .trace
         .decisions

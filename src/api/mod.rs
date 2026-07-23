@@ -235,6 +235,7 @@ pub struct NowledgeGraphExplainOutput {
     pub plan: String,
     pub trace: OptimizerTrace,
     pub work_request: WorkRequest,
+    pub plan_cache_lookup: PlanCacheLookup,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5480,6 +5481,60 @@ pub struct ExplainOutput {
     pub physical_plan: PhysicalPlan,
     pub trace: OptimizerTrace,
     pub work_request: WorkRequest,
+    pub plan_cache_lookup: PlanCacheLookup,
+}
+
+pub(crate) struct QueryExecutionTrace {
+    pub(crate) optimizer_trace: Option<OptimizerTrace>,
+    pub(crate) plan_cache_lookup: Option<PlanCacheLookup>,
+}
+
+impl QueryExecutionTrace {
+    fn uncached() -> Self {
+        Self {
+            optimizer_trace: None,
+            plan_cache_lookup: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanCacheLookup {
+    Hit,
+    Miss,
+    Bypass(PlanCacheBypassReason),
+}
+
+impl PlanCacheLookup {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Miss => "miss",
+            Self::Bypass(_) => "bypass",
+        }
+    }
+
+    pub fn bypass_reason(self) -> Option<PlanCacheBypassReason> {
+        match self {
+            Self::Bypass(reason) => Some(reason),
+            Self::Hit | Self::Miss => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlanCacheBypassReason {
+    MutationPlanning,
+    StatementNotCacheable,
+}
+
+impl PlanCacheBypassReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MutationPlanning => "mutation_planning",
+            Self::StatementNotCacheable => "statement_not_cacheable",
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -5679,7 +5734,7 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
         capture_trace: bool,
-    ) -> Result<(QueryOutput, Option<OptimizerTrace>)> {
+    ) -> Result<(QueryOutput, QueryExecutionTrace)> {
         let started = std::time::Instant::now();
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
@@ -5688,7 +5743,7 @@ impl Database {
             return self
                 .system_variables
                 .apply_set_system_variable(set)
-                .map(|output| (output, None));
+                .map(|output| (output, QueryExecutionTrace::uncached()));
         }
         if matches!(body, cypher::Statement::Checkpoint) {
             if !parameters.is_empty() {
@@ -5697,27 +5752,35 @@ impl Database {
                 ));
             }
             self.checkpoint()?;
-            return Ok((QueryOutput { rows: Vec::new() }, None));
+            return Ok((
+                QueryOutput { rows: Vec::new() },
+                QueryExecutionTrace::uncached(),
+            ));
         }
         let query_result = (|| {
             query_work_request_for_statement(&self.system_variables, &statement)?;
-            let (physical, trace) =
-                self.optimized_query_plan(cypher_text, &statement, parameters)?;
-            let is_mutation = executor::is_mutation_plan(&physical)?;
+            let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+            let is_mutation = executor::is_mutation_plan(&optimized.physical_plan)?;
             if is_mutation {
                 self.ensure_writable()?;
             }
             let rows = if is_mutation {
-                executor::execute(&physical, &mut self.catalog, &mut self.store)?
+                executor::execute(&optimized.physical_plan, &mut self.catalog, &mut self.store)?
             } else {
                 executor::execute_with_row_limit(
-                    &physical,
+                    &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
                     self.config.max_read_result_rows,
                 )?
             };
-            Ok((QueryOutput { rows }, capture_trace.then_some(trace)))
+            Ok((
+                QueryOutput { rows },
+                QueryExecutionTrace {
+                    optimizer_trace: capture_trace.then_some(optimized.trace),
+                    plan_cache_lookup: Some(optimized.plan_cache_lookup),
+                },
+            ))
         })();
         let statement_result = match &query_result {
             Ok((output, _)) => Ok(output),
@@ -5822,16 +5885,20 @@ impl Database {
                 ));
             }
             query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
-            let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
-            if executor::is_mutation_plan(&physical)? {
+            let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+            if executor::is_mutation_plan(&optimized.physical_plan)? {
                 return Err(SkeinError::Execution(
                     "read-only query runtime must not execute a mutation".to_string(),
                 ));
             }
             let mut catalog = self.catalog.clone();
             let mut store = self.store.snapshot();
-            let rows =
-                executor::execute_with_row_limit(&physical, &mut catalog, &mut store, max_rows)?;
+            let rows = executor::execute_with_row_limit(
+                &optimized.physical_plan,
+                &mut catalog,
+                &mut store,
+                max_rows,
+            )?;
             Ok(QueryOutput { rows })
         })();
         self.record_statement_execution(
@@ -5892,12 +5959,12 @@ impl Database {
     ) -> Result<ExplainOutput> {
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
-        let (physical_plan, trace) =
-            self.optimized_query_plan(cypher_text, &statement, parameters)?;
+        let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
         Ok(ExplainOutput {
-            physical_plan,
-            trace,
+            physical_plan: optimized.physical_plan,
+            trace: optimized.trace,
             work_request,
+            plan_cache_lookup: optimized.plan_cache_lookup,
         })
     }
 
@@ -5910,7 +5977,7 @@ impl Database {
         cypher_text: &str,
         statement: &cypher::Statement,
         parameters: &BTreeMap<String, Value>,
-    ) -> Result<(PhysicalPlan, OptimizerTrace)> {
+    ) -> Result<OptimizedQueryPlan> {
         let cache_mode = if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
@@ -29369,6 +29436,7 @@ impl<'a> NowledgeGraphAdapter<'a> {
             plan: output.physical_plan.explain(0),
             trace: output.trace,
             work_request: output.work_request,
+            plan_cache_lookup: output.plan_cache_lookup,
         })
     }
 
@@ -29416,10 +29484,10 @@ impl DatabaseTransaction<'_> {
             ));
         }
         query_work_request_for_statement(&self.db.system_variables, &statement)?;
-        let (physical, _) = self
+        let optimized = self
             .db
             .optimized_query_plan(cypher_text, &statement, parameters)?;
-        let Some(mutation) = executor::mutation_command(&physical)? else {
+        let Some(mutation) = executor::mutation_command(&optimized.physical_plan)? else {
             return Err(SkeinError::Execution(
                 "transaction query must be a mutation".to_string(),
             ));
@@ -29475,13 +29543,14 @@ impl DatabaseSession<'_> {
         }
         let statement = cypher::parse(cypher_text)?;
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
-        let (physical_plan, trace) =
-            self.db
-                .optimized_query_plan(cypher_text, &statement, parameters)?;
+        let optimized = self
+            .db
+            .optimized_query_plan(cypher_text, &statement, parameters)?;
         Ok(ExplainOutput {
-            physical_plan,
-            trace,
+            physical_plan: optimized.physical_plan,
+            trace: optimized.trace,
             work_request,
+            plan_cache_lookup: optimized.plan_cache_lookup,
         })
     }
 
@@ -29587,7 +29656,7 @@ fn mutation_command_for_statement(
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
 ) -> Result<Option<GraphMutation>> {
-    let (physical, _) = optimized_query_plan_for(
+    let optimized = optimized_query_plan_for(
         cypher_text,
         statement,
         parameters,
@@ -29600,28 +29669,13 @@ fn mutation_command_for_statement(
             cache: &db.plan_cache,
         },
     )?;
-    executor::mutation_command(&physical)
+    executor::mutation_command(&optimized.physical_plan)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlanCacheMode {
     Use,
     Bypass(PlanCacheBypassReason),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PlanCacheBypassReason {
-    MutationPlanning,
-    StatementNotCacheable,
-}
-
-impl PlanCacheBypassReason {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::MutationPlanning => "mutation_planning",
-            Self::StatementNotCacheable => "statement_not_cacheable",
-        }
-    }
 }
 
 struct PlanCacheContext<'a> {
@@ -29632,13 +29686,19 @@ struct PlanCacheContext<'a> {
     cache: &'a RefCell<PlanCache>,
 }
 
+struct OptimizedQueryPlan {
+    physical_plan: PhysicalPlan,
+    trace: OptimizerTrace,
+    plan_cache_lookup: PlanCacheLookup,
+}
+
 fn optimized_query_plan_for(
     cypher_text: &str,
     statement: &cypher::Statement,
     parameters: &BTreeMap<String, Value>,
     cache_mode: PlanCacheMode,
     context: PlanCacheContext<'_>,
-) -> Result<(PhysicalPlan, OptimizerTrace)> {
+) -> Result<OptimizedQueryPlan> {
     let key = (cache_mode == PlanCacheMode::Use).then(|| PlanCacheKey {
         cypher: cypher_text.to_string(),
         parameters: parameters.clone(),
@@ -29652,7 +29712,11 @@ fn optimized_query_plan_for(
             trace
                 .decisions
                 .push("plan cache hit: exact parameterized physical plan".to_string());
-            return Ok((cached.physical_plan, trace));
+            return Ok(OptimizedQueryPlan {
+                physical_plan: cached.physical_plan,
+                trace,
+                plan_cache_lookup: PlanCacheLookup::Hit,
+            });
         }
     }
 
@@ -29674,13 +29738,23 @@ fn optimized_query_plan_for(
         trace
             .decisions
             .push("plan cache miss: optimized exact parameterized physical plan".to_string());
+        return Ok(OptimizedQueryPlan {
+            physical_plan,
+            trace,
+            plan_cache_lookup: PlanCacheLookup::Miss,
+        });
     } else if let PlanCacheMode::Bypass(reason) = cache_mode {
         context.cache.borrow_mut().record_bypass();
         trace
             .decisions
             .push(format!("plan cache bypass: {}", reason.as_str()));
+        return Ok(OptimizedQueryPlan {
+            physical_plan,
+            trace,
+            plan_cache_lookup: PlanCacheLookup::Bypass(reason),
+        });
     }
-    Ok((physical_plan, trace))
+    unreachable!("plan cache mode must be either use or bypass")
 }
 
 fn statement_uses_plan_cache(statement: &cypher::Statement) -> bool {
@@ -29740,15 +29814,16 @@ impl DatabaseReadTransaction {
             ));
         }
         query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
-        let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
-        if executor::is_mutation_plan(&physical)? {
+        let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+        if executor::is_mutation_plan(&optimized.physical_plan)? {
             return Err(SkeinError::Execution(
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
-        let execution_profile = executor::read_execution_profile(&physical, max_rows)?;
+        let execution_profile =
+            executor::read_execution_profile(&optimized.physical_plan, max_rows)?;
         let rows = executor::execute_with_row_limit(
-            &physical,
+            &optimized.physical_plan,
             &mut self.catalog,
             &mut self.store,
             max_rows,
@@ -29789,17 +29864,17 @@ impl DatabaseReadTransaction {
         let statement = cypher::parse(cypher_text)?;
         let work_request =
             query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
-        let (physical_plan, trace) =
-            self.optimized_query_plan(cypher_text, &statement, parameters)?;
-        if executor::is_mutation_plan(&physical_plan)? {
+        let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+        if executor::is_mutation_plan(&optimized.physical_plan)? {
             return Err(SkeinError::Execution(
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
         Ok(ExplainOutput {
-            physical_plan,
-            trace,
+            physical_plan: optimized.physical_plan,
+            trace: optimized.trace,
             work_request,
+            plan_cache_lookup: optimized.plan_cache_lookup,
         })
     }
 
@@ -29819,7 +29894,7 @@ impl DatabaseReadTransaction {
         cypher_text: &str,
         statement: &cypher::Statement,
         parameters: &BTreeMap<String, Value>,
-    ) -> Result<(PhysicalPlan, OptimizerTrace)> {
+    ) -> Result<OptimizedQueryPlan> {
         let cache_mode = if statement_uses_plan_cache(statement) {
             PlanCacheMode::Use
         } else {
