@@ -555,6 +555,10 @@ mod tests {
             "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "missing_required_routes": [],
             "primary_ready_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "missing_query_runtime_routes": [],
+            "route_query_runtime_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
             "routes": []

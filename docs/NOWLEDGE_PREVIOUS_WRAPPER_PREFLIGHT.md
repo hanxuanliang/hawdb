@@ -324,7 +324,10 @@ files override the standard names loaded from `--bundle-dir`.
 
 Route readiness is generated from per-route shadow evidence instead of being
 hand-authored. Each route row must name the Mem route and report whether shadow
-compare and primary-read behavior are ready:
+compare and primary-read behavior are ready. Ready routes must also attach at
+least one `skein-nowledge-mem-query-report-v1` record produced by the
+`NowledgeMemGraph::query_with_report` runtime, so the gate can prove the route
+went through the query runtime instead of a handwritten route path:
 
 ```json
 {
@@ -333,6 +336,23 @@ compare and primary-read behavior are ready:
       "route": "/graph/overview",
       "shadow_compare_ready": true,
       "primary_ready": true,
+      "query_reports": [
+        {
+          "protocol": "skein-nowledge-mem-query-report-v1",
+          "statement_kind": "match_return",
+          "execution_path": "fast_path",
+          "fast_path_selected": true,
+          "slow_log_candidate": false,
+          "physical_plan_captured": false,
+          "plan_cache": {
+            "lookup": "miss",
+            "cacheable": true,
+            "hit": false,
+            "miss": true,
+            "bypassed": false
+          }
+        }
+      ],
       "blocker_codes": []
     }
   ]
@@ -350,8 +370,8 @@ cargo run --quiet --bin skein -- \
 ```
 
 The command fails closed when any required Nowledge graph read route is missing,
-when a route has no shadow-compare evidence, or when a route is not primary
-ready.
+when a route has no shadow-compare evidence, when a route is not primary ready,
+or when a ready route lacks query-runtime report evidence.
 
 ## 10. Compile The Mem Integration Bundle
 
