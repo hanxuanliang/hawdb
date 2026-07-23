@@ -1309,67 +1309,6 @@ fn search_projection_row(external_id: &str, title: &str, body: &str) -> SearchPr
 }
 
 #[test]
-fn nowledge_graph_adapter_exposes_typed_knowledge_navigation() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})")
-            .unwrap();
-
-    let adapter = NowledgeGraphAdapter::new(&mut db);
-    let entity = adapter.knowledge_entity(&KnowledgeEntityRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-    });
-    assert_eq!(entity.graph_commit_epoch, 1);
-    assert_eq!(
-        entity
-            .entity
-            .as_ref()
-            .and_then(|entity| entity.external_id.as_deref()),
-        Some("root")
-    );
-
-    let neighbors = adapter.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: 4,
-        max_hops: 1,
-    });
-    assert_eq!(neighbors.paths.len(), 1);
-    assert_eq!(neighbors.diagnostics.path_count, 1);
-    assert_eq!(neighbors.diagnostics.fanout_reason_count, 0);
-
-    let paths = adapter.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "leaf".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        limit: 4,
-    });
-    assert_eq!(paths.paths.len(), 1);
-    assert_eq!(paths.diagnostics.target_found, Some(true));
-    assert_eq!(paths.diagnostics.relationship_count, 1);
-
-    let subgraph = adapter.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: 4,
-        relationship_limit: 4,
-    });
-    assert_eq!(subgraph.nodes.len(), 2);
-    assert_eq!(subgraph.relationships.len(), 1);
-    assert_eq!(subgraph.diagnostics.node_count, 2);
-    assert_eq!(subgraph.diagnostics.relationship_count, 1);
-}
-
-#[test]
 fn database_session_runs_transaction_control_statements() {
     let mut db = Database::new();
     {

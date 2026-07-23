@@ -362,56 +362,31 @@ pub use value::Value;
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Database, KnowledgeEntityRequest, KnowledgeNeighborDirection, KnowledgeNeighborsRequest,
-        KnowledgePathRequest, KnowledgeSubgraphRequest,
-    };
+    use super::{Database, NowledgeGraphAdapter, NowledgeGraphStatement, Value};
+    use std::collections::BTreeMap;
 
     #[test]
-    fn crate_root_exports_typed_knowledge_navigation_api() {
+    fn crate_root_exports_query_runtime_front_door() {
         let mut db = Database::new();
-        db.query(
-            "CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})",
-        )
-        .unwrap();
+        let mut adapter = NowledgeGraphAdapter::new(&mut db);
+        let create = NowledgeGraphStatement {
+            cypher: "CREATE (:Memory {id: $id, title: $title})".to_string(),
+            parameters: BTreeMap::from([
+                ("id".to_string(), Value::String("root".to_string())),
+                ("title".to_string(), Value::String("Root".to_string())),
+            ]),
+        };
+        adapter.query(&create).unwrap();
 
-        let entity = db.knowledge_entity(&KnowledgeEntityRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-        });
-        assert!(entity.entity.is_some());
+        let read = NowledgeGraphStatement {
+            cypher: "MATCH (m:Memory {id: $id}) RETURN m.title AS title".to_string(),
+            parameters: BTreeMap::from([("id".to_string(), Value::String("root".to_string()))]),
+        };
+        let output = adapter.query(&read).unwrap();
 
-        let neighbors = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            limit: 4,
-            max_hops: 1,
-        });
-        assert_eq!(neighbors.diagnostics.path_count, 1);
-
-        let paths = db.knowledge_paths(&KnowledgePathRequest {
-            source_label: "Memory".to_string(),
-            source_external_id: "root".to_string(),
-            target_label: "Entity".to_string(),
-            target_external_id: "leaf".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            max_hops: 1,
-            limit: 4,
-        });
-        assert_eq!(paths.diagnostics.target_found, Some(true));
-
-        let subgraph = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
-            label: "Memory".to_string(),
-            external_id: "root".to_string(),
-            relationship_type: Some("LINKS".to_string()),
-            direction: KnowledgeNeighborDirection::Outgoing,
-            max_hops: 1,
-            node_limit: 4,
-            relationship_limit: 4,
-        });
-        assert_eq!(subgraph.diagnostics.node_count, 2);
+        assert_eq!(
+            output.rows[0].get("title"),
+            Some(&Value::String("Root".to_string()))
+        );
     }
 }

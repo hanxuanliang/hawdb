@@ -150,9 +150,11 @@ Exit gate:
 - the first read and mutation fixture families match Ladybug behavior
 
 Status: parameter binding is implemented. `NowledgeGraphAdapter` now exposes a
-typed front door for parameterized query, explain, and grouped mutation
-transaction execution without requiring raw string interpolation.
-The typed knowledge facade also covers endpoint-known entity lookup,
+parameterized query front door for query, explain, work-request inspection, and
+grouped mutation transaction execution without requiring raw string
+interpolation. The remaining query-shape-specific typed knowledge facade is a
+legacy compatibility surface on `Database`, not the adapter extension model. It
+currently covers endpoint-known entity lookup,
 create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
 normalized-space batch moves, memory access/click-dwell touches, ordered batch
 mutation, source memory-count adjustments, source lifecycle updates, source
