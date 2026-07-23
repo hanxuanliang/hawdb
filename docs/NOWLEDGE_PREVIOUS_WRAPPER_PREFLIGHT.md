@@ -307,3 +307,40 @@ For targeted debugging, the same command still accepts explicit
 `--contract-evidence-json`, `--adapter-smoke-json`, `--migration-gate-json`,
 `--replacement-summary-json`, and `--library-readiness-json` paths; explicit
 files override the standard names loaded from `--bundle-dir`.
+
+## 9. Compile The Mem Integration Bundle
+
+The previous-wrapper preflight proves replacement behavior. The Mem integration
+bundle adds the product migration boundary: Skein must be present as a
+submodule, legacy Kuzu/Ladybug and LanceDB data must still be retained
+side-by-side, and `content.db` must remain available for message and source
+chunk payloads.
+
+Use the Rust bundle composer to avoid keeping a Python-only builder on the
+critical path:
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-mem-integration-bundle \
+  --require-ready \
+  --submodule-path vendor/skein \
+  --submodule-commit "$(git -C vendor/skein rev-parse --short HEAD)" \
+  --legacy-data-retained \
+  --coexistence-mode shadow \
+  --content-store-present \
+  --content-store-engine sqlite \
+  --content-store-messages-available \
+  --content-store-source-chunks-available \
+  --previous-wrapper-preflight-json "$NMEM_PREFLIGHT_ROOT/preflight-check.json" \
+  --replacement-summary-json "$NMEM_PREFLIGHT_ROOT/replacement-summary.json" \
+  --bounded-read-evidence-json "$NMEM_PREFLIGHT_ROOT/bounded-read-evidence.json" \
+  --graph-route-readiness-json "$NMEM_PREFLIGHT_ROOT/graph-route-readiness.json" \
+  --library-readiness-json "$NMEM_PREFLIGHT_ROOT/library-readiness.json" \
+  > "$NMEM_PREFLIGHT_ROOT/integration-bundle.json"
+```
+
+`--require-ready` makes the composer feed its output into
+`nowledge-mem-integration-readiness` before returning success, so stale bounded
+read evidence, missing route readiness, missing library readiness, or unsafe
+legacy coexistence is rejected before Mem cutover automation consumes the
+bundle.
