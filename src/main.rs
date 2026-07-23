@@ -3,6 +3,7 @@ mod cli_bounded_read_evidence;
 mod cli_fixture_contract;
 mod cli_fixture_contract_check;
 mod cli_mem_integration_readiness;
+mod cli_mem_library_readiness;
 mod cli_previous_wrapper_preflight;
 mod cli_query_family_evidence;
 mod cli_replacement_summary;
@@ -13,6 +14,7 @@ use cli_bounded_read_evidence::run_nowledge_bounded_read_evidence;
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
 use cli_mem_integration_readiness::run_nowledge_mem_integration_readiness;
+use cli_mem_library_readiness::run_nowledge_mem_library_readiness;
 use cli_previous_wrapper_preflight::run_nowledge_previous_wrapper_preflight_check;
 use cli_query_family_evidence::run_nowledge_query_family_evidence;
 use cli_replacement_summary::{
@@ -122,6 +124,17 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge mem integration readiness is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-mem-library-readiness" {
+            let (json, require_ready) = run_nowledge_mem_library_readiness(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge mem library readiness is not ready".to_string(),
                 ));
             }
             return Ok(());

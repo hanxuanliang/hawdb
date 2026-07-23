@@ -622,6 +622,26 @@ publishes it as `query_family_evidence` plus
 rows keep library readiness false; callers should pass the same family evidence
 that will later feed `nowledge-replacement-summary`.
 
+Rust-only harnesses can generate the same library-level artifact without
+manually composing API calls:
+
+```text
+skein nowledge-mem-library-readiness \
+  --bounded-probe-json bounded-probe.json \
+  --covered-routes-json covered-routes.json \
+  --query-family-evidence-json query-family-evidence.json \
+  --primary-search-projection-probe-json lancedb-probe.json \
+  --search-projection skein-search-index \
+  skein-graph-db > library-readiness.json
+```
+
+The command opens the graph in `shadow_read_only` mode by default, uses the
+same `NowledgeMemEmbeddedStore::library_readiness_json` path as embedded
+callers, and includes only a sanitized `open_report` instead of local database
+paths. Use `--require-ready` in release automation when missing route coverage,
+query-family evidence, search projection parity, storage recovery, or
+background-maintenance readiness must fail the command.
+
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
 automation that must reject self-shadow smoke runs, missing shadow parity
