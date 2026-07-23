@@ -286,6 +286,8 @@ pub struct NowledgeMemQueryReport {
     pub mode: NowledgeMemGraphMode,
     pub execution_path: NowledgeMemQueryExecutionPath,
     pub fast_path_reason: Option<String>,
+    pub physical_operator_counts: BTreeMap<String, usize>,
+    pub optimizer_decision_count: usize,
 }
 
 impl NowledgeMemQueryReport {
@@ -296,6 +298,8 @@ impl NowledgeMemQueryReport {
             "execution_path": self.execution_path.as_str(),
             "fast_path_reason": self.fast_path_reason,
             "fast_path_selected": self.execution_path == NowledgeMemQueryExecutionPath::FastPath,
+            "physical_operator_counts": self.physical_operator_counts,
+            "optimizer_decision_count": self.optimizer_decision_count,
         })
     }
 }
@@ -453,7 +457,8 @@ impl NowledgeMemGraph {
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<NowledgeMemQueryOutput> {
-        let report = nowledge_mem_query_report(self.mode, cypher)?;
+        let explain = self.db.explain_query_with_params(cypher, parameters)?;
+        let report = nowledge_mem_query_report(self.mode, cypher, &explain.trace)?;
         let output = self.db.query_with_params(cypher, parameters)?;
         Ok(NowledgeMemQueryOutput { output, report })
     }
@@ -870,6 +875,7 @@ fn require_search_projection_mut(
 fn nowledge_mem_query_report(
     mode: NowledgeMemGraphMode,
     cypher_text: &str,
+    trace: &crate::optimizer::OptimizerTrace,
 ) -> Result<NowledgeMemQueryReport> {
     let statement = cypher::parse(cypher_text)?;
     let decision = nowledge_mem_query_execution_path(&statement);
@@ -878,6 +884,8 @@ fn nowledge_mem_query_report(
         mode,
         execution_path: decision.execution_path,
         fast_path_reason: decision.fast_path_reason.map(str::to_string),
+        physical_operator_counts: trace.selected_plan_operator_counts.clone(),
+        optimizer_decision_count: trace.decisions.len(),
     })
 }
 
@@ -1323,8 +1331,17 @@ mod tests {
             query.report.fast_path_reason.as_deref(),
             Some("simple_node_lookup")
         );
+        assert!(query.report.optimizer_decision_count > 0);
+        assert!(query
+            .report
+            .physical_operator_counts
+            .contains_key("ProjectExec"));
         assert_eq!(query.report.json()["execution_path"], "fast_path");
         assert_eq!(query.report.json()["fast_path_selected"], true);
+        assert_eq!(
+            query.report.json()["physical_operator_counts"]["ProjectExec"],
+            1
+        );
     }
 
     #[test]
@@ -1348,8 +1365,17 @@ mod tests {
             NowledgeMemQueryExecutionPath::OptimizedPath
         );
         assert_eq!(query.report.fast_path_reason, None);
+        assert!(query.report.optimizer_decision_count > 0);
+        assert!(query
+            .report
+            .physical_operator_counts
+            .contains_key("SortExec"));
         assert_eq!(query.report.json()["execution_path"], "optimized_path");
         assert_eq!(query.report.json()["fast_path_selected"], false);
+        assert_eq!(
+            query.report.json()["physical_operator_counts"]["SortExec"],
+            1
+        );
     }
 
     #[test]
