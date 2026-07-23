@@ -25461,6 +25461,8 @@ fn sql_system_table_queries_do_not_use_plan_cache() {
 
     db.query_sql("SELECT * FROM system.plan_cache").unwrap();
     db.query_sql("SELECT * FROM system.slow_queries").unwrap();
+    db.query_sql("SELECT * FROM system.statement_summary")
+        .unwrap();
 
     let after = db.plan_cache_stats();
     assert_eq!(after, before);
@@ -25507,6 +25509,7 @@ fn failed_cypher_queries_do_not_enter_slow_query_ring() {
         read_only: true,
         slow_query_log_threshold_micros: 0,
         slow_query_log_capacity: 8,
+        statement_summary_capacity: 8,
         ..DatabaseConfig::default()
     });
 
@@ -25518,6 +25521,32 @@ fn failed_cypher_queries_do_not_enter_slow_query_ring() {
     let output = db.query_sql("SELECT * FROM system.slow_queries").unwrap();
 
     assert!(output.rows.is_empty());
+
+    let summary = db
+        .query_sql(
+            "SELECT statement_kind, execution_count, success_count, error_count, \
+             last_success, last_error \
+             FROM system.statement_summary \
+             WHERE statement_kind = 'create_node'",
+        )
+        .unwrap();
+
+    assert_eq!(summary.rows.len(), 1);
+    assert_eq!(
+        summary.rows[0].get("statement_kind"),
+        Some(&Value::String("create_node".to_string()))
+    );
+    assert_eq!(summary.rows[0].get("execution_count"), Some(&Value::Int(1)));
+    assert_eq!(summary.rows[0].get("success_count"), Some(&Value::Int(0)));
+    assert_eq!(summary.rows[0].get("error_count"), Some(&Value::Int(1)));
+    assert_eq!(
+        summary.rows[0].get("last_success"),
+        Some(&Value::Bool(false))
+    );
+    assert!(matches!(
+        summary.rows[0].get("last_error"),
+        Some(Value::String(message)) if message.contains("read-only")
+    ));
 }
 
 #[test]
@@ -25556,6 +25585,84 @@ fn read_transaction_sql_reads_slow_query_snapshot() {
 
     assert_eq!(output.rows.len(), 1);
     assert_eq!(output.rows[0].get("sequence"), Some(&Value::Int(1)));
+}
+
+#[test]
+fn sql_reads_statement_summary_virtual_table() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory {id: 'summary'}) RETURN m.title AS title";
+
+    db.query("CREATE (:Memory {id: 'summary', title: 'Statement summary'})")
+        .unwrap();
+    db.query(query).unwrap();
+    db.query(query).unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT statement_kind, execution_count, success_count, error_count, \
+             total_row_count \
+             FROM system.statement_summary \
+             WHERE statement_kind = 'match_return' \
+             ORDER BY execution_count DESC LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([
+            (
+                "statement_kind".to_string(),
+                Value::String("match_return".to_string())
+            ),
+            ("execution_count".to_string(), Value::Int(2)),
+            ("success_count".to_string(), Value::Int(2)),
+            ("error_count".to_string(), Value::Int(0)),
+            ("total_row_count".to_string(), Value::Int(2)),
+        ])]
+    );
+}
+
+#[test]
+fn knowledge_source_ids_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query(
+        "CREATE (:Source {id: 'source_a', lifecycle_state: 'extracted', space_id: 'default'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Source {id: 'source_b', lifecycle_state: 'raw', space_id: 'default'})")
+        .unwrap();
+    let request = KnowledgeSourceIdListRequest {
+        lifecycle_state: Some("extracted".to_string()),
+        normalized_space_id: Some("default".to_string()),
+        limit: 10,
+    };
+
+    let first = db.knowledge_source_ids(&request).unwrap();
+    let second = db.knowledge_source_ids(&request).unwrap();
+
+    assert_eq!(first.source_ids, vec!["source_a".to_string()]);
+    assert_eq!(first, second);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+
+    let summary = db
+        .query_sql(
+            "SELECT execution_count FROM system.statement_summary \
+             WHERE statement_kind = 'match_return' \
+             ORDER BY execution_count DESC LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(summary.rows[0].get("execution_count"), Some(&Value::Int(2)));
 }
 
 #[test]

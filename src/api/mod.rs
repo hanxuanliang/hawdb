@@ -79,6 +79,7 @@ pub struct Database {
     optimizer: CascadesOptimizer,
     plan_cache: RefCell<PlanCache>,
     slow_query_log: RefCell<system_sql::SlowQueryLog>,
+    statement_summary: RefCell<system_sql::StatementSummary>,
     config: DatabaseConfig,
     system_variables: QuerySystemVariables,
     reader_pins: Rc<RefCell<ReaderPins>>,
@@ -97,6 +98,7 @@ pub struct DatabaseConfig {
     pub max_plan_cache_entries: Option<usize>,
     pub slow_query_log_capacity: usize,
     pub slow_query_log_threshold_micros: u128,
+    pub statement_summary_capacity: usize,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
 }
 
@@ -121,6 +123,7 @@ impl Default for DatabaseConfig {
             max_plan_cache_entries: Some(DEFAULT_PLAN_CACHE_MAX_ENTRIES),
             slow_query_log_capacity: system_sql::DEFAULT_SLOW_QUERY_LOG_CAPACITY,
             slow_query_log_threshold_micros: system_sql::DEFAULT_SLOW_QUERY_LOG_THRESHOLD_MICROS,
+            statement_summary_capacity: system_sql::DEFAULT_STATEMENT_SUMMARY_CAPACITY,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
         }
     }
@@ -5500,6 +5503,7 @@ pub struct DatabaseReadTransaction {
     optimizer: CascadesOptimizer,
     plan_cache: RefCell<PlanCache>,
     slow_query_snapshot: Vec<system_sql::SlowQueryRecord>,
+    statement_summary_snapshot: Vec<system_sql::StatementSummaryRecord>,
     config: DatabaseConfig,
     _pin: ReaderPin,
 }
@@ -5536,6 +5540,9 @@ impl Default for Database {
             slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
             )),
+            statement_summary: RefCell::new(system_sql::StatementSummary::new(
+                config.statement_summary_capacity,
+            )),
             config,
             system_variables: QuerySystemVariables::default(),
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
@@ -5563,6 +5570,9 @@ impl Database {
             plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
             slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
+            )),
+            statement_summary: RefCell::new(system_sql::StatementSummary::new(
+                config.statement_summary_capacity,
             )),
             config,
             system_variables: QuerySystemVariables::default(),
@@ -5622,6 +5632,9 @@ impl Database {
             plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
             slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
                 config.slow_query_log_capacity,
+            )),
+            statement_summary: RefCell::new(system_sql::StatementSummary::new(
+                config.statement_summary_capacity,
             )),
             config,
             system_variables: QuerySystemVariables::default(),
@@ -5692,20 +5705,46 @@ impl Database {
             };
             Ok(QueryOutput { rows })
         })();
-        if let Ok(output) = &query_result {
-            self.record_completed_query("cypher", cypher_text, started, output);
-        }
+        self.record_statement_execution(
+            "cypher",
+            cypher_text,
+            statement_kind(body),
+            started,
+            &query_result,
+        );
         query_result
     }
 
-    fn record_completed_query(
+    fn record_statement_execution(
         &self,
         query_language: &str,
         query_text: &str,
+        statement_kind: &str,
         started: std::time::Instant,
-        output: &QueryOutput,
+        result: &Result<QueryOutput>,
     ) {
         let elapsed_micros = started.elapsed().as_micros();
+        let execution = match result {
+            Ok(output) => system_sql::StatementExecution::completed(
+                query_language,
+                query_text,
+                statement_kind,
+                elapsed_micros,
+                output.rows.len(),
+            ),
+            Err(error) => system_sql::StatementExecution::failed(
+                query_language,
+                query_text,
+                statement_kind,
+                elapsed_micros,
+                error.to_string(),
+            ),
+        };
+        self.statement_summary.borrow_mut().record(execution);
+
+        let Ok(output) = result else {
+            return;
+        };
         let slow_log_candidate = elapsed_micros >= self.config.slow_query_log_threshold_micros;
         if !slow_log_candidate {
             return;
@@ -5737,7 +5776,54 @@ impl Database {
             max_rows,
             &self.plan_cache.borrow().stats(),
             &self.slow_query_log.borrow().snapshot(),
+            &self.statement_summary.borrow().snapshot(),
         )
+    }
+
+    fn query_read_only_with_params_bounded(
+        &self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+        max_rows: Option<usize>,
+    ) -> Result<QueryOutput> {
+        let started = std::time::Instant::now();
+        let statement = cypher::parse(cypher_text)?;
+        let body = statement_body(&statement);
+        let query_result = (|| {
+            if matches!(body, cypher::Statement::Checkpoint) {
+                reject_transaction_control_parameters("CHECKPOINT", parameters)?;
+                return Err(SkeinError::Execution(
+                    "CHECKPOINT is not allowed inside a read-only query runtime".to_string(),
+                ));
+            }
+            if matches!(body, cypher::Statement::SetSystemVariable(_)) {
+                reject_system_variable_parameters(parameters)?;
+                return Err(SkeinError::Execution(
+                    "SET system variable is not allowed inside a read-only query runtime"
+                        .to_string(),
+                ));
+            }
+            query_work_request_for_statement(&QuerySystemVariables::default(), &statement)?;
+            let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+            if executor::is_mutation_plan(&physical)? {
+                return Err(SkeinError::Execution(
+                    "read-only query runtime must not execute a mutation".to_string(),
+                ));
+            }
+            let mut catalog = self.catalog.clone();
+            let mut store = self.store.snapshot();
+            let rows =
+                executor::execute_with_row_limit(&physical, &mut catalog, &mut store, max_rows)?;
+            Ok(QueryOutput { rows })
+        })();
+        self.record_statement_execution(
+            "cypher",
+            cypher_text,
+            statement_kind(body),
+            started,
+            &query_result,
+        );
+        query_result
     }
 
     pub fn begin_transaction(&mut self) -> DatabaseTransaction<'_> {
@@ -5771,6 +5857,7 @@ impl Database {
             optimizer: self.optimizer.clone(),
             plan_cache: RefCell::new(PlanCache::new(self.config.max_plan_cache_entries)),
             slow_query_snapshot: self.slow_query_log.borrow().snapshot(),
+            statement_summary_snapshot: self.statement_summary.borrow().snapshot(),
             config: self.config.clone(),
             _pin: pin,
         }
@@ -7204,7 +7291,7 @@ impl Database {
         &self,
         request: &KnowledgeSourceIdListRequest,
     ) -> Result<KnowledgeSourceIdListOutput> {
-        knowledge_source_ids_for(&self.catalog, &self.store, request)
+        knowledge_source_ids_via_query_runtime(self, request)
     }
 
     pub fn knowledge_sources(
@@ -15730,11 +15817,54 @@ fn knowledge_source_for(
     })
 }
 
-fn knowledge_source_ids_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_source_ids_via_query_runtime(
+    db: &Database,
     request: &KnowledgeSourceIdListRequest,
 ) -> Result<KnowledgeSourceIdListOutput> {
+    validate_knowledge_source_id_list_request(request)?;
+
+    let mut parameters = BTreeMap::new();
+    let predicate = knowledge_source_id_list_predicate(request, &mut parameters);
+    let count_query = format!("MATCH (s:Source){predicate} RETURN count(s) AS count");
+    let count_output =
+        db.query_read_only_with_params_bounded(&count_query, &parameters, Some(1))?;
+    let matched_count = count_output
+        .rows
+        .first()
+        .and_then(|row| row.get("count"))
+        .and_then(value_to_non_negative_usize)
+        .unwrap_or(0);
+
+    let limit_clause = if request.limit > 0 {
+        parameters.insert(
+            "limit".to_string(),
+            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
+        );
+        " LIMIT $limit"
+    } else {
+        ""
+    };
+    let list_query = format!(
+        "MATCH (s:Source){predicate} RETURN s.id AS source_id ORDER BY source_id ASC{limit_clause}"
+    );
+    let list_output = db.query_read_only_with_params_bounded(&list_query, &parameters, None)?;
+    let source_ids = list_output
+        .rows
+        .iter()
+        .filter_map(|row| row.get("source_id").map(value_to_external_id))
+        .filter(|source_id| !source_id.is_empty())
+        .collect::<Vec<_>>();
+    let returned_count = source_ids.len();
+
+    Ok(KnowledgeSourceIdListOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        source_ids,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_source_id_list_request(request: &KnowledgeSourceIdListRequest) -> Result<()> {
     if request
         .lifecycle_state
         .as_deref()
@@ -15753,43 +15883,46 @@ fn knowledge_source_ids_for(
             "knowledge source id list requires a non-empty normalized space id".to_string(),
         ));
     }
+    Ok(())
+}
 
-    let Some(label_id) = catalog.label_id("Source") else {
-        return Ok(KnowledgeSourceIdListOutput {
-            graph_commit_epoch: store.commit_epoch(),
-            source_ids: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-    let mut source_ids = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| {
-            request.lifecycle_state.as_ref().is_none_or(|state| {
-                node.properties
-                    .get("lifecycle_state")
-                    .map(value_to_external_id)
-                    .as_ref()
-                    == Some(state)
-            }) && request
-                .normalized_space_id
-                .as_ref()
-                .is_none_or(|space_id| normalized_node_space_id(node) == *space_id)
-        })
-        .filter_map(node_external_id)
-        .collect::<Vec<_>>();
-    source_ids.sort();
-    let matched_count = source_ids.len();
-    if request.limit > 0 {
-        source_ids.truncate(request.limit);
+fn knowledge_source_id_list_predicate(
+    request: &KnowledgeSourceIdListRequest,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    let mut predicates = Vec::new();
+    if let Some(lifecycle_state) = &request.lifecycle_state {
+        parameters.insert(
+            "lifecycle_state".to_string(),
+            Value::String(lifecycle_state.clone()),
+        );
+        predicates.push("s.lifecycle_state = $lifecycle_state");
     }
-    let returned_count = source_ids.len();
-    Ok(KnowledgeSourceIdListOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        source_ids,
-        matched_count,
-        returned_count,
-    })
+    if let Some(normalized_space_id) = &request.normalized_space_id {
+        parameters.insert(
+            "normalized_space_id".to_string(),
+            Value::String(normalized_space_id.clone()),
+        );
+        if normalized_space_id == "default" {
+            predicates.push(
+                "(s.space_id IS NULL OR s.space_id = '' OR s.space_id = $normalized_space_id)",
+            );
+        } else {
+            predicates.push("s.space_id = $normalized_space_id");
+        }
+    }
+    if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    }
+}
+
+fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
+    match value {
+        Value::Int(value) if *value >= 0 => usize::try_from(*value).ok(),
+        _ => None,
+    }
 }
 
 fn knowledge_sources_for(
@@ -28765,6 +28898,60 @@ fn statement_body(statement: &cypher::Statement) -> &cypher::Statement {
     }
 }
 
+fn statement_kind(statement: &cypher::Statement) -> &'static str {
+    match statement {
+        cypher::Statement::AlterPropertyState(_) => "alter_property_state",
+        cypher::Statement::AlterTableState(_) => "alter_table_state",
+        cypher::Statement::BeginTransaction => "begin_transaction",
+        cypher::Statement::Checkpoint => "checkpoint",
+        cypher::Statement::Commit => "commit",
+        cypher::Statement::CreateCompositeIndex(_) => "create_composite_index",
+        cypher::Statement::CreateFullTextIndex(_) => "create_full_text_index",
+        cypher::Statement::CreateIndex(_) => "create_index",
+        cypher::Statement::CreateNode(_) => "create_node",
+        cypher::Statement::CreateNodeLabel(_) => "create_node_label",
+        cypher::Statement::CreateNodePropertyExistsConstraint(_) => {
+            "create_node_property_exists_constraint"
+        }
+        cypher::Statement::CreateNodeTable(_) => "create_node_table",
+        cypher::Statement::CreateProperty(_) => "create_property",
+        cypher::Statement::CreateRangeIndex(_) => "create_range_index",
+        cypher::Statement::CreateRelationship(_) => "create_relationship",
+        cypher::Statement::CreateRelationshipPropertyExistsConstraint(_) => {
+            "create_relationship_property_exists_constraint"
+        }
+        cypher::Statement::CreateRelationshipTable(_) => "create_relationship_table",
+        cypher::Statement::CreateRelationshipType(_) => "create_relationship_type",
+        cypher::Statement::CreateRelationshipUniqueConstraint(_) => {
+            "create_relationship_unique_constraint"
+        }
+        cypher::Statement::CreateUniqueConstraint(_) => "create_unique_constraint",
+        cypher::Statement::CypherQuery(query) => statement_kind(&query.statement),
+        cypher::Statement::GraphAlgorithm(_) => "graph_algorithm",
+        cypher::Statement::MatchCreateRelationship(_) => "match_create_relationship",
+        cypher::Statement::MatchDelete(_) => "match_delete",
+        cypher::Statement::MatchExpandMatchMergeRelationship(_) => {
+            "match_expand_match_merge_relationship"
+        }
+        cypher::Statement::MatchExpandMergeRelationship(_) => "match_expand_merge_relationship",
+        cypher::Statement::MatchMergeRelationship(_) => "match_merge_relationship",
+        cypher::Statement::MatchNodesReturn(_) => "match_nodes_return",
+        cypher::Statement::MatchOptionalRelationshipCountSum(_) => {
+            "match_optional_relationship_count_sum"
+        }
+        cypher::Statement::MatchReturn(_) => "match_return",
+        cypher::Statement::MatchSet(_) => "match_set",
+        cypher::Statement::MatchSetReturn(_) => "match_set_return",
+        cypher::Statement::MatchThreadRepairStats(_) => "match_thread_repair_stats",
+        cypher::Statement::MergeNode(_) => "merge_node",
+        cypher::Statement::MergeRelationship(_) => "merge_relationship",
+        cypher::Statement::ProjectGraph(_) => "project_graph",
+        cypher::Statement::Rollback => "rollback",
+        cypher::Statement::SetSystemVariable(_) => "set_system_variable",
+        cypher::Statement::ShortestPathReturn(_) => "shortest_path_return",
+    }
+}
+
 fn query_work_request_for_statement(
     variables: &QuerySystemVariables,
     statement: &cypher::Statement,
@@ -30400,6 +30587,7 @@ impl DatabaseReadTransaction {
             max_rows,
             &self.plan_cache.borrow().stats(),
             &self.slow_query_snapshot,
+            &self.statement_summary_snapshot,
         )
     }
 

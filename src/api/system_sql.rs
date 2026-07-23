@@ -12,7 +12,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const DEFAULT_SLOW_QUERY_LOG_CAPACITY: usize = 256;
 pub(crate) const DEFAULT_SLOW_QUERY_LOG_THRESHOLD_MICROS: u128 = 300_000;
+pub(crate) const DEFAULT_STATEMENT_SUMMARY_CAPACITY: usize = 256;
 const MAX_SLOW_QUERY_TEXT_BYTES: usize = 4096;
+const MAX_STATEMENT_TEXT_BYTES: usize = 4096;
+const MAX_STATEMENT_ERROR_BYTES: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct SlowQueryRecord {
@@ -32,6 +35,43 @@ pub(crate) struct SlowQueryLog {
     capacity: usize,
     next_sequence: u64,
     records: VecDeque<SlowQueryRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatementExecution {
+    pub(crate) query_language: String,
+    pub(crate) query_text: String,
+    pub(crate) statement_kind: String,
+    pub(crate) elapsed_micros: i64,
+    pub(crate) row_count: i64,
+    pub(crate) success: bool,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatementSummaryRecord {
+    pub(crate) digest: String,
+    pub(crate) query_language: String,
+    pub(crate) query_text: String,
+    pub(crate) statement_kind: String,
+    pub(crate) execution_count: i64,
+    pub(crate) success_count: i64,
+    pub(crate) error_count: i64,
+    pub(crate) total_elapsed_micros: i64,
+    pub(crate) max_elapsed_micros: i64,
+    pub(crate) total_row_count: i64,
+    pub(crate) last_seen_unix_micros: i64,
+    pub(crate) last_elapsed_micros: i64,
+    pub(crate) last_row_count: i64,
+    pub(crate) last_success: bool,
+    pub(crate) last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatementSummary {
+    capacity: usize,
+    records: BTreeMap<String, StatementSummaryRecord>,
+    insertion_order: VecDeque<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +98,7 @@ pub(crate) struct SystemTableScan {
 enum SystemTable {
     PlanCache,
     SlowQueries,
+    StatementSummary,
 }
 
 impl SlowQueryRecord {
@@ -110,15 +151,150 @@ impl SlowQueryLog {
     }
 }
 
+impl StatementExecution {
+    pub(crate) fn completed(
+        query_language: &str,
+        query_text: &str,
+        statement_kind: &str,
+        elapsed_micros: u128,
+        row_count: usize,
+    ) -> Self {
+        Self {
+            query_language: query_language.to_string(),
+            query_text: truncate_utf8(query_text, MAX_STATEMENT_TEXT_BYTES),
+            statement_kind: statement_kind.to_string(),
+            elapsed_micros: saturating_i64_from_u128(elapsed_micros),
+            row_count: i64::try_from(row_count).unwrap_or(i64::MAX),
+            success: true,
+            error: None,
+        }
+    }
+
+    pub(crate) fn failed(
+        query_language: &str,
+        query_text: &str,
+        statement_kind: &str,
+        elapsed_micros: u128,
+        error: String,
+    ) -> Self {
+        Self {
+            query_language: query_language.to_string(),
+            query_text: truncate_utf8(query_text, MAX_STATEMENT_TEXT_BYTES),
+            statement_kind: statement_kind.to_string(),
+            elapsed_micros: saturating_i64_from_u128(elapsed_micros),
+            row_count: 0,
+            success: false,
+            error: Some(truncate_utf8(&error, MAX_STATEMENT_ERROR_BYTES)),
+        }
+    }
+}
+
+impl StatementSummary {
+    pub(crate) fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            records: BTreeMap::new(),
+            insertion_order: VecDeque::with_capacity(capacity),
+        }
+    }
+
+    pub(crate) fn record(&mut self, execution: StatementExecution) {
+        if self.capacity == 0 {
+            return;
+        }
+
+        let digest = statement_digest(
+            &execution.query_language,
+            &execution.statement_kind,
+            &execution.query_text,
+        );
+        if let Some(record) = self.records.get_mut(&digest) {
+            record.apply(execution);
+            return;
+        }
+
+        while self.records.len() >= self.capacity {
+            let Some(evicted) = self.insertion_order.pop_front() else {
+                break;
+            };
+            self.records.remove(&evicted);
+        }
+
+        self.insertion_order.push_back(digest.clone());
+        self.records.insert(
+            digest.clone(),
+            StatementSummaryRecord::from_execution(digest, execution),
+        );
+    }
+
+    pub(crate) fn snapshot(&self) -> Vec<StatementSummaryRecord> {
+        self.insertion_order
+            .iter()
+            .filter_map(|digest| self.records.get(digest).cloned())
+            .collect()
+    }
+}
+
+impl StatementSummaryRecord {
+    fn from_execution(digest: String, execution: StatementExecution) -> Self {
+        let now = unix_now_micros();
+        let success_count = i64::from(execution.success);
+        let error_count = i64::from(!execution.success);
+        Self {
+            digest,
+            query_language: execution.query_language,
+            query_text: execution.query_text,
+            statement_kind: execution.statement_kind,
+            execution_count: 1,
+            success_count,
+            error_count,
+            total_elapsed_micros: execution.elapsed_micros,
+            max_elapsed_micros: execution.elapsed_micros,
+            total_row_count: execution.row_count,
+            last_seen_unix_micros: now,
+            last_elapsed_micros: execution.elapsed_micros,
+            last_row_count: execution.row_count,
+            last_success: execution.success,
+            last_error: execution.error,
+        }
+    }
+
+    fn apply(&mut self, execution: StatementExecution) {
+        self.execution_count = self.execution_count.saturating_add(1);
+        if execution.success {
+            self.success_count = self.success_count.saturating_add(1);
+        } else {
+            self.error_count = self.error_count.saturating_add(1);
+        }
+        self.total_elapsed_micros = self
+            .total_elapsed_micros
+            .saturating_add(execution.elapsed_micros);
+        self.max_elapsed_micros = self.max_elapsed_micros.max(execution.elapsed_micros);
+        self.total_row_count = self.total_row_count.saturating_add(execution.row_count);
+        self.last_seen_unix_micros = unix_now_micros();
+        self.last_elapsed_micros = execution.elapsed_micros;
+        self.last_row_count = execution.row_count;
+        self.last_success = execution.success;
+        self.last_error = execution.error;
+    }
+}
+
 pub(crate) fn query_sql(
     sql_text: &str,
     max_rows: Option<usize>,
     plan_cache_stats: &PlanCacheStats,
     slow_queries: &[SlowQueryRecord],
+    statement_summaries: &[StatementSummaryRecord],
 ) -> Result<QueryOutput> {
     let logical = plan_sql(sql_text)?;
     let physical = optimize_sql(logical);
-    let rows = execute_sql(physical, plan_cache_stats, slow_queries, max_rows)?;
+    let rows = execute_sql(
+        physical,
+        plan_cache_stats,
+        slow_queries,
+        statement_summaries,
+        max_rows,
+    )?;
     Ok(QueryOutput { rows })
 }
 
@@ -148,12 +324,17 @@ fn execute_sql(
     physical: SqlPhysicalPlan,
     plan_cache_stats: &PlanCacheStats,
     slow_queries: &[SlowQueryRecord],
+    statement_summaries: &[StatementSummaryRecord],
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
     match physical {
-        SqlPhysicalPlan::SystemTableScanExec(scan) => {
-            execute_system_table_scan(scan, plan_cache_stats, slow_queries, max_rows)
-        }
+        SqlPhysicalPlan::SystemTableScanExec(scan) => execute_system_table_scan(
+            scan,
+            plan_cache_stats,
+            slow_queries,
+            statement_summaries,
+            max_rows,
+        ),
     }
 }
 
@@ -161,11 +342,13 @@ fn execute_system_table_scan(
     scan: SystemTableScan,
     plan_cache_stats: &PlanCacheStats,
     slow_queries: &[SlowQueryRecord],
+    statement_summaries: &[StatementSummaryRecord],
     max_rows: Option<usize>,
 ) -> Result<Vec<Row>> {
     let mut rows = match scan.table {
         SystemTable::PlanCache => plan_cache_rows(plan_cache_stats),
         SystemTable::SlowQueries => slow_query_rows(slow_queries),
+        SystemTable::StatementSummary => statement_summary_rows(statement_summaries),
     };
 
     if let Some(predicate) = &scan.predicate {
@@ -294,6 +477,75 @@ fn slow_query_rows(records: &[SlowQueryRecord]) -> Vec<Row> {
         .collect()
 }
 
+fn statement_summary_rows(records: &[StatementSummaryRecord]) -> Vec<Row> {
+    records
+        .iter()
+        .map(|record| {
+            BTreeMap::from([
+                ("digest".to_string(), Value::String(record.digest.clone())),
+                (
+                    "query_language".to_string(),
+                    Value::String(record.query_language.clone()),
+                ),
+                (
+                    "query_text".to_string(),
+                    Value::String(record.query_text.clone()),
+                ),
+                (
+                    "statement_kind".to_string(),
+                    Value::String(record.statement_kind.clone()),
+                ),
+                (
+                    "execution_count".to_string(),
+                    Value::Int(record.execution_count),
+                ),
+                (
+                    "success_count".to_string(),
+                    Value::Int(record.success_count),
+                ),
+                ("error_count".to_string(), Value::Int(record.error_count)),
+                (
+                    "total_elapsed_micros".to_string(),
+                    Value::Int(record.total_elapsed_micros),
+                ),
+                (
+                    "max_elapsed_micros".to_string(),
+                    Value::Int(record.max_elapsed_micros),
+                ),
+                (
+                    "avg_elapsed_micros".to_string(),
+                    Value::Int(avg_i64(record.total_elapsed_micros, record.execution_count)),
+                ),
+                (
+                    "total_row_count".to_string(),
+                    Value::Int(record.total_row_count),
+                ),
+                (
+                    "last_seen_unix_micros".to_string(),
+                    Value::Int(record.last_seen_unix_micros),
+                ),
+                (
+                    "last_elapsed_micros".to_string(),
+                    Value::Int(record.last_elapsed_micros),
+                ),
+                (
+                    "last_row_count".to_string(),
+                    Value::Int(record.last_row_count),
+                ),
+                ("last_success".to_string(), Value::Bool(record.last_success)),
+                (
+                    "last_error".to_string(),
+                    record
+                        .last_error
+                        .as_ref()
+                        .map(|error| Value::String(error.clone()))
+                        .unwrap_or(Value::Null),
+                ),
+            ])
+        })
+        .collect()
+}
+
 fn predicate_matches(predicate: &SqlPredicate, row: &Row) -> bool {
     match predicate {
         SqlPredicate::And(left, right) => {
@@ -371,6 +623,7 @@ fn system_table(select: &SelectStatement) -> Result<SystemTable> {
     match (select.from.schema.as_deref(), select.from.name.as_str()) {
         (Some("system"), "plan_cache") => Ok(SystemTable::PlanCache),
         (Some("system"), "slow_queries") => Ok(SystemTable::SlowQueries),
+        (Some("system"), "statement_summary") => Ok(SystemTable::StatementSummary),
         _ => Err(SkeinError::Semantic(format!(
             "unknown SQL system table {}",
             format_table_name(select)
@@ -416,6 +669,7 @@ fn validate_column(table: SystemTable, column: &SqlColumnRef) -> Result<()> {
         let table_name = match table {
             SystemTable::PlanCache => "plan_cache",
             SystemTable::SlowQueries => "slow_queries",
+            SystemTable::StatementSummary => "statement_summary",
         };
         if qualifier != table_name {
             return Err(SkeinError::Semantic(format!(
@@ -447,6 +701,24 @@ fn table_columns(table: SystemTable) -> &'static [&'static str] {
             "error",
             "slow_log_candidate",
         ],
+        SystemTable::StatementSummary => &[
+            "digest",
+            "query_language",
+            "query_text",
+            "statement_kind",
+            "execution_count",
+            "success_count",
+            "error_count",
+            "total_elapsed_micros",
+            "max_elapsed_micros",
+            "avg_elapsed_micros",
+            "total_row_count",
+            "last_seen_unix_micros",
+            "last_elapsed_micros",
+            "last_row_count",
+            "last_success",
+            "last_error",
+        ],
     }
 }
 
@@ -469,8 +741,31 @@ fn u64_value(value: u64) -> Value {
     Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
+fn avg_i64(total: i64, count: i64) -> i64 {
+    if count <= 0 {
+        0
+    } else {
+        total / count
+    }
+}
+
 fn saturating_i64_from_u128(value: u128) -> i64 {
     i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn statement_digest(query_language: &str, statement_kind: &str, query_text: &str) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in query_language
+        .bytes()
+        .chain([0xff])
+        .chain(statement_kind.bytes())
+        .chain([0xfe])
+        .chain(query_text.bytes())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
 }
 
 fn unix_now_micros() -> i64 {
@@ -512,6 +807,7 @@ mod tests {
             "SELECT value FROM system.plan_cache WHERE metric = 'hits'",
             None,
             &stats,
+            &[],
             &[],
         )
         .expect("system plan cache query");
@@ -575,6 +871,7 @@ mod tests {
                 evictions: 0,
             },
             &records,
+            &[],
         )
         .expect("system slow query scan");
 
