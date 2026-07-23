@@ -3,12 +3,16 @@ use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
 };
 use crate::{
-    BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
+    cypher, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
     BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
-    KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState, QueryOutput,
-    ReadExecutionProfile, Result, SearchIndex, SearchProjectionDeltaReport,
-    SearchProjectionFreshness, SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions,
-    SkeinError, Value,
+    KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
+    NowledgeGraphStatement, QueryOutput, ReadExecutionProfile, Result, SearchIndex,
+    SearchProjectionDeltaReport, SearchProjectionFreshness, SearchProjectionGraphDeltaRequest,
+    SearchProjectionProbeOptions, SkeinError, Value,
+};
+use crate::{
+    nowledge_inventory::background_maintenance_summary_to_json,
+    store::{RecoveryMode, StorageRecoveryReport},
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -109,10 +113,12 @@ impl NowledgeMemOpenReport {
 }
 
 pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-report";
+pub const NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
+pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ROWS: usize = 512;
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ESTIMATED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 
@@ -259,6 +265,72 @@ pub struct NowledgeMemReadOutput {
     pub report: NowledgeMemReadReport,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NowledgeMemQueryExecutionPath {
+    FastPath,
+    OptimizedPath,
+}
+
+impl NowledgeMemQueryExecutionPath {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::FastPath => "fast_path",
+            Self::OptimizedPath => "optimized_path",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemQueryReport {
+    pub protocol: String,
+    pub mode: NowledgeMemGraphMode,
+    pub execution_path: NowledgeMemQueryExecutionPath,
+    pub fast_path_reason: Option<String>,
+}
+
+impl NowledgeMemQueryReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "mode": self.mode.as_str(),
+            "execution_path": self.execution_path.as_str(),
+            "fast_path_reason": self.fast_path_reason,
+            "fast_path_selected": self.execution_path == NowledgeMemQueryExecutionPath::FastPath,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemQueryOutput {
+    pub output: QueryOutput,
+    pub report: NowledgeMemQueryReport,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemReadinessOptions {
+    pub bounded_read_probe: Option<NowledgeGraphStatement>,
+    pub read_options: NowledgeMemReadOptions,
+    pub search_projection_probe_options: SearchProjectionProbeOptions,
+    pub primary_search_projection_probe: Option<serde_json::Value>,
+    pub qos_policy: LocalQosPolicy,
+    pub qos_state: LocalQosState,
+    pub background_maintenance_options: BackgroundMaintenanceOptions,
+}
+
+impl Default for NowledgeMemReadinessOptions {
+    fn default() -> Self {
+        Self {
+            bounded_read_probe: None,
+            read_options: NowledgeMemReadOptions::default(),
+            search_projection_probe_options: SearchProjectionProbeOptions::default(),
+            primary_search_projection_probe: None,
+            qos_policy: LocalQosPolicy::default(),
+            qos_state: LocalQosState::default(),
+            background_maintenance_options: BackgroundMaintenanceOptions::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemRetrievalReport {
     pub protocol: String,
@@ -364,12 +436,26 @@ impl NowledgeMemGraph {
         self.db.query(cypher)
     }
 
+    pub fn query_with_report(&mut self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
+        self.query_with_params_with_report(cypher, &BTreeMap::new())
+    }
+
     pub fn query_with_params(
         &mut self,
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
         self.db.query_with_params(cypher, parameters)
+    }
+
+    pub fn query_with_params_with_report(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<NowledgeMemQueryOutput> {
+        let report = nowledge_mem_query_report(self.mode, cypher)?;
+        let output = self.db.query_with_params(cypher, parameters)?;
+        Ok(NowledgeMemQueryOutput { output, report })
     }
 
     pub fn read_query(&mut self, cypher: &str) -> Result<NowledgeMemReadOutput> {
@@ -639,6 +725,18 @@ impl NowledgeMemEmbeddedStore {
         self.graph.read_query(cypher)
     }
 
+    pub fn query_with_report(&mut self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
+        self.graph.query_with_report(cypher)
+    }
+
+    pub fn query_with_params_with_report(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.graph.query_with_params_with_report(cypher, parameters)
+    }
+
     pub fn read_query_with_options(
         &mut self,
         cypher: &str,
@@ -673,6 +771,83 @@ impl NowledgeMemEmbeddedStore {
         )
     }
 
+    pub fn library_readiness_json(
+        &mut self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> serde_json::Value {
+        let bounded_read_evidence = self.bounded_read_probe_evidence_json(options);
+        let storage_recovery =
+            storage_recovery_report_json(&self.graph.database().storage_recovery_report());
+        let background_maintenance =
+            background_maintenance_summary_to_json(&self.background_maintenance_summary(
+                &options.qos_policy,
+                &options.qos_state,
+                options.background_maintenance_options.clone(),
+            ));
+        let search_projection_evidence = self
+            .search_projection_evidence_json(options.search_projection_probe_options.clone())
+            .unwrap_or_else(|_| missing_search_projection_evidence_json());
+        let search_projection_shadow_evidence = options
+            .primary_search_projection_probe
+            .as_ref()
+            .map(|primary_probe| {
+                self.search_projection_shadow_evidence_json(
+                    primary_probe,
+                    options.search_projection_probe_options.clone(),
+                )
+                .unwrap_or_else(|_| missing_search_projection_shadow_evidence_json())
+            })
+            .unwrap_or_else(missing_primary_search_projection_probe_json);
+        let blocker_codes = library_readiness_blocker_codes(
+            &bounded_read_evidence,
+            &storage_recovery,
+            &search_projection_evidence,
+            &search_projection_shadow_evidence,
+        );
+        let ready = blocker_codes.is_empty();
+
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+            "present": true,
+            "ready": ready,
+            "mode": self.graph.mode().as_str(),
+            "blocker_codes": blocker_codes,
+            "graph": {
+                "open": true,
+                "mode": self.graph.mode().as_str(),
+                "read_only": self.graph.database().config().read_only,
+            },
+            "bounded_read_evidence": bounded_read_evidence,
+            "storage_recovery": storage_recovery,
+            "background_maintenance": background_maintenance,
+            "search_projection_evidence": search_projection_evidence,
+            "search_projection_shadow_evidence": search_projection_shadow_evidence,
+        })
+    }
+
+    fn bounded_read_probe_evidence_json(
+        &mut self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> serde_json::Value {
+        let Some(probe) = options.bounded_read_probe.as_ref() else {
+            return serde_json::json!({
+                "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+                "present": false,
+                "ready": false,
+                "blocker_codes": ["bounded_read_probe_missing"],
+            });
+        };
+        match self.read_query_with_params(&probe.cypher, &probe.parameters, &options.read_options) {
+            Ok(read) => read.report.bounded_read_evidence_json(),
+            Err(_) => serde_json::json!({
+                "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+                "present": true,
+                "ready": false,
+                "blocker_codes": ["bounded_read_probe_failed"],
+            }),
+        }
+    }
+
     fn require_search_projection(&self) -> Result<&NowledgeMemSearchProjection> {
         self.search_projection
             .as_ref()
@@ -690,6 +865,228 @@ fn require_search_projection_mut(
     search_projection
         .as_mut()
         .ok_or_else(missing_search_projection_error)
+}
+
+fn nowledge_mem_query_report(
+    mode: NowledgeMemGraphMode,
+    cypher_text: &str,
+) -> Result<NowledgeMemQueryReport> {
+    let statement = cypher::parse(cypher_text)?;
+    let decision = nowledge_mem_query_execution_path(&statement);
+    Ok(NowledgeMemQueryReport {
+        protocol: NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL.to_string(),
+        mode,
+        execution_path: decision.execution_path,
+        fast_path_reason: decision.fast_path_reason.map(str::to_string),
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NowledgeMemQueryPathDecision {
+    execution_path: NowledgeMemQueryExecutionPath,
+    fast_path_reason: Option<&'static str>,
+}
+
+fn nowledge_mem_query_execution_path(
+    statement: &cypher::Statement,
+) -> NowledgeMemQueryPathDecision {
+    let body = nowledge_statement_body(statement);
+    let fast_path_reason = match body {
+        cypher::Statement::MatchReturn(query) if is_simple_node_lookup(query) => {
+            Some("simple_node_lookup")
+        }
+        cypher::Statement::MatchReturn(query) if is_simple_one_hop_expand(query) => {
+            Some("simple_one_hop_expand")
+        }
+        cypher::Statement::MatchNodesReturn(query) if is_simple_two_node_lookup(query) => {
+            Some("simple_two_node_lookup")
+        }
+        cypher::Statement::ShortestPathReturn(_) => Some("bounded_shortest_path"),
+        _ => None,
+    };
+    NowledgeMemQueryPathDecision {
+        execution_path: if fast_path_reason.is_some() {
+            NowledgeMemQueryExecutionPath::FastPath
+        } else {
+            NowledgeMemQueryExecutionPath::OptimizedPath
+        },
+        fast_path_reason,
+    }
+}
+
+fn nowledge_statement_body(statement: &cypher::Statement) -> &cypher::Statement {
+    match statement {
+        cypher::Statement::CypherQuery(query) => &query.statement,
+        _ => statement,
+    }
+}
+
+fn is_simple_node_lookup(query: &cypher::MatchReturn) -> bool {
+    !query.properties.is_empty()
+        && query.expand.is_none()
+        && query.post_match_expand.is_none()
+        && query.optional_expand.is_none()
+        && query.optional_with.is_none()
+        && query.collect_with.is_none()
+        && query.distinct_with.is_none()
+        && query.with_projection.is_none()
+        && query.with_order_by.is_empty()
+        && query.with_offset.is_none()
+        && query.with_limit.is_none()
+        && query.aggregate_with.is_none()
+        && query.aggregate_with_filter.is_none()
+        && query.post_with_match.is_none()
+        && query.predicate.is_none()
+        && !query.distinct
+        && query.order_by.is_empty()
+        && query.offset.is_none()
+}
+
+fn is_simple_one_hop_expand(query: &cypher::MatchReturn) -> bool {
+    query.expand.as_ref().is_some_and(|expand| {
+        expand.min_hops == 1
+            && expand.max_hops == 1
+            && !query.properties.is_empty()
+            && query.post_match_expand.is_none()
+            && query.optional_expand.is_none()
+            && query.optional_with.is_none()
+            && query.collect_with.is_none()
+            && query.distinct_with.is_none()
+            && query.with_projection.is_none()
+            && query.with_order_by.is_empty()
+            && query.with_offset.is_none()
+            && query.with_limit.is_none()
+            && query.aggregate_with.is_none()
+            && query.aggregate_with_filter.is_none()
+            && query.post_with_match.is_none()
+            && query.predicate.is_none()
+            && !query.distinct
+            && query.order_by.is_empty()
+            && query.offset.is_none()
+    })
+}
+
+fn is_simple_two_node_lookup(query: &cypher::MatchNodesReturn) -> bool {
+    !query.left_properties.is_empty()
+        && !query.right_properties.is_empty()
+        && query.predicate.is_none()
+}
+
+fn storage_recovery_report_json(report: &StorageRecoveryReport) -> serde_json::Value {
+    let durable_recovery_observed = report.durable;
+    let checkpoint_boundary_present =
+        report.checkpoint_epoch.is_some() || report.checkpoint_commit_epoch.is_some();
+    let wal_replay_bounded = report
+        .max_wal_replay_entries
+        .is_some_and(|limit| report.replayed_wal_entries <= limit);
+    let torn_tail_clean = !report.torn_tail_ignored;
+    let mut blocker_codes = Vec::new();
+    if !durable_recovery_observed {
+        blocker_codes.push("durable_recovery_not_observed");
+    }
+    if !checkpoint_boundary_present {
+        blocker_codes.push("checkpoint_boundary_missing");
+    }
+    if !wal_replay_bounded {
+        blocker_codes.push("wal_replay_unbounded");
+    }
+    if !torn_tail_clean {
+        blocker_codes.push("torn_tail_observed");
+    }
+    serde_json::json!({
+        "protocol": "skein-storage-recovery-report",
+        "present": true,
+        "ready": blocker_codes.is_empty(),
+        "durable": report.durable,
+        "recovery_mode": recovery_mode_name(report.recovery_mode),
+        "checkpoint_epoch": report.checkpoint_epoch,
+        "checkpoint_commit_epoch": report.checkpoint_commit_epoch,
+        "wal_present": report.wal_present,
+        "wal_replay_start_lsn": report.wal_replay_start_lsn,
+        "next_lsn_after_replay": report.next_lsn_after_replay,
+        "replayed_wal_entries": report.replayed_wal_entries,
+        "torn_tail_ignored": report.torn_tail_ignored,
+        "recovered_commit_epoch": report.recovered_commit_epoch,
+        "readiness": {
+            "durable_recovery_observed": durable_recovery_observed,
+            "checkpoint_boundary_present": checkpoint_boundary_present,
+            "wal_replay_bounded": wal_replay_bounded,
+            "torn_tail_clean": torn_tail_clean,
+        },
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn recovery_mode_name(mode: RecoveryMode) -> &'static str {
+    match mode {
+        RecoveryMode::TolerateTornTail => "tolerate_torn_tail",
+        RecoveryMode::Strict => "strict",
+    }
+}
+
+fn missing_search_projection_evidence_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "skein-nowledge-search-projection-evidence",
+        "present": false,
+        "ready": false,
+        "blocker_codes": ["search_projection_not_configured"],
+    })
+}
+
+fn missing_search_projection_shadow_evidence_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "skein-nowledge-search-projection-shadow-evidence",
+        "present": false,
+        "ready": false,
+        "blocker_codes": ["search_projection_not_configured"],
+    })
+}
+
+fn missing_primary_search_projection_probe_json() -> serde_json::Value {
+    serde_json::json!({
+        "protocol": "skein-nowledge-search-projection-shadow-evidence",
+        "present": false,
+        "ready": false,
+        "blocker_codes": ["primary_search_projection_probe_missing"],
+    })
+}
+
+fn library_readiness_blocker_codes(
+    bounded_read_evidence: &serde_json::Value,
+    storage_recovery: &serde_json::Value,
+    search_projection_evidence: &serde_json::Value,
+    search_projection_shadow_evidence: &serde_json::Value,
+) -> Vec<&'static str> {
+    let mut blockers = Vec::new();
+    if bounded_read_evidence
+        .get("ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        blockers.push("bounded_read_evidence_not_ready");
+    }
+    if storage_recovery
+        .get("ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        blockers.push("storage_recovery_not_ready");
+    }
+    if search_projection_evidence
+        .get("ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        blockers.push("search_projection_evidence_not_ready");
+    }
+    if search_projection_shadow_evidence
+        .get("ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        blockers.push("search_projection_shadow_evidence_not_ready");
+    }
+    blockers
 }
 
 fn nowledge_mem_retrieval_report(
@@ -851,19 +1248,21 @@ mod tests {
     use super::{
         nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode, NowledgeMemEmbeddedStore, NowledgeMemGraph,
-        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemReadOptions,
-        NowledgeMemReadReport, NowledgeMemSearchProjection,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
+        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
+        NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessOptions,
+        NowledgeMemSearchProjection, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
         DatabaseConfig, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
-        LocalQosScheduler, LocalQosState, SearchEmbeddingManifest, SearchIndex, SearchMode,
-        SearchProjectionDelta, SearchProjectionKind, SearchProjectionProbeOptions,
-        SearchProjectionRow, WorkClass,
+        LocalQosScheduler, LocalQosState, NowledgeGraphStatement, SearchEmbeddingManifest,
+        SearchIndex, SearchMode, SearchProjectionDelta, SearchProjectionKind,
+        SearchProjectionProbeOptions, SearchProjectionRow, WorkClass,
     };
     use std::collections::BTreeMap;
 
@@ -900,6 +1299,57 @@ mod tests {
 
         assert_eq!(output.rows.len(), 1);
         assert_eq!(graph.mode(), NowledgeMemGraphMode::WritableCutover);
+    }
+
+    #[test]
+    fn graph_query_with_report_marks_simple_lookup_fast_path() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-fast', title: 'Fast path'})")
+            .unwrap();
+
+        let query = graph
+            .query_with_report("MATCH (m:Memory {id: 'mem-fast'}) RETURN m.title AS title")
+            .unwrap();
+
+        assert_eq!(query.output.rows.len(), 1);
+        assert_eq!(query.report.protocol, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL);
+        assert_eq!(
+            query.report.execution_path,
+            NowledgeMemQueryExecutionPath::FastPath
+        );
+        assert_eq!(
+            query.report.fast_path_reason.as_deref(),
+            Some("simple_node_lookup")
+        );
+        assert_eq!(query.report.json()["execution_path"], "fast_path");
+        assert_eq!(query.report.json()["fast_path_selected"], true);
+    }
+
+    #[test]
+    fn graph_query_with_report_keeps_ordered_scan_on_optimized_path() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-slow-1', title: 'B'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'mem-slow-2', title: 'A'})")
+            .unwrap();
+
+        let query = graph
+            .query_with_report("MATCH (m:Memory) RETURN m.title AS title ORDER BY title LIMIT 1")
+            .unwrap();
+
+        assert_eq!(query.output.rows.len(), 1);
+        assert_eq!(
+            query.report.execution_path,
+            NowledgeMemQueryExecutionPath::OptimizedPath
+        );
+        assert_eq!(query.report.fast_path_reason, None);
+        assert_eq!(query.report.json()["execution_path"], "optimized_path");
+        assert_eq!(query.report.json()["fast_path_selected"], false);
     }
 
     #[test]
@@ -1165,6 +1615,79 @@ mod tests {
         assert_eq!(read.report.row_count, 1);
         assert!(!read.report.row_budget_exceeded);
         assert!(!read.report.payload_budget_exceeded);
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_fails_closed_without_required_evidence() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions::default());
+
+        assert_eq!(
+            readiness["protocol"],
+            NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL
+        );
+        assert_eq!(readiness["present"], true);
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(readiness["mode"], "shadow_read_only");
+        assert_eq!(readiness["bounded_read_evidence"]["present"], false);
+        assert_eq!(
+            readiness["bounded_read_evidence"]["blocker_codes"],
+            serde_json::json!(["bounded_read_probe_missing"])
+        );
+        assert_eq!(
+            readiness["search_projection_evidence"]["blocker_codes"],
+            serde_json::json!(["search_projection_not_configured"])
+        );
+        assert_eq!(
+            readiness["search_projection_shadow_evidence"]["blocker_codes"],
+            serde_json::json!(["primary_search_projection_probe_missing"])
+        );
+        assert!(readiness["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "bounded_read_evidence_not_ready"));
+        assert!(!readiness.to_string().contains("redacted"));
+    }
+
+    #[test]
+    fn embedded_store_library_readiness_runs_bounded_probe() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        graph
+            .database_mut()
+            .query("CREATE (:Memory {id: 'mem-readiness', title: 'Readiness'})")
+            .unwrap();
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let readiness = store.library_readiness_json(&NowledgeMemReadinessOptions {
+            bounded_read_probe: Some(NowledgeGraphStatement {
+                cypher: "MATCH (m:Memory {id: 'mem-readiness'}) RETURN m.title AS title"
+                    .to_string(),
+                parameters: BTreeMap::new(),
+            }),
+            ..NowledgeMemReadinessOptions::default()
+        });
+
+        assert_eq!(readiness["bounded_read_evidence"]["present"], true);
+        assert_eq!(readiness["bounded_read_evidence"]["ready"], true);
+        assert_eq!(
+            readiness["bounded_read_evidence"]["mode"],
+            "shadow_read_only"
+        );
+        assert_eq!(readiness["bounded_read_evidence"]["execution_row_cap"], 513);
+        assert_eq!(
+            readiness["background_maintenance"]["total_candidates"]
+                .as_u64()
+                .unwrap_or_default(),
+            readiness["background_maintenance"]["ranked"]
+                .as_array()
+                .unwrap()
+                .len() as u64
+        );
     }
 
     #[test]
