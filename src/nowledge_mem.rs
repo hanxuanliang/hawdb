@@ -11,7 +11,9 @@ use crate::{
     SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
 };
 use crate::{
-    nowledge_inventory::background_maintenance_summary_to_json,
+    nowledge_inventory::{
+        background_maintenance_evidence_health, background_maintenance_summary_to_json,
+    },
     store::{RecoveryMode, StorageRecoveryReport},
 };
 use std::collections::BTreeMap;
@@ -862,9 +864,19 @@ impl NowledgeMemEmbeddedStore {
         let blocker_codes = library_readiness_blocker_codes(
             &bounded_read_evidence,
             &storage_recovery,
+            &background_maintenance,
             &search_projection_evidence,
             &search_projection_shadow_evidence,
         );
+        let readiness_by_area = library_readiness_by_area_json(
+            &bounded_read_evidence,
+            &storage_recovery,
+            &background_maintenance,
+            &search_projection_evidence,
+            &search_projection_shadow_evidence,
+        );
+        let ready_area_count = readiness_area_count(&readiness_by_area, true);
+        let blocked_area_count = readiness_area_count(&readiness_by_area, false);
         let ready = blocker_codes.is_empty();
 
         serde_json::json!({
@@ -873,6 +885,9 @@ impl NowledgeMemEmbeddedStore {
             "ready": ready,
             "mode": self.graph.mode().as_str(),
             "blocker_codes": blocker_codes,
+            "readiness_by_area": readiness_by_area,
+            "ready_area_count": ready_area_count,
+            "blocked_area_count": blocked_area_count,
             "graph": {
                 "open": true,
                 "mode": self.graph.mode().as_str(),
@@ -1136,6 +1151,7 @@ fn missing_primary_search_projection_probe_json() -> serde_json::Value {
 fn library_readiness_blocker_codes(
     bounded_read_evidence: &serde_json::Value,
     storage_recovery: &serde_json::Value,
+    background_maintenance: &serde_json::Value,
     search_projection_evidence: &serde_json::Value,
     search_projection_shadow_evidence: &serde_json::Value,
 ) -> Vec<&'static str> {
@@ -1154,6 +1170,9 @@ fn library_readiness_blocker_codes(
     {
         blockers.push("storage_recovery_not_ready");
     }
+    if !library_background_maintenance_ready(background_maintenance) {
+        blockers.push("background_maintenance_not_ready");
+    }
     if search_projection_evidence
         .get("ready")
         .and_then(serde_json::Value::as_bool)
@@ -1169,6 +1188,98 @@ fn library_readiness_blocker_codes(
         blockers.push("search_projection_shadow_evidence_not_ready");
     }
     blockers
+}
+
+fn library_readiness_by_area_json(
+    bounded_read_evidence: &serde_json::Value,
+    storage_recovery: &serde_json::Value,
+    background_maintenance: &serde_json::Value,
+    search_projection_evidence: &serde_json::Value,
+    search_projection_shadow_evidence: &serde_json::Value,
+) -> serde_json::Value {
+    serde_json::json!({
+        "graph": {
+            "ready": true,
+            "blocker_codes": [],
+        },
+        "query": readiness_area_json(
+            bounded_read_evidence,
+            "bounded_read_evidence_not_ready"
+        ),
+        "storage": readiness_area_json(
+            storage_recovery,
+            "storage_recovery_not_ready"
+        ),
+        "background": background_maintenance_readiness_area_json(background_maintenance),
+        "search_projection": readiness_area_json(
+            search_projection_evidence,
+            "search_projection_evidence_not_ready"
+        ),
+        "search_projection_shadow": readiness_area_json(
+            search_projection_shadow_evidence,
+            "search_projection_shadow_evidence_not_ready"
+        ),
+    })
+}
+
+fn readiness_area_json(
+    evidence: &serde_json::Value,
+    fallback_blocker_code: &'static str,
+) -> serde_json::Value {
+    let ready = evidence.get("ready").and_then(serde_json::Value::as_bool) == Some(true);
+    serde_json::json!({
+        "ready": ready,
+        "blocker_codes": readiness_blocker_codes(evidence, fallback_blocker_code, ready),
+    })
+}
+
+fn background_maintenance_readiness_area_json(
+    background_maintenance: &serde_json::Value,
+) -> serde_json::Value {
+    let health = background_maintenance_evidence_health(Some(background_maintenance), true);
+    serde_json::json!({
+        "ready": health.ready,
+        "blocker_codes": health.blocker_codes,
+    })
+}
+
+fn library_background_maintenance_ready(background_maintenance: &serde_json::Value) -> bool {
+    background_maintenance_evidence_health(Some(background_maintenance), true).ready
+}
+
+fn readiness_blocker_codes(
+    evidence: &serde_json::Value,
+    fallback_blocker_code: &'static str,
+    ready: bool,
+) -> Vec<String> {
+    if ready {
+        return Vec::new();
+    }
+    let codes = evidence
+        .get("blocker_codes")
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if codes.is_empty() {
+        vec![fallback_blocker_code.to_string()]
+    } else {
+        codes
+    }
+}
+
+fn readiness_area_count(readiness_by_area: &serde_json::Value, ready: bool) -> usize {
+    readiness_by_area
+        .as_object()
+        .into_iter()
+        .flat_map(serde_json::Map::values)
+        .filter(|area| area.get("ready").and_then(serde_json::Value::as_bool) == Some(ready))
+        .count()
 }
 
 fn nowledge_mem_retrieval_report(
@@ -1821,6 +1932,28 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "bounded_read_evidence_not_ready"));
+        assert_eq!(readiness["readiness_by_area"]["graph"]["ready"], true);
+        assert_eq!(readiness["readiness_by_area"]["query"]["ready"], false);
+        assert_eq!(
+            readiness["readiness_by_area"]["query"]["blocker_codes"],
+            serde_json::json!(["bounded_read_probe_missing"])
+        );
+        assert_eq!(readiness["readiness_by_area"]["storage"]["ready"], false);
+        assert_eq!(readiness["readiness_by_area"]["background"]["ready"], false);
+        assert_eq!(
+            readiness["readiness_by_area"]["background"]["blocker_codes"],
+            serde_json::json!(["no_candidates", "no_ranked_work"])
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_projection"]["ready"],
+            false
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["search_projection_shadow"]["ready"],
+            false
+        );
+        assert_eq!(readiness["ready_area_count"], 1);
+        assert_eq!(readiness["blocked_area_count"], 5);
         assert!(!readiness.to_string().contains("redacted"));
     }
 
@@ -1858,6 +1991,12 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len() as u64
+        );
+        assert_eq!(readiness["readiness_by_area"]["query"]["ready"], true);
+        assert_eq!(readiness["readiness_by_area"]["background"]["ready"], true);
+        assert_eq!(
+            readiness["readiness_by_area"]["background"]["blocker_codes"],
+            serde_json::json!([])
         );
     }
 
