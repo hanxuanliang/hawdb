@@ -1,4 +1,4 @@
-use skein::{Result, SkeinError};
+use skein::{Result, SkeinError, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -6,7 +6,7 @@ const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
-    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --library-readiness-json <path>"
+    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
         .to_string()
 }
 
@@ -26,6 +26,7 @@ struct IntegrationBundleInputs {
     replacement_summary: Option<serde_json::Value>,
     bounded_read_evidence: Option<serde_json::Value>,
     graph_route_readiness: Option<serde_json::Value>,
+    search_candidate_shadow_evidence: Option<serde_json::Value>,
     library_readiness: Option<serde_json::Value>,
 }
 
@@ -77,6 +78,9 @@ pub fn run_nowledge_mem_integration_bundle(
             "--graph-route-readiness-json" => {
                 inputs.graph_route_readiness = Some(read_json_arg(&mut args)?);
             }
+            "--search-candidate-shadow-evidence-json" => {
+                inputs.search_candidate_shadow_evidence = Some(read_json_arg(&mut args)?);
+            }
             "--library-readiness-json" => {
                 inputs.library_readiness = Some(read_json_arg(&mut args)?);
             }
@@ -113,9 +117,15 @@ fn nowledge_mem_integration_bundle_json(
         require_json(inputs.bounded_read_evidence, "--bounded-read-evidence-json")?;
     let graph_route_readiness =
         require_json(inputs.graph_route_readiness, "--graph-route-readiness-json")?;
+    let search_candidate_shadow_evidence = require_json(
+        inputs.search_candidate_shadow_evidence,
+        "--search-candidate-shadow-evidence-json",
+    )?;
     let library_readiness = require_json(inputs.library_readiness, "--library-readiness-json")?;
     let bounded_alignment =
         bounded_read_alignment_json(&bounded_read_evidence, &replacement_summary);
+    let graph_route_alignment =
+        graph_route_alignment_json(&graph_route_readiness, &replacement_summary);
 
     Ok(serde_json::json!({
         "protocol": NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL,
@@ -150,8 +160,129 @@ fn nowledge_mem_integration_bundle_json(
         "bounded_read_evidence": bounded_read_evidence,
         "replacement_summary_bounded_read_alignment": bounded_alignment,
         "graph_route_readiness": graph_route_readiness,
+        "replacement_summary_graph_route_alignment": graph_route_alignment,
+        "search_candidate_shadow_evidence": search_candidate_shadow_evidence,
         "library_readiness": library_readiness,
     }))
+}
+
+fn graph_route_alignment_json(
+    graph_route_readiness: &serde_json::Value,
+    replacement_summary: &serde_json::Value,
+) -> serde_json::Value {
+    let summary = replacement_summary
+        .get("bounded_read_evidence")
+        .unwrap_or(&serde_json::Value::Null);
+    let evidence_present = !graph_route_readiness.is_null();
+    let summary_present = !summary.is_null();
+    let evidence_route_primary_ready =
+        bool_path(graph_route_readiness, &["route_primary_ready"]) == Some(true);
+    let summary_route_primary_ready = bool_path(summary, &["route_primary_ready"]) == Some(true);
+    let evidence_primary_ready_routes = graph_route_primary_ready_routes(graph_route_readiness);
+    let summary_primary_ready_routes = string_set_path(summary, &["primary_ready_routes"]);
+    let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .map(|route| (*route).to_string())
+        .collect::<BTreeSet<_>>();
+    let route_primary_ready_matches = evidence_route_primary_ready == summary_route_primary_ready;
+    let primary_ready_routes_match = evidence_primary_ready_routes == summary_primary_ready_routes;
+    let evidence_required_routes_covered = required_routes
+        .iter()
+        .all(|route| evidence_primary_ready_routes.contains(route));
+    let summary_required_routes_covered = required_routes
+        .iter()
+        .all(|route| summary_primary_ready_routes.contains(route));
+    let alignment = GraphRouteAlignment {
+        evidence_present,
+        summary_present,
+        evidence_route_primary_ready,
+        summary_route_primary_ready,
+        route_primary_ready_matches,
+        primary_ready_routes_match,
+        evidence_required_routes_covered,
+        summary_required_routes_covered,
+    };
+
+    serde_json::json!({
+        "ready": alignment.ready(),
+        "evidence_present": evidence_present,
+        "summary_present": summary_present,
+        "evidence_route_primary_ready": evidence_route_primary_ready,
+        "summary_route_primary_ready": summary_route_primary_ready,
+        "route_primary_ready_matches": route_primary_ready_matches,
+        "primary_ready_routes_match": primary_ready_routes_match,
+        "evidence_required_routes_covered": evidence_required_routes_covered,
+        "summary_required_routes_covered": summary_required_routes_covered,
+        "evidence_primary_ready_routes": evidence_primary_ready_routes,
+        "summary_primary_ready_routes": summary_primary_ready_routes,
+        "blocker_codes": alignment.blocker_codes()
+    })
+}
+
+fn graph_route_primary_ready_routes(value: &serde_json::Value) -> BTreeSet<String> {
+    value
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|route| bool_path(route, &["primary_ready"]) == Some(true))
+        .filter_map(|route| str_path(route, &["route"]))
+        .map(str::to_string)
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GraphRouteAlignment {
+    evidence_present: bool,
+    summary_present: bool,
+    evidence_route_primary_ready: bool,
+    summary_route_primary_ready: bool,
+    route_primary_ready_matches: bool,
+    primary_ready_routes_match: bool,
+    evidence_required_routes_covered: bool,
+    summary_required_routes_covered: bool,
+}
+
+impl GraphRouteAlignment {
+    fn ready(&self) -> bool {
+        self.evidence_present
+            && self.summary_present
+            && self.evidence_route_primary_ready
+            && self.summary_route_primary_ready
+            && self.route_primary_ready_matches
+            && self.primary_ready_routes_match
+            && self.evidence_required_routes_covered
+            && self.summary_required_routes_covered
+    }
+
+    fn blocker_codes(&self) -> Vec<&'static str> {
+        let mut blockers = Vec::new();
+        if !self.evidence_present {
+            blockers.push("graph_route_readiness_missing");
+        }
+        if !self.summary_present {
+            blockers.push("replacement_summary_bounded_read_evidence_missing");
+        }
+        if !self.evidence_route_primary_ready {
+            blockers.push("graph_route_readiness_not_primary_ready");
+        }
+        if !self.summary_route_primary_ready {
+            blockers.push("replacement_summary_route_primary_not_ready");
+        }
+        if !self.route_primary_ready_matches {
+            blockers.push("graph_route_primary_ready_mismatch");
+        }
+        if !self.primary_ready_routes_match {
+            blockers.push("graph_route_primary_ready_routes_mismatch");
+        }
+        if !self.evidence_required_routes_covered {
+            blockers.push("graph_route_readiness_required_routes_missing");
+        }
+        if !self.summary_required_routes_covered {
+            blockers.push("replacement_summary_primary_ready_routes_missing");
+        }
+        blockers
+    }
 }
 
 fn bounded_read_alignment_json(
@@ -453,6 +584,7 @@ mod tests {
             replacement_summary: Some(ready_replacement_summary()),
             bounded_read_evidence: Some(ready_bounded_read_evidence()),
             graph_route_readiness: Some(ready_graph_route_readiness()),
+            search_candidate_shadow_evidence: Some(ready_search_candidate_shadow_evidence()),
             library_readiness: Some(ready_library_readiness()),
         }
     }
@@ -535,6 +667,8 @@ mod tests {
             "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
             "present": true,
             "ready": true,
+            "route_primary_ready": true,
+            "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "mode": "shadow_read_only",
             "max_rows": 512,
             "execution_row_cap": 513,
@@ -561,7 +695,28 @@ mod tests {
             "route_query_runtime_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
-            "routes": []
+            "routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+                .iter()
+                .map(|route| {
+                    serde_json::json!({
+                        "route": route,
+                        "primary_ready": true,
+                        "query_runtime_ready": true,
+                        "blocker_codes": []
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+    }
+
+    fn ready_search_candidate_shadow_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-search-candidate-shadow-evidence",
+            "route": "/search-index/skein-shadow/candidate-evidence",
+            "engine": "skein-shadow",
+            "ready": true,
+            "candidate_primary_engine": "skein",
+            "blocker_codes": []
         })
     }
 

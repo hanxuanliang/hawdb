@@ -11,6 +11,8 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
+const SKEIN_NOWLEDGE_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-candidate-shadow-evidence";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
@@ -349,6 +351,27 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                         "blocker_codes",
                     ][..],
                 ],
+            ),
+        ),
+        check(
+            "search_candidate_primary_evidence",
+            [
+                str_path(bundle, &["search_candidate_shadow_evidence", "protocol"])
+                    == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL),
+                bool_path(bundle, &["search_candidate_shadow_evidence", "ready"]) == Some(true),
+                str_path(
+                    bundle,
+                    &["search_candidate_shadow_evidence", "candidate_primary_engine"],
+                ) == Some("skein"),
+            ],
+            [
+                "search_candidate_shadow_evidence.protocol",
+                "search_candidate_shadow_evidence.ready",
+                "search_candidate_shadow_evidence.candidate_primary_engine",
+            ],
+            blocker_codes(
+                bundle,
+                &[&["search_candidate_shadow_evidence", "blocker_codes"][..]],
             ),
         ),
         check(
@@ -1071,6 +1094,18 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if !search_candidate_primary_evidence_ready(bundle) {
+        actions.push(next_action(
+            "enable_skein_search_candidate_primary_reads",
+            "LanceDB replacement must prove memory-hybrid candidate reads are served by Skein before Mem cutover",
+            [
+                "search_candidate_shadow_evidence.protocol",
+                "search_candidate_shadow_evidence.ready",
+                "search_candidate_shadow_evidence.candidate_primary_engine",
+                "search_candidate_shadow_evidence.blocker_codes",
+            ],
+        ));
+    }
     if !replacement_summary_bounded_read_ready(bundle) {
         actions.push(next_action(
             "attach_bounded_read_profile",
@@ -1303,6 +1338,19 @@ fn replacement_summary_search_projection_ready(bundle: &serde_json::Value) -> bo
     ]
     .iter()
     .all(|path| bool_path(bundle, path) == Some(true))
+}
+
+fn search_candidate_primary_evidence_ready(bundle: &serde_json::Value) -> bool {
+    str_path(bundle, &["search_candidate_shadow_evidence", "protocol"])
+        == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
+        && bool_path(bundle, &["search_candidate_shadow_evidence", "ready"]) == Some(true)
+        && str_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "candidate_primary_engine",
+            ],
+        ) == Some("skein")
 }
 
 fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
@@ -1851,6 +1899,67 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_search_projection_replacement_evidence"));
+    }
+
+    #[test]
+    fn requires_skein_search_candidate_primary_engine() {
+        let mut bundle = ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["candidate_primary_engine"] =
+            serde_json::json!("lancedb");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_candidate_primary_evidence"])
+        );
+        let candidate_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_candidate_primary_evidence")
+            .unwrap();
+        assert_eq!(
+            candidate_check["failed_evidence_fields"],
+            serde_json::json!(["search_candidate_shadow_evidence.candidate_primary_engine"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "enable_skein_search_candidate_primary_reads"));
+    }
+
+    #[test]
+    fn requires_search_candidate_shadow_evidence_presence() {
+        let mut bundle = ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("search_candidate_shadow_evidence");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_candidate_primary_evidence"])
+        );
+        let candidate_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_candidate_primary_evidence")
+            .unwrap();
+        assert_eq!(
+            candidate_check["failed_evidence_fields"],
+            serde_json::json!([
+                "search_candidate_shadow_evidence.protocol",
+                "search_candidate_shadow_evidence.ready",
+                "search_candidate_shadow_evidence.candidate_primary_engine"
+            ])
+        );
     }
 
     #[test]
@@ -2847,6 +2956,14 @@ mod tests {
                     "blocker_codes": []
                 }
             ]
+        });
+        bundle["search_candidate_shadow_evidence"] = serde_json::json!({
+            "protocol": "skein-nowledge-search-candidate-shadow-evidence",
+            "route": "/search-index/skein-shadow/candidate-evidence",
+            "engine": "skein-shadow",
+            "ready": true,
+            "candidate_primary_engine": "skein",
+            "blocker_codes": []
         });
         bundle["library_readiness"] = ready_library_readiness();
         bundle
