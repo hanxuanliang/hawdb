@@ -25,6 +25,8 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--library-readiness-graph <path>] \
   [--library-readiness-search-projection <path>] \
   [--require-integration-readiness] \
+  [--graph-route-query-json <path>] \
+  [--graph-route-database <path>] \
   [--graph-route-evidence-json <path>] \
   [--graph-route-readiness-json <path>] \
   [--integration-submodule-path <path>] \
@@ -61,6 +63,8 @@ library_readiness_json=
 library_readiness_graph=
 library_readiness_search_projection=
 require_integration_readiness=false
+graph_route_query_json=
+graph_route_database=
 graph_route_evidence_json=
 graph_route_readiness_json=
 integration_submodule_path=
@@ -143,6 +147,14 @@ while (($# > 0)); do
       require_integration_readiness=true
       shift
       ;;
+    --graph-route-query-json)
+      graph_route_query_json="${2:-}"
+      shift 2
+      ;;
+    --graph-route-database)
+      graph_route_database="${2:-}"
+      shift 2
+      ;;
     --graph-route-readiness-json)
       graph_route_readiness_json="${2:-}"
       shift 2
@@ -223,6 +235,7 @@ for evidence_path in \
   "$bounded_read_evidence_json" \
   "$bounded_read_report_json" \
   "$library_readiness_json" \
+  "$graph_route_query_json" \
   "$graph_route_evidence_json" \
   "$graph_route_readiness_json"; do
   if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
@@ -261,9 +274,19 @@ if [[ -n "$library_readiness_search_projection" && ! -e "$library_readiness_sear
   exit 2
 fi
 
+if [[ -n "$graph_route_database" && ! -e "$graph_route_database" ]]; then
+  echo "--graph-route-database does not exist: $graph_route_database" >&2
+  exit 2
+fi
+
+if [[ -n "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
+  echo "--graph-route-evidence-json cannot be combined with --graph-route-query-json" >&2
+  exit 2
+fi
+
 if [[ "$require_integration_readiness" == true ]]; then
-  if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" ]]; then
-    echo "--require-integration-readiness requires --graph-route-readiness-json or --graph-route-evidence-json" >&2
+  if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" && -z "$graph_route_query_json" ]]; then
+    echo "--require-integration-readiness requires --graph-route-readiness-json, --graph-route-evidence-json, or --graph-route-query-json" >&2
     exit 2
   fi
   if [[ -z "$integration_submodule_path" ]]; then
@@ -463,6 +486,14 @@ else
     "${library_readiness_args[@]}" \
     "${library_readiness_graph:-$skein_preflight_db}" \
     > "$preflight_root/library-readiness.json"
+fi
+
+if [[ -z "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
+  run_skein nowledge-graph-route-evidence \
+    "${graph_route_database:-$skein_preflight_db}" \
+    "$graph_route_query_json" \
+    > "$preflight_root/graph-route-evidence.json"
+  graph_route_evidence_json="$preflight_root/graph-route-evidence.json"
 fi
 
 if [[ -z "$graph_route_readiness_json" && -n "$graph_route_evidence_json" ]]; then
