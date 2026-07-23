@@ -5487,13 +5487,15 @@ pub struct ExplainOutput {
 }
 
 pub(crate) struct QueryExecutionTrace {
+    pub(crate) statement: cypher::Statement,
     pub(crate) optimizer_trace: Option<OptimizerTrace>,
     pub(crate) plan_cache_lookup: Option<PlanCacheLookup>,
 }
 
 impl QueryExecutionTrace {
-    fn uncached() -> Self {
+    fn uncached(statement: cypher::Statement) -> Self {
         Self {
+            statement,
             optimizer_trace: None,
             plan_cache_lookup: None,
         }
@@ -5740,12 +5742,13 @@ impl Database {
         let started = std::time::Instant::now();
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
+        let statement_kind_name = statement_kind(body);
         if let cypher::Statement::SetSystemVariable(set) = body {
             reject_system_variable_parameters(parameters)?;
             return self
                 .system_variables
                 .apply_set_system_variable(set)
-                .map(|output| (output, QueryExecutionTrace::uncached()));
+                .map(|output| (output, QueryExecutionTrace::uncached(statement.clone())));
         }
         if matches!(body, cypher::Statement::Checkpoint) {
             if !parameters.is_empty() {
@@ -5756,7 +5759,7 @@ impl Database {
             self.checkpoint()?;
             return Ok((
                 QueryOutput { rows: Vec::new() },
-                QueryExecutionTrace::uncached(),
+                QueryExecutionTrace::uncached(statement),
             ));
         }
         let query_result = (|| {
@@ -5779,6 +5782,7 @@ impl Database {
             Ok((
                 QueryOutput { rows },
                 QueryExecutionTrace {
+                    statement,
                     optimizer_trace: capture_trace.then_some(optimized.trace),
                     plan_cache_lookup: Some(optimized.plan_cache_lookup),
                 },
@@ -5791,7 +5795,7 @@ impl Database {
         self.record_statement_execution(
             "cypher",
             cypher_text,
-            statement_kind(body),
+            statement_kind_name,
             started,
             statement_result,
         );

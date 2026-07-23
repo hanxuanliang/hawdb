@@ -341,6 +341,10 @@ pub struct NowledgeMemQueryReport {
     pub physical_plan_captured: bool,
     pub plan_cache_lookup: Option<String>,
     pub plan_cache_bypass_reason: Option<String>,
+    pub plan_cache_cacheable: bool,
+    pub plan_cache_hit: bool,
+    pub plan_cache_miss: bool,
+    pub plan_cache_bypassed: bool,
     pub physical_operator_counts: BTreeMap<String, usize>,
     pub optimizer_decision_count: usize,
 }
@@ -360,6 +364,18 @@ impl NowledgeMemQueryReport {
             "physical_plan_captured": self.physical_plan_captured,
             "plan_cache_lookup": self.plan_cache_lookup,
             "plan_cache_bypass_reason": self.plan_cache_bypass_reason,
+            "plan_cache_cacheable": self.plan_cache_cacheable,
+            "plan_cache_hit": self.plan_cache_hit,
+            "plan_cache_miss": self.plan_cache_miss,
+            "plan_cache_bypassed": self.plan_cache_bypassed,
+            "plan_cache": {
+                "lookup": self.plan_cache_lookup,
+                "bypass_reason": self.plan_cache_bypass_reason,
+                "cacheable": self.plan_cache_cacheable,
+                "hit": self.plan_cache_hit,
+                "miss": self.plan_cache_miss,
+                "bypassed": self.plan_cache_bypassed,
+            },
             "physical_operator_counts": self.physical_operator_counts,
             "optimizer_decision_count": self.optimizer_decision_count,
         })
@@ -544,12 +560,12 @@ impl NowledgeMemGraph {
         let elapsed_micros = started.elapsed().as_micros();
         let report = nowledge_mem_query_report(
             self.mode,
-            cypher,
+            &execution_trace.statement,
             execution_trace.optimizer_trace.as_ref(),
             execution_trace.plan_cache_lookup,
             options,
             elapsed_micros,
-        )?;
+        );
         Ok(NowledgeMemQueryOutput { output, report })
     }
 
@@ -1019,19 +1035,19 @@ fn require_search_projection_mut(
 
 fn nowledge_mem_query_report(
     mode: NowledgeMemGraphMode,
-    cypher_text: &str,
+    statement: &cypher::Statement,
     trace: Option<&crate::optimizer::OptimizerTrace>,
     plan_cache_lookup: Option<PlanCacheLookup>,
     options: NowledgeMemQueryReportOptions,
     elapsed_micros: u128,
-) -> Result<NowledgeMemQueryReport> {
-    let statement = cypher::parse(cypher_text)?;
-    let statement_kind = crate::api::statement_kind(nowledge_statement_body(&statement));
-    let decision = nowledge_mem_query_execution_path(&statement);
+) -> NowledgeMemQueryReport {
+    let statement_kind = crate::api::statement_kind(nowledge_statement_body(statement));
+    let decision = nowledge_mem_query_execution_path(statement);
     let slow_log_candidate = options
         .slow_log_threshold_micros
         .is_some_and(|threshold| elapsed_micros >= threshold);
-    Ok(NowledgeMemQueryReport {
+    let plan_cache = NowledgeMemPlanCacheReport::from_lookup(plan_cache_lookup);
+    NowledgeMemQueryReport {
         protocol: NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL.to_string(),
         mode,
         statement_kind: statement_kind.to_string(),
@@ -1045,17 +1061,60 @@ fn nowledge_mem_query_report(
         plan_cache_bypass_reason: plan_cache_lookup
             .and_then(|lookup| lookup.bypass_reason())
             .map(|reason| reason.as_str().to_string()),
+        plan_cache_cacheable: plan_cache.cacheable,
+        plan_cache_hit: plan_cache.hit,
+        plan_cache_miss: plan_cache.miss,
+        plan_cache_bypassed: plan_cache.bypassed,
         physical_operator_counts: trace
             .map(|trace| trace.selected_plan_operator_counts.clone())
             .unwrap_or_default(),
         optimizer_decision_count: trace.map(|trace| trace.decisions.len()).unwrap_or_default(),
-    })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct NowledgeMemQueryPathDecision {
     execution_path: NowledgeMemQueryExecutionPath,
     fast_path_reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NowledgeMemPlanCacheReport {
+    cacheable: bool,
+    hit: bool,
+    miss: bool,
+    bypassed: bool,
+}
+
+impl NowledgeMemPlanCacheReport {
+    fn from_lookup(lookup: Option<PlanCacheLookup>) -> Self {
+        match lookup {
+            Some(PlanCacheLookup::Hit) => Self {
+                cacheable: true,
+                hit: true,
+                miss: false,
+                bypassed: false,
+            },
+            Some(PlanCacheLookup::Miss) => Self {
+                cacheable: true,
+                hit: false,
+                miss: true,
+                bypassed: false,
+            },
+            Some(PlanCacheLookup::Bypass(_)) => Self {
+                cacheable: false,
+                hit: false,
+                miss: false,
+                bypassed: true,
+            },
+            None => Self {
+                cacheable: false,
+                hit: false,
+                miss: false,
+                bypassed: false,
+            },
+        }
+    }
 }
 
 fn nowledge_mem_query_execution_path(
@@ -1674,6 +1733,7 @@ mod tests {
         assert_eq!(query.report.json()["statement_kind"], "match_return");
         assert_eq!(query.report.json()["fast_path_selected"], true);
         assert_eq!(query.report.json()["physical_plan_captured"], false);
+        assert_eq!(query.report.json()["plan_cache"]["cacheable"], true);
     }
 
     #[test]
@@ -1701,8 +1761,15 @@ mod tests {
         assert_eq!(query.report.optimizer_decision_count, 0);
         assert!(!query.report.physical_plan_captured);
         assert!(query.report.physical_operator_counts.is_empty());
+        assert!(query.report.plan_cache_cacheable);
+        assert!(query.report.plan_cache_miss);
+        assert!(!query.report.plan_cache_hit);
+        assert!(!query.report.plan_cache_bypassed);
         assert_eq!(query.report.json()["execution_path"], "optimized_path");
         assert_eq!(query.report.json()["fast_path_selected"], false);
+        assert_eq!(query.report.json()["plan_cache"]["lookup"], "miss");
+        assert_eq!(query.report.json()["plan_cache"]["cacheable"], true);
+        assert_eq!(query.report.json()["plan_cache"]["miss"], true);
     }
 
     #[test]
@@ -1778,9 +1845,40 @@ mod tests {
         assert!(query.report.physical_plan_captured);
         assert_eq!(query.report.plan_cache_lookup.as_deref(), Some("miss"));
         assert_eq!(query.report.plan_cache_bypass_reason, None);
+        assert!(query.report.plan_cache_cacheable);
+        assert!(query.report.plan_cache_miss);
+        assert!(!query.report.plan_cache_bypassed);
         assert_eq!(after.entries, before.entries + 1);
         assert_eq!(after.misses, before.misses + 1);
         assert_eq!(after.hits, before.hits);
+    }
+
+    #[test]
+    fn graph_query_with_report_keeps_system_statement_out_of_plan_cache() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+
+        let query = graph
+            .query_with_report("SET system.work_priority = 'background'")
+            .unwrap();
+
+        assert_eq!(query.output.rows.len(), 1);
+        assert_eq!(query.report.statement_kind, "set_system_variable");
+        assert_eq!(
+            query.report.execution_path,
+            NowledgeMemQueryExecutionPath::OptimizedPath
+        );
+        assert_eq!(query.report.plan_cache_lookup, None);
+        assert_eq!(query.report.plan_cache_bypass_reason, None);
+        assert!(!query.report.plan_cache_cacheable);
+        assert!(!query.report.plan_cache_hit);
+        assert!(!query.report.plan_cache_miss);
+        assert!(!query.report.plan_cache_bypassed);
+        assert_eq!(
+            query.report.json()["plan_cache"]["lookup"],
+            serde_json::Value::Null
+        );
+        assert_eq!(query.report.json()["plan_cache"]["cacheable"], false);
     }
 
     #[test]
