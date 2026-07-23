@@ -7284,7 +7284,7 @@ impl Database {
         &self,
         request: &KnowledgeSourceRequest,
     ) -> Result<KnowledgeSourceOutput> {
-        knowledge_source_for(&self.catalog, &self.store, request)
+        knowledge_source_via_query_runtime(self, request)
     }
 
     pub fn knowledge_source_ids(
@@ -7309,10 +7309,12 @@ impl Database {
     }
 
     pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
-        KnowledgeSourceCountOutput {
-            graph_commit_epoch: self.store.commit_epoch(),
-            count: count_nodes_with_label(&self.catalog, &self.store, "Source"),
-        }
+        knowledge_source_count_via_query_runtime(self).unwrap_or_else(|| {
+            KnowledgeSourceCountOutput {
+                graph_commit_epoch: self.store.commit_epoch(),
+                count: count_nodes_with_label(&self.catalog, &self.store, "Source"),
+            }
+        })
     }
 
     pub fn knowledge_source_sourced_memory_count(
@@ -15798,9 +15800,8 @@ fn validate_knowledge_source_label_delete(delete: &KnowledgeSourceLabelDelete) -
     Ok(())
 }
 
-fn knowledge_source_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_source_via_query_runtime(
+    db: &Database,
     request: &KnowledgeSourceRequest,
 ) -> Result<KnowledgeSourceOutput> {
     if request.source_id.is_empty() {
@@ -15808,12 +15809,79 @@ fn knowledge_source_for(
             "knowledge source read requires a non-empty source id".to_string(),
         ));
     }
-    let row = seed_node_by_label_and_external_id(catalog, store, "Source", &request.source_id)
-        .map(|node| knowledge_source_row(catalog, store, node));
+    let mut parameters = BTreeMap::new();
+    parameters.insert(
+        "source_id".to_string(),
+        Value::String(request.source_id.clone()),
+    );
+    let detail = db.query_read_only_with_params_bounded(
+        "MATCH (s:Source {id: $source_id}) \
+         RETURN id(s) AS node_id, s.id AS source_id, s.original_name AS original_name, \
+         s.title AS title, s.source_type AS source_type, s.lifecycle_state AS lifecycle_state, \
+         s.space_id AS space_id, s.parsed_path AS parsed_path, s.file_path AS file_path, \
+         s.mime_type AS mime_type, s.memory_count AS memory_count, s.chunk_count AS chunk_count, \
+         s.size_bytes AS size_bytes, s.created_at AS created_at, s.updated_at AS updated_at \
+         LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let Some(detail_row) = detail.rows.first() else {
+        return Ok(KnowledgeSourceOutput {
+            graph_commit_epoch: db.store.commit_epoch(),
+            found: false,
+            row: None,
+        });
+    };
+    let count = db.query_read_only_with_params_bounded(
+        "MATCH (:Memory)-[r:SOURCED_FROM]->(:Source {id: $source_id}) \
+         RETURN count(r) AS sourced_memory_count",
+        &parameters,
+        Some(1),
+    )?;
+    let sourced_memory_count = count
+        .rows
+        .first()
+        .and_then(|row| row.get("sourced_memory_count"))
+        .and_then(value_to_non_negative_usize)
+        .unwrap_or(0);
+    let row = knowledge_source_row_from_query(detail_row, sourced_memory_count)?;
     Ok(KnowledgeSourceOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        found: row.is_some(),
-        row,
+        graph_commit_epoch: db.store.commit_epoch(),
+        found: true,
+        row: Some(row),
+    })
+}
+
+fn knowledge_source_row_from_query(
+    row: &Row,
+    sourced_memory_count: usize,
+) -> Result<KnowledgeSourceRow> {
+    let node_id = row
+        .get("node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution("knowledge source row is missing node_id".to_string())
+        })?;
+    let normalized_space_id = optional_string_cell(row, "space_id")
+        .filter(|space_id| !space_id.is_empty())
+        .unwrap_or_else(|| "default".to_string());
+    Ok(KnowledgeSourceRow {
+        source_id: optional_string_cell(row, "source_id"),
+        node_id,
+        original_name: optional_string_cell(row, "original_name"),
+        title: optional_string_cell(row, "title"),
+        source_type: optional_string_cell(row, "source_type"),
+        lifecycle_state: optional_string_cell(row, "lifecycle_state"),
+        normalized_space_id,
+        parsed_path: optional_string_cell(row, "parsed_path"),
+        file_path: optional_string_cell(row, "file_path"),
+        mime_type: optional_string_cell(row, "mime_type"),
+        memory_count: optional_i64_cell(row, "memory_count"),
+        chunk_count: optional_i64_cell(row, "chunk_count"),
+        size_bytes: optional_i64_cell(row, "size_bytes"),
+        created_at: optional_value_cell(row, "created_at"),
+        updated_at: optional_value_cell(row, "updated_at"),
+        sourced_memory_count,
     })
 }
 
@@ -15861,6 +15929,25 @@ fn knowledge_source_ids_via_query_runtime(
         source_ids,
         matched_count,
         returned_count,
+    })
+}
+
+fn knowledge_source_count_via_query_runtime(db: &Database) -> Option<KnowledgeSourceCountOutput> {
+    let output = db
+        .query_read_only_with_params_bounded(
+            "MATCH (s:Source) RETURN count(s) AS count",
+            &BTreeMap::new(),
+            Some(1),
+        )
+        .ok()?;
+    let count = output
+        .rows
+        .first()
+        .and_then(|row| row.get("count"))
+        .and_then(value_to_non_negative_usize)?;
+    Some(KnowledgeSourceCountOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        count,
     })
 }
 
@@ -15923,6 +16010,33 @@ fn value_to_non_negative_usize(value: &Value) -> Option<usize> {
         Value::Int(value) if *value >= 0 => usize::try_from(*value).ok(),
         _ => None,
     }
+}
+
+fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
+    match value {
+        Value::Int(value) if *value >= 0 => u64::try_from(*value).ok(),
+        _ => None,
+    }
+}
+
+fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
+    row.get(column)
+        .filter(|value| !matches!(value, Value::Null))
+        .map(value_to_external_id)
+        .filter(|value| !value.is_empty())
+}
+
+fn optional_i64_cell(row: &Row, column: &str) -> Option<i64> {
+    match row.get(column) {
+        Some(Value::Int(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn optional_value_cell(row: &Row, column: &str) -> Option<Value> {
+    row.get(column)
+        .filter(|value| !matches!(value, Value::Null))
+        .cloned()
 }
 
 fn knowledge_sources_for(
@@ -16291,31 +16405,6 @@ fn compare_source_projected_ids(
     left.source_id
         .cmp(&right.source_id)
         .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn knowledge_source_row(
-    catalog: &Catalog,
-    store: &GraphStore,
-    node: &NodeRecord,
-) -> KnowledgeSourceRow {
-    KnowledgeSourceRow {
-        source_id: node_external_id(node),
-        node_id: node.id.0,
-        original_name: string_property(node, "original_name"),
-        title: string_property(node, "title"),
-        source_type: string_property(node, "source_type"),
-        lifecycle_state: string_property(node, "lifecycle_state"),
-        normalized_space_id: normalized_node_space_id(node),
-        parsed_path: string_property(node, "parsed_path"),
-        file_path: string_property(node, "file_path"),
-        mime_type: string_property(node, "mime_type"),
-        memory_count: integer_property(node, "memory_count"),
-        chunk_count: integer_property(node, "chunk_count"),
-        size_bytes: integer_property(node, "size_bytes"),
-        created_at: node.properties.get("created_at").cloned(),
-        updated_at: node.properties.get("updated_at").cloned(),
-        sourced_memory_count: source_sourced_memory_count(catalog, store, node.id),
-    }
 }
 
 fn knowledge_source_memories_for(
