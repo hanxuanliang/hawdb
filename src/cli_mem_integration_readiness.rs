@@ -499,6 +499,10 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL),
                 u64_path(bundle, &["graph_route_readiness", "route_count"])
                     .is_some_and(|value| value > 0),
+                u64_path(bundle, &["graph_route_readiness", "required_route_count"])
+                    == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
+                string_array_path(bundle, &["graph_route_readiness", "missing_required_routes"])
+                    .is_empty(),
                 bool_path(bundle, &["graph_route_readiness", "route_primary_ready"]) == Some(true),
                 graph_route_primary_ready_count_matches(bundle),
                 string_array_path(bundle, &["graph_route_readiness", "route_primary_blocker_codes"])
@@ -507,6 +511,8 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             [
                 "graph_route_readiness.protocol",
                 "graph_route_readiness.route_count",
+                "graph_route_readiness.required_route_count",
+                "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count",
                 "graph_route_readiness.route_primary_blocker_codes",
@@ -1021,6 +1027,8 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             [
                 "graph_route_readiness.protocol",
                 "graph_route_readiness.route_count",
+                "graph_route_readiness.required_route_count",
+                "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count",
                 "graph_route_readiness.route_primary_blocker_codes",
@@ -1316,6 +1324,13 @@ fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
         == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL)
         && u64_path(bundle, &["graph_route_readiness", "route_count"])
             .is_some_and(|value| value > 0)
+        && u64_path(bundle, &["graph_route_readiness", "required_route_count"])
+            == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && string_array_path(
+            bundle,
+            &["graph_route_readiness", "missing_required_routes"],
+        )
+        .is_empty()
         && bool_path(bundle, &["graph_route_readiness", "route_primary_ready"]) == Some(true)
         && graph_route_primary_ready_count_matches(bundle)
         && string_array_path(
@@ -2074,6 +2089,7 @@ mod tests {
             serde_json::json!([
                 "graph_route_readiness.protocol",
                 "graph_route_readiness.route_count",
+                "graph_route_readiness.required_route_count",
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count"
             ])
@@ -2573,6 +2589,8 @@ mod tests {
         bundle["graph_route_readiness"] = serde_json::json!({
             "protocol": "nmem-graph-route-readiness-v1",
             "route_count": 15,
+            "required_route_count": 15,
+            "missing_required_routes": [],
             "shadow_compare_route_count": 15,
             "primary_ready_route_count": 15,
             "route_primary_ready": true,

@@ -25,6 +25,7 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--library-readiness-graph <path>] \
   [--library-readiness-search-projection <path>] \
   [--require-integration-readiness] \
+  [--graph-route-evidence-json <path>] \
   [--graph-route-readiness-json <path>] \
   [--integration-submodule-path <path>] \
   [--integration-submodule-commit <commit>] \
@@ -60,6 +61,7 @@ library_readiness_json=
 library_readiness_graph=
 library_readiness_search_projection=
 require_integration_readiness=false
+graph_route_evidence_json=
 graph_route_readiness_json=
 integration_submodule_path=
 integration_submodule_commit=
@@ -145,6 +147,10 @@ while (($# > 0)); do
       graph_route_readiness_json="${2:-}"
       shift 2
       ;;
+    --graph-route-evidence-json)
+      graph_route_evidence_json="${2:-}"
+      shift 2
+      ;;
     --integration-submodule-path)
       integration_submodule_path="${2:-}"
       shift 2
@@ -217,6 +223,7 @@ for evidence_path in \
   "$bounded_read_evidence_json" \
   "$bounded_read_report_json" \
   "$library_readiness_json" \
+  "$graph_route_evidence_json" \
   "$graph_route_readiness_json"; do
   if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
     echo "evidence JSON does not exist or is not a file: $evidence_path" >&2
@@ -255,8 +262,8 @@ if [[ -n "$library_readiness_search_projection" && ! -e "$library_readiness_sear
 fi
 
 if [[ "$require_integration_readiness" == true ]]; then
-  if [[ -z "$graph_route_readiness_json" ]]; then
-    echo "--require-integration-readiness requires --graph-route-readiness-json" >&2
+  if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" ]]; then
+    echo "--require-integration-readiness requires --graph-route-readiness-json or --graph-route-evidence-json" >&2
     exit 2
   fi
   if [[ -z "$integration_submodule_path" ]]; then
@@ -456,6 +463,14 @@ else
     "${library_readiness_args[@]}" \
     "${library_readiness_graph:-$skein_preflight_db}" \
     > "$preflight_root/library-readiness.json"
+fi
+
+if [[ -z "$graph_route_readiness_json" && -n "$graph_route_evidence_json" ]]; then
+  run_skein nowledge-graph-route-readiness \
+    --require-ready \
+    "$graph_route_evidence_json" \
+    > "$preflight_root/graph-route-readiness.json"
+  graph_route_readiness_json="$preflight_root/graph-route-readiness.json"
 fi
 
 run_skein nowledge-previous-wrapper-preflight-check \

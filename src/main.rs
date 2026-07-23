@@ -2,6 +2,7 @@ mod cli_background_maintenance_evidence;
 mod cli_bounded_read_evidence;
 mod cli_fixture_contract;
 mod cli_fixture_contract_check;
+mod cli_graph_route_readiness;
 mod cli_mem_integration_bundle;
 mod cli_mem_integration_readiness;
 mod cli_mem_library_readiness;
@@ -14,6 +15,7 @@ use cli_background_maintenance_evidence::run_nowledge_background_maintenance_evi
 use cli_bounded_read_evidence::run_nowledge_bounded_read_evidence;
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
+use cli_graph_route_readiness::run_nowledge_graph_route_readiness;
 use cli_mem_integration_bundle::run_nowledge_mem_integration_bundle;
 use cli_mem_integration_readiness::{
     nowledge_mem_integration_readiness_json, run_nowledge_mem_integration_readiness,
@@ -109,6 +111,21 @@ fn main() -> Result<()> {
             return Err(SkeinError::Execution(
                 "fixture contract command check failed".to_string(),
             ));
+        }
+        if command == "nowledge-graph-route-readiness" {
+            let (json, require_ready) = run_nowledge_graph_route_readiness(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready
+                && json
+                    .get("route_primary_ready")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge graph route readiness is not ready".to_string(),
+                ));
+            }
+            return Ok(());
         }
         if command == "nowledge-previous-wrapper-preflight-check" {
             let (json, require_ready) = run_nowledge_previous_wrapper_preflight_check(args)?;

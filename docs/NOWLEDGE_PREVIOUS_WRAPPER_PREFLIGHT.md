@@ -66,7 +66,7 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --nowledge-root /Users/hawkingrei/devel/nowledge/mem \
   --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
   --require-integration-readiness \
-  --graph-route-readiness-json "$NMEM_PREFLIGHT_ROOT/graph-route-readiness.json" \
+  --graph-route-evidence-json "$NMEM_PREFLIGHT_ROOT/graph-route-evidence.json" \
   --integration-submodule-path vendor/skein \
   --integration-submodule-commit "$(git -C vendor/skein rev-parse --short HEAD)" \
   --integration-legacy-data-retained \
@@ -320,7 +320,40 @@ For targeted debugging, the same command still accepts explicit
 `--replacement-summary-json`, and `--library-readiness-json` paths; explicit
 files override the standard names loaded from `--bundle-dir`.
 
-## 9. Compile The Mem Integration Bundle
+## 9. Compile Graph Route Readiness
+
+Route readiness is generated from per-route shadow evidence instead of being
+hand-authored. Each route row must name the Mem route and report whether shadow
+compare and primary-read behavior are ready:
+
+```json
+{
+  "routes": [
+    {
+      "route": "/graph/overview",
+      "shadow_compare_ready": true,
+      "primary_ready": true,
+      "blocker_codes": []
+    }
+  ]
+}
+```
+
+Compile it with:
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-graph-route-readiness \
+  --require-ready \
+  "$NMEM_PREFLIGHT_ROOT/graph-route-evidence.json" \
+  > "$NMEM_PREFLIGHT_ROOT/graph-route-readiness.json"
+```
+
+The command fails closed when any required Nowledge graph read route is missing,
+when a route has no shadow-compare evidence, or when a route is not primary
+ready.
+
+## 10. Compile The Mem Integration Bundle
 
 The previous-wrapper preflight proves replacement behavior. The Mem integration
 bundle adds the product migration boundary: Skein must be present as a
