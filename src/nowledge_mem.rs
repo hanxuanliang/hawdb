@@ -13,6 +13,7 @@ use crate::{
 use crate::{
     nowledge_inventory::{
         background_maintenance_evidence_health, background_maintenance_summary_to_json,
+        replacement_readiness_family_evidence_health, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     },
     store::{RecoveryMode, StorageRecoveryReport},
 };
@@ -381,6 +382,7 @@ pub struct NowledgeMemQueryReportOptions {
 pub struct NowledgeMemReadinessOptions {
     pub bounded_read_probe: Option<NowledgeGraphStatement>,
     pub covered_routes: Vec<String>,
+    pub replacement_readiness_by_query_family: Option<serde_json::Value>,
     pub read_options: NowledgeMemReadOptions,
     pub search_projection_probe_options: SearchProjectionProbeOptions,
     pub primary_search_projection_probe: Option<serde_json::Value>,
@@ -892,6 +894,9 @@ impl NowledgeMemEmbeddedStore {
                 &options.qos_state,
                 options.background_maintenance_options.clone(),
             ));
+        let query_family_evidence = query_family_replacement_evidence_json(
+            options.replacement_readiness_by_query_family.as_ref(),
+        );
         let search_projection_evidence = self
             .search_projection_evidence_json(options.search_projection_probe_options.clone())
             .unwrap_or_else(|_| missing_search_projection_evidence_json());
@@ -910,6 +915,7 @@ impl NowledgeMemEmbeddedStore {
             &bounded_read_evidence,
             &storage_recovery,
             &background_maintenance,
+            &query_family_evidence,
             &search_projection_evidence,
             &search_projection_shadow_evidence,
         );
@@ -917,6 +923,7 @@ impl NowledgeMemEmbeddedStore {
             &bounded_read_evidence,
             &storage_recovery,
             &background_maintenance,
+            &query_family_evidence,
             &search_projection_evidence,
             &search_projection_shadow_evidence,
         );
@@ -941,6 +948,7 @@ impl NowledgeMemEmbeddedStore {
             "bounded_read_evidence": bounded_read_evidence,
             "storage_recovery": storage_recovery,
             "background_maintenance": background_maintenance,
+            "query_family_evidence": query_family_evidence,
             "search_projection_evidence": search_projection_evidence,
             "search_projection_shadow_evidence": search_projection_shadow_evidence,
         })
@@ -1196,10 +1204,71 @@ fn missing_primary_search_projection_probe_json() -> serde_json::Value {
     })
 }
 
+fn query_family_replacement_evidence_json(
+    replacement_readiness_by_query_family: Option<&serde_json::Value>,
+) -> serde_json::Value {
+    let Some(families) =
+        query_family_replacement_readiness_array(replacement_readiness_by_query_family)
+    else {
+        return serde_json::json!({
+            "protocol": "skein-nowledge-query-family-evidence-v1",
+            "present": false,
+            "ready": false,
+            "required_query_families": REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+            "missing_required_query_families": REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+            "blocker_codes": ["query_family_evidence_missing"],
+        });
+    };
+    let health = replacement_readiness_family_evidence_health(Some(families));
+    let blocker_codes = query_family_replacement_blocker_codes(&health);
+    serde_json::json!({
+        "protocol": "skein-nowledge-query-family-evidence-v1",
+        "present": health.present,
+        "ready": health.ready,
+        "min_replacement_readiness_per_million": health.min_replacement_readiness_per_million,
+        "invalid_family_count": health.invalid_family_count,
+        "blocked_query_families": health.blocked_query_families,
+        "required_query_families": REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        "missing_required_query_families": health.missing_required_query_families,
+        "blocker_codes": blocker_codes,
+        "blockers": health.blockers,
+        "replacement_readiness_by_query_family": families,
+    })
+}
+
+fn query_family_replacement_readiness_array(
+    value: Option<&serde_json::Value>,
+) -> Option<&serde_json::Value> {
+    let value = value?;
+    if value.is_array() {
+        return Some(value);
+    }
+    value
+        .get("replacement_readiness_by_query_family")
+        .filter(|families| families.is_array())
+}
+
+fn query_family_replacement_blocker_codes(
+    health: &crate::nowledge_inventory::ReplacementReadinessFamilyEvidenceHealth,
+) -> Vec<&'static str> {
+    let mut blockers = Vec::new();
+    if health.invalid_family_count > 0 {
+        blockers.push("invalid_family_entries");
+    }
+    if !health.blocked_query_families.is_empty() {
+        blockers.push("blocked_query_families");
+    }
+    if !health.missing_required_query_families.is_empty() {
+        blockers.push("missing_required_query_families");
+    }
+    blockers
+}
+
 fn library_readiness_blocker_codes(
     bounded_read_evidence: &serde_json::Value,
     storage_recovery: &serde_json::Value,
     background_maintenance: &serde_json::Value,
+    query_family_evidence: &serde_json::Value,
     search_projection_evidence: &serde_json::Value,
     search_projection_shadow_evidence: &serde_json::Value,
 ) -> Vec<&'static str> {
@@ -1220,6 +1289,13 @@ fn library_readiness_blocker_codes(
     }
     if !library_background_maintenance_ready(background_maintenance) {
         blockers.push("background_maintenance_not_ready");
+    }
+    if query_family_evidence
+        .get("ready")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
+        blockers.push("query_family_evidence_not_ready");
     }
     if search_projection_evidence
         .get("ready")
@@ -1242,6 +1318,7 @@ fn library_readiness_by_area_json(
     bounded_read_evidence: &serde_json::Value,
     storage_recovery: &serde_json::Value,
     background_maintenance: &serde_json::Value,
+    query_family_evidence: &serde_json::Value,
     search_projection_evidence: &serde_json::Value,
     search_projection_shadow_evidence: &serde_json::Value,
 ) -> serde_json::Value {
@@ -1259,6 +1336,10 @@ fn library_readiness_by_area_json(
             "storage_recovery_not_ready"
         ),
         "background": background_maintenance_readiness_area_json(background_maintenance),
+        "query_family": readiness_area_json(
+            query_family_evidence,
+            "query_family_evidence_not_ready"
+        ),
         "search_projection": readiness_area_json(
             search_projection_evidence,
             "search_projection_evidence_not_ready"
@@ -1496,7 +1577,7 @@ mod tests {
         NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
-        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -1991,6 +2072,10 @@ mod tests {
             readiness["search_projection_shadow_evidence"]["blocker_codes"],
             serde_json::json!(["primary_search_projection_probe_missing"])
         );
+        assert_eq!(
+            readiness["query_family_evidence"]["blocker_codes"],
+            serde_json::json!(["query_family_evidence_missing"])
+        );
         assert!(readiness["blocker_codes"]
             .as_array()
             .unwrap()
@@ -2009,6 +2094,14 @@ mod tests {
             serde_json::json!(["no_candidates", "no_ranked_work"])
         );
         assert_eq!(
+            readiness["readiness_by_area"]["query_family"]["ready"],
+            false
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["query_family"]["blocker_codes"],
+            serde_json::json!(["query_family_evidence_missing"])
+        );
+        assert_eq!(
             readiness["readiness_by_area"]["search_projection"]["ready"],
             false
         );
@@ -2017,7 +2110,7 @@ mod tests {
             false
         );
         assert_eq!(readiness["ready_area_count"], 1);
-        assert_eq!(readiness["blocked_area_count"], 5);
+        assert_eq!(readiness["blocked_area_count"], 6);
         assert!(!readiness.to_string().contains("redacted"));
     }
 
@@ -2038,6 +2131,7 @@ mod tests {
                 parameters: BTreeMap::new(),
             }),
             covered_routes: full_bounded_read_routes(),
+            replacement_readiness_by_query_family: Some(ready_query_family_replacement()),
             ..NowledgeMemReadinessOptions::default()
         });
 
@@ -2066,6 +2160,18 @@ mod tests {
         assert_eq!(
             readiness["readiness_by_area"]["background"]["blocker_codes"],
             serde_json::json!([])
+        );
+        assert_eq!(
+            readiness["readiness_by_area"]["query_family"]["ready"],
+            true
+        );
+        assert_eq!(
+            readiness["query_family_evidence"]["missing_required_query_families"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            readiness["query_family_evidence"]["min_replacement_readiness_per_million"],
+            1_000_000
         );
     }
 
@@ -2642,6 +2748,19 @@ mod tests {
             .iter()
             .map(|route| (*route).to_string())
             .collect()
+    }
+
+    fn ready_query_family_replacement() -> serde_json::Value {
+        serde_json::json!(REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES
+            .iter()
+            .map(|family| serde_json::json!({
+                "query_family": family,
+                "required_checks": 1,
+                "covered_checks": 1,
+                "shadow_matched_checks": 1,
+                "replacement_readiness_per_million": 1_000_000,
+            }))
+            .collect::<Vec<_>>())
     }
 
     fn unique_nowledge_mem_test_dir(name: &str) -> std::path::PathBuf {

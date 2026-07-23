@@ -614,6 +614,14 @@ Missing production graph-read routes add the stable
 `missing_covered_routes` blocker and keep bounded-read readiness false, so a
 single bounded query probe cannot be mistaken for full route cutover coverage.
 
+The embedded library readiness report also accepts query-family replacement
+readiness evidence through `replacement_readiness_by_query_family`. It
+recomputes `skein-nowledge-query-family-evidence-v1` from the family rows and
+publishes it as `query_family_evidence` plus
+`readiness_by_area.query_family`. Missing, blocked, or malformed query-family
+rows keep library readiness false; callers should pass the same family evidence
+that will later feed `nowledge-replacement-summary`.
+
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
 automation that must reject self-shadow smoke runs, missing shadow parity
