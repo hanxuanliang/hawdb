@@ -241,9 +241,37 @@ jq -e '
 If this command fails, inspect `next_actions` first. The action codes are
 stable enough for dashboards and release automation.
 
-## 7. Verify The Whole Preflight Bundle
+## 7. Verify The Rust Library Readiness Surface
 
-Use the bundle checker to collapse the four evidence files into one
+The final preflight also requires the embedded Rust library surface to open and
+aggregate the same cutover evidence. This keeps the release gate tied to the
+API that Mem will actually call instead of only checking standalone CLI
+artifacts:
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-mem-library-readiness \
+  --require-ready \
+  --search-projection "$NMEM_PREFLIGHT_ROOT/skein-search-index" \
+  --bounded-read-evidence-json "$NMEM_PREFLIGHT_ROOT/bounded-read-evidence.json" \
+  --query-family-evidence-json "$NMEM_PREFLIGHT_ROOT/query-family-evidence.json" \
+  --search-projection-evidence-json "$NMEM_PREFLIGHT_ROOT/search-projection-evidence.json" \
+  --search-projection-shadow-evidence-json "$NMEM_PREFLIGHT_ROOT/search-projection-shadow-evidence.json" \
+  "$NMEM_PREFLIGHT_ROOT/skein-demo" \
+  > "$NMEM_PREFLIGHT_ROOT/library-readiness.json"
+```
+
+When using the bundle runner, an existing `library-readiness.json` can be
+provided with `--library-readiness-json`; otherwise the runner generates it
+from the preflight graph and the already materialized bounded-read,
+query-family, search-projection, and search-projection-shadow evidence files.
+Automatic generation also needs `--library-readiness-search-projection` to
+point at an existing Skein search projection so `open_report` can prove that
+the embedded library opened both graph and search projection state.
+
+## 8. Verify The Whole Preflight Bundle
+
+Use the bundle checker to collapse the preflight stage artifacts into one
 release-facing preflight verdict:
 
 ```bash
@@ -257,10 +285,12 @@ cargo run --quiet --bin skein -- \
 
 The verifier checks wrapper identity consistency across the full contract,
 adapter smoke, migration gate, storage recovery evidence, background
-maintenance evidence, and replacement summary artifacts. It fails closed unless
-every stage is ready, the storage/background evidence is explicitly required and
-present in the migration gate, and the replacement summary has no blockers,
-missing evidence, or next actions.
+maintenance evidence, replacement summary, and Rust library-readiness
+artifacts. It fails closed unless every stage is ready, the storage/background
+evidence is explicitly required and present in the migration gate, the
+replacement summary has no blockers, missing evidence, or next actions, and the
+embedded library surface opens graph plus search projection with every
+readiness area marked ready.
 The final preflight is stricter than compatibility summary generation: the
 replacement summary must carry `dual_engine_evidence.present == true` and
 `dual_engine_evidence.ready == true`.
@@ -275,5 +305,5 @@ replacement readiness, storage/background readiness, and dual-engine counts
 needed by release notes and dashboards.
 For targeted debugging, the same command still accepts explicit
 `--contract-evidence-json`, `--adapter-smoke-json`, `--migration-gate-json`,
-and `--replacement-summary-json` paths; explicit files override the standard
-names loaded from `--bundle-dir`.
+`--replacement-summary-json`, and `--library-readiness-json` paths; explicit
+files override the standard names loaded from `--bundle-dir`.

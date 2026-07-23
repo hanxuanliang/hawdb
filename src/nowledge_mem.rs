@@ -381,11 +381,14 @@ pub struct NowledgeMemQueryReportOptions {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NowledgeMemReadinessOptions {
     pub bounded_read_probe: Option<NowledgeGraphStatement>,
+    pub bounded_read_evidence: Option<serde_json::Value>,
     pub covered_routes: Vec<String>,
     pub replacement_readiness_by_query_family: Option<serde_json::Value>,
     pub read_options: NowledgeMemReadOptions,
+    pub search_projection_evidence: Option<serde_json::Value>,
     pub search_projection_probe_options: SearchProjectionProbeOptions,
     pub primary_search_projection_probe: Option<serde_json::Value>,
+    pub search_projection_shadow_evidence: Option<serde_json::Value>,
     pub qos_policy: LocalQosPolicy,
     pub qos_state: LocalQosState,
     pub background_maintenance_options: BackgroundMaintenanceOptions,
@@ -885,7 +888,10 @@ impl NowledgeMemEmbeddedStore {
         &mut self,
         options: &NowledgeMemReadinessOptions,
     ) -> serde_json::Value {
-        let bounded_read_evidence = self.bounded_read_probe_evidence_json(options);
+        let bounded_read_evidence = options
+            .bounded_read_evidence
+            .clone()
+            .unwrap_or_else(|| self.bounded_read_probe_evidence_json(options));
         let storage_recovery =
             storage_recovery_report_json(&self.graph.database().storage_recovery_report());
         let background_maintenance =
@@ -897,20 +903,32 @@ impl NowledgeMemEmbeddedStore {
         let query_family_evidence = query_family_replacement_evidence_json(
             options.replacement_readiness_by_query_family.as_ref(),
         );
-        let search_projection_evidence = self
-            .search_projection_evidence_json(options.search_projection_probe_options.clone())
-            .unwrap_or_else(|_| missing_search_projection_evidence_json());
+        let search_projection_evidence =
+            options
+                .search_projection_evidence
+                .clone()
+                .unwrap_or_else(|| {
+                    self.search_projection_evidence_json(
+                        options.search_projection_probe_options.clone(),
+                    )
+                    .unwrap_or_else(|_| missing_search_projection_evidence_json())
+                });
         let search_projection_shadow_evidence = options
-            .primary_search_projection_probe
-            .as_ref()
-            .map(|primary_probe| {
-                self.search_projection_shadow_evidence_json(
-                    primary_probe,
-                    options.search_projection_probe_options.clone(),
-                )
-                .unwrap_or_else(|_| missing_search_projection_shadow_evidence_json())
-            })
-            .unwrap_or_else(missing_primary_search_projection_probe_json);
+            .search_projection_shadow_evidence
+            .clone()
+            .unwrap_or_else(|| {
+                options
+                    .primary_search_projection_probe
+                    .as_ref()
+                    .map(|primary_probe| {
+                        self.search_projection_shadow_evidence_json(
+                            primary_probe,
+                            options.search_projection_probe_options.clone(),
+                        )
+                        .unwrap_or_else(|_| missing_search_projection_shadow_evidence_json())
+                    })
+                    .unwrap_or_else(missing_primary_search_projection_probe_json)
+            });
         let blocker_codes = library_readiness_blocker_codes(
             &bounded_read_evidence,
             &storage_recovery,

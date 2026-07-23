@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 pub fn nowledge_mem_library_readiness_usage() -> String {
-    "nowledge-mem-library-readiness requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--search-projection <path>] [--bounded-probe-json <path>] [--covered-routes-json <path>] [--query-family-evidence-json <path>] [--primary-search-projection-probe-json <path>] [--active-model <model>] [--active-dimension <n>] <graph-db>"
+    "nowledge-mem-library-readiness requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--search-projection <path>] [--bounded-probe-json <path>] [--bounded-read-evidence-json <path>] [--covered-routes-json <path>] [--query-family-evidence-json <path>] [--search-projection-evidence-json <path>] [--primary-search-projection-probe-json <path>] [--search-projection-shadow-evidence-json <path>] [--active-model <model>] [--active-dimension <n>] <graph-db>"
         .to_string()
 }
 
@@ -17,9 +17,12 @@ pub fn run_nowledge_mem_library_readiness(
     let mut mode = NowledgeMemGraphMode::ShadowReadOnly;
     let mut search_projection_path = None;
     let mut bounded_read_probe = None;
+    let mut bounded_read_evidence = None;
     let mut covered_routes = Vec::new();
     let mut replacement_readiness_by_query_family = None;
+    let mut search_projection_evidence = None;
     let mut primary_search_projection_probe = None;
+    let mut search_projection_shadow_evidence = None;
     let mut search_projection_probe_options = SearchProjectionProbeOptions::default();
     let mut graph_path = None;
 
@@ -47,6 +50,12 @@ pub fn run_nowledge_mem_library_readiness(
                     &path,
                 ))?)?);
             }
+            "--bounded-read-evidence-json" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
+                bounded_read_evidence = Some(read_json_file(Path::new(&path))?);
+            }
             "--covered-routes-json" => {
                 let path = args
                     .next()
@@ -61,11 +70,23 @@ pub fn run_nowledge_mem_library_readiness(
                     .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
                 replacement_readiness_by_query_family = Some(read_json_file(Path::new(&path))?);
             }
+            "--search-projection-evidence-json" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
+                search_projection_evidence = Some(read_json_file(Path::new(&path))?);
+            }
             "--primary-search-projection-probe-json" => {
                 let path = args
                     .next()
                     .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
                 primary_search_projection_probe = Some(read_json_file(Path::new(&path))?);
+            }
+            "--search-projection-shadow-evidence-json" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
+                search_projection_shadow_evidence = Some(read_json_file(Path::new(&path))?);
             }
             "--active-model" => {
                 search_projection_probe_options.active_embedding_model =
@@ -101,10 +122,13 @@ pub fn run_nowledge_mem_library_readiness(
     let (mut store, open_report) = NowledgeMemEmbeddedStore::open_with_options(open_options)?;
     let options = NowledgeMemReadinessOptions {
         bounded_read_probe,
+        bounded_read_evidence,
         covered_routes,
         replacement_readiness_by_query_family,
+        search_projection_evidence,
         search_projection_probe_options,
         primary_search_projection_probe,
+        search_projection_shadow_evidence,
         ..NowledgeMemReadinessOptions::default()
     };
     let mut readiness = store.library_readiness_json(&options);
@@ -330,6 +354,108 @@ mod tests {
         assert!(error
             .to_string()
             .contains("nowledge-mem-library-readiness requires"));
+    }
+
+    #[test]
+    fn library_readiness_command_accepts_precomputed_evidence() {
+        let root = unique_test_dir("library-readiness-precomputed");
+        let graph_path = root.join("graph");
+        let bounded_evidence_path = root.join("bounded-read-evidence.json");
+        let query_family_evidence_path = root.join("query-family-evidence.json");
+        let search_evidence_path = root.join("search-projection-evidence.json");
+        let search_shadow_evidence_path = root.join("search-projection-shadow-evidence.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let db = Database::open(&graph_path).unwrap();
+        drop(db);
+        std::fs::write(
+            &bounded_evidence_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-mem-bounded-read-evidence-v1",
+                "present": true,
+                "ready": true,
+                "blocker_codes": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &query_family_evidence_path,
+            ready_query_family_evidence().to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &search_evidence_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-search-projection-evidence",
+                "present": true,
+                "ready": true,
+                "blocker_codes": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &search_shadow_evidence_path,
+            serde_json::json!({
+                "protocol": "skein-nowledge-search-projection-shadow-evidence",
+                "present": true,
+                "ready": true,
+                "blocker_codes": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (readiness, _) = run_nowledge_mem_library_readiness(
+            [
+                "--bounded-read-evidence-json",
+                bounded_evidence_path.to_str().unwrap(),
+                "--query-family-evidence-json",
+                query_family_evidence_path.to_str().unwrap(),
+                "--search-projection-evidence-json",
+                search_evidence_path.to_str().unwrap(),
+                "--search-projection-shadow-evidence-json",
+                search_shadow_evidence_path.to_str().unwrap(),
+                graph_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(readiness["bounded_read_evidence"]["ready"], true);
+        assert_eq!(readiness["query_family_evidence"]["ready"], true);
+        assert_eq!(readiness["search_projection_evidence"]["ready"], true);
+        assert_eq!(
+            readiness["search_projection_shadow_evidence"]["ready"],
+            true
+        );
+        assert_eq!(readiness["open_report"]["graph_opened"], true);
+        assert_eq!(readiness["open_report"]["search_projection_opened"], false);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn ready_query_family_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "replacement_readiness_by_query_family": [
+                {
+                    "query_family": "memory_lookup",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
+                    "query_family": "graph_traversal",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
+                    "query_family": "projected_graph",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
+                    "query_family": "search_projection",
+                    "replacement_readiness_per_million": 1_000_000
+                }
+            ]
+        })
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

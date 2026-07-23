@@ -1,8 +1,8 @@
-use skein::{Result, SkeinError};
+use skein::{Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL};
 use std::path::Path;
 
 pub fn nowledge_previous_wrapper_preflight_check_usage() -> String {
-    "nowledge-previous-wrapper-preflight-check requires [--require-ready] --wrapper-identity <id> (--bundle-dir <dir> | --contract-evidence-json <path> --adapter-smoke-json <path> --migration-gate-json <path> --replacement-summary-json <path>)".to_string()
+    "nowledge-previous-wrapper-preflight-check requires [--require-ready] --wrapper-identity <id> (--bundle-dir <dir> | --contract-evidence-json <path> --adapter-smoke-json <path> --migration-gate-json <path> --replacement-summary-json <path> --library-readiness-json <path>)".to_string()
 }
 
 #[derive(Debug, Clone, Default)]
@@ -13,6 +13,7 @@ struct PreviousWrapperPreflightCheckInputs {
     adapter_smoke: Option<serde_json::Value>,
     migration_gate: Option<serde_json::Value>,
     replacement_summary: Option<serde_json::Value>,
+    library_readiness: Option<serde_json::Value>,
 }
 
 pub fn run_nowledge_previous_wrapper_preflight_check(
@@ -59,6 +60,9 @@ pub fn run_nowledge_previous_wrapper_preflight_check(
             "--replacement-summary-json" => {
                 inputs.replacement_summary = Some(read_json_arg(&mut args)?);
             }
+            "--library-readiness-json" => {
+                inputs.library_readiness = Some(read_json_arg(&mut args)?);
+            }
             _ => {
                 return Err(SkeinError::Semantic(
                     nowledge_previous_wrapper_preflight_check_usage(),
@@ -90,6 +94,10 @@ fn fill_bundle_dir_inputs(inputs: &mut PreviousWrapperPreflightCheckInputs) -> R
         inputs.replacement_summary = Some(read_json_file(
             &bundle_dir.join("replacement-summary.json"),
         )?);
+    }
+    if inputs.library_readiness.is_none() {
+        inputs.library_readiness =
+            Some(read_json_file(&bundle_dir.join("library-readiness.json"))?);
     }
     Ok(())
 }
@@ -133,6 +141,9 @@ fn nowledge_previous_wrapper_preflight_check_json(
         .ok_or_else(|| SkeinError::Semantic(nowledge_previous_wrapper_preflight_check_usage()))?;
     let replacement_summary = inputs
         .replacement_summary
+        .ok_or_else(|| SkeinError::Semantic(nowledge_previous_wrapper_preflight_check_usage()))?;
+    let library_readiness = inputs
+        .library_readiness
         .ok_or_else(|| SkeinError::Semantic(nowledge_previous_wrapper_preflight_check_usage()))?;
 
     let checks = vec![
@@ -495,6 +506,62 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 ],
             ),
         ),
+        preflight_check(
+            "library_readiness",
+            [
+                str_path(&library_readiness, &["protocol"])
+                    == Some(NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL),
+                bool_path(&library_readiness, &["present"]) == Some(true),
+                bool_path(&library_readiness, &["ready"]) == Some(true),
+                u64_path(&library_readiness, &["ready_area_count"]).is_some_and(|value| value > 0),
+                u64_path(&library_readiness, &["blocked_area_count"]) == Some(0),
+                bool_path(&library_readiness, &["open_report", "graph_opened"]) == Some(true),
+                bool_path(
+                    &library_readiness,
+                    &["open_report", "search_projection_opened"],
+                ) == Some(true),
+                library_readiness_area_ready(&library_readiness, "graph"),
+                library_readiness_area_ready(&library_readiness, "query"),
+                library_readiness_area_ready(&library_readiness, "storage"),
+                library_readiness_area_ready(&library_readiness, "background"),
+                library_readiness_area_ready(&library_readiness, "query_family"),
+                library_readiness_area_ready(&library_readiness, "search_projection"),
+                library_readiness_area_ready(&library_readiness, "search_projection_shadow"),
+            ],
+            [
+                "library_readiness.protocol",
+                "library_readiness.present",
+                "library_readiness.ready",
+                "library_readiness.ready_area_count",
+                "library_readiness.blocked_area_count",
+                "library_readiness.open_report.graph_opened",
+                "library_readiness.open_report.search_projection_opened",
+                "library_readiness.readiness_by_area.graph.ready",
+                "library_readiness.readiness_by_area.query.ready",
+                "library_readiness.readiness_by_area.storage.ready",
+                "library_readiness.readiness_by_area.background.ready",
+                "library_readiness.readiness_by_area.query_family.ready",
+                "library_readiness.readiness_by_area.search_projection.ready",
+                "library_readiness.readiness_by_area.search_projection_shadow.ready",
+            ],
+            blocker_codes(
+                &library_readiness,
+                &[
+                    &["blocker_codes"][..],
+                    &["readiness_by_area", "graph", "blocker_codes"][..],
+                    &["readiness_by_area", "query", "blocker_codes"][..],
+                    &["readiness_by_area", "storage", "blocker_codes"][..],
+                    &["readiness_by_area", "background", "blocker_codes"][..],
+                    &["readiness_by_area", "query_family", "blocker_codes"][..],
+                    &["readiness_by_area", "search_projection", "blocker_codes"][..],
+                    &[
+                        "readiness_by_area",
+                        "search_projection_shadow",
+                        "blocker_codes",
+                    ][..],
+                ],
+            ),
+        ),
     ];
     let ready = checks.iter().all(|check| {
         check
@@ -514,6 +581,7 @@ fn nowledge_previous_wrapper_preflight_check_json(
         &adapter_smoke,
         &migration_gate,
         &replacement_summary,
+        &library_readiness,
     );
 
     Ok(serde_json::json!({
@@ -532,6 +600,7 @@ fn previous_wrapper_preflight_release_summary(
     adapter_smoke: &serde_json::Value,
     migration_gate: &serde_json::Value,
     replacement_summary: &serde_json::Value,
+    library_readiness: &serde_json::Value,
 ) -> serde_json::Value {
     let mut summary = serde_json::Map::new();
     insert_json_value(&mut summary, "wrapper_identity", wrapper_identity);
@@ -925,6 +994,34 @@ fn previous_wrapper_preflight_release_summary(
             ],
         ),
     );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_ready",
+        bool_path(library_readiness, &["ready"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_ready_area_count",
+        u64_path(library_readiness, &["ready_area_count"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_blocked_area_count",
+        u64_path(library_readiness, &["blocked_area_count"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_graph_opened",
+        bool_path(library_readiness, &["open_report", "graph_opened"]),
+    );
+    insert_json_value(
+        &mut summary,
+        "library_readiness_search_projection_opened",
+        bool_path(
+            library_readiness,
+            &["open_report", "search_projection_opened"],
+        ),
+    );
     serde_json::Value::Object(summary)
 }
 
@@ -977,6 +1074,11 @@ fn str_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> 
 
 fn u64_path(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
     value_path(value, path).and_then(serde_json::Value::as_u64)
+}
+
+fn library_readiness_area_ready(value: &serde_json::Value, area: &str) -> bool {
+    value_path(value, &["readiness_by_area", area, "ready"]).and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 fn full_contract_check_count_ready(value: &serde_json::Value) -> bool {
@@ -1192,6 +1294,11 @@ mod tests {
             "search_projection_shadow_incremental_watermark_parity",
             true,
         );
+        assert_release_summary_field(summary, "library_readiness_ready", true);
+        assert_release_summary_field(summary, "library_readiness_ready_area_count", 7);
+        assert_release_summary_field(summary, "library_readiness_blocked_area_count", 0);
+        assert_release_summary_field(summary, "library_readiness_graph_opened", true);
+        assert_release_summary_field(summary, "library_readiness_search_projection_opened", true);
         assert!(report["checks"]
             .as_array()
             .unwrap()
@@ -1464,6 +1571,43 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_requires_library_readiness() {
+        let mut inputs = ready_inputs();
+        let library_readiness = inputs.library_readiness.as_mut().unwrap();
+        library_readiness["ready"] = serde_json::json!(false);
+        library_readiness["blocked_area_count"] = serde_json::json!(1);
+        library_readiness["blocker_codes"] =
+            serde_json::json!(["search_projection_evidence_not_ready"]);
+        library_readiness["readiness_by_area"]["search_projection"]["ready"] =
+            serde_json::json!(false);
+        library_readiness["readiness_by_area"]["search_projection"]["blocker_codes"] =
+            serde_json::json!(["search_projection_probe_missing"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.readiness_by_area.search_projection.ready"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["blocker_codes"],
+            serde_json::json!([
+                "search_projection_evidence_not_ready",
+                "search_projection_probe_missing"
+            ])
+        );
+    }
+
+    #[test]
     fn preflight_check_requires_matching_wrapper_identity() {
         let mut inputs = ready_inputs();
         inputs.wrapper_identity = Some("nowledge-previous-wrapper:other".to_string());
@@ -1647,6 +1791,10 @@ mod tests {
             bundle_dir.join("replacement-summary.json"),
             inputs.replacement_summary.as_ref().unwrap(),
         );
+        write_json(
+            bundle_dir.join("library-readiness.json"),
+            inputs.library_readiness.as_ref().unwrap(),
+        );
 
         let (report, require_ready) = run_nowledge_previous_wrapper_preflight_check(
             vec![
@@ -1782,7 +1930,56 @@ mod tests {
                 "search_projection_evidence": ready_search_projection_evidence(),
                 "search_projection_shadow_evidence": ready_search_projection_shadow_evidence()
             })),
+            library_readiness: Some(ready_library_readiness()),
         }
+    }
+
+    fn ready_library_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-mem-library-readiness-v1",
+            "present": true,
+            "ready": true,
+            "mode": "shadow_read_only",
+            "ready_area_count": 7,
+            "blocked_area_count": 0,
+            "blocker_codes": [],
+            "open_report": {
+                "protocol": "skein-nowledge-mem-open-report",
+                "mode": "shadow_read_only",
+                "graph_opened": true,
+                "search_projection_opened": true
+            },
+            "readiness_by_area": {
+                "graph": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "query": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "storage": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "background": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "query_family": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "search_projection": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "search_projection_shadow": {
+                    "ready": true,
+                    "blocker_codes": []
+                }
+            }
+        })
     }
 
     fn ready_search_projection_evidence() -> serde_json::Value {

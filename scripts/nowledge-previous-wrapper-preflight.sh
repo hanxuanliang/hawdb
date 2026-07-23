@@ -21,6 +21,9 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--bounded-read-params-json <json-object>] \
   [--bounded-read-max-rows <n>] \
   [--bounded-read-max-estimated-payload-bytes <n>] \
+  [--library-readiness-json <path>] \
+  [--library-readiness-graph <path>] \
+  [--library-readiness-search-projection <path>] \
   -- <wrapper-command> [args...]
 
 Runs the Skein-side Nowledge previous-wrapper production preflight bundle.
@@ -42,6 +45,9 @@ bounded_read_cypher=
 bounded_read_params_json=
 bounded_read_max_rows=
 bounded_read_max_estimated_payload_bytes=
+library_readiness_json=
+library_readiness_graph=
+library_readiness_search_projection=
 
 while (($# > 0)); do
   case "$1" in
@@ -97,6 +103,18 @@ while (($# > 0)); do
       bounded_read_max_estimated_payload_bytes="${2:-}"
       shift 2
       ;;
+    --library-readiness-json)
+      library_readiness_json="${2:-}"
+      shift 2
+      ;;
+    --library-readiness-graph)
+      library_readiness_graph="${2:-}"
+      shift 2
+      ;;
+    --library-readiness-search-projection)
+      library_readiness_search_projection="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -131,7 +149,8 @@ for evidence_path in \
   "$search_projection_evidence_json" \
   "$search_projection_shadow_evidence_json" \
   "$bounded_read_evidence_json" \
-  "$bounded_read_report_json"; do
+  "$bounded_read_report_json" \
+  "$library_readiness_json"; do
   if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
     echo "evidence JSON does not exist or is not a file: $evidence_path" >&2
     exit 2
@@ -155,6 +174,16 @@ fi
 
 if [[ -n "$bounded_read_database" && ! -e "$bounded_read_database" ]]; then
   echo "--bounded-read-database does not exist: $bounded_read_database" >&2
+  exit 2
+fi
+
+if [[ -n "$library_readiness_graph" && ! -e "$library_readiness_graph" ]]; then
+  echo "--library-readiness-graph does not exist: $library_readiness_graph" >&2
+  exit 2
+fi
+
+if [[ -n "$library_readiness_search_projection" && ! -e "$library_readiness_search_projection" ]]; then
+  echo "--library-readiness-search-projection does not exist: $library_readiness_search_projection" >&2
   exit 2
 fi
 
@@ -303,6 +332,41 @@ run_skein nowledge-replacement-summary \
   "${replacement_summary_evidence_args[@]}" \
   "$preflight_root/migration-gate.json" \
   > "$preflight_root/replacement-summary.json"
+
+if [[ -n "$library_readiness_json" ]]; then
+  if [[ "$library_readiness_json" != "$preflight_root/library-readiness.json" ]]; then
+    cp "$library_readiness_json" "$preflight_root/library-readiness.json"
+  fi
+else
+  if [[ -z "$bounded_read_evidence_json" ]]; then
+    echo "library readiness generation requires bounded read evidence; provide --bounded-read-evidence-json, --bounded-read-report-json, or --bounded-read-cypher" >&2
+    exit 2
+  fi
+  if [[ -z "$search_projection_evidence_json" ]]; then
+    echo "library readiness generation requires --search-projection-evidence-json" >&2
+    exit 2
+  fi
+  if [[ -z "$search_projection_shadow_evidence_json" ]]; then
+    echo "library readiness generation requires --search-projection-shadow-evidence-json" >&2
+    exit 2
+  fi
+  library_readiness_args=(
+    --bounded-read-evidence-json "$bounded_read_evidence_json"
+    --query-family-evidence-json "$preflight_root/query-family-evidence.json"
+    --search-projection-evidence-json "$search_projection_evidence_json"
+    --search-projection-shadow-evidence-json "$search_projection_shadow_evidence_json"
+  )
+  if [[ -n "$library_readiness_search_projection" ]]; then
+    library_readiness_args+=(
+      --search-projection "$library_readiness_search_projection"
+    )
+  fi
+  run_skein nowledge-mem-library-readiness \
+    --require-ready \
+    "${library_readiness_args[@]}" \
+    "${library_readiness_graph:-$skein_preflight_db}" \
+    > "$preflight_root/library-readiness.json"
+fi
 
 run_skein nowledge-previous-wrapper-preflight-check \
   --require-ready \
