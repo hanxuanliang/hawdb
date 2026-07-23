@@ -16,6 +16,7 @@ use crate::{
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemGraphMode {
@@ -286,6 +287,10 @@ pub struct NowledgeMemQueryReport {
     pub mode: NowledgeMemGraphMode,
     pub execution_path: NowledgeMemQueryExecutionPath,
     pub fast_path_reason: Option<String>,
+    pub elapsed_micros: u128,
+    pub slow_log_threshold_micros: Option<u128>,
+    pub slow_log_candidate: bool,
+    pub physical_plan_captured: bool,
     pub physical_operator_counts: BTreeMap<String, usize>,
     pub optimizer_decision_count: usize,
 }
@@ -298,6 +303,10 @@ impl NowledgeMemQueryReport {
             "execution_path": self.execution_path.as_str(),
             "fast_path_reason": self.fast_path_reason,
             "fast_path_selected": self.execution_path == NowledgeMemQueryExecutionPath::FastPath,
+            "elapsed_micros": self.elapsed_micros,
+            "slow_log_threshold_micros": self.slow_log_threshold_micros,
+            "slow_log_candidate": self.slow_log_candidate,
+            "physical_plan_captured": self.physical_plan_captured,
             "physical_operator_counts": self.physical_operator_counts,
             "optimizer_decision_count": self.optimizer_decision_count,
         })
@@ -308,6 +317,12 @@ impl NowledgeMemQueryReport {
 pub struct NowledgeMemQueryOutput {
     pub output: QueryOutput,
     pub report: NowledgeMemQueryReport,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct NowledgeMemQueryReportOptions {
+    pub capture_physical_plan: bool,
+    pub slow_log_threshold_micros: Option<u128>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -444,6 +459,14 @@ impl NowledgeMemGraph {
         self.query_with_params_with_report(cypher, &BTreeMap::new())
     }
 
+    pub fn query_with_report_options(
+        &mut self,
+        cypher: &str,
+        options: NowledgeMemQueryReportOptions,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.query_with_params_with_report_options(cypher, &BTreeMap::new(), options)
+    }
+
     pub fn query_with_params(
         &mut self,
         cypher: &str,
@@ -457,9 +480,29 @@ impl NowledgeMemGraph {
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<NowledgeMemQueryOutput> {
-        let explain = self.db.explain_query_with_params(cypher, parameters)?;
-        let report = nowledge_mem_query_report(self.mode, cypher, &explain.trace)?;
+        self.query_with_params_with_report_options(
+            cypher,
+            parameters,
+            NowledgeMemQueryReportOptions::default(),
+        )
+    }
+
+    pub fn query_with_params_with_report_options(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+    ) -> Result<NowledgeMemQueryOutput> {
+        let trace = if options.capture_physical_plan {
+            Some(self.db.explain_query_with_params(cypher, parameters)?.trace)
+        } else {
+            None
+        };
+        let started = Instant::now();
         let output = self.db.query_with_params(cypher, parameters)?;
+        let elapsed_micros = started.elapsed().as_micros();
+        let report =
+            nowledge_mem_query_report(self.mode, cypher, trace.as_ref(), options, elapsed_micros)?;
         Ok(NowledgeMemQueryOutput { output, report })
     }
 
@@ -734,12 +777,30 @@ impl NowledgeMemEmbeddedStore {
         self.graph.query_with_report(cypher)
     }
 
+    pub fn query_with_report_options(
+        &mut self,
+        cypher: &str,
+        options: NowledgeMemQueryReportOptions,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.graph.query_with_report_options(cypher, options)
+    }
+
     pub fn query_with_params_with_report(
         &mut self,
         cypher: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<NowledgeMemQueryOutput> {
         self.graph.query_with_params_with_report(cypher, parameters)
+    }
+
+    pub fn query_with_params_with_report_options(
+        &mut self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.graph
+            .query_with_params_with_report_options(cypher, parameters, options)
     }
 
     pub fn read_query_with_options(
@@ -875,17 +936,28 @@ fn require_search_projection_mut(
 fn nowledge_mem_query_report(
     mode: NowledgeMemGraphMode,
     cypher_text: &str,
-    trace: &crate::optimizer::OptimizerTrace,
+    trace: Option<&crate::optimizer::OptimizerTrace>,
+    options: NowledgeMemQueryReportOptions,
+    elapsed_micros: u128,
 ) -> Result<NowledgeMemQueryReport> {
     let statement = cypher::parse(cypher_text)?;
     let decision = nowledge_mem_query_execution_path(&statement);
+    let slow_log_candidate = options
+        .slow_log_threshold_micros
+        .is_some_and(|threshold| elapsed_micros >= threshold);
     Ok(NowledgeMemQueryReport {
         protocol: NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL.to_string(),
         mode,
         execution_path: decision.execution_path,
         fast_path_reason: decision.fast_path_reason.map(str::to_string),
-        physical_operator_counts: trace.selected_plan_operator_counts.clone(),
-        optimizer_decision_count: trace.decisions.len(),
+        elapsed_micros,
+        slow_log_threshold_micros: options.slow_log_threshold_micros,
+        slow_log_candidate,
+        physical_plan_captured: trace.is_some(),
+        physical_operator_counts: trace
+            .map(|trace| trace.selected_plan_operator_counts.clone())
+            .unwrap_or_default(),
+        optimizer_decision_count: trace.map(|trace| trace.decisions.len()).unwrap_or_default(),
     })
 }
 
@@ -1257,11 +1329,11 @@ mod tests {
         nowledge_mem_bounded_read_evidence_json, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode, NowledgeMemEmbeddedStore, NowledgeMemGraph,
         NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
-        NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessOptions,
-        NowledgeMemSearchProjection, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
+        NowledgeMemQueryReportOptions, NowledgeMemReadOptions, NowledgeMemReadReport,
+        NowledgeMemReadinessOptions, NowledgeMemSearchProjection,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -1331,17 +1403,13 @@ mod tests {
             query.report.fast_path_reason.as_deref(),
             Some("simple_node_lookup")
         );
-        assert!(query.report.optimizer_decision_count > 0);
-        assert!(query
-            .report
-            .physical_operator_counts
-            .contains_key("ProjectExec"));
+        assert_eq!(query.report.optimizer_decision_count, 0);
+        assert!(!query.report.physical_plan_captured);
+        assert!(query.report.physical_operator_counts.is_empty());
+        assert!(!query.report.slow_log_candidate);
         assert_eq!(query.report.json()["execution_path"], "fast_path");
         assert_eq!(query.report.json()["fast_path_selected"], true);
-        assert_eq!(
-            query.report.json()["physical_operator_counts"]["ProjectExec"],
-            1
-        );
+        assert_eq!(query.report.json()["physical_plan_captured"], false);
     }
 
     #[test]
@@ -1365,13 +1433,45 @@ mod tests {
             NowledgeMemQueryExecutionPath::OptimizedPath
         );
         assert_eq!(query.report.fast_path_reason, None);
+        assert_eq!(query.report.optimizer_decision_count, 0);
+        assert!(!query.report.physical_plan_captured);
+        assert!(query.report.physical_operator_counts.is_empty());
+        assert_eq!(query.report.json()["execution_path"], "optimized_path");
+        assert_eq!(query.report.json()["fast_path_selected"], false);
+    }
+
+    #[test]
+    fn graph_query_with_report_can_capture_physical_plan_on_demand() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-plan-1', title: 'B'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'mem-plan-2', title: 'A'})")
+            .unwrap();
+
+        let query = graph
+            .query_with_params_with_report_options(
+                "MATCH (m:Memory) RETURN m.title AS title ORDER BY title LIMIT 1",
+                &BTreeMap::new(),
+                NowledgeMemQueryReportOptions {
+                    capture_physical_plan: true,
+                    slow_log_threshold_micros: Some(0),
+                },
+            )
+            .unwrap();
+
+        assert_eq!(query.output.rows.len(), 1);
+        assert!(query.report.physical_plan_captured);
         assert!(query.report.optimizer_decision_count > 0);
         assert!(query
             .report
             .physical_operator_counts
             .contains_key("SortExec"));
-        assert_eq!(query.report.json()["execution_path"], "optimized_path");
-        assert_eq!(query.report.json()["fast_path_selected"], false);
+        assert!(query.report.slow_log_candidate);
+        assert_eq!(query.report.json()["physical_plan_captured"], true);
+        assert_eq!(query.report.json()["slow_log_candidate"], true);
         assert_eq!(
             query.report.json()["physical_operator_counts"]["SortExec"],
             1
