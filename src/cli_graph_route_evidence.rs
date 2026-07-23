@@ -91,6 +91,7 @@ fn nowledge_graph_route_evidence_json(
 struct RouteQuery {
     route: String,
     shadow_compare_ready: bool,
+    primary_read_routing_enabled: bool,
     primary_ready: bool,
     blocker_codes: Vec<String>,
     queries: Vec<RouteCypherQuery>,
@@ -123,12 +124,18 @@ impl RouteQuery {
                 }
             }
         }
+        let query_runtime_succeeded = !query_reports.is_empty() && query_errors.is_empty();
+        if query_runtime_succeeded {
+            blocker_codes.retain(|code| code != "graph_route_execution_evidence_missing");
+        }
         blocker_codes.sort();
         blocker_codes.dedup();
         serde_json::json!({
             "route": self.route,
             "shadow_compare_ready": self.shadow_compare_ready,
-            "primary_ready": self.primary_ready && query_errors.is_empty(),
+            "primary_read_routing_enabled": self.primary_read_routing_enabled,
+            "primary_ready": (self.primary_ready || self.primary_read_routing_enabled)
+                && query_runtime_succeeded,
             "query_reports": query_reports,
             "query_errors": query_errors,
             "blocker_codes": blocker_codes,
@@ -173,6 +180,7 @@ fn parse_route_query(value: &serde_json::Value) -> Result<RouteQuery> {
     Ok(RouteQuery {
         route,
         shadow_compare_ready: bool_field(value, "shadow_compare_ready"),
+        primary_read_routing_enabled: bool_field(value, "primary_read_routing_enabled"),
         primary_ready: bool_field(value, "primary_ready"),
         blocker_codes: string_array_field(value, "blocker_codes")?,
         queries,
@@ -355,6 +363,45 @@ mod tests {
             evidence["routes"][0]["query_reports"][0]["statement_kind"],
             "match_return"
         );
+    }
+
+    #[test]
+    fn route_evidence_promotes_primary_routing_after_query_runtime_success() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = parse_route_query_inventory(&serde_json::json!({
+            "routes": [
+                {
+                    "route": "/graph/overview",
+                    "shadow_compare_ready": true,
+                    "primary_read_routing_enabled": true,
+                    "primary_ready": false,
+                    "queries": [
+                        {
+                            "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
+                            "parameters": {
+                                "id": "mem-route"
+                            }
+                        }
+                    ],
+                    "blocker_codes": ["graph_route_execution_evidence_missing"]
+                }
+            ]
+        }))
+        .unwrap();
+
+        let evidence =
+            nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
+
+        assert_eq!(evidence["routes"][0]["primary_read_routing_enabled"], true);
+        assert_eq!(evidence["routes"][0]["primary_ready"], true);
+        assert!(!evidence["routes"][0]["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "graph_route_execution_evidence_missing"));
     }
 
     #[test]
