@@ -285,6 +285,7 @@ impl NowledgeMemQueryExecutionPath {
 pub struct NowledgeMemQueryReport {
     pub protocol: String,
     pub mode: NowledgeMemGraphMode,
+    pub statement_kind: String,
     pub execution_path: NowledgeMemQueryExecutionPath,
     pub fast_path_reason: Option<String>,
     pub elapsed_micros: u128,
@@ -302,6 +303,7 @@ impl NowledgeMemQueryReport {
         serde_json::json!({
             "protocol": self.protocol,
             "mode": self.mode.as_str(),
+            "statement_kind": self.statement_kind,
             "execution_path": self.execution_path.as_str(),
             "fast_path_reason": self.fast_path_reason,
             "fast_path_selected": self.execution_path == NowledgeMemQueryExecutionPath::FastPath,
@@ -935,6 +937,7 @@ fn nowledge_mem_query_report(
     elapsed_micros: u128,
 ) -> Result<NowledgeMemQueryReport> {
     let statement = cypher::parse(cypher_text)?;
+    let statement_kind = crate::api::statement_kind(nowledge_statement_body(&statement));
     let decision = nowledge_mem_query_execution_path(&statement);
     let slow_log_candidate = options
         .slow_log_threshold_micros
@@ -942,6 +945,7 @@ fn nowledge_mem_query_report(
     Ok(NowledgeMemQueryReport {
         protocol: NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL.to_string(),
         mode,
+        statement_kind: statement_kind.to_string(),
         execution_path: decision.execution_path,
         fast_path_reason: decision.fast_path_reason.map(str::to_string),
         elapsed_micros,
@@ -1393,6 +1397,7 @@ mod tests {
 
         assert_eq!(query.output.rows.len(), 1);
         assert_eq!(query.report.protocol, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL);
+        assert_eq!(query.report.statement_kind, "match_return");
         assert_eq!(
             query.report.execution_path,
             NowledgeMemQueryExecutionPath::FastPath
@@ -1406,6 +1411,7 @@ mod tests {
         assert!(query.report.physical_operator_counts.is_empty());
         assert!(!query.report.slow_log_candidate);
         assert_eq!(query.report.json()["execution_path"], "fast_path");
+        assert_eq!(query.report.json()["statement_kind"], "match_return");
         assert_eq!(query.report.json()["fast_path_selected"], true);
         assert_eq!(query.report.json()["physical_plan_captured"], false);
     }
@@ -1430,6 +1436,7 @@ mod tests {
             query.report.execution_path,
             NowledgeMemQueryExecutionPath::OptimizedPath
         );
+        assert_eq!(query.report.statement_kind, "match_return");
         assert_eq!(query.report.fast_path_reason, None);
         assert_eq!(query.report.optimizer_decision_count, 0);
         assert!(!query.report.physical_plan_captured);
@@ -1462,6 +1469,7 @@ mod tests {
 
         assert_eq!(query.output.rows.len(), 1);
         assert!(query.report.physical_plan_captured);
+        assert_eq!(query.report.statement_kind, "match_return");
         assert!(query.report.optimizer_decision_count > 0);
         assert!(query
             .report

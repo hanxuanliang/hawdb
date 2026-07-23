@@ -4259,6 +4259,7 @@ fn explain_output_json(
         "protocol": "skein-explain",
         "protocol_version": 1,
         "query": query,
+        "statement_kind": output.statement_kind,
         "parameters": serde_json::Value::Object(
             parameters
                 .iter()
@@ -5654,6 +5655,7 @@ mod tests {
             },
             work_request: WorkRequest::background(WorkClass::Analytics, 64),
             plan_cache_lookup: skein::PlanCacheLookup::Miss,
+            statement_kind: "match_return",
             trace: OptimizerTrace {
                 groups: 1,
                 search_mode: skein::optimizer::SearchMode::Memo,
@@ -5706,6 +5708,7 @@ mod tests {
         assert_eq!(json["protocol"], "skein-explain");
         assert_eq!(json["protocol_version"], 1);
         assert_eq!(json["search_mode"], "memo");
+        assert_eq!(json["statement_kind"], "match_return");
         assert_eq!(json["parameters"]["id"], 42);
         assert_eq!(
             json["selected_plan_fingerprint"],

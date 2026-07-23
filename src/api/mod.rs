@@ -236,6 +236,7 @@ pub struct NowledgeGraphExplainOutput {
     pub trace: OptimizerTrace,
     pub work_request: WorkRequest,
     pub plan_cache_lookup: PlanCacheLookup,
+    pub statement_kind: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5482,6 +5483,7 @@ pub struct ExplainOutput {
     pub trace: OptimizerTrace,
     pub work_request: WorkRequest,
     pub plan_cache_lookup: PlanCacheLookup,
+    pub statement_kind: &'static str,
 }
 
 pub(crate) struct QueryExecutionTrace {
@@ -5965,6 +5967,7 @@ impl Database {
             trace: optimized.trace,
             work_request,
             plan_cache_lookup: optimized.plan_cache_lookup,
+            statement_kind: statement_kind(statement_body(&statement)),
         })
     }
 
@@ -29300,7 +29303,7 @@ fn statement_body(statement: &cypher::Statement) -> &cypher::Statement {
     }
 }
 
-fn statement_kind(statement: &cypher::Statement) -> &'static str {
+pub(crate) fn statement_kind(statement: &cypher::Statement) -> &'static str {
     match statement {
         cypher::Statement::AlterPropertyState(_) => "alter_property_state",
         cypher::Statement::AlterTableState(_) => "alter_table_state",
@@ -29437,6 +29440,7 @@ impl<'a> NowledgeGraphAdapter<'a> {
             trace: output.trace,
             work_request: output.work_request,
             plan_cache_lookup: output.plan_cache_lookup,
+            statement_kind: output.statement_kind,
         })
     }
 
@@ -29551,6 +29555,7 @@ impl DatabaseSession<'_> {
             trace: optimized.trace,
             work_request,
             plan_cache_lookup: optimized.plan_cache_lookup,
+            statement_kind: statement_kind(statement_body(&statement)),
         })
     }
 
@@ -29875,6 +29880,7 @@ impl DatabaseReadTransaction {
             trace: optimized.trace,
             work_request,
             plan_cache_lookup: optimized.plan_cache_lookup,
+            statement_kind: statement_kind(statement_body(&statement)),
         })
     }
 
