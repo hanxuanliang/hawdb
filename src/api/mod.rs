@@ -61,6 +61,7 @@ use std::str::FromStr;
 
 mod artifact_jobs;
 mod plan_cache;
+mod system_sql;
 
 const DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES: usize = 4096;
 
@@ -77,6 +78,7 @@ pub struct Database {
     store: GraphStore,
     optimizer: CascadesOptimizer,
     plan_cache: RefCell<PlanCache>,
+    slow_query_log: RefCell<system_sql::SlowQueryLog>,
     config: DatabaseConfig,
     system_variables: QuerySystemVariables,
     reader_pins: Rc<RefCell<ReaderPins>>,
@@ -93,6 +95,8 @@ pub struct DatabaseConfig {
     pub max_wal_replay_entries: Option<usize>,
     pub max_search_projection_change_log_entries: Option<usize>,
     pub max_plan_cache_entries: Option<usize>,
+    pub slow_query_log_capacity: usize,
+    pub slow_query_log_threshold_micros: u128,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
 }
 
@@ -115,6 +119,8 @@ impl Default for DatabaseConfig {
                 DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES,
             ),
             max_plan_cache_entries: Some(DEFAULT_PLAN_CACHE_MAX_ENTRIES),
+            slow_query_log_capacity: system_sql::DEFAULT_SLOW_QUERY_LOG_CAPACITY,
+            slow_query_log_threshold_micros: system_sql::DEFAULT_SLOW_QUERY_LOG_THRESHOLD_MICROS,
             compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
         }
     }
@@ -5493,6 +5499,7 @@ pub struct DatabaseReadTransaction {
     store: GraphStore,
     optimizer: CascadesOptimizer,
     plan_cache: RefCell<PlanCache>,
+    slow_query_snapshot: Vec<system_sql::SlowQueryRecord>,
     config: DatabaseConfig,
     _pin: ReaderPin,
 }
@@ -5526,6 +5533,9 @@ impl Default for Database {
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
             plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
+            slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
+                config.slow_query_log_capacity,
+            )),
             config,
             system_variables: QuerySystemVariables::default(),
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
@@ -5551,6 +5561,9 @@ impl Database {
             store,
             optimizer,
             plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
+            slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
+                config.slow_query_log_capacity,
+            )),
             config,
             system_variables: QuerySystemVariables::default(),
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
@@ -5607,6 +5620,9 @@ impl Database {
             store,
             optimizer: CascadesOptimizer::new(optimizer_config_from_database_config(&config)),
             plan_cache: RefCell::new(PlanCache::new(config.max_plan_cache_entries)),
+            slow_query_log: RefCell::new(system_sql::SlowQueryLog::new(
+                config.slow_query_log_capacity,
+            )),
             config,
             system_variables: QuerySystemVariables::default(),
             reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
@@ -5641,6 +5657,7 @@ impl Database {
         cypher_text: &str,
         parameters: &BTreeMap<String, Value>,
     ) -> Result<QueryOutput> {
+        let started = std::time::Instant::now();
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
         if let cypher::Statement::SetSystemVariable(set) = body {
@@ -5656,23 +5673,71 @@ impl Database {
             self.checkpoint()?;
             return Ok(QueryOutput { rows: Vec::new() });
         }
-        query_work_request_for_statement(&self.system_variables, &statement)?;
-        let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
-        let is_mutation = executor::is_mutation_plan(&physical)?;
-        if is_mutation {
-            self.ensure_writable()?;
+        let query_result = (|| {
+            query_work_request_for_statement(&self.system_variables, &statement)?;
+            let (physical, _) = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+            let is_mutation = executor::is_mutation_plan(&physical)?;
+            if is_mutation {
+                self.ensure_writable()?;
+            }
+            let rows = if is_mutation {
+                executor::execute(&physical, &mut self.catalog, &mut self.store)?
+            } else {
+                executor::execute_with_row_limit(
+                    &physical,
+                    &mut self.catalog,
+                    &mut self.store,
+                    self.config.max_read_result_rows,
+                )?
+            };
+            Ok(QueryOutput { rows })
+        })();
+        if let Ok(output) = &query_result {
+            self.record_completed_query("cypher", cypher_text, started, output);
         }
-        let rows = if is_mutation {
-            executor::execute(&physical, &mut self.catalog, &mut self.store)?
-        } else {
-            executor::execute_with_row_limit(
-                &physical,
-                &mut self.catalog,
-                &mut self.store,
-                self.config.max_read_result_rows,
-            )?
-        };
-        Ok(QueryOutput { rows })
+        query_result
+    }
+
+    fn record_completed_query(
+        &self,
+        query_language: &str,
+        query_text: &str,
+        started: std::time::Instant,
+        output: &QueryOutput,
+    ) {
+        let elapsed_micros = started.elapsed().as_micros();
+        let slow_log_candidate = elapsed_micros >= self.config.slow_query_log_threshold_micros;
+        if !slow_log_candidate {
+            return;
+        }
+        self.slow_query_log
+            .borrow_mut()
+            .push(system_sql::SlowQueryRecord::completed(
+                query_language,
+                query_text,
+                elapsed_micros,
+                output.rows.len(),
+                true,
+                None,
+                slow_log_candidate,
+            ));
+    }
+
+    pub fn query_sql(&self, sql_text: &str) -> Result<QueryOutput> {
+        self.query_sql_bounded(sql_text, self.config.max_read_result_rows)
+    }
+
+    pub fn query_sql_bounded(
+        &self,
+        sql_text: &str,
+        max_rows: Option<usize>,
+    ) -> Result<QueryOutput> {
+        system_sql::query_sql(
+            sql_text,
+            max_rows,
+            &self.plan_cache.borrow().stats(),
+            &self.slow_query_log.borrow().snapshot(),
+        )
     }
 
     pub fn begin_transaction(&mut self) -> DatabaseTransaction<'_> {
@@ -5705,6 +5770,7 @@ impl Database {
             store: self.store.snapshot(),
             optimizer: self.optimizer.clone(),
             plan_cache: RefCell::new(PlanCache::new(self.config.max_plan_cache_entries)),
+            slow_query_snapshot: self.slow_query_log.borrow().snapshot(),
             config: self.config.clone(),
             _pin: pin,
         }
@@ -30318,6 +30384,23 @@ impl DatabaseReadTransaction {
             output: QueryOutput { rows },
             execution_profile,
         })
+    }
+
+    pub fn query_sql(&self, sql_text: &str) -> Result<QueryOutput> {
+        self.query_sql_bounded(sql_text, self.config.max_read_result_rows)
+    }
+
+    pub fn query_sql_bounded(
+        &self,
+        sql_text: &str,
+        max_rows: Option<usize>,
+    ) -> Result<QueryOutput> {
+        system_sql::query_sql(
+            sql_text,
+            max_rows,
+            &self.plan_cache.borrow().stats(),
+            &self.slow_query_snapshot,
+        )
     }
 
     pub fn explain_query(&self, cypher_text: &str) -> Result<ExplainOutput> {

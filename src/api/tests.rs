@@ -25410,6 +25410,155 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
 }
 
 #[test]
+fn sql_reads_plan_cache_virtual_table() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+
+    db.explain_query(query).unwrap();
+    db.explain_query(query).unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT metric, value FROM system.plan_cache \
+             WHERE metric IN ('entries', 'hits', 'misses') \
+             ORDER BY metric",
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![
+            BTreeMap::from([
+                ("metric".to_string(), Value::String("entries".to_string())),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+            BTreeMap::from([
+                ("metric".to_string(), Value::String("hits".to_string())),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+            BTreeMap::from([
+                ("metric".to_string(), Value::String("misses".to_string())),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+        ]
+    );
+}
+
+#[test]
+fn sql_system_table_queries_do_not_use_plan_cache() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+
+    db.explain_query(query).unwrap();
+    db.explain_query(query).unwrap();
+    let before = db.plan_cache_stats();
+
+    db.query_sql("SELECT * FROM system.plan_cache").unwrap();
+    db.query_sql("SELECT * FROM system.slow_queries").unwrap();
+
+    let after = db.plan_cache_stats();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn sql_reads_completed_slow_query_ring() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'm1', title: 'Graph foundations'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm1'}) RETURN m.title AS title")
+        .unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT query_language, row_count, slow_log_candidate \
+             FROM system.slow_queries \
+             WHERE query_language = 'cypher' AND slow_log_candidate = true \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([
+            (
+                "query_language".to_string(),
+                Value::String("cypher".to_string())
+            ),
+            ("row_count".to_string(), Value::Int(1)),
+            ("slow_log_candidate".to_string(), Value::Bool(true)),
+        ])]
+    );
+}
+
+#[test]
+fn failed_cypher_queries_do_not_enter_slow_query_ring() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        read_only: true,
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    let error = db
+        .query("CREATE (:Memory {id: 'blocked', title: 'Blocked write'})")
+        .expect_err("read-only mutation should fail");
+    assert!(error.to_string().contains("read-only"));
+
+    let output = db.query_sql("SELECT * FROM system.slow_queries").unwrap();
+
+    assert!(output.rows.is_empty());
+}
+
+#[test]
+fn cypher_queries_below_slow_threshold_do_not_enter_slow_query_ring() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: u128::MAX,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'fast', title: 'Fast path'})")
+        .unwrap();
+
+    let output = db.query_sql("SELECT * FROM system.slow_queries").unwrap();
+
+    assert!(output.rows.is_empty());
+}
+
+#[test]
+fn read_transaction_sql_reads_slow_query_snapshot() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'before-read-tx', title: 'Before'})")
+        .unwrap();
+    let read_tx = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'after-read-tx', title: 'After'})")
+        .unwrap();
+
+    let output = read_tx
+        .query_sql("SELECT sequence FROM system.slow_queries ORDER BY sequence")
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(output.rows[0].get("sequence"), Some(&Value::Int(1)));
+}
+
+#[test]
 fn plan_cache_misses_after_graph_commit_epoch_changes() {
     let mut db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),

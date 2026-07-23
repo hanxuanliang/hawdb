@@ -27,6 +27,10 @@ pub mod value {
     pub use skein_core::value::*;
 }
 
+pub mod sql {
+    pub use skein_sql::*;
+}
+
 pub use analytics::{
     CommunityAssignment, LouvainOptions, PageRankOptions, PageRankScore, ProjectedGraph,
 };
