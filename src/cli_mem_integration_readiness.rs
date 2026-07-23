@@ -1,6 +1,6 @@
 use skein::{
-    Result, SkeinError, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::path::Path;
 
@@ -520,6 +520,95 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ),
         ),
         check(
+            "library_readiness",
+            [
+                str_path(bundle, &["library_readiness", "protocol"])
+                    == Some(NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL),
+                bool_path(bundle, &["library_readiness", "present"]) == Some(true),
+                bool_path(bundle, &["library_readiness", "ready"]) == Some(true),
+                u64_path(bundle, &["library_readiness", "ready_area_count"])
+                    .is_some_and(|value| value > 0),
+                u64_path(bundle, &["library_readiness", "blocked_area_count"]) == Some(0),
+                bool_path(bundle, &["library_readiness", "open_report", "graph_opened"])
+                    == Some(true),
+                bool_path(
+                    bundle,
+                    &["library_readiness", "open_report", "search_projection_opened"],
+                ) == Some(true),
+                library_readiness_area_ready(bundle, "graph"),
+                library_readiness_area_ready(bundle, "query"),
+                library_readiness_area_ready(bundle, "storage"),
+                library_readiness_area_ready(bundle, "background"),
+                library_readiness_area_ready(bundle, "query_family"),
+                library_readiness_area_ready(bundle, "search_projection"),
+                library_readiness_area_ready(bundle, "search_projection_shadow"),
+            ],
+            [
+                "library_readiness.protocol",
+                "library_readiness.present",
+                "library_readiness.ready",
+                "library_readiness.ready_area_count",
+                "library_readiness.blocked_area_count",
+                "library_readiness.open_report.graph_opened",
+                "library_readiness.open_report.search_projection_opened",
+                "library_readiness.readiness_by_area.graph.ready",
+                "library_readiness.readiness_by_area.query.ready",
+                "library_readiness.readiness_by_area.storage.ready",
+                "library_readiness.readiness_by_area.background.ready",
+                "library_readiness.readiness_by_area.query_family.ready",
+                "library_readiness.readiness_by_area.search_projection.ready",
+                "library_readiness.readiness_by_area.search_projection_shadow.ready",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &["library_readiness", "blocker_codes"][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "graph",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "query",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "storage",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "background",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "query_family",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "search_projection",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "library_readiness",
+                        "readiness_by_area",
+                        "search_projection_shadow",
+                        "blocker_codes",
+                    ][..],
+                ],
+            ),
+        ),
+        check(
             "background_maintenance_evidence",
             [
                 bool_path(
@@ -938,6 +1027,20 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if !library_readiness_ready(bundle) {
+        actions.push(next_action(
+            "attach_library_readiness_evidence",
+            "Nowledge Mem cutover requires the Skein Rust library to open graph, search projection, and required evidence areas",
+            [
+                "library_readiness.protocol",
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.open_report.graph_opened",
+                "library_readiness.open_report.search_projection_opened",
+                "library_readiness.readiness_by_area",
+            ],
+        ));
+    }
     if !replacement_summary_storage_recovery_ready(bundle) {
         actions.push(next_action(
             "attach_storage_recovery_report",
@@ -1229,6 +1332,48 @@ fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
         &["graph_route_readiness", "primary_ready_route_count"],
     );
     route_count.is_some_and(|value| value > 0) && route_count == primary_ready_route_count
+}
+
+fn library_readiness_ready(bundle: &serde_json::Value) -> bool {
+    str_path(bundle, &["library_readiness", "protocol"])
+        == Some(NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL)
+        && bool_path(bundle, &["library_readiness", "present"]) == Some(true)
+        && bool_path(bundle, &["library_readiness", "ready"]) == Some(true)
+        && u64_path(bundle, &["library_readiness", "ready_area_count"])
+            .is_some_and(|value| value > 0)
+        && u64_path(bundle, &["library_readiness", "blocked_area_count"]) == Some(0)
+        && bool_path(
+            bundle,
+            &["library_readiness", "open_report", "graph_opened"],
+        ) == Some(true)
+        && bool_path(
+            bundle,
+            &[
+                "library_readiness",
+                "open_report",
+                "search_projection_opened",
+            ],
+        ) == Some(true)
+        && [
+            "graph",
+            "query",
+            "storage",
+            "background",
+            "query_family",
+            "search_projection",
+            "search_projection_shadow",
+        ]
+        .into_iter()
+        .all(|area| library_readiness_area_ready(bundle, area))
+}
+
+fn library_readiness_area_ready(bundle: &serde_json::Value, area: &str) -> bool {
+    json_get_path(
+        bundle,
+        &["library_readiness", "readiness_by_area", area, "ready"],
+    )
+    .and_then(serde_json::Value::as_bool)
+        == Some(true)
 }
 
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
@@ -2000,6 +2145,92 @@ mod tests {
     }
 
     #[test]
+    fn requires_library_readiness_evidence() {
+        let mut bundle = ready_bundle();
+        bundle.as_object_mut().unwrap().remove("library_readiness");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        let library_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(
+            library_check["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.protocol",
+                "library_readiness.present",
+                "library_readiness.ready",
+                "library_readiness.ready_area_count",
+                "library_readiness.blocked_area_count",
+                "library_readiness.open_report.graph_opened",
+                "library_readiness.open_report.search_projection_opened",
+                "library_readiness.readiness_by_area.graph.ready",
+                "library_readiness.readiness_by_area.query.ready",
+                "library_readiness.readiness_by_area.storage.ready",
+                "library_readiness.readiness_by_area.background.ready",
+                "library_readiness.readiness_by_area.query_family.ready",
+                "library_readiness.readiness_by_area.search_projection.ready",
+                "library_readiness.readiness_by_area.search_projection_shadow.ready"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_library_readiness_evidence"));
+    }
+
+    #[test]
+    fn rejects_blocked_library_readiness_area() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["blocked_area_count"] = serde_json::json!(1);
+        bundle["library_readiness"]["blocker_codes"] =
+            serde_json::json!(["search_projection_not_ready"]);
+        bundle["library_readiness"]["readiness_by_area"]["search_projection"]["ready"] =
+            serde_json::json!(false);
+        bundle["library_readiness"]["readiness_by_area"]["search_projection"]["blocker_codes"] =
+            serde_json::json!(["search_projection_probe_missing"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!([
+                "search_projection_not_ready",
+                "search_projection_probe_missing"
+            ])
+        );
+        let library_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(
+            library_check["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.readiness_by_area.search_projection.ready"
+            ])
+        );
+    }
+
+    #[test]
     fn requires_background_maintenance_evidence() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_ready"] =
@@ -2355,6 +2586,86 @@ mod tests {
                 }
             ]
         });
+        bundle["library_readiness"] = ready_library_readiness();
         bundle
+    }
+
+    fn ready_library_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-mem-library-readiness-v1",
+            "present": true,
+            "ready": true,
+            "mode": "shadow_read_only",
+            "ready_area_count": 7,
+            "blocked_area_count": 0,
+            "blocker_codes": [],
+            "open_report": {
+                "protocol": "skein-nowledge-mem-open-report",
+                "mode": "shadow_read_only",
+                "graph_configured": true,
+                "search_projection_configured": true,
+                "compressed_vector_search_mode": "disabled",
+                "graph_opened": true,
+                "search_projection_opened": true
+            },
+            "graph": {
+                "open": true,
+                "mode": "shadow_read_only",
+                "read_only": true
+            },
+            "readiness_by_area": {
+                "graph": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "query": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "storage": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "background": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "query_family": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "search_projection": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "search_projection_shadow": {
+                    "ready": true,
+                    "blocker_codes": []
+                }
+            },
+            "bounded_read_evidence": {
+                "ready": true,
+                "blocker_codes": []
+            },
+            "query_family_evidence": {
+                "ready": true,
+                "blocker_codes": []
+            },
+            "storage_recovery": {
+                "ready": true,
+                "blocker_codes": []
+            },
+            "background_maintenance": {
+                "blocker_codes": []
+            },
+            "search_projection_evidence": {
+                "ready": true,
+                "blocker_codes": []
+            },
+            "search_projection_shadow_evidence": {
+                "ready": true,
+                "blocker_codes": []
+            }
+        })
     }
 }

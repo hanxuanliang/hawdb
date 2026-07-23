@@ -642,6 +642,13 @@ paths. Use `--require-ready` in release automation when missing route coverage,
 query-family evidence, search projection parity, storage recovery, or
 background-maintenance readiness must fail the command.
 
+Nightly Mem replacement bundles should include this command output as the
+top-level `library_readiness` object. `nowledge-mem-integration-readiness
+--require-ready` treats `skein-nowledge-mem-library-readiness-v1` as required
+cutover evidence and fails closed unless the graph store, search projection,
+query families, bounded reads, storage recovery, and background maintenance are
+all ready through the Rust embedded library surface.
+
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
 automation that must reject self-shadow smoke runs, missing shadow parity
