@@ -25346,8 +25346,10 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
     assert_eq!(stats.entries, 1);
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 1);
+    assert_eq!(stats.admissions, 1);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 0);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]
@@ -25364,7 +25366,7 @@ fn sql_reads_plan_cache_virtual_table() {
     let output = db
         .query_sql(
             "SELECT metric, value FROM system.plan_cache \
-             WHERE metric IN ('entries', 'hits', 'misses') \
+             WHERE metric IN ('admissions', 'entries', 'hits', 'memory_pressure_events', 'misses') \
              ORDER BY metric",
         )
         .unwrap();
@@ -25373,12 +25375,26 @@ fn sql_reads_plan_cache_virtual_table() {
         output.rows,
         vec![
             BTreeMap::from([
+                (
+                    "metric".to_string(),
+                    Value::String("admissions".to_string())
+                ),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+            BTreeMap::from([
                 ("metric".to_string(), Value::String("entries".to_string())),
                 ("value".to_string(), Value::Int(1)),
             ]),
             BTreeMap::from([
                 ("metric".to_string(), Value::String("hits".to_string())),
                 ("value".to_string(), Value::Int(1)),
+            ]),
+            BTreeMap::from([
+                (
+                    "metric".to_string(),
+                    Value::String("memory_pressure_events".to_string())
+                ),
+                ("value".to_string(), Value::Int(0)),
             ]),
             BTreeMap::from([
                 ("metric".to_string(), Value::String("misses".to_string())),
@@ -25839,8 +25855,10 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.admissions, 2);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 1);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]
@@ -25879,8 +25897,10 @@ fn plan_cache_misses_after_index_descriptor_changes() {
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.admissions, 2);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 1);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]
@@ -25920,9 +25940,11 @@ fn plan_cache_evicts_least_frequently_used_plan() {
     assert_eq!(stats.entries, 2);
     assert_eq!(stats.hits, 2);
     assert_eq!(stats.misses, 4);
+    assert_eq!(stats.admissions, 4);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 0);
     assert_eq!(stats.evictions, 2);
+    assert_eq!(stats.memory_pressure_events, 2);
 }
 
 #[test]
@@ -25959,9 +25981,11 @@ fn plan_cache_can_be_disabled_with_zero_capacity() {
     assert_eq!(stats.entries, 0);
     assert_eq!(stats.hits, 0);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.admissions, 0);
     assert_eq!(stats.disabled_misses, 2);
     assert_eq!(stats.bypasses, 0);
     assert_eq!(stats.evictions, 0);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]
@@ -25988,9 +26012,11 @@ fn plan_cache_records_bypassed_mutation_explain_separately() {
     assert_eq!(stats.entries, 0);
     assert_eq!(stats.hits, 0);
     assert_eq!(stats.misses, 0);
+    assert_eq!(stats.admissions, 0);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 1);
     assert_eq!(stats.evictions, 0);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]

@@ -6,9 +6,11 @@ pub struct PlanCacheStats {
     pub entries: usize,
     pub hits: u64,
     pub misses: u64,
+    pub admissions: u64,
     pub disabled_misses: u64,
     pub bypasses: u64,
     pub evictions: u64,
+    pub memory_pressure_events: u64,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -25,9 +27,11 @@ pub struct LfuCache<K, V> {
     access_tick: u64,
     hits: u64,
     misses: u64,
+    admissions: u64,
     disabled_misses: u64,
     bypasses: u64,
     evictions: u64,
+    memory_pressure_events: u64,
 }
 
 impl<K, V> LfuCache<K, V>
@@ -42,9 +46,11 @@ where
             access_tick: 0,
             hits: 0,
             misses: 0,
+            admissions: 0,
             disabled_misses: 0,
             bypasses: 0,
             evictions: 0,
+            memory_pressure_events: 0,
         }
     }
 
@@ -72,12 +78,18 @@ where
     pub fn insert(&mut self, key: K, value: V) {
         let Some(max_entries) = self.max_entries else {
             self.insert_entry(key, value);
+            self.admissions = self.admissions.saturating_add(1);
             return;
         };
         if max_entries == 0 {
             return;
         }
+        let new_key = !self.entries.contains_key(&key);
+        if new_key && self.entries.len() >= max_entries {
+            self.memory_pressure_events = self.memory_pressure_events.saturating_add(1);
+        }
         self.insert_entry(key, value);
+        self.admissions = self.admissions.saturating_add(1);
         while self.entries.len() > max_entries {
             let Some(evicted) = self.lfu_victim_key() else {
                 break;
@@ -125,9 +137,11 @@ where
             entries: self.entries.len(),
             hits: self.hits,
             misses: self.misses,
+            admissions: self.admissions,
             disabled_misses: self.disabled_misses,
             bypasses: self.bypasses,
             evictions: self.evictions,
+            memory_pressure_events: self.memory_pressure_events,
         }
     }
 }
@@ -148,7 +162,9 @@ mod tests {
         assert_eq!(cache.get(&"hot"), Some(1));
         assert_eq!(cache.get(&"new"), Some(3));
         assert_eq!(cache.get(&"cold"), None);
+        assert_eq!(cache.stats().admissions, 3);
         assert_eq!(cache.stats().evictions, 1);
+        assert_eq!(cache.stats().memory_pressure_events, 1);
     }
 
     #[test]
@@ -172,6 +188,8 @@ mod tests {
         assert_eq!(cache.stats().entries, 0);
         assert_eq!(cache.stats().misses, 1);
         assert_eq!(cache.stats().disabled_misses, 1);
+        assert_eq!(cache.stats().admissions, 0);
+        assert_eq!(cache.stats().memory_pressure_events, 0);
     }
 
     #[test]
@@ -183,5 +201,19 @@ mod tests {
         assert_eq!(cache.stats().bypasses, 1);
         assert_eq!(cache.stats().misses, 0);
         assert_eq!(cache.stats().hits, 0);
+        assert_eq!(cache.stats().admissions, 0);
+    }
+
+    #[test]
+    fn unbounded_cache_records_admissions_without_pressure() {
+        let mut cache = LfuCache::new(None);
+
+        cache.insert("first", 1);
+        cache.insert("second", 2);
+
+        assert_eq!(cache.stats().entries, 2);
+        assert_eq!(cache.stats().admissions, 2);
+        assert_eq!(cache.stats().memory_pressure_events, 0);
+        assert_eq!(cache.stats().evictions, 0);
     }
 }

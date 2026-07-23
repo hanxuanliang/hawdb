@@ -422,9 +422,14 @@ fn plan_cache_rows(stats: &PlanCacheStats) -> Vec<Row> {
         ("entries", usize_value(stats.entries)),
         ("hits", u64_value(stats.hits)),
         ("misses", u64_value(stats.misses)),
+        ("admissions", u64_value(stats.admissions)),
         ("disabled_misses", u64_value(stats.disabled_misses)),
         ("bypasses", u64_value(stats.bypasses)),
         ("evictions", u64_value(stats.evictions)),
+        (
+            "memory_pressure_events",
+            u64_value(stats.memory_pressure_events),
+        ),
     ]
     .into_iter()
     .map(|(metric, value)| {
@@ -798,9 +803,11 @@ mod tests {
             entries: 3,
             hits: 5,
             misses: 7,
+            admissions: 4,
             disabled_misses: 0,
             bypasses: 2,
             evictions: 1,
+            memory_pressure_events: 1,
         };
 
         let output = query_sql(
@@ -866,9 +873,11 @@ mod tests {
                 entries: 0,
                 hits: 0,
                 misses: 0,
+                admissions: 0,
                 disabled_misses: 0,
                 bypasses: 0,
                 evictions: 0,
+                memory_pressure_events: 0,
             },
             &records,
             &[],

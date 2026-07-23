@@ -88,7 +88,7 @@ query family, or cutover gate requires them.
 
 - [ ] Add compact readiness dashboards for route, query-family, storage, search,
   and background-maintenance blockers.
-- [ ] Add stable counters for plan cache hit, miss, admission, eviction, and
+- [x] Add stable counters for plan cache hit, miss, admission, eviction, and
   memory pressure.
 - [ ] Add explain output that includes semantic checks, selected fast path,
   optimizer budget, chosen indexes, scan-pruning decisions, and resource class.

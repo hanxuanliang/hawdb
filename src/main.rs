@@ -4302,9 +4302,11 @@ fn explain_output_json(
             "entries": plan_cache_stats.entries,
             "hits": plan_cache_stats.hits,
             "misses": plan_cache_stats.misses,
+            "admissions": plan_cache_stats.admissions,
             "disabled_misses": plan_cache_stats.disabled_misses,
             "bypasses": plan_cache_stats.bypasses,
             "evictions": plan_cache_stats.evictions,
+            "memory_pressure_events": plan_cache_stats.memory_pressure_events,
         },
         "warnings": output.trace.warnings,
         "decisions": output.trace.decisions,
@@ -5694,9 +5696,11 @@ mod tests {
             entries: 1,
             hits: 2,
             misses: 3,
+            admissions: 6,
             disabled_misses: 1,
             bypasses: 5,
             evictions: 4,
+            memory_pressure_events: 2,
         };
         let json = explain_output_json(
             "MATCH (m:Memory {id: $id}) RETURN m",
@@ -5738,9 +5742,11 @@ mod tests {
         assert_eq!(json["plan_cache_stats"]["entries"], 1);
         assert_eq!(json["plan_cache_stats"]["hits"], 2);
         assert_eq!(json["plan_cache_stats"]["misses"], 3);
+        assert_eq!(json["plan_cache_stats"]["admissions"], 6);
         assert_eq!(json["plan_cache_stats"]["disabled_misses"], 1);
         assert_eq!(json["plan_cache_stats"]["bypasses"], 5);
         assert_eq!(json["plan_cache_stats"]["evictions"], 4);
+        assert_eq!(json["plan_cache_stats"]["memory_pressure_events"], 2);
         assert_eq!(json["warnings"][0], "diagnostic warning");
         assert_eq!(json["decisions"][0], "diagnostic decision");
         assert_eq!(
