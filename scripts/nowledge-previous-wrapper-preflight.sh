@@ -24,6 +24,17 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--library-readiness-json <path>] \
   [--library-readiness-graph <path>] \
   [--library-readiness-search-projection <path>] \
+  [--require-integration-readiness] \
+  [--graph-route-readiness-json <path>] \
+  [--integration-submodule-path <path>] \
+  [--integration-submodule-commit <commit>] \
+  [--integration-legacy-data-retained] \
+  [--integration-legacy-data-deleted] \
+  [--integration-coexistence-mode shadow|side_by_side] \
+  [--integration-content-store-present] \
+  [--integration-content-store-engine <engine>] \
+  [--integration-content-store-messages-available] \
+  [--integration-content-store-source-chunks-available] \
   -- <wrapper-command> [args...]
 
 Runs the Skein-side Nowledge previous-wrapper production preflight bundle.
@@ -48,6 +59,17 @@ bounded_read_max_estimated_payload_bytes=
 library_readiness_json=
 library_readiness_graph=
 library_readiness_search_projection=
+require_integration_readiness=false
+graph_route_readiness_json=
+integration_submodule_path=
+integration_submodule_commit=
+integration_legacy_data_retained=false
+integration_legacy_data_deleted=false
+integration_coexistence_mode=
+integration_content_store_present=false
+integration_content_store_engine=
+integration_content_store_messages_available=false
+integration_content_store_source_chunks_available=false
 
 while (($# > 0)); do
   case "$1" in
@@ -115,6 +137,50 @@ while (($# > 0)); do
       library_readiness_search_projection="${2:-}"
       shift 2
       ;;
+    --require-integration-readiness)
+      require_integration_readiness=true
+      shift
+      ;;
+    --graph-route-readiness-json)
+      graph_route_readiness_json="${2:-}"
+      shift 2
+      ;;
+    --integration-submodule-path)
+      integration_submodule_path="${2:-}"
+      shift 2
+      ;;
+    --integration-submodule-commit)
+      integration_submodule_commit="${2:-}"
+      shift 2
+      ;;
+    --integration-legacy-data-retained)
+      integration_legacy_data_retained=true
+      shift
+      ;;
+    --integration-legacy-data-deleted)
+      integration_legacy_data_deleted=true
+      shift
+      ;;
+    --integration-coexistence-mode)
+      integration_coexistence_mode="${2:-}"
+      shift 2
+      ;;
+    --integration-content-store-present)
+      integration_content_store_present=true
+      shift
+      ;;
+    --integration-content-store-engine)
+      integration_content_store_engine="${2:-}"
+      shift 2
+      ;;
+    --integration-content-store-messages-available)
+      integration_content_store_messages_available=true
+      shift
+      ;;
+    --integration-content-store-source-chunks-available)
+      integration_content_store_source_chunks_available=true
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -150,7 +216,8 @@ for evidence_path in \
   "$search_projection_shadow_evidence_json" \
   "$bounded_read_evidence_json" \
   "$bounded_read_report_json" \
-  "$library_readiness_json"; do
+  "$library_readiness_json" \
+  "$graph_route_readiness_json"; do
   if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
     echo "evidence JSON does not exist or is not a file: $evidence_path" >&2
     exit 2
@@ -185,6 +252,29 @@ fi
 if [[ -n "$library_readiness_search_projection" && ! -e "$library_readiness_search_projection" ]]; then
   echo "--library-readiness-search-projection does not exist: $library_readiness_search_projection" >&2
   exit 2
+fi
+
+if [[ "$require_integration_readiness" == true ]]; then
+  if [[ -z "$graph_route_readiness_json" ]]; then
+    echo "--require-integration-readiness requires --graph-route-readiness-json" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_submodule_path" ]]; then
+    echo "--require-integration-readiness requires --integration-submodule-path" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_submodule_commit" ]]; then
+    echo "--require-integration-readiness requires --integration-submodule-commit" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_coexistence_mode" ]]; then
+    echo "--require-integration-readiness requires --integration-coexistence-mode" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_content_store_engine" ]]; then
+    echo "--require-integration-readiness requires --integration-content-store-engine" >&2
+    exit 2
+  fi
 fi
 
 mkdir -p "$preflight_root"
@@ -374,4 +464,41 @@ run_skein nowledge-previous-wrapper-preflight-check \
   --bundle-dir "$preflight_root" \
   > "$preflight_root/preflight-check.json"
 
-cat "$preflight_root/preflight-check.json"
+if [[ "$require_integration_readiness" == true ]]; then
+  integration_bundle_args=(
+    --require-ready
+    --submodule-path "$integration_submodule_path"
+    --submodule-commit "$integration_submodule_commit"
+    --coexistence-mode "$integration_coexistence_mode"
+    --content-store-engine "$integration_content_store_engine"
+    --previous-wrapper-preflight-json "$preflight_root/preflight-check.json"
+    --replacement-summary-json "$preflight_root/replacement-summary.json"
+    --bounded-read-evidence-json "$bounded_read_evidence_json"
+    --graph-route-readiness-json "$graph_route_readiness_json"
+    --library-readiness-json "$preflight_root/library-readiness.json"
+  )
+  if [[ "$integration_legacy_data_retained" == true ]]; then
+    integration_bundle_args+=(--legacy-data-retained)
+  fi
+  if [[ "$integration_legacy_data_deleted" == true ]]; then
+    integration_bundle_args+=(--legacy-data-deleted)
+  fi
+  if [[ "$integration_content_store_present" == true ]]; then
+    integration_bundle_args+=(--content-store-present)
+  fi
+  if [[ "$integration_content_store_messages_available" == true ]]; then
+    integration_bundle_args+=(--content-store-messages-available)
+  fi
+  if [[ "$integration_content_store_source_chunks_available" == true ]]; then
+    integration_bundle_args+=(--content-store-source-chunks-available)
+  fi
+  run_skein nowledge-mem-integration-bundle \
+    "${integration_bundle_args[@]}" \
+    > "$preflight_root/integration-bundle.json"
+fi
+
+if [[ "$require_integration_readiness" == true ]]; then
+  cat "$preflight_root/integration-bundle.json"
+else
+  cat "$preflight_root/preflight-check.json"
+fi

@@ -65,12 +65,24 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --preflight-root "$NMEM_PREFLIGHT_ROOT" \
   --nowledge-root /Users/hawkingrei/devel/nowledge/mem \
   --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
+  --require-integration-readiness \
+  --graph-route-readiness-json "$NMEM_PREFLIGHT_ROOT/graph-route-readiness.json" \
+  --integration-submodule-path vendor/skein \
+  --integration-submodule-commit "$(git -C vendor/skein rev-parse --short HEAD)" \
+  --integration-legacy-data-retained \
+  --integration-coexistence-mode shadow \
+  --integration-content-store-present \
+  --integration-content-store-engine sqlite \
+  --integration-content-store-messages-available \
+  --integration-content-store-source-chunks-available \
   -- "$NOWLEDGE_WRAPPER_COMMAND"
 ```
 
-The script prints `preflight-check.json` on success and leaves every
-intermediate artifact under `$NMEM_PREFLIGHT_ROOT`. Use the manual steps below
-when bringing up a new wrapper command or debugging a specific failed stage.
+The script prints `integration-bundle.json` on success when
+`--require-integration-readiness` is enabled; otherwise it prints
+`preflight-check.json`. It leaves every intermediate artifact under
+`$NMEM_PREFLIGHT_ROOT`. Use the manual steps below when bringing up a new
+wrapper command or debugging a specific failed stage.
 
 ## 1. Export The Contract
 
@@ -316,8 +328,8 @@ submodule, legacy Kuzu/Ladybug and LanceDB data must still be retained
 side-by-side, and `content.db` must remain available for message and source
 chunk payloads.
 
-Use the Rust bundle composer to avoid keeping a Python-only builder on the
-critical path:
+Use the Rust bundle composer directly when debugging this final stage or when
+the earlier preflight artifacts were produced by another harness:
 
 ```bash
 cargo run --quiet --bin skein -- \
