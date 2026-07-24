@@ -57,8 +57,8 @@ export NOWLEDGE_WRAPPER_IDENTITY="nowledge-previous-wrapper:local-copy"
 
 Use the checked-in bundle runner for release preflight. It runs the full
 contract, adapter smoke, storage recovery, background maintenance, migration
-gate, replacement summary, and final preflight verifier in the fail-closed
-order documented below:
+gate, replacement summary, query runtime preflight, and final preflight
+verifier in the fail-closed order documented below:
 
 ```bash
 scripts/nowledge-previous-wrapper-preflight.sh \
@@ -67,6 +67,7 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
   --require-integration-readiness \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
+  --query-runtime-probe-json "$NMEM_PREFLIGHT_ROOT/query-runtime-probes.json" \
   --integration-submodule-path vendor/skein \
   --integration-submodule-commit "$(git -C vendor/skein rev-parse --short HEAD)" \
   --integration-legacy-data-retained \
@@ -297,10 +298,11 @@ cargo run --quiet --bin skein -- \
 
 The verifier checks wrapper identity consistency across the full contract,
 adapter smoke, migration gate, storage recovery evidence, background
-maintenance evidence, replacement summary, and Rust library-readiness
-artifacts. It fails closed unless every stage is ready, the storage/background
-evidence is explicitly required and present in the migration gate, the
-replacement summary has no blockers, missing evidence, or next actions, and the
+maintenance evidence, replacement summary, query runtime preflight, and Rust
+library-readiness artifacts. It fails closed unless every stage is ready, the
+storage/background evidence is explicitly required and present in the migration
+gate, the replacement summary has no blockers, missing evidence, or next
+actions, the query runtime probes all produce plan/profile evidence, and the
 embedded library surface opens graph plus search projection with every
 readiness area marked ready.
 The final preflight is stricter than compatibility summary generation: the
@@ -314,11 +316,13 @@ can report the exact missing or mismatched field without parsing blocker text.
 The final JSON also includes `release_summary`, a compact copy of the wrapper
 identity, contract counts, adapter request counts, migration/cutover decisions,
 replacement readiness, storage/background readiness, and dual-engine counts
-needed by release notes and dashboards.
+needed by release notes and dashboards, plus query runtime probe counts for
+plan-readiness tracking.
 For targeted debugging, the same command still accepts explicit
 `--contract-evidence-json`, `--adapter-smoke-json`, `--migration-gate-json`,
-`--replacement-summary-json`, and `--library-readiness-json` paths; explicit
-files override the standard names loaded from `--bundle-dir`.
+`--replacement-summary-json`, `--query-runtime-preflight-json`, and
+`--library-readiness-json` paths; explicit files override the standard names
+loaded from `--bundle-dir`.
 
 ## 9. Compile Graph Route Readiness
 
