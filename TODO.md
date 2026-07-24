@@ -92,7 +92,7 @@ query family, or cutover gate requires them.
   memory pressure.
 - [ ] Add explain output that includes semantic checks, selected fast path,
   optimizer budget, chosen indexes, scan-pruning decisions, and resource class.
-- [x] Add query-runtime preflight or harness commands for replacement artifacts
+- [ ] Add typed preflight or harness commands for all replacement artifacts
   so Python-only validation scripts can be retired from the critical path.
   - `nowledge-query-runtime-preflight` runs JSON-defined probes through the
     read-only query runtime with `EXPLAIN ANALYZE` and emits plan/profile
