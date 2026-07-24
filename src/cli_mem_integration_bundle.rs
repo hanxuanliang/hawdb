@@ -6,7 +6,7 @@ const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
-    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
+    "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
         .to_string()
 }
 
@@ -26,6 +26,7 @@ struct IntegrationBundleInputs {
     replacement_summary: Option<serde_json::Value>,
     bounded_read_evidence: Option<serde_json::Value>,
     graph_route_readiness: Option<serde_json::Value>,
+    query_runtime_preflight: Option<serde_json::Value>,
     search_candidate_shadow_evidence: Option<serde_json::Value>,
     library_readiness: Option<serde_json::Value>,
 }
@@ -78,6 +79,9 @@ pub fn run_nowledge_mem_integration_bundle(
             "--graph-route-readiness-json" => {
                 inputs.graph_route_readiness = Some(read_json_arg(&mut args)?);
             }
+            "--query-runtime-preflight-json" => {
+                inputs.query_runtime_preflight = Some(read_json_arg(&mut args)?);
+            }
             "--search-candidate-shadow-evidence-json" => {
                 inputs.search_candidate_shadow_evidence = Some(read_json_arg(&mut args)?);
             }
@@ -117,6 +121,10 @@ fn nowledge_mem_integration_bundle_json(
         require_json(inputs.bounded_read_evidence, "--bounded-read-evidence-json")?;
     let graph_route_readiness =
         require_json(inputs.graph_route_readiness, "--graph-route-readiness-json")?;
+    let query_runtime_preflight = require_json(
+        inputs.query_runtime_preflight,
+        "--query-runtime-preflight-json",
+    )?;
     let search_candidate_shadow_evidence = require_json(
         inputs.search_candidate_shadow_evidence,
         "--search-candidate-shadow-evidence-json",
@@ -161,6 +169,7 @@ fn nowledge_mem_integration_bundle_json(
         "replacement_summary_bounded_read_alignment": bounded_alignment,
         "graph_route_readiness": graph_route_readiness,
         "replacement_summary_graph_route_alignment": graph_route_alignment,
+        "query_runtime_preflight": query_runtime_preflight,
         "search_candidate_shadow_evidence": search_candidate_shadow_evidence,
         "library_readiness": library_readiness,
     }))
@@ -584,6 +593,7 @@ mod tests {
             replacement_summary: Some(ready_replacement_summary()),
             bounded_read_evidence: Some(ready_bounded_read_evidence()),
             graph_route_readiness: Some(ready_graph_route_readiness()),
+            query_runtime_preflight: Some(ready_query_runtime_preflight()),
             search_candidate_shadow_evidence: Some(ready_search_candidate_shadow_evidence()),
             library_readiness: Some(ready_library_readiness()),
         }
@@ -717,6 +727,34 @@ mod tests {
             "ready": true,
             "candidate_primary_engine": "skein",
             "blocker_codes": []
+        })
+    }
+
+    fn ready_query_runtime_preflight() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-query-runtime-preflight-v1",
+            "ready": true,
+            "database_opened": true,
+            "probe_count": 1,
+            "passed_probe_count": 1,
+            "failed_probe_count": 0,
+            "blocker_codes": [],
+            "probes": [
+                {
+                    "name": "memory-lookup",
+                    "route": "/graph/node-details/{node_id}",
+                    "query_family": "memory_lookup",
+                    "ready": true,
+                    "success": true,
+                    "output_row_count": 1,
+                    "selected_plan_fingerprint": "IndexNodeSeek(1:m:6:Memory)",
+                    "execution_profile": {
+                        "scan_pruning_report_count": 1,
+                        "pruned_scan_count": 1
+                    },
+                    "blocker_codes": []
+                }
+            ]
         })
     }
 
