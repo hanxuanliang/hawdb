@@ -15,7 +15,7 @@ use crate::{
         background_maintenance_evidence_health, background_maintenance_summary_to_json,
         replacement_readiness_family_evidence_health, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     },
-    store::{RecoveryMode, StorageRecoveryReport},
+    store::{RecoveryMode, ScanPruningReport, ScanPruningStrategy, StorageRecoveryReport},
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
@@ -347,6 +347,7 @@ pub struct NowledgeMemQueryReport {
     pub plan_cache_bypassed: bool,
     pub physical_operator_counts: BTreeMap<String, usize>,
     pub optimizer_decision_count: usize,
+    pub scan_pruning_reports: Vec<ScanPruningReport>,
 }
 
 impl NowledgeMemQueryReport {
@@ -378,6 +379,8 @@ impl NowledgeMemQueryReport {
             },
             "physical_operator_counts": self.physical_operator_counts,
             "optimizer_decision_count": self.optimizer_decision_count,
+            "scan_pruning_report_count": self.scan_pruning_reports.len(),
+            "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
         })
     }
 }
@@ -563,6 +566,7 @@ impl NowledgeMemGraph {
             &execution_trace.statement,
             execution_trace.optimizer_trace.as_ref(),
             execution_trace.plan_cache_lookup,
+            execution_trace.execution_profile.as_ref(),
             options,
             elapsed_micros,
         );
@@ -1038,6 +1042,7 @@ fn nowledge_mem_query_report(
     statement: &cypher::Statement,
     trace: Option<&crate::optimizer::OptimizerTrace>,
     plan_cache_lookup: Option<PlanCacheLookup>,
+    execution_profile: Option<&ReadExecutionProfile>,
     options: NowledgeMemQueryReportOptions,
     elapsed_micros: u128,
 ) -> NowledgeMemQueryReport {
@@ -1069,6 +1074,44 @@ fn nowledge_mem_query_report(
             .map(|trace| trace.selected_plan_operator_counts.clone())
             .unwrap_or_default(),
         optimizer_decision_count: trace.map(|trace| trace.decisions.len()).unwrap_or_default(),
+        scan_pruning_reports: execution_profile
+            .map(|profile| profile.scan_pruning_reports.clone())
+            .unwrap_or_default(),
+    }
+}
+
+fn scan_pruning_report_json(report: &ScanPruningReport) -> serde_json::Value {
+    serde_json::json!({
+        "label_id": report.label_id.map(|label_id| label_id.0),
+        "strategy": scan_pruning_strategy_json(&report.strategy),
+        "pruned": report.pruned,
+        "exact_empty": report.exact_empty,
+        "candidate_count_before_filter": report.candidate_count_before_filter,
+        "output_count": report.output_count,
+        "filtered_out_count": report.filtered_out_count,
+    })
+}
+
+fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Value {
+    match strategy {
+        ScanPruningStrategy::FullLabelScan => serde_json::json!({"kind": "full_label_scan"}),
+        ScanPruningStrategy::Empty => serde_json::json!({"kind": "empty"}),
+        ScanPruningStrategy::IdEq => serde_json::json!({"kind": "id_eq"}),
+        ScanPruningStrategy::IdIn => serde_json::json!({"kind": "id_in"}),
+        ScanPruningStrategy::IdRange => serde_json::json!({"kind": "id_range"}),
+        ScanPruningStrategy::PropertyEq { property } => {
+            serde_json::json!({"kind": "property_eq", "property": property})
+        }
+        ScanPruningStrategy::PropertyNotEq { property } => {
+            serde_json::json!({"kind": "property_not_eq", "property": property})
+        }
+        ScanPruningStrategy::PropertyIn { property } => {
+            serde_json::json!({"kind": "property_in", "property": property})
+        }
+        ScanPruningStrategy::PropertyRange { property } => {
+            serde_json::json!({"kind": "property_range", "property": property})
+        }
+        ScanPruningStrategy::OrUnion => serde_json::json!({"kind": "or_union"}),
     }
 }
 
@@ -1851,6 +1894,38 @@ mod tests {
         assert_eq!(after.entries, before.entries + 1);
         assert_eq!(after.misses, before.misses + 1);
         assert_eq!(after.hits, before.hits);
+    }
+
+    #[test]
+    fn graph_query_with_report_exposes_storage_scan_pruning() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        graph
+            .query("CREATE (:Memory {id: 'mem-prune-1', kind: 'note', title: 'Keep'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'mem-prune-2', kind: 'note', title: 'Also keep'})")
+            .unwrap();
+
+        let query = graph
+            .query_with_report("MATCH (m:Memory) WHERE m.kind = 'note' RETURN m.title AS title")
+            .unwrap();
+
+        assert_eq!(query.output.rows.len(), 2);
+        assert_eq!(query.report.scan_pruning_reports.len(), 1);
+        let scan = &query.report.scan_pruning_reports[0];
+        assert!(scan.pruned);
+        assert_eq!(scan.candidate_count_before_filter, 2);
+        assert_eq!(scan.output_count, 2);
+        assert_eq!(query.report.json()["scan_pruning_report_count"], 1);
+        assert_eq!(
+            query.report.json()["scan_pruning_reports"][0]["strategy"]["kind"],
+            "property_eq"
+        );
+        assert_eq!(
+            query.report.json()["scan_pruning_reports"][0]["strategy"]["property"],
+            "kind"
+        );
     }
 
     #[test]

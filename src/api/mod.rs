@@ -5486,10 +5486,22 @@ pub struct ExplainOutput {
     pub statement_kind: &'static str,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct ExplainAnalyzeOutput {
+    pub output: QueryOutput,
+    pub execution_profile: executor::ReadExecutionProfile,
+    pub physical_plan: PhysicalPlan,
+    pub trace: OptimizerTrace,
+    pub work_request: WorkRequest,
+    pub plan_cache_lookup: PlanCacheLookup,
+    pub statement_kind: &'static str,
+}
+
 pub(crate) struct QueryExecutionTrace {
     pub(crate) statement: cypher::Statement,
     pub(crate) optimizer_trace: Option<OptimizerTrace>,
     pub(crate) plan_cache_lookup: Option<PlanCacheLookup>,
+    pub(crate) execution_profile: Option<executor::ReadExecutionProfile>,
 }
 
 impl QueryExecutionTrace {
@@ -5498,6 +5510,7 @@ impl QueryExecutionTrace {
             statement,
             optimizer_trace: None,
             plan_cache_lookup: None,
+            execution_profile: None,
         }
     }
 }
@@ -5769,15 +5782,23 @@ impl Database {
             if is_mutation {
                 self.ensure_writable()?;
             }
-            let rows = if is_mutation {
-                executor::execute(&optimized.physical_plan, &mut self.catalog, &mut self.store)?
+            let (rows, execution_profile) = if is_mutation {
+                (
+                    executor::execute(
+                        &optimized.physical_plan,
+                        &mut self.catalog,
+                        &mut self.store,
+                    )?,
+                    None,
+                )
             } else {
-                executor::execute_with_row_limit(
+                let profiled = executor::execute_with_row_limit_profile(
                     &optimized.physical_plan,
                     &mut self.catalog,
                     &mut self.store,
                     self.config.max_read_result_rows,
-                )?
+                )?;
+                (profiled.rows, Some(profiled.profile))
             };
             Ok((
                 QueryOutput { rows },
@@ -5785,6 +5806,7 @@ impl Database {
                     statement,
                     optimizer_trace: capture_trace.then_some(optimized.trace),
                     plan_cache_lookup: Some(optimized.plan_cache_lookup),
+                    execution_profile,
                 },
             ))
         })();
@@ -5967,6 +5989,42 @@ impl Database {
         let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
         let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
         Ok(ExplainOutput {
+            physical_plan: optimized.physical_plan,
+            trace: optimized.trace,
+            work_request,
+            plan_cache_lookup: optimized.plan_cache_lookup,
+            statement_kind: statement_kind(statement_body(&statement)),
+        })
+    }
+
+    pub fn explain_analyze_query(&mut self, cypher_text: &str) -> Result<ExplainAnalyzeOutput> {
+        self.explain_analyze_query_with_params(cypher_text, &BTreeMap::new())
+    }
+
+    pub fn explain_analyze_query_with_params(
+        &mut self,
+        cypher_text: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<ExplainAnalyzeOutput> {
+        let statement = cypher::parse(cypher_text)?;
+        let work_request = query_work_request_for_statement(&self.system_variables, &statement)?;
+        let optimized = self.optimized_query_plan(cypher_text, &statement, parameters)?;
+        if executor::is_mutation_plan(&optimized.physical_plan)? {
+            return Err(SkeinError::Execution(
+                "EXPLAIN ANALYZE only supports read queries".to_string(),
+            ));
+        }
+        let profiled = executor::execute_with_row_limit_profile(
+            &optimized.physical_plan,
+            &mut self.catalog,
+            &mut self.store,
+            self.config.max_read_result_rows,
+        )?;
+        Ok(ExplainAnalyzeOutput {
+            output: QueryOutput {
+                rows: profiled.rows,
+            },
+            execution_profile: profiled.profile,
             physical_plan: optimized.physical_plan,
             trace: optimized.trace,
             work_request,
@@ -29829,17 +29887,17 @@ impl DatabaseReadTransaction {
                 "read transaction query must not be a mutation".to_string(),
             ));
         }
-        let execution_profile =
-            executor::read_execution_profile(&optimized.physical_plan, max_rows)?;
-        let rows = executor::execute_with_row_limit(
+        let profiled = executor::execute_with_row_limit_profile(
             &optimized.physical_plan,
             &mut self.catalog,
             &mut self.store,
             max_rows,
         )?;
         Ok(BoundedReadQueryOutput {
-            output: QueryOutput { rows },
-            execution_profile,
+            output: QueryOutput {
+                rows: profiled.rows,
+            },
+            execution_profile: profiled.profile,
         })
     }
 
