@@ -37,6 +37,7 @@ const BM25_B: f64 = 0.75;
 const RRF_K: f64 = 60.0;
 const SEARCH_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
 const SEARCH_COMPRESSION_LEVEL: i32 = 3;
+const SEARCH_DOCUMENT_ID_FIELD: &str = "document_id";
 #[cfg(not(test))]
 const SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS: usize = 128;
 #[cfg(test)]
@@ -3182,10 +3183,12 @@ impl SearchSegmentFieldSummary {
 fn search_segment_descriptor_fields(
     documents: &BTreeMap<String, SearchDocument>,
 ) -> BTreeSet<String> {
-    documents
+    let mut fields = documents
         .values()
         .flat_map(|document| document.metadata.keys().cloned())
-        .collect()
+        .collect::<BTreeSet<_>>();
+    fields.insert(SEARCH_DOCUMENT_ID_FIELD.to_string());
+    fields
 }
 
 fn search_document_matches_predicate(
@@ -3224,6 +3227,7 @@ fn search_document_matches_predicate(
 
 fn search_document_field_value<'a>(document: &'a SearchDocument, key: &str) -> Option<&'a str> {
     match key {
+        SEARCH_DOCUMENT_ID_FIELD => Some(document.id.as_str()),
         "space_id" => Some(
             document
                 .metadata
@@ -6902,6 +6906,104 @@ mod tests {
                 scanned_segment_count: 1,
                 numeric_range_summary_used: true,
                 value_summary_used: false,
+            }]
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_segment_descriptor_prunes_document_id_filters() {
+        let path = unique_test_dir("search_segment_descriptor_document_id");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for id in ["memory:0_old_0", "memory:0_old_1", "memory:1_target"] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: "Graph memory".to_string(),
+                        content: "segment descriptor document id retrieval".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::new(),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let descriptor =
+            std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
+        let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
+        assert_eq!(
+            descriptor.segments[0]
+                .metadata
+                .get(SEARCH_DOCUMENT_ID_FIELD)
+                .map(|summary| summary.values.clone()),
+            Some(BTreeSet::from([
+                "memory:0_old_0".to_string(),
+                "memory:0_old_1".to_string()
+            ]))
+        );
+
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index.search_with_options(
+            "segment descriptor document id retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "document_id__in".to_string(),
+                    r#"["memory:1_target"]"#.to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.hits[0].id, "memory:1_target");
+        assert!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .persisted_segment_descriptor_used
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            2
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .field_summaries,
+            vec![SearchPredicateFieldPruningReport {
+                field: SEARCH_DOCUMENT_ID_FIELD.to_string(),
+                value_kind: "numeric_or_string".to_string(),
+                operation_kinds: vec!["in".to_string()],
+                segment_count: 2,
+                pruned_segment_count: 1,
+                scanned_segment_count: 1,
+                numeric_range_summary_used: false,
+                value_summary_used: true,
             }]
         );
         std::fs::remove_dir_all(path).unwrap();
