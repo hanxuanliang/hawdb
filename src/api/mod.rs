@@ -5755,7 +5755,24 @@ impl Database {
         let started = std::time::Instant::now();
         let statement = cypher::parse(cypher_text)?;
         let body = statement_body(&statement);
-        let statement_kind_name = statement_kind(body);
+        let statement_kind_name = statement_kind(&statement);
+        if let cypher::Statement::Explain(explain) = &statement {
+            let query_result = self
+                .execute_explain_statement(cypher_text, explain, parameters)
+                .map(|output| (output, QueryExecutionTrace::uncached(statement)));
+            let statement_result = match &query_result {
+                Ok((output, _)) => Ok(output),
+                Err(error) => Err(error),
+            };
+            self.record_statement_execution(
+                "cypher",
+                cypher_text,
+                statement_kind_name,
+                started,
+                statement_result,
+            );
+            return query_result;
+        }
         if let cypher::Statement::SetSystemVariable(set) = body {
             reject_system_variable_parameters(parameters)?;
             return self
@@ -5822,6 +5839,47 @@ impl Database {
             statement_result,
         );
         query_result
+    }
+
+    fn execute_explain_statement(
+        &mut self,
+        cypher_text: &str,
+        explain: &cypher::Explain,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<QueryOutput> {
+        let work_request =
+            query_work_request_for_statement(&self.system_variables, &explain.statement)?;
+        let optimized = self.optimized_query_plan(cypher_text, &explain.statement, parameters)?;
+        let inner_statement_kind = statement_kind(statement_body(&explain.statement));
+        if explain.analyze {
+            if executor::is_mutation_plan(&optimized.physical_plan)? {
+                return Err(SkeinError::Execution(
+                    "EXPLAIN ANALYZE only supports read queries".to_string(),
+                ));
+            }
+            let profiled = executor::execute_with_row_limit_profile(
+                &optimized.physical_plan,
+                &mut self.catalog,
+                &mut self.store,
+                self.config.max_read_result_rows,
+            )?;
+            return Ok(QueryOutput {
+                rows: vec![explain_analyze_output_row(
+                    &optimized,
+                    work_request,
+                    inner_statement_kind,
+                    profiled.rows.len(),
+                    &profiled.profile,
+                )],
+            });
+        }
+        Ok(QueryOutput {
+            rows: vec![explain_output_row(
+                &optimized,
+                work_request,
+                inner_statement_kind,
+            )],
+        })
     }
 
     fn record_statement_execution(
@@ -29394,6 +29452,13 @@ pub(crate) fn statement_kind(statement: &cypher::Statement) -> &'static str {
         }
         cypher::Statement::CreateUniqueConstraint(_) => "create_unique_constraint",
         cypher::Statement::CypherQuery(query) => statement_kind(&query.statement),
+        cypher::Statement::Explain(explain) => {
+            if explain.analyze {
+                "explain_analyze"
+            } else {
+                "explain"
+            }
+        }
         cypher::Statement::GraphAlgorithm(_) => "graph_algorithm",
         cypher::Statement::MatchCreateRelationship(_) => "match_create_relationship",
         cypher::Statement::MatchDelete(_) => "match_delete",
@@ -29427,6 +29492,9 @@ fn query_work_request_for_statement(
         cypher::Statement::CypherQuery(query) => variables
             .apply_system_variable_hints(&query.system_variables)
             .map(|variables| variables.query_work_request()),
+        cypher::Statement::Explain(explain) => {
+            query_work_request_for_statement(variables, &explain.statement)
+        }
         _ => Ok(variables.query_work_request()),
     }
 }
@@ -29757,6 +29825,97 @@ struct OptimizedQueryPlan {
     physical_plan: PhysicalPlan,
     trace: OptimizerTrace,
     plan_cache_lookup: PlanCacheLookup,
+}
+
+fn explain_output_row(
+    optimized: &OptimizedQueryPlan,
+    work_request: WorkRequest,
+    statement_kind: &'static str,
+) -> Row {
+    let mut row = Row::new();
+    row.insert("mode".to_string(), Value::String("explain".to_string()));
+    row.insert(
+        "statement_kind".to_string(),
+        Value::String(statement_kind.to_string()),
+    );
+    row.insert(
+        "plan".to_string(),
+        Value::String(optimized.physical_plan.explain(0)),
+    );
+    row.insert(
+        "selected_plan".to_string(),
+        Value::String(optimized.trace.selected_plan.clone()),
+    );
+    row.insert(
+        "selected_plan_fingerprint".to_string(),
+        Value::String(optimized.trace.selected_plan_fingerprint.clone()),
+    );
+    row.insert(
+        "plan_cache_lookup".to_string(),
+        Value::String(optimized.plan_cache_lookup.as_str().to_string()),
+    );
+    if let Some(reason) = optimized.plan_cache_lookup.bypass_reason() {
+        row.insert(
+            "plan_cache_bypass_reason".to_string(),
+            Value::String(reason.as_str().to_string()),
+        );
+    } else {
+        row.insert("plan_cache_bypass_reason".to_string(), Value::Null);
+    }
+    row.insert(
+        "work_request".to_string(),
+        explain_work_request_value(work_request),
+    );
+    row
+}
+
+fn explain_analyze_output_row(
+    optimized: &OptimizedQueryPlan,
+    work_request: WorkRequest,
+    statement_kind: &'static str,
+    row_count: usize,
+    profile: &executor::ReadExecutionProfile,
+) -> Row {
+    let mut row = explain_output_row(optimized, work_request, statement_kind);
+    row.insert(
+        "mode".to_string(),
+        Value::String("explain_analyze".to_string()),
+    );
+    row.insert("row_count".to_string(), usize_value(row_count));
+    row.insert(
+        "scan_pruning_report_count".to_string(),
+        usize_value(profile.scan_pruning_reports.len()),
+    );
+    row.insert(
+        "row_limit_enforced_before_output".to_string(),
+        Value::Bool(profile.row_limit_enforced_before_output),
+    );
+    row.insert(
+        "operator_row_cap_enabled".to_string(),
+        Value::Bool(profile.operator_row_cap_enabled),
+    );
+    row
+}
+
+fn explain_work_request_value(work_request: WorkRequest) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "priority".to_string(),
+            Value::String(work_request.priority.as_str().to_string()),
+        ),
+        (
+            "class".to_string(),
+            Value::String(work_request.class.as_str().to_string()),
+        ),
+        (
+            "estimated_operations".to_string(),
+            usize_value(work_request.estimated_operations),
+        ),
+    ]))
+}
+
+fn usize_value(value: usize) -> Value {
+    Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
 fn optimized_query_plan_for(
