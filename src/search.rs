@@ -2034,6 +2034,12 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
         .segment_descriptor
         .as_ref()
         .is_some_and(|descriptor| descriptor.matches_documents(&index.documents));
+    let segment_descriptor_field_summaries = index
+        .segment_descriptor
+        .as_ref()
+        .filter(|descriptor| descriptor.matches_documents(&index.documents))
+        .map(search_projection_probe_segment_descriptor_field_summaries)
+        .unwrap_or_default();
     serde_json::json!({
         "ready": true,
         "equality_ready": true,
@@ -2059,7 +2065,36 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
             "event_end",
             "is_latest"
         ],
+        "segment_descriptor_field_count": segment_descriptor_field_summaries.len(),
+        "segment_descriptor_field_summaries": segment_descriptor_field_summaries,
     })
+}
+
+fn search_projection_probe_segment_descriptor_field_summaries(
+    descriptor: &SearchSegmentDescriptor,
+) -> Vec<serde_json::Value> {
+    let mut fields = BTreeMap::<String, (usize, bool, bool)>::new();
+    for segment in &descriptor.segments {
+        for (field, summary) in &segment.metadata {
+            let entry = fields.entry(field.clone()).or_default();
+            entry.0 += 1;
+            entry.1 |= !summary.values.is_empty();
+            entry.2 |= summary.numeric_range.is_some();
+        }
+    }
+    fields
+        .into_iter()
+        .map(
+            |(field, (segment_count, value_summary_used, numeric_range_summary_used))| {
+                serde_json::json!({
+                    "field": field,
+                    "segment_count": segment_count,
+                    "value_summary_used": value_summary_used,
+                    "numeric_range_summary_used": numeric_range_summary_used,
+                })
+            },
+        )
+        .collect()
 }
 
 #[cfg(feature = "turbovec")]
