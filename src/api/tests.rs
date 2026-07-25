@@ -6392,6 +6392,65 @@ fn counts_memory_crystal_synthesis_for_decay_scheduler_shape() {
 }
 
 #[test]
+fn memory_crystal_synthesis_counts_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'synthesis-count-cache-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'synthesis-count-cache-b'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'synthesis-count-cache-crystal-a', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'synthesis-count-cache-crystal-b', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'synthesis-count-cache-non-crystal', is_crystal: false})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'synthesis-count-cache-source'})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-crystal-a'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-crystal-b'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'synthesis-count-cache-non-crystal'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (c)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    db.query("MATCH (s:Source {id: 'synthesis-count-cache-source'}), (m:Memory {id: 'synthesis-count-cache-a'}) CREATE (s)-[:SYNTHESIZED_FROM]->(m)")
+        .unwrap();
+    let request = KnowledgeMemoryCrystalSynthesisCountRequest {
+        memory_ids: vec![
+            "synthesis-count-cache-a".to_string(),
+            "missing-synthesis-count-cache".to_string(),
+            "synthesis-count-cache-b".to_string(),
+            "synthesis-count-cache-a".to_string(),
+        ],
+    };
+
+    let first = db
+        .knowledge_memory_crystal_synthesis_counts(&request)
+        .unwrap();
+    let second = db
+        .knowledge_memory_crystal_synthesis_counts(&request)
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_memory_count, 2);
+    assert_eq!(
+        first.missing_memory_ids,
+        vec!["missing-synthesis-count-cache".to_string()]
+    );
+    assert_eq!(first.matched_relationship_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].memory_id, "synthesis-count-cache-a");
+    assert_eq!(first.rows[0].count, 2);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn memory_crystal_synthesis_counts_rejects_empty_ids_without_wal() {
     let path = unique_test_dir("memory_crystal_synthesis_counts_empty_without_wal");
     let mut db = Database::open(&path).unwrap();

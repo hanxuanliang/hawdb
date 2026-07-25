@@ -7219,7 +7219,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryCrystalSynthesisCountRequest,
     ) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
-        knowledge_memory_crystal_synthesis_counts_for(&self.catalog, &self.store, request)
+        knowledge_memory_crystal_synthesis_counts_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_evolves_neighbors(
@@ -12570,6 +12570,108 @@ fn knowledge_memory_crystal_synthesis_counts_for(
         missing_memory_ids,
         matched_relationship_count,
         returned_count,
+    })
+}
+
+fn knowledge_memory_crystal_synthesis_counts_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryCrystalSynthesisCountRequest,
+) -> Result<KnowledgeMemoryCrystalSynthesisCountOutput> {
+    validate_knowledge_memory_crystal_synthesis_count_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    if request.memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_memory_count: 0,
+            missing_memory_ids: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    }
+
+    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let parameters = BTreeMap::from([(
+        "memory_ids".to_string(),
+        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
+    )]);
+    let memory_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id",
+        &parameters,
+        None,
+    )?;
+    let matched_ids = memory_output
+        .rows
+        .iter()
+        .filter_map(|row| optional_string_cell(row, "memory_id"))
+        .collect::<BTreeSet<_>>();
+    let mut seen_missing = BTreeSet::new();
+    let missing_memory_ids = request
+        .memory_ids
+        .iter()
+        .filter(|memory_id| !matched_ids.contains(*memory_id))
+        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let count_output = db.query_read_only_with_params_bounded(
+        "MATCH (c:Memory)-[r:SYNTHESIZED_FROM]->(m:Memory) \
+         WHERE m.id IN $memory_ids AND c.is_crystal = true \
+         RETURN m.id AS memory_id, id(m) AS node_id, count(r) AS count",
+        &parameters,
+        None,
+    )?;
+    let mut rows = count_output
+        .rows
+        .iter()
+        .map(knowledge_memory_crystal_synthesis_count_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    rows.sort_by(|left, right| {
+        left.memory_id
+            .cmp(&right.memory_id)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let matched_relationship_count = rows.iter().map(|row| row.count).sum();
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryCrystalSynthesisCountOutput {
+        graph_commit_epoch,
+        rows,
+        matched_memory_count: matched_ids.len(),
+        missing_memory_ids,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
+fn knowledge_memory_crystal_synthesis_count_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeMemoryCrystalSynthesisCountRow> {
+    let memory_id = optional_string_cell(row, "memory_id").ok_or_else(|| {
+        SkeinError::Execution(
+            "knowledge memory crystal synthesis count row is missing memory_id".to_string(),
+        )
+    })?;
+    let node_id = row
+        .get("node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory crystal synthesis count row is missing node_id".to_string(),
+            )
+        })?;
+    let count = row
+        .get("count")
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory crystal synthesis count row is missing count".to_string(),
+            )
+        })?;
+    Ok(KnowledgeMemoryCrystalSynthesisCountRow {
+        memory_id,
+        node_id,
+        count,
     })
 }
 
