@@ -8074,7 +8074,6 @@ impl Database {
         request: &KnowledgeAugmentationJobRequest,
     ) -> Result<KnowledgeAugmentationJobOutput> {
         knowledge_augmentation_job_via_query_runtime(self, request)
-            .or_else(|_| knowledge_augmentation_job_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_augmentation_jobs(
@@ -8082,7 +8081,6 @@ impl Database {
         request: &KnowledgeAugmentationJobListRequest,
     ) -> Result<KnowledgeAugmentationJobListOutput> {
         knowledge_augmentation_jobs_via_query_runtime(self, request)
-            .or_else(|_| knowledge_augmentation_jobs_for(&self.catalog, &self.store, request))
     }
 
     pub fn interrupt_knowledge_augmentation_jobs(
@@ -30385,33 +30383,6 @@ fn augmentation_job_create_statement(
     (cypher, parameters)
 }
 
-fn knowledge_augmentation_job_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeAugmentationJobRequest,
-) -> Result<KnowledgeAugmentationJobOutput> {
-    if request.job_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge augmentation job read requires a non-empty job id".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = store.commit_epoch();
-    let job = node_by_label_property_external_id(
-        catalog,
-        store,
-        "AugmentationJob",
-        "job_id",
-        request.job_id.as_str(),
-    )
-    .map(knowledge_augmentation_job_from_node);
-    Ok(KnowledgeAugmentationJobOutput {
-        graph_commit_epoch,
-        found: job.is_some(),
-        job,
-    })
-}
-
 fn knowledge_augmentation_job_via_query_runtime(
     db: &Database,
     request: &KnowledgeAugmentationJobRequest,
@@ -30439,54 +30410,6 @@ fn knowledge_augmentation_job_via_query_runtime(
         graph_commit_epoch,
         found: job.is_some(),
         job,
-    })
-}
-
-fn knowledge_augmentation_jobs_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeAugmentationJobListRequest,
-) -> Result<KnowledgeAugmentationJobListOutput> {
-    if request
-        .status_filter
-        .as_ref()
-        .is_some_and(|status| status.is_empty())
-    {
-        return Err(SkeinError::Semantic(
-            "knowledge augmentation job list requires a non-empty status filter".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("AugmentationJob") else {
-        return Ok(KnowledgeAugmentationJobListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-
-    let mut rows = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| {
-            request
-                .status_filter
-                .as_ref()
-                .is_none_or(|status| node_string_property(node, "status").as_ref() == Some(status))
-        })
-        .map(knowledge_augmentation_job_from_node)
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| compare_augmentation_jobs_for_order(left, right, &request.order_by));
-    let matched_count = rows.len();
-    rows.truncate(request.limit);
-    let returned_count = rows.len();
-
-    Ok(KnowledgeAugmentationJobListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_count,
-        returned_count,
     })
 }
 
@@ -30600,37 +30523,11 @@ fn knowledge_augmentation_job_from_query(row: &Row) -> Result<KnowledgeAugmentat
     })
 }
 
-fn knowledge_augmentation_job_from_node(node: &NodeRecord) -> KnowledgeAugmentationJob {
-    KnowledgeAugmentationJob {
-        job_id: node
-            .properties
-            .get("job_id")
-            .map(value_to_external_id)
-            .filter(|job_id| !job_id.is_empty()),
-        node_id: node.id.0,
-        job_type: node_string_property(node, "job_type"),
-        status: node_string_property(node, "status"),
-        progress: node_number_property(node, "progress"),
-        message: node_string_property(node, "message"),
-        result: node.properties.get("result").cloned(),
-        error_message: node_string_property(node, "error_message"),
-        started_at: node.properties.get("started_at").cloned(),
-        completed_at: node.properties.get("completed_at").cloned(),
-        created_at: node.properties.get("created_at").cloned(),
-    }
-}
-
 fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String> {
     match node.properties.get(property_name) {
         Some(Value::String(value)) => Some(value.clone()),
         _ => None,
     }
-}
-
-fn node_number_property(node: &NodeRecord, property_name: &str) -> Option<f64> {
-    node.properties
-        .get(property_name)
-        .and_then(value_to_finite_f64)
 }
 
 fn value_to_finite_f64(value: &Value) -> Option<f64> {
@@ -30639,23 +30536,6 @@ fn value_to_finite_f64(value: &Value) -> Option<f64> {
         Value::Float(value) if value.is_finite() => Some(*value),
         _ => None,
     }
-}
-
-fn compare_augmentation_jobs_for_order(
-    left: &KnowledgeAugmentationJob,
-    right: &KnowledgeAugmentationJob,
-    order: &KnowledgeAugmentationJobListOrder,
-) -> std::cmp::Ordering {
-    let left_order = match order {
-        KnowledgeAugmentationJobListOrder::StartedAtDesc => left.started_at.as_ref(),
-        KnowledgeAugmentationJobListOrder::CreatedAtDesc => left.created_at.as_ref(),
-    };
-    let right_order = match order {
-        KnowledgeAugmentationJobListOrder::StartedAtDesc => right.started_at.as_ref(),
-        KnowledgeAugmentationJobListOrder::CreatedAtDesc => right.created_at.as_ref(),
-    };
-    compare_optional_values_desc(left_order, right_order)
-        .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
 fn compare_optional_values_desc(left: Option<&Value>, right: Option<&Value>) -> std::cmp::Ordering {
