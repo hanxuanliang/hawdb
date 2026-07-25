@@ -657,6 +657,10 @@ non-zero `request_count`. Candidate parity is fail-closed unless
 `primary_candidate_count == shadow_candidate_count`,
 `matched_candidate_count == shadow_candidate_count`, and
 `primary_only_candidate_count == 0`.
+Rust bridge code should generate this object with
+`nowledge_mem_search_candidate_shadow_evidence_json` and
+`NowledgeMemSearchCandidateShadowEvidence` so `ready` and blocker codes are
+computed by Skein instead of handwritten by the caller.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover

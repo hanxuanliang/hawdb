@@ -867,7 +867,9 @@ mod tests {
     use super::{nowledge_mem_integration_bundle_json, IntegrationBundleInputs};
     use crate::cli_mem_integration_readiness::nowledge_mem_integration_readiness_json;
     use skein::{
-        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        nowledge_mem_search_candidate_shadow_evidence_json,
+        NowledgeMemSearchCandidateShadowEvidence, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
 
     #[test]
@@ -1272,20 +1274,9 @@ mod tests {
     }
 
     fn ready_search_candidate_shadow_evidence() -> serde_json::Value {
-        serde_json::json!({
-            "protocol": "skein-nowledge-search-candidate-shadow-evidence",
-            "route": "/search-index/skein-shadow/candidate-evidence",
-            "evidence_source": "nmem-rust-bridge",
-            "engine": "skein-shadow",
-            "ready": true,
-            "candidate_primary_engine": "skein",
-            "request_count": 1,
-            "primary_candidate_count": 3,
-            "shadow_candidate_count": 3,
-            "matched_candidate_count": 3,
-            "primary_only_candidate_count": 0,
-            "blocker_codes": []
-        })
+        nowledge_mem_search_candidate_shadow_evidence_json(
+            &NowledgeMemSearchCandidateShadowEvidence::ready(1, 3, 3, 3),
+        )
     }
 
     fn ready_query_runtime_preflight() -> serde_json::Value {

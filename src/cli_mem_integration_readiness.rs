@@ -1,5 +1,8 @@
 use skein::{
     Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -14,11 +17,6 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
-const SKEIN_NOWLEDGE_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL: &str =
-    "skein-nowledge-search-candidate-shadow-evidence";
-const SKEIN_NOWLEDGE_SEARCH_CANDIDATE_EVIDENCE_SOURCE: &str = "nmem-rust-bridge";
-const SKEIN_NOWLEDGE_SEARCH_CANDIDATE_EVIDENCE_ROUTE: &str =
-    "/search-index/skein-shadow/candidate-evidence";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
@@ -446,16 +444,16 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             "search_candidate_primary_evidence",
             [
                 str_path(bundle, &["search_candidate_shadow_evidence", "protocol"])
-                    == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL),
+                    == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL),
                 str_path(bundle, &["search_candidate_shadow_evidence", "evidence_source"])
-                    == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_EVIDENCE_SOURCE),
+                    == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE),
                 str_path(bundle, &["search_candidate_shadow_evidence", "route"])
-                    == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_EVIDENCE_ROUTE),
+                    == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE),
                 bool_path(bundle, &["search_candidate_shadow_evidence", "ready"]) == Some(true),
                 str_path(
                     bundle,
                     &["search_candidate_shadow_evidence", "candidate_primary_engine"],
-                ) == Some("skein"),
+                ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE),
                 search_candidate_shadow_counts_ready(bundle),
             ],
             [
@@ -1754,13 +1752,13 @@ fn replacement_summary_search_projection_ready(bundle: &serde_json::Value) -> bo
 
 fn search_candidate_primary_evidence_ready(bundle: &serde_json::Value) -> bool {
     str_path(bundle, &["search_candidate_shadow_evidence", "protocol"])
-        == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
+        == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
         && str_path(
             bundle,
             &["search_candidate_shadow_evidence", "evidence_source"],
-        ) == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
+        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
         && str_path(bundle, &["search_candidate_shadow_evidence", "route"])
-            == Some(SKEIN_NOWLEDGE_SEARCH_CANDIDATE_EVIDENCE_ROUTE)
+            == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE)
         && bool_path(bundle, &["search_candidate_shadow_evidence", "ready"]) == Some(true)
         && str_path(
             bundle,
@@ -1768,7 +1766,7 @@ fn search_candidate_primary_evidence_ready(bundle: &serde_json::Value) -> bool {
                 "search_candidate_shadow_evidence",
                 "candidate_primary_engine",
             ],
-        ) == Some("skein")
+        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE)
         && search_candidate_shadow_counts_ready(bundle)
 }
 
@@ -2637,7 +2635,9 @@ fn json_get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a 
 mod tests {
     use super::nowledge_mem_integration_readiness_json;
     use skein::{
-        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        nowledge_mem_search_candidate_shadow_evidence_json,
+        NowledgeMemSearchCandidateShadowEvidence, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
 
     #[test]
@@ -4866,20 +4866,10 @@ mod tests {
             "blocker_codes": [],
             "probes": ready_query_runtime_preflight_probes()
         });
-        bundle["search_candidate_shadow_evidence"] = serde_json::json!({
-            "protocol": "skein-nowledge-search-candidate-shadow-evidence",
-            "route": "/search-index/skein-shadow/candidate-evidence",
-            "evidence_source": "nmem-rust-bridge",
-            "engine": "skein-shadow",
-            "ready": true,
-            "candidate_primary_engine": "skein",
-            "request_count": 1,
-            "primary_candidate_count": 3,
-            "shadow_candidate_count": 3,
-            "matched_candidate_count": 3,
-            "primary_only_candidate_count": 0,
-            "blocker_codes": []
-        });
+        bundle["search_candidate_shadow_evidence"] =
+            nowledge_mem_search_candidate_shadow_evidence_json(
+                &NowledgeMemSearchCandidateShadowEvidence::ready(1, 3, 3, 3),
+            );
         bundle["library_readiness"] = ready_library_readiness();
         bundle
     }

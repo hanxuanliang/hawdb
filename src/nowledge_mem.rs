@@ -123,6 +123,13 @@ pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-ret
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
+pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL: &str =
+    "skein-nowledge-search-candidate-shadow-evidence";
+pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE: &str = "nmem-rust-bridge";
+pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE: &str =
+    "/search-index/skein-shadow/candidate-evidence";
+pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE: &str = "skein";
+pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE: &str = "skein-shadow";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/graph/overview",
     "/graph/explore",
@@ -305,6 +312,81 @@ fn missing_nowledge_mem_bounded_read_routes(covered_routes: &[String]) -> Vec<&'
         .copied()
         .filter(|route| !covered_routes.contains(route))
         .collect()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSearchCandidateShadowEvidence {
+    pub request_count: u64,
+    pub primary_candidate_count: u64,
+    pub shadow_candidate_count: u64,
+    pub matched_candidate_count: u64,
+    pub primary_only_candidate_count: u64,
+    pub blocker_codes: Vec<String>,
+}
+
+impl NowledgeMemSearchCandidateShadowEvidence {
+    pub fn ready(
+        request_count: u64,
+        primary_candidate_count: u64,
+        shadow_candidate_count: u64,
+        matched_candidate_count: u64,
+    ) -> Self {
+        Self {
+            request_count,
+            primary_candidate_count,
+            shadow_candidate_count,
+            matched_candidate_count,
+            primary_only_candidate_count: 0,
+            blocker_codes: Vec::new(),
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        nowledge_mem_search_candidate_shadow_evidence_json(self)
+    }
+}
+
+pub fn nowledge_mem_search_candidate_shadow_evidence_json(
+    evidence: &NowledgeMemSearchCandidateShadowEvidence,
+) -> serde_json::Value {
+    let blocker_codes = nowledge_mem_search_candidate_shadow_blocker_codes(evidence);
+    let ready = blocker_codes.is_empty();
+    serde_json::json!({
+        "protocol": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
+        "route": NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        "evidence_source": NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+        "engine": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
+        "ready": ready,
+        "candidate_primary_engine": NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+        "request_count": evidence.request_count,
+        "primary_candidate_count": evidence.primary_candidate_count,
+        "shadow_candidate_count": evidence.shadow_candidate_count,
+        "matched_candidate_count": evidence.matched_candidate_count,
+        "primary_only_candidate_count": evidence.primary_only_candidate_count,
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn nowledge_mem_search_candidate_shadow_blocker_codes(
+    evidence: &NowledgeMemSearchCandidateShadowEvidence,
+) -> Vec<String> {
+    let mut blockers = evidence
+        .blocker_codes
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if evidence.request_count == 0 {
+        blockers.insert("search_candidate_shadow_no_requests".to_string());
+    }
+    if evidence.primary_candidate_count != evidence.shadow_candidate_count
+        || evidence.matched_candidate_count != evidence.shadow_candidate_count
+    {
+        blockers.insert("search_candidate_mismatch".to_string());
+    }
+    if evidence.primary_only_candidate_count != 0 {
+        blockers.insert("search_candidate_primary_only".to_string());
+    }
+    blockers.into_iter().collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1692,13 +1774,18 @@ mod tests {
     use super::{
         nowledge_mem_bounded_read_evidence_json,
         nowledge_mem_bounded_read_evidence_json_with_routes, nowledge_mem_graph_config,
-        nowledge_mem_graph_config_with_search_mode, NowledgeMemEmbeddedStore, NowledgeMemGraph,
-        NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
-        NowledgeMemQueryReportOptions, NowledgeMemReadOptions, NowledgeMemReadReport,
-        NowledgeMemReadinessOptions, NowledgeMemSearchProjection,
+        nowledge_mem_graph_config_with_search_mode,
+        nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemEmbeddedStore,
+        NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions,
+        NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
+        NowledgeMemReadReport, NowledgeMemReadinessOptions,
+        NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
         NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     };
     use crate::search::CompressedVectorSearchMode;
@@ -2086,6 +2173,58 @@ mod tests {
         assert_eq!(
             evidence["blocker_codes"],
             serde_json::json!(["not_shadow_read_only", "missing_covered_routes"])
+        );
+    }
+
+    #[test]
+    fn search_candidate_shadow_evidence_reports_ready_counts() {
+        let evidence = nowledge_mem_search_candidate_shadow_evidence_json(
+            &NowledgeMemSearchCandidateShadowEvidence::ready(2, 5, 5, 5),
+        );
+
+        assert_eq!(
+            evidence["protocol"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL
+        );
+        assert_eq!(
+            evidence["route"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE
+        );
+        assert_eq!(
+            evidence["evidence_source"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE
+        );
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["request_count"], 2);
+        assert_eq!(evidence["primary_candidate_count"], 5);
+        assert_eq!(evidence["shadow_candidate_count"], 5);
+        assert_eq!(evidence["matched_candidate_count"], 5);
+        assert_eq!(evidence["primary_only_candidate_count"], 0);
+        assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_candidate_shadow_evidence_fails_closed_on_weak_counts() {
+        let evidence = nowledge_mem_search_candidate_shadow_evidence_json(
+            &NowledgeMemSearchCandidateShadowEvidence {
+                request_count: 0,
+                primary_candidate_count: 3,
+                shadow_candidate_count: 2,
+                matched_candidate_count: 1,
+                primary_only_candidate_count: 1,
+                blocker_codes: vec!["bridge_timeout".to_string()],
+            },
+        );
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(
+            evidence["blocker_codes"],
+            serde_json::json!([
+                "bridge_timeout",
+                "search_candidate_mismatch",
+                "search_candidate_primary_only",
+                "search_candidate_shadow_no_requests"
+            ])
         );
     }
 
