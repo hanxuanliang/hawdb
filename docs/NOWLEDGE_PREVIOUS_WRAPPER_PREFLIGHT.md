@@ -426,6 +426,11 @@ profile metadata (`elapsed_micros`, `physical_operator_counts`,
 `optimizer_decision_count`, `scan_pruning_report_count`, and
 `scan_pruning_reports`) so route readiness proves runtime observability rather
 than only proving that a route had a successful row comparison.
+`nowledge-graph-route-evidence` also recomputes route coverage from the shared
+required-route list and emits `required_route_count`, `covered_route_count`,
+`covered_routes`, `missing_required_routes`, and `required_routes_covered`.
+With `--require-ready`, a partial route inventory is rejected at evidence
+generation time before the integration readiness compiler consumes it.
 Route query inventory can require scan pruning with `require_scan_pruning` and
 actual row reduction with `require_pruned`; missing or weak runtime evidence
 adds route blocker codes and keeps primary readiness fail-closed. Raw Cypher and
