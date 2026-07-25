@@ -7840,7 +7840,9 @@ impl Database {
         &self,
         request: &KnowledgeLabelMemoryDistributionRequest,
     ) -> KnowledgeLabelMemoryDistributionOutput {
-        knowledge_label_memory_distribution_for(&self.catalog, &self.store, request)
+        knowledge_label_memory_distribution_via_query_runtime(self, request).unwrap_or_else(|_| {
+            knowledge_label_memory_distribution_for(&self.catalog, &self.store, request)
+        })
     }
 
     pub fn knowledge_label_regex_memory_connections(
@@ -25003,6 +25005,65 @@ fn knowledge_label_memory_distribution_for(
         matched_count,
         returned_count,
     }
+}
+
+fn knowledge_label_memory_distribution_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeLabelMemoryDistributionRequest,
+) -> Result<KnowledgeLabelMemoryDistributionOutput> {
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) \
+         WITH l, count(DISTINCT m) AS memory_count \
+         RETURN l.id AS label_id, id(l) AS label_node_id, l.name AS label_name, memory_count",
+        &BTreeMap::new(),
+        None,
+    )?;
+    let mut rows = output
+        .rows
+        .iter()
+        .map(knowledge_label_memory_distribution_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    sort_label_memory_distribution_rows(&mut rows);
+    let matched_count = rows.len();
+    let mut rows = rows.into_iter().skip(request.offset).collect::<Vec<_>>();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeLabelMemoryDistributionOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn knowledge_label_memory_distribution_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeLabelMemoryDistributionRow> {
+    let label_node_id = row
+        .get("label_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge label memory distribution row is missing label_node_id".to_string(),
+            )
+        })?;
+    let memory_count = row
+        .get("memory_count")
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge label memory distribution row is missing memory_count".to_string(),
+            )
+        })?;
+    Ok(KnowledgeLabelMemoryDistributionRow {
+        label_id: optional_string_cell(row, "label_id"),
+        label_node_id,
+        label_name: optional_string_cell(row, "label_name"),
+        memory_count,
+    })
 }
 
 fn knowledge_label_regex_memory_connections_for(

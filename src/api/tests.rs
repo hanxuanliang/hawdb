@@ -18959,7 +18959,11 @@ fn reads_label_usage_rows_for_nowledge_label_apis() {
 
 #[test]
 fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Label {id: 'alpha', name: 'Alpha'})")
         .unwrap();
     db.query("CREATE (:Label {id: 'beta', name: 'Beta'})")
@@ -19009,16 +19013,27 @@ fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
         vec![("alpha", "Alpha", 2), ("beta", "Beta", 1)]
     );
 
-    let page = db.knowledge_label_memory_distribution(&KnowledgeLabelMemoryDistributionRequest {
+    let page_request = KnowledgeLabelMemoryDistributionRequest {
         offset: 1,
         limit: 1,
-    });
+    };
+    let page = db.knowledge_label_memory_distribution(&page_request);
 
     assert_eq!(page.matched_count, 2);
     assert_eq!(page.returned_count, 1);
     assert_eq!(page.rows[0].label_id.as_deref(), Some("beta"));
     assert_eq!(page.rows[0].label_name.as_deref(), Some("Beta"));
     assert_eq!(page.rows[0].memory_count, 1);
+
+    let stats = db.plan_cache_stats();
+    let repeated_page = db.knowledge_label_memory_distribution(&page_request);
+    assert_eq!(repeated_page, page);
+    let repeated_stats = db.plan_cache_stats();
+    assert!(repeated_stats.entries >= stats.entries);
+    assert_eq!(
+        repeated_stats.hits + repeated_stats.misses,
+        stats.hits + stats.misses + 1
+    );
 }
 
 #[test]
