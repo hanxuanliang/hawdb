@@ -19208,7 +19208,11 @@ fn reads_label_memory_distribution_for_nowledge_label_stats_shapes() {
 
 #[test]
 fn reads_label_regex_memory_connections_for_nowledge_label_stats_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'memory_alpha', title: 'Alpha Memory', importance: 0.9})")
         .unwrap();
     db.query("CREATE (:Memory {id: 'memory_beta', title: 'Beta Memory', importance: 0.8})")
@@ -19274,6 +19278,31 @@ fn reads_label_regex_memory_connections_for_nowledge_label_stats_shapes() {
     assert_eq!(page.matched_count, 2);
     assert_eq!(page.returned_count, 1);
     assert_eq!(page.rows[0].memory_id.as_deref(), Some("memory_beta"));
+
+    let stats = db.plan_cache_stats();
+    let repeated_page = db
+        .knowledge_label_regex_memory_connections(&KnowledgeLabelRegexMemoryConnectionsRequest {
+            label_name_pattern: "^regex-(alpha|beta)$".to_string(),
+            memory_property_names: vec!["title".to_string()],
+            offset: 1,
+            limit: 1,
+        })
+        .unwrap();
+    assert_eq!(repeated_page, page);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(
+        repeated_stats.entries, stats.entries,
+        "{stats:?} {repeated_stats:?}"
+    );
+    assert_eq!(
+        repeated_stats.misses, stats.misses,
+        "{stats:?} {repeated_stats:?}"
+    );
+    assert_eq!(
+        repeated_stats.hits,
+        stats.hits + 2,
+        "{stats:?} {repeated_stats:?}"
+    );
 }
 
 #[test]

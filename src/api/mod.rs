@@ -7885,7 +7885,9 @@ impl Database {
         &self,
         request: &KnowledgeLabelRegexMemoryConnectionsRequest,
     ) -> Result<KnowledgeLabelRegexMemoryConnectionsOutput> {
-        knowledge_label_regex_memory_connections_for(&self.catalog, &self.store, request)
+        knowledge_label_regex_memory_connections_via_query_runtime(self, request).or_else(|_| {
+            knowledge_label_regex_memory_connections_for(&self.catalog, &self.store, request)
+        })
     }
 
     pub fn delete_knowledge_memory_labels(
@@ -26528,6 +26530,71 @@ fn knowledge_label_regex_memory_connections_for(
     })
 }
 
+fn knowledge_label_regex_memory_connections_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeLabelRegexMemoryConnectionsRequest,
+) -> Result<KnowledgeLabelRegexMemoryConnectionsOutput> {
+    validate_knowledge_label_regex_memory_connections_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let property_names = deduplicated_strings_in_order(&request.memory_property_names);
+    let mut parameters = BTreeMap::from([(
+        "pattern".to_string(),
+        Value::String(request.label_name_pattern.clone()),
+    )]);
+
+    let count = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory)-[r:HAS_LABEL]->(l:Label) \
+         WHERE l.name =~ $pattern \
+         RETURN m.id AS memory_id, id(m) AS memory_node_id, l.id AS label_id, id(l) AS label_node_id, \
+         count(r) AS label_connections",
+        &parameters,
+        None,
+    )?;
+    let matched_count = count.rows.len();
+
+    if request.offset > 0 {
+        parameters.insert(
+            "offset".to_string(),
+            Value::Int(i64::try_from(request.offset).unwrap_or(i64::MAX)),
+        );
+    }
+    if request.limit > 0 {
+        parameters.insert(
+            "limit".to_string(),
+            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
+        );
+    }
+    let page_clause = match (request.offset > 0, request.limit > 0) {
+        (false, false) => "",
+        (true, false) => " SKIP $offset",
+        (false, true) => " LIMIT $limit",
+        (true, true) => " SKIP $offset LIMIT $limit",
+    };
+    let query = format!(
+        "MATCH (m:Memory)-[r:HAS_LABEL]->(l:Label) \
+         WHERE l.name =~ $pattern \
+         RETURN m AS memory, l AS label, count(r) AS label_connections, \
+         l.name AS label_name, m.id AS memory_id, id(m) AS memory_node_id, \
+         l.id AS label_id, id(l) AS label_node_id \
+         ORDER BY label_connections DESC, label_name ASC, memory_id ASC, \
+         memory_node_id ASC, label_id ASC, label_node_id ASC{page_clause}"
+    );
+    let page = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let rows = page
+        .rows
+        .iter()
+        .map(|row| knowledge_label_regex_memory_connection_row_from_query(row, &property_names))
+        .collect::<Result<Vec<_>>>()?;
+    let returned_count = rows.len();
+
+    Ok(KnowledgeLabelRegexMemoryConnectionsOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
 fn delete_knowledge_memory_labels_for(
     db: &mut Database,
     request: &KnowledgeMemoryLabelDeleteRequest,
@@ -27315,6 +27382,46 @@ fn knowledge_label_regex_memory_connection_row(
         label_name: node_string_property(label, "name"),
         label_connections,
     }
+}
+
+fn knowledge_label_regex_memory_connection_row_from_query(
+    row: &Row,
+    memory_property_names: &[String],
+) -> Result<KnowledgeLabelRegexMemoryConnectionRow> {
+    let memory = row
+        .get("memory")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge label regex memory connection row is missing memory map".to_string(),
+            )
+        })?;
+    let label = row
+        .get("label")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge label regex memory connection row is missing label map".to_string(),
+            )
+        })?;
+    let label_connections = row
+        .get("label_connections")
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge label regex memory connection row is missing label_connections"
+                    .to_string(),
+            )
+        })?;
+    Ok(KnowledgeLabelRegexMemoryConnectionRow {
+        memory_id: memory.external_id,
+        memory_node_id: memory.node_id,
+        memory_properties: projected_properties(&memory.properties, memory_property_names),
+        label_id: label.external_id,
+        label_node_id: label.node_id,
+        label_name: string_property_value(&label.properties, "name"),
+        label_connections,
+    })
 }
 
 fn sort_label_regex_memory_connection_rows(rows: &mut [KnowledgeLabelRegexMemoryConnectionRow]) {
