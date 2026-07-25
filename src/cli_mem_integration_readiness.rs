@@ -638,6 +638,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
                 u64_path(bundle, &["graph_route_readiness", "query_runtime_report_count"])
                     .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
+                graph_route_query_plan_profile_summary_ready(bundle),
                 string_array_path_is_empty(
                     bundle,
                     &["graph_route_readiness", "missing_query_runtime_routes"],
@@ -672,6 +673,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
+                "graph_route_readiness.query_runtime_plan_profile_counts",
                 "graph_route_readiness.missing_query_runtime_routes",
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
@@ -1508,6 +1510,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
+                "graph_route_readiness.query_runtime_plan_profile_counts",
                 "graph_route_readiness.missing_query_runtime_routes",
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
@@ -2148,6 +2151,7 @@ fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
             &["graph_route_readiness", "query_runtime_report_count"],
         )
         .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && graph_route_query_plan_profile_summary_ready(bundle)
         && string_array_path_is_empty(
             bundle,
             &["graph_route_readiness", "missing_query_runtime_routes"],
@@ -2210,6 +2214,55 @@ fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
     route_count.is_some_and(|value| value > 0) && route_count == primary_ready_route_count
 }
 
+fn graph_route_query_plan_profile_summary_ready(bundle: &serde_json::Value) -> bool {
+    let report_count = u64_path(
+        bundle,
+        &["graph_route_readiness", "query_runtime_report_count"],
+    );
+    report_count
+        .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && u64_path(
+            bundle,
+            &["graph_route_readiness", "query_runtime_plan_report_count"],
+        ) == report_count
+        && u64_path(
+            bundle,
+            &[
+                "graph_route_readiness",
+                "query_runtime_profile_report_count",
+            ],
+        ) == report_count
+        && u64_path(
+            bundle,
+            &["graph_route_readiness", "query_runtime_failed_query_count"],
+        ) == Some(0)
+        && u64_path(
+            bundle,
+            &[
+                "graph_route_readiness",
+                "query_runtime_missing_plan_evidence_count",
+            ],
+        ) == Some(0)
+        && u64_path(
+            bundle,
+            &[
+                "graph_route_readiness",
+                "query_runtime_missing_profile_evidence_count",
+            ],
+        ) == Some(0)
+        && bool_path(
+            bundle,
+            &["graph_route_readiness", "route_query_plan_evidence_ready"],
+        ) == Some(true)
+        && bool_path(
+            bundle,
+            &[
+                "graph_route_readiness",
+                "route_query_profile_evidence_ready",
+            ],
+        ) == Some(true)
+}
+
 fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
     let Some(routes) = json_get_path(bundle, &["graph_route_readiness", "routes"])
         .and_then(serde_json::Value::as_array)
@@ -2236,6 +2289,8 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
         }
         if bool_path(route, &["primary_ready"]) != Some(true)
             || bool_path(route, &["query_runtime_ready"]) != Some(true)
+            || bool_path(route, &["query_plan_evidence_ready"]) != Some(true)
+            || bool_path(route, &["query_profile_evidence_ready"]) != Some(true)
             || !graph_route_shadow_compare_ready(route)
             || u64_path(route, &["query_report_count"]).is_none_or(|value| value == 0)
         {
@@ -2248,6 +2303,14 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
         };
         if query_reports.is_empty()
             || u64_path(route, &["query_report_count"]) != Some(query_reports.len() as u64)
+            || u64_path(route, &["query_runtime_report_count"]) != Some(query_reports.len() as u64)
+            || u64_path(route, &["query_runtime_plan_report_count"])
+                != Some(query_reports.len() as u64)
+            || u64_path(route, &["query_runtime_profile_report_count"])
+                != Some(query_reports.len() as u64)
+            || u64_path(route, &["query_runtime_failed_query_count"]) != Some(0)
+            || u64_path(route, &["query_runtime_missing_plan_evidence_count"]) != Some(0)
+            || u64_path(route, &["query_runtime_missing_profile_evidence_count"]) != Some(0)
             || !query_reports.iter().all(graph_route_query_report_ready)
         {
             return false;
@@ -3873,6 +3936,7 @@ mod tests {
                 "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
+                "graph_route_readiness.query_runtime_plan_profile_counts",
                 "graph_route_readiness.missing_query_runtime_routes",
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
@@ -4318,6 +4382,37 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_graph_route_readiness_evidence"));
+    }
+
+    #[test]
+    fn rejects_graph_route_readiness_without_plan_profile_summary_counts() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("query_runtime_plan_report_count");
+        bundle["graph_route_readiness"]["query_runtime_missing_profile_evidence_count"] =
+            serde_json::json!(1);
+        bundle["graph_route_readiness"]["route_query_profile_evidence_ready"] =
+            serde_json::json!(false);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.query_runtime_plan_profile_counts"])
+        );
     }
 
     #[test]
@@ -5231,8 +5326,15 @@ mod tests {
             "primary_ready_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_plan_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_profile_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_failed_query_count": 0,
+            "query_runtime_missing_plan_evidence_count": 0,
+            "query_runtime_missing_profile_evidence_count": 0,
             "missing_query_runtime_routes": [],
             "route_query_runtime_ready": true,
+            "route_query_plan_evidence_ready": true,
+            "route_query_profile_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
             "routes": ready_graph_route_profile_routes()
@@ -5377,6 +5479,14 @@ mod tests {
                     "query_family_blocker_codes": [],
                     "query_runtime_ready": true,
                     "query_report_count": 1,
+                    "query_runtime_report_count": 1,
+                    "query_runtime_plan_report_count": 1,
+                    "query_runtime_profile_report_count": 1,
+                    "query_runtime_failed_query_count": 0,
+                    "query_runtime_missing_plan_evidence_count": 0,
+                    "query_runtime_missing_profile_evidence_count": 0,
+                    "query_plan_evidence_ready": true,
+                    "query_profile_evidence_ready": true,
                     "query_reports": [ready_graph_route_query_report(query_family)],
                     "blocker_codes": []
                 })
