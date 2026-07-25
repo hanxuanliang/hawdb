@@ -7226,7 +7226,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryEvolvesNeighborRequest,
     ) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
-        knowledge_memory_evolves_neighbors_for(&self.catalog, &self.store, request)
+        knowledge_memory_evolves_neighbors_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_evolves_projected_successors(
@@ -13470,6 +13470,127 @@ fn knowledge_memory_evolves_neighbors_for(
     })
 }
 
+fn knowledge_memory_evolves_neighbors_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryEvolvesNeighborRequest,
+) -> Result<KnowledgeMemoryEvolvesNeighborOutput> {
+    validate_knowledge_memory_evolves_neighbor_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "memory_id".to_string(),
+        Value::String(request.memory_id.clone()),
+    )]);
+    let anchor_output = db.query_read_only_with_params_bounded(
+        "MATCH (a:Memory) \
+         WHERE a.id = $memory_id \
+         RETURN a.id AS anchor_memory_id, id(a) AS anchor_node_id",
+        &parameters,
+        Some(1),
+    )?;
+    let Some(anchor_row) = anchor_output.rows.first() else {
+        return Ok(KnowledgeMemoryEvolvesNeighborOutput {
+            graph_commit_epoch,
+            anchor_found: false,
+            anchor_node_id: None,
+            rows: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    };
+    let anchor_node_id = anchor_row
+        .get("anchor_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves neighbor anchor row is missing anchor_node_id"
+                    .to_string(),
+            )
+        })?;
+    let anchor_memory_id =
+        optional_string_cell(anchor_row, "anchor_memory_id").ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves neighbor anchor row is missing anchor_memory_id"
+                    .to_string(),
+            )
+        })?;
+
+    let mut rows = Vec::new();
+    if matches!(
+        request.direction,
+        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
+    ) {
+        rows.extend(knowledge_memory_evolves_neighbor_rows_via_query_runtime(
+            db,
+            "MATCH (a:Memory)-[r:EVOLVES]->(n:Memory) \
+             WHERE a.id = $memory_id \
+             RETURN n AS neighbor, r AS relationship, id(r) AS relationship_id",
+            &parameters,
+            &anchor_memory_id,
+            anchor_node_id,
+            request,
+        )?);
+    }
+    if matches!(
+        request.direction,
+        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
+    ) {
+        rows.extend(knowledge_memory_evolves_neighbor_rows_via_query_runtime(
+            db,
+            "MATCH (n:Memory)-[r:EVOLVES]->(a:Memory) \
+             WHERE a.id = $memory_id \
+             RETURN n AS neighbor, r AS relationship, id(r) AS relationship_id",
+            &parameters,
+            &anchor_memory_id,
+            anchor_node_id,
+            request,
+        )?);
+    }
+
+    rows.sort_by(|left, right| {
+        left.neighbor_memory_id
+            .cmp(&right.neighbor_memory_id)
+            .then_with(|| left.neighbor_node_id.cmp(&right.neighbor_node_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+    let matched_relationship_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryEvolvesNeighborOutput {
+        graph_commit_epoch,
+        anchor_found: true,
+        anchor_node_id: Some(anchor_node_id),
+        rows,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
+fn knowledge_memory_evolves_neighbor_rows_via_query_runtime(
+    db: &Database,
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
+    anchor_memory_id: &str,
+    anchor_node_id: u64,
+    request: &KnowledgeMemoryEvolvesNeighborRequest,
+) -> Result<Vec<KnowledgeMemoryEvolvesNeighborRow>> {
+    let output = db.query_read_only_with_params_bounded(query, parameters, None)?;
+    output
+        .rows
+        .iter()
+        .map(|row| {
+            knowledge_memory_evolves_neighbor_row_from_query(
+                row,
+                anchor_memory_id,
+                anchor_node_id,
+                request,
+            )
+        })
+        .collect()
+}
+
 fn knowledge_memory_evolves_projected_successors_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -13660,6 +13781,59 @@ fn knowledge_memory_evolves_neighbor_row(
         relationship_id: relationship.id.0,
         relationship_properties: projected_properties(
             &relationship.properties,
+            &request.relationship_property_names,
+        ),
+    })
+}
+
+fn knowledge_memory_evolves_neighbor_row_from_query(
+    row: &Row,
+    anchor_memory_id: &str,
+    anchor_node_id: u64,
+    request: &KnowledgeMemoryEvolvesNeighborRequest,
+) -> Result<KnowledgeMemoryEvolvesNeighborRow> {
+    let neighbor = row
+        .get("neighbor")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves neighbor row is missing neighbor map".to_string(),
+            )
+        })?;
+    let relationship_id = row
+        .get("relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves neighbor row is missing relationship_id".to_string(),
+            )
+        })?;
+    let relationship = row
+        .get("relationship")
+        .and_then(value_to_map)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves neighbor row is missing relationship map".to_string(),
+            )
+        })?;
+    let mut relationship_properties = relationship.clone();
+    relationship_properties.remove("_id");
+    relationship_properties.remove("source_id");
+    relationship_properties.remove("target_id");
+    relationship_properties.remove("type");
+
+    Ok(KnowledgeMemoryEvolvesNeighborRow {
+        anchor_memory_id: anchor_memory_id.to_string(),
+        anchor_node_id,
+        neighbor_memory_id: neighbor.external_id,
+        neighbor_node_id: neighbor.node_id,
+        neighbor_properties: projected_properties(
+            &neighbor.properties,
+            &request.neighbor_property_names,
+        ),
+        relationship_id,
+        relationship_properties: projected_properties(
+            &relationship_properties,
             &request.relationship_property_names,
         ),
     })

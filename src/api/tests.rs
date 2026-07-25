@@ -6706,6 +6706,30 @@ fn reads_memory_evolves_neighbors_for_mcp_shapes_with_projected_fields() {
         Some(&Value::String("better evidence".to_string()))
     );
 
+    let cached_outgoing = db
+        .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
+            memory_id: "mcp-evolves-source".to_string(),
+            direction: KnowledgeNeighborDirection::Outgoing,
+            neighbor_property_names: vec![
+                "title".to_string(),
+                "is_latest".to_string(),
+                "extra_status".to_string(),
+                "title".to_string(),
+            ],
+            relationship_property_names: vec![
+                "content_relation".to_string(),
+                "confidence".to_string(),
+                "reviewed".to_string(),
+                "reason".to_string(),
+            ],
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(cached_outgoing, outgoing);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+
     let incoming = db
         .knowledge_memory_evolves_neighbors(&KnowledgeMemoryEvolvesNeighborRequest {
             memory_id: "mcp-evolves-target".to_string(),
