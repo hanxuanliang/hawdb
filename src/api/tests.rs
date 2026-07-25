@@ -5686,6 +5686,39 @@ fn reads_memory_prefix_ownership_for_mcp_skill_guard() {
 }
 
 #[test]
+fn memory_prefix_ownership_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'skill:cache:1', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'skill:cache:2', space_id: 'team'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'skill:other:1', space_id: 'team'})")
+        .unwrap();
+    let request = KnowledgeMemoryPrefixOwnershipRequest {
+        prefix: "skill:cache:".to_string(),
+        limit: 1,
+    };
+
+    let first = db.knowledge_memory_prefix_ownership(&request).unwrap();
+    let second = db.knowledge_memory_prefix_ownership(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].memory_id, "skill:cache:1");
+    assert_eq!(first.rows[0].raw_space_id.as_deref(), Some(""));
+    assert_eq!(first.rows[0].normalized_space_id, "default");
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn memory_prefix_ownership_rejects_empty_prefix_without_wal() {
     let path = unique_test_dir("memory_prefix_ownership_empty_prefix_without_wal");
     let mut db = Database::open(&path).unwrap();

@@ -7191,7 +7191,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryPrefixOwnershipRequest,
     ) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
-        knowledge_memory_prefix_ownership_for(&self.catalog, &self.store, request)
+        knowledge_memory_prefix_ownership_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_title_contents(
@@ -11509,6 +11509,67 @@ fn knowledge_memory_prefix_ownership_for(
         rows,
         matched_count,
         returned_count,
+    })
+}
+
+fn knowledge_memory_prefix_ownership_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryPrefixOwnershipRequest,
+) -> Result<KnowledgeMemoryPrefixOwnershipOutput> {
+    if request.prefix.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge memory prefix ownership requires a non-empty prefix".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters =
+        BTreeMap::from([("prefix".to_string(), Value::String(request.prefix.clone()))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory) WHERE m.id STARTS WITH $prefix RETURN m.id AS memory_id, id(m) AS memory_node_id, m.space_id AS raw_space_id",
+        &parameters,
+        None,
+    )?;
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(knowledge_memory_prefix_ownership_row_from_query)
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        left.memory_id
+            .cmp(&right.memory_id)
+            .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
+    });
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryPrefixOwnershipOutput {
+        graph_commit_epoch,
+        prefix: request.prefix.clone(),
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn knowledge_memory_prefix_ownership_row_from_query(
+    row: &Row,
+) -> Option<KnowledgeMemoryPrefixOwnershipRow> {
+    let raw_space_id = row.get("raw_space_id").map(value_to_external_id);
+    Some(KnowledgeMemoryPrefixOwnershipRow {
+        memory_id: optional_string_cell(row, "memory_id")?,
+        memory_node_id: row
+            .get("memory_node_id")
+            .and_then(value_to_non_negative_u64)?,
+        normalized_space_id: raw_space_id
+            .as_ref()
+            .filter(|space_id| !space_id.is_empty())
+            .cloned()
+            .unwrap_or_else(|| "default".to_string()),
+        raw_space_id,
     })
 }
 
