@@ -451,6 +451,46 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ),
         ),
         check(
+            "graph_route_parity_alignment",
+            [
+                bool_path(bundle, &["graph_route_parity_alignment", "ready"]) == Some(true),
+                u64_path(bundle, &["graph_route_parity_alignment", "required_route_count"])
+                    .is_some_and(|value| value > 0),
+                u64_path(bundle, &["graph_route_parity_alignment", "ready_route_count"])
+                    == u64_path(bundle, &["graph_route_parity_alignment", "required_route_count"]),
+                string_array_path(bundle, &["graph_route_parity_alignment", "missing_routes"])
+                    .is_empty(),
+                string_array_path(bundle, &["graph_route_parity_alignment", "not_ready_routes"])
+                    .is_empty(),
+                string_array_path(
+                    bundle,
+                    &["graph_route_parity_alignment", "route_mismatch_routes"],
+                )
+                .is_empty(),
+                string_array_path(
+                    bundle,
+                    &["graph_route_parity_alignment", "protocol_mismatch_routes"],
+                )
+                .is_empty(),
+                string_array_path(bundle, &["graph_route_parity_alignment", "blocker_routes"])
+                    .is_empty(),
+            ],
+            [
+                "graph_route_parity_alignment.ready",
+                "graph_route_parity_alignment.required_route_count",
+                "graph_route_parity_alignment.ready_route_count",
+                "graph_route_parity_alignment.missing_routes",
+                "graph_route_parity_alignment.not_ready_routes",
+                "graph_route_parity_alignment.route_mismatch_routes",
+                "graph_route_parity_alignment.protocol_mismatch_routes",
+                "graph_route_parity_alignment.blocker_routes",
+            ],
+            blocker_codes(
+                bundle,
+                &[&["graph_route_parity_alignment", "blocker_codes"][..]],
+            ),
+        ),
+        check(
             "background_maintenance_evidence",
             [
                 bool_path(
@@ -856,6 +896,22 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             ],
         ));
     }
+    if !graph_route_parity_alignment_ready(bundle) {
+        actions.push(next_action(
+            "attach_graph_route_parity_evidence",
+            "Nowledge Mem graph cutover requires route-level shadow parity evidence for graph reads",
+            [
+                "graph_route_parity_alignment.ready",
+                "graph_route_parity_alignment.required_route_count",
+                "graph_route_parity_alignment.ready_route_count",
+                "graph_route_parity_alignment.missing_routes",
+                "graph_route_parity_alignment.not_ready_routes",
+                "graph_route_parity_alignment.route_mismatch_routes",
+                "graph_route_parity_alignment.protocol_mismatch_routes",
+                "graph_route_parity_alignment.blocker_routes",
+            ],
+        ));
+    }
     if !replacement_summary_storage_recovery_ready(bundle) {
         actions.push(next_action(
             "attach_storage_recovery_report",
@@ -1085,6 +1141,39 @@ fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
         &["graph_route_readiness", "primary_ready_route_count"],
     );
     route_count.is_some_and(|value| value > 0) && route_count == primary_ready_route_count
+}
+
+fn graph_route_parity_alignment_ready(bundle: &serde_json::Value) -> bool {
+    bool_path(bundle, &["graph_route_parity_alignment", "ready"]) == Some(true)
+        && u64_path(
+            bundle,
+            &["graph_route_parity_alignment", "required_route_count"],
+        )
+        .is_some_and(|value| value > 0)
+        && u64_path(
+            bundle,
+            &["graph_route_parity_alignment", "ready_route_count"],
+        ) == u64_path(
+            bundle,
+            &["graph_route_parity_alignment", "required_route_count"],
+        )
+        && string_array_path(bundle, &["graph_route_parity_alignment", "missing_routes"]).is_empty()
+        && string_array_path(
+            bundle,
+            &["graph_route_parity_alignment", "not_ready_routes"],
+        )
+        .is_empty()
+        && string_array_path(
+            bundle,
+            &["graph_route_parity_alignment", "route_mismatch_routes"],
+        )
+        .is_empty()
+        && string_array_path(
+            bundle,
+            &["graph_route_parity_alignment", "protocol_mismatch_routes"],
+        )
+        .is_empty()
+        && string_array_path(bundle, &["graph_route_parity_alignment", "blocker_routes"]).is_empty()
 }
 
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
@@ -1748,6 +1837,50 @@ mod tests {
     }
 
     #[test]
+    fn requires_graph_route_parity_alignment() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_parity_alignment"]["ready"] = serde_json::json!(false);
+        bundle["graph_route_parity_alignment"]["ready_route_count"] = serde_json::json!(17);
+        bundle["graph_route_parity_alignment"]["missing_routes"] =
+            serde_json::json!(["agent_evolves"]);
+        bundle["graph_route_parity_alignment"]["observed_blocker_codes"] =
+            serde_json::json!(["agent_evolves_parity_evidence_missing"]);
+        bundle["graph_route_parity_alignment"]["blocker_codes"] =
+            serde_json::json!(["graph_route_parity_evidence_missing"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_parity_alignment"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["graph_route_parity_evidence_missing"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_parity_alignment")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "graph_route_parity_alignment.ready",
+                "graph_route_parity_alignment.ready_route_count",
+                "graph_route_parity_alignment.missing_routes"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_graph_route_parity_evidence"));
+    }
+
+    #[test]
     fn requires_background_maintenance_evidence() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["cutover_evidence"]["background_maintenance_ready"] =
@@ -1954,6 +2087,38 @@ mod tests {
                         "blocker_codes": []
                     }
                 ]
+            },
+            "graph_route_parity_alignment": {
+                "ready": true,
+                "required_route_count": 18,
+                "ready_route_count": 18,
+                "ready_routes": [
+                    "augmentation_state",
+                    "pagerank_plan",
+                    "overview",
+                    "graph_search",
+                    "explore",
+                    "expand",
+                    "live_preview",
+                    "live_preview_node",
+                    "node_details",
+                    "source_detail",
+                    "orphans",
+                    "shortest_path",
+                    "community_members",
+                    "community_subgraph",
+                    "community_recent_memories",
+                    "related_communities",
+                    "graph_analysis",
+                    "agent_evolves"
+                ],
+                "missing_routes": [],
+                "not_ready_routes": [],
+                "route_mismatch_routes": [],
+                "protocol_mismatch_routes": [],
+                "blocker_routes": [],
+                "observed_blocker_codes": [],
+                "blocker_codes": []
             },
             "replacement_summary": {
                 "protocol": "skein-nowledge-replacement-summary",
