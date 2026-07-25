@@ -18051,12 +18051,17 @@ fn thread_meta_lookup_rejects_empty_filters() {
 
 #[test]
 fn resolves_thread_identity_for_nowledge_repo_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:ThreadIdentity {id: 'identity_public', thread_node_id: 'thread_uuid', thread_id: 'logical_a', space_id: '', source: 'codex'})")
         .unwrap();
     db.query("CREATE (:ThreadIdentity {id: 'identity_other', thread_node_id: 'other_uuid', thread_id: 'logical_b', space_id: 'team', source: 'slack'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
+    let cache_before_lookup = db.plan_cache_stats();
 
     let output = db
         .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
@@ -18072,6 +18077,16 @@ fn resolves_thread_identity_for_nowledge_repo_shape() {
     assert_eq!(output.raw_space_id, None);
     assert_eq!(output.normalized_space_id.as_deref(), Some("default"));
     assert_eq!(output.source.as_deref(), Some("codex"));
+    let repeated = db
+        .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {
+            identity_key: "identity_public".to_string(),
+        })
+        .unwrap();
+    assert_eq!(output, repeated);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
     let missing = db
         .knowledge_thread_identity(&KnowledgeThreadIdentityRequest {

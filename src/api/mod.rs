@@ -7718,7 +7718,7 @@ impl Database {
         &self,
         request: &KnowledgeThreadIdentityRequest,
     ) -> Result<KnowledgeThreadIdentityOutput> {
-        knowledge_thread_identity_for(&self.catalog, &self.store, request)
+        knowledge_thread_identity_via_query_runtime(self, request)
     }
 
     pub fn delete_knowledge_thread_identities(
@@ -22979,6 +22979,41 @@ fn knowledge_thread_identity_for(
         raw_space_id: string_property(identity, "space_id"),
         normalized_space_id: Some(normalized_node_space_id(identity)),
         source: string_property(identity, "source"),
+    })
+}
+
+fn knowledge_thread_identity_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadIdentityRequest,
+) -> Result<KnowledgeThreadIdentityOutput> {
+    validate_knowledge_thread_identity_request(request)?;
+    let parameters = BTreeMap::from([(
+        "identity_key".to_string(),
+        Value::String(request.identity_key.clone()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (ti:ThreadIdentity {id: $identity_key}) \
+         RETURN id(ti) AS identity_node_id, ti.thread_node_id AS thread_node_id, \
+         ti.thread_id AS thread_id, ti.space_id AS raw_space_id, \
+         CASE WHEN ti.space_id IS NULL OR ti.space_id = '' THEN 'default' ELSE ti.space_id END AS normalized_space_id, \
+         ti.source AS source \
+         LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let first = output.rows.first();
+    Ok(KnowledgeThreadIdentityOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        identity_key: request.identity_key.clone(),
+        identity_node_id: first
+            .and_then(|row| row.get("identity_node_id"))
+            .and_then(value_to_non_negative_u64),
+        found_identity: first.is_some(),
+        thread_node_id: first.and_then(|row| optional_string_cell(row, "thread_node_id")),
+        thread_id: first.and_then(|row| optional_string_cell(row, "thread_id")),
+        raw_space_id: first.and_then(|row| optional_string_cell(row, "raw_space_id")),
+        normalized_space_id: first.and_then(|row| optional_string_cell(row, "normalized_space_id")),
+        source: first.and_then(|row| optional_string_cell(row, "source")),
     })
 }
 
