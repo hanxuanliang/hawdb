@@ -89,10 +89,14 @@ fn query_runtime_preflight_json(
                 "covered_routes": route_coverage.covered_routes,
                 "missing_required_routes": route_coverage.missing_required_routes,
                 "required_routes_covered": route_coverage.required_routes_covered,
+                "unknown_routes": route_coverage.unknown_routes,
+                "duplicate_routes": route_coverage.duplicate_routes,
+                "route_coverage_ready": route_coverage.ready,
+                "route_coverage_blocker_codes": route_coverage.blocker_codes,
                 "blocker_codes": database_open_blocker_codes(
                     probes.len(),
                     probes.len(),
-                    route_coverage.required_routes_covered,
+                    &route_coverage,
                 ),
                 "error_class": error_class(&error),
                 "probes": [],
@@ -109,11 +113,7 @@ fn query_runtime_preflight_json(
         .filter(|probe| probe.get("ready").and_then(serde_json::Value::as_bool) == Some(true))
         .count();
     let failed_probe_count = probe_reports.len().saturating_sub(passed_probe_count);
-    let blocker_codes = preflight_blocker_codes(
-        probes.len(),
-        failed_probe_count,
-        route_coverage.required_routes_covered,
-    );
+    let blocker_codes = preflight_blocker_codes(probes.len(), failed_probe_count, &route_coverage);
 
     serde_json::json!({
         "protocol": QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
@@ -127,6 +127,10 @@ fn query_runtime_preflight_json(
         "covered_routes": route_coverage.covered_routes,
         "missing_required_routes": route_coverage.missing_required_routes,
         "required_routes_covered": route_coverage.required_routes_covered,
+        "unknown_routes": route_coverage.unknown_routes,
+        "duplicate_routes": route_coverage.duplicate_routes,
+        "route_coverage_ready": route_coverage.ready,
+        "route_coverage_blocker_codes": route_coverage.blocker_codes,
         "blocker_codes": blocker_codes,
         "probes": probe_reports,
     })
@@ -139,13 +143,22 @@ struct QueryRuntimeRouteCoverage {
     covered_routes: Vec<&'static str>,
     missing_required_routes: Vec<&'static str>,
     required_routes_covered: bool,
+    unknown_routes: Vec<String>,
+    duplicate_routes: Vec<String>,
+    ready: bool,
+    blocker_codes: Vec<&'static str>,
 }
 
 fn query_runtime_route_coverage(probes: &[QueryRuntimeProbe]) -> QueryRuntimeRouteCoverage {
-    let observed_routes = probes
+    let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
         .iter()
-        .filter_map(|probe| probe.route.as_deref())
+        .copied()
         .collect::<BTreeSet<_>>();
+    let mut route_counts = BTreeMap::<&str, usize>::new();
+    for route in probes.iter().filter_map(|probe| probe.route.as_deref()) {
+        *route_counts.entry(route).or_default() += 1;
+    }
+    let observed_routes = route_counts.keys().copied().collect::<BTreeSet<_>>();
     let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
         .iter()
         .copied()
@@ -156,12 +169,38 @@ fn query_runtime_route_coverage(probes: &[QueryRuntimeProbe]) -> QueryRuntimeRou
         .copied()
         .filter(|route| !observed_routes.contains(route))
         .collect::<Vec<_>>();
+    let unknown_routes = observed_routes
+        .iter()
+        .filter(|route| !required_routes.contains(**route))
+        .map(|route| (*route).to_string())
+        .collect::<Vec<_>>();
+    let duplicate_routes = route_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(route, _)| (*route).to_string())
+        .collect::<Vec<_>>();
+    let required_routes_covered = missing_required_routes.is_empty();
+    let mut blocker_codes = Vec::new();
+    if !required_routes_covered {
+        blocker_codes.push("query_runtime_route_coverage_missing");
+    }
+    if !unknown_routes.is_empty() {
+        blocker_codes.push("query_runtime_unknown_routes");
+    }
+    if !duplicate_routes.is_empty() {
+        blocker_codes.push("query_runtime_duplicate_routes");
+    }
+    let ready = blocker_codes.is_empty();
     QueryRuntimeRouteCoverage {
         required_route_count: REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
         covered_route_count: covered_routes.len(),
         covered_routes,
-        required_routes_covered: missing_required_routes.is_empty(),
+        required_routes_covered,
         missing_required_routes,
+        unknown_routes,
+        duplicate_routes,
+        ready,
+        blocker_codes,
     }
 }
 
@@ -239,7 +278,7 @@ fn run_probe(db: &mut Database, probe: &QueryRuntimeProbe) -> serde_json::Value 
 fn preflight_blocker_codes(
     probe_count: usize,
     failed_probe_count: usize,
-    required_routes_covered: bool,
+    route_coverage: &QueryRuntimeRouteCoverage,
 ) -> Vec<&'static str> {
     let mut blockers = Vec::new();
     if probe_count == 0 {
@@ -248,22 +287,20 @@ fn preflight_blocker_codes(
     if failed_probe_count > 0 {
         blockers.push("query_runtime_probe_failed");
     }
-    if !required_routes_covered {
-        blockers.push("query_runtime_route_coverage_missing");
-    }
+    blockers.extend(route_coverage.blocker_codes.iter().copied());
     blockers
 }
 
 fn database_open_blocker_codes(
     probe_count: usize,
     failed_probe_count: usize,
-    required_routes_covered: bool,
+    route_coverage: &QueryRuntimeRouteCoverage,
 ) -> Vec<&'static str> {
     let mut blockers = vec!["database_open_failed"];
     blockers.extend(preflight_blocker_codes(
         probe_count,
         failed_probe_count,
-        required_routes_covered,
+        route_coverage,
     ));
     blockers
 }
@@ -570,6 +607,13 @@ mod tests {
         );
         assert_eq!(report["required_routes_covered"], true);
         assert_eq!(report["missing_required_routes"], serde_json::json!([]));
+        assert_eq!(report["unknown_routes"], serde_json::json!([]));
+        assert_eq!(report["duplicate_routes"], serde_json::json!([]));
+        assert_eq!(report["route_coverage_ready"], true);
+        assert_eq!(
+            report["route_coverage_blocker_codes"],
+            serde_json::json!([])
+        );
         assert_eq!(report["probes"][0]["ready"], true);
         assert_eq!(report["probes"][0]["output_row_count"], 1);
         assert_eq!(
@@ -637,6 +681,113 @@ mod tests {
                 "query_runtime_route_coverage_missing"
             ])
         );
+        assert_eq!(
+            report["route_coverage_blocker_codes"],
+            serde_json::json!(["query_runtime_route_coverage_missing"])
+        );
+        assert_eq!(report["route_coverage_ready"], false);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn query_runtime_preflight_rejects_unknown_route_probe() {
+        let root = unique_test_dir("query-runtime-preflight-unknown-route");
+        let graph_path = root.join("graph");
+        let probe_path = root.join("probes.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut db = Database::open(&graph_path).unwrap();
+        db.query("CREATE (:Memory {id: 'mem-a', kind: 'note', title: 'A'})")
+            .unwrap();
+        drop(db);
+        let mut probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| ready_probe(route))
+            .collect::<Vec<_>>();
+        probes.push(ready_probe("/graph/manual-extra-route"));
+        std::fs::write(
+            &probe_path,
+            serde_json::json!({ "probes": probes }).to_string(),
+        )
+        .unwrap();
+
+        let (report, _) = run_nowledge_query_runtime_preflight(
+            [
+                "--probe-json",
+                probe_path.to_str().unwrap(),
+                graph_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["required_routes_covered"], true);
+        assert_eq!(report["route_coverage_ready"], false);
+        assert_eq!(
+            report["unknown_routes"],
+            serde_json::json!(["/graph/manual-extra-route"])
+        );
+        assert_eq!(
+            report["route_coverage_blocker_codes"],
+            serde_json::json!(["query_runtime_unknown_routes"])
+        );
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_runtime_unknown_routes"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn query_runtime_preflight_rejects_duplicate_route_probe() {
+        let root = unique_test_dir("query-runtime-preflight-duplicate-route");
+        let graph_path = root.join("graph");
+        let probe_path = root.join("probes.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut db = Database::open(&graph_path).unwrap();
+        db.query("CREATE (:Memory {id: 'mem-a', kind: 'note', title: 'A'})")
+            .unwrap();
+        drop(db);
+        let mut probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| ready_probe(route))
+            .collect::<Vec<_>>();
+        probes.push(ready_probe("/graph/overview"));
+        std::fs::write(
+            &probe_path,
+            serde_json::json!({ "probes": probes }).to_string(),
+        )
+        .unwrap();
+
+        let (report, _) = run_nowledge_query_runtime_preflight(
+            [
+                "--probe-json",
+                probe_path.to_str().unwrap(),
+                graph_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["required_routes_covered"], true);
+        assert_eq!(report["route_coverage_ready"], false);
+        assert_eq!(
+            report["duplicate_routes"],
+            serde_json::json!(["/graph/overview"])
+        );
+        assert_eq!(
+            report["route_coverage_blocker_codes"],
+            serde_json::json!(["query_runtime_duplicate_routes"])
+        );
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_runtime_duplicate_routes"));
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -683,5 +834,18 @@ mod tests {
             .unwrap()
             .as_nanos();
         std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}", std::process::id()))
+    }
+
+    fn ready_probe(route: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": format!("memory-by-kind:{route}"),
+            "route": route,
+            "query_family": "memory_lookup",
+            "cypher": "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.title AS title",
+            "parameters": {"kind": "note"},
+            "require_scan_pruning": true,
+            "require_pruned": true,
+            "max_output_rows": 1
+        })
     }
 }

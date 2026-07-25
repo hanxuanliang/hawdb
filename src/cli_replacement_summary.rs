@@ -2,7 +2,7 @@ use skein::{
     replacement_readiness_family_evidence_health_from_bundle,
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
@@ -257,6 +257,8 @@ pub fn nowledge_replacement_summary_json_with_options(
             "covered_routes": query_runtime_preflight.covered_routes,
             "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_required_routes": query_runtime_preflight.missing_required_routes,
+            "unknown_routes": query_runtime_preflight.unknown_routes,
+            "duplicate_routes": query_runtime_preflight.duplicate_routes,
             "required_routes_covered": query_runtime_preflight.required_routes_covered,
             "route_coverage_ready": query_runtime_preflight.route_coverage_ready,
             "probe_details_ready": query_runtime_preflight.probe_details_ready,
@@ -565,6 +567,8 @@ struct QueryRuntimePreflightSummary {
     covered_route_count: Option<u64>,
     covered_routes: Vec<String>,
     missing_required_routes: Vec<&'static str>,
+    unknown_routes: Vec<String>,
+    duplicate_routes: Vec<String>,
     required_routes_covered: Option<bool>,
     route_coverage_ready: bool,
     probe_details_ready: bool,
@@ -985,6 +989,7 @@ fn query_runtime_preflight_summary(bundle: &serde_json::Value) -> QueryRuntimePr
     let covered_route_count = json_get_u64_path_from_dynamic(bundle, path, "covered_route_count");
     let required_routes_covered =
         json_get_bool_path_from_dynamic(bundle, path, "required_routes_covered");
+    let probe_routes = query_runtime_preflight_probe_routes(bundle, path);
     let probe_route_set = query_runtime_preflight_probe_route_set(bundle, path);
     let covered_routes = probe_route_set
         .iter()
@@ -995,11 +1000,21 @@ fn query_runtime_preflight_summary(bundle: &serde_json::Value) -> QueryRuntimePr
         .copied()
         .filter(|route| !probe_route_set.contains(*route))
         .collect::<Vec<_>>();
+    let unknown_routes = probe_route_set
+        .iter()
+        .filter(|route| !REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.contains(&route.as_str()))
+        .map(String::to_string)
+        .collect::<Vec<_>>();
+    let duplicate_routes = duplicate_probe_routes(&probe_routes);
     let required_route_len = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64;
     let route_coverage_ready = required_route_count == Some(required_route_len)
         && covered_route_count == Some(required_route_len)
         && required_routes_covered == Some(true)
-        && missing_required_routes.is_empty();
+        && missing_required_routes.is_empty()
+        && unknown_routes.is_empty()
+        && duplicate_routes.is_empty()
+        && json_get_bool_path_from_dynamic(bundle, path, "route_coverage_ready")
+            .is_none_or(|ready| ready);
     let probe_details_ready = query_runtime_preflight_probe_details_ready(bundle, path);
     let ready = present
         && protocol.as_deref() == Some(SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL)
@@ -1022,6 +1037,8 @@ fn query_runtime_preflight_summary(bundle: &serde_json::Value) -> QueryRuntimePr
         covered_route_count,
         covered_routes,
         missing_required_routes,
+        unknown_routes,
+        duplicate_routes,
         required_routes_covered,
         route_coverage_ready,
         probe_details_ready,
@@ -1033,6 +1050,12 @@ fn query_runtime_preflight_probe_route_set(
     bundle: &serde_json::Value,
     path: &[&str],
 ) -> BTreeSet<String> {
+    query_runtime_preflight_probe_routes(bundle, path)
+        .into_iter()
+        .collect()
+}
+
+fn query_runtime_preflight_probe_routes(bundle: &serde_json::Value, path: &[&str]) -> Vec<String> {
     json_get_path_from_dynamic(bundle, path, "probes")
         .and_then(serde_json::Value::as_array)
         .into_iter()
@@ -1043,6 +1066,18 @@ fn query_runtime_preflight_probe_route_set(
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_string)
         })
+        .collect()
+}
+
+fn duplicate_probe_routes(routes: &[String]) -> Vec<String> {
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for route in routes {
+        *counts.entry(route.as_str()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(route, _)| route.to_string())
         .collect()
 }
 
@@ -2473,6 +2508,63 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_rejects_query_runtime_unknown_route_probe() {
+        let mut bundle = production_ready_bundle();
+        let mut probe = bundle["query_runtime_preflight"]["probes"][0].clone();
+        probe["route"] = serde_json::json!("/graph/stale-route");
+        bundle["query_runtime_preflight"]["probes"]
+            .as_array_mut()
+            .unwrap()
+            .push(probe);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["query_runtime_preflight"]["ready"], false);
+        assert_eq!(
+            summary["query_runtime_preflight"]["route_coverage_ready"],
+            false
+        );
+        assert_eq!(
+            summary["query_runtime_preflight"]["unknown_routes"],
+            serde_json::json!(["/graph/stale-route"])
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "query_runtime_preflight"));
+    }
+
+    #[test]
+    fn replacement_summary_rejects_query_runtime_duplicate_route_probe() {
+        let mut bundle = production_ready_bundle();
+        let probe = bundle["query_runtime_preflight"]["probes"][0].clone();
+        bundle["query_runtime_preflight"]["probes"]
+            .as_array_mut()
+            .unwrap()
+            .push(probe);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["query_runtime_preflight"]["ready"], false);
+        assert_eq!(
+            summary["query_runtime_preflight"]["route_coverage_ready"],
+            false
+        );
+        assert_eq!(
+            summary["query_runtime_preflight"]["duplicate_routes"],
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[0]])
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "query_runtime_preflight"));
+    }
+
+    #[test]
     fn replacement_summary_blocks_production_without_graph_delta_aggregate_evidence() {
         let mut bundle = production_ready_bundle();
         bundle["cutover_evidence"]
@@ -3329,6 +3421,10 @@ mod tests {
             "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_required_routes": [],
             "required_routes_covered": true,
+            "unknown_routes": [],
+            "duplicate_routes": [],
+            "route_coverage_ready": true,
+            "route_coverage_blocker_codes": [],
             "blocker_codes": [],
             "probes": probes,
         })

@@ -1,5 +1,5 @@
 use skein::{Result, SkeinError, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
@@ -597,6 +597,10 @@ fn query_runtime_alignment_json(
 }
 
 fn query_runtime_probe_route_set(value: &serde_json::Value) -> BTreeSet<String> {
+    query_runtime_probe_routes(value).into_iter().collect()
+}
+
+fn query_runtime_probe_routes(value: &serde_json::Value) -> Vec<String> {
     value
         .get("probes")
         .and_then(serde_json::Value::as_array)
@@ -608,7 +612,13 @@ fn query_runtime_probe_route_set(value: &serde_json::Value) -> BTreeSet<String> 
 }
 
 fn query_runtime_route_coverage_ready(value: &serde_json::Value) -> Option<bool> {
-    let observed_routes = query_runtime_probe_route_set(value);
+    let observed_routes = query_runtime_probe_routes(value);
+    let observed_route_set = observed_routes.iter().cloned().collect::<BTreeSet<_>>();
+    let unknown_route_count = observed_route_set
+        .iter()
+        .filter(|route| !REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.contains(&route.as_str()))
+        .count();
+    let duplicate_routes = duplicate_routes(&observed_routes);
     Some(
         str_path(value, &["protocol"]) == Some(SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL)
             && u64_path(value, &["required_route_count"])
@@ -617,10 +627,28 @@ fn query_runtime_route_coverage_ready(value: &serde_json::Value) -> Option<bool>
                 == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
             && bool_path(value, &["required_routes_covered"]) == Some(true)
             && string_set_path(value, &["missing_required_routes"]).is_empty()
+            && string_set_path(value, &["unknown_routes"]).is_empty()
+            && string_set_path(value, &["duplicate_routes"]).is_empty()
+            && bool_path(value, &["route_coverage_ready"]) == Some(true)
+            && string_set_path(value, &["route_coverage_blocker_codes"]).is_empty()
+            && unknown_route_count == 0
+            && duplicate_routes.is_empty()
             && REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
                 .iter()
-                .all(|route| observed_routes.contains(*route)),
+                .all(|route| observed_route_set.contains(*route)),
     )
+}
+
+fn duplicate_routes(routes: &[String]) -> Vec<String> {
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for route in routes {
+        *counts.entry(route).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(route, _)| route.to_string())
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1054,8 +1082,11 @@ mod tests {
             "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_required_routes": [],
+            "unknown_routes": [],
+            "duplicate_routes": [],
             "required_routes_covered": true,
             "route_coverage_ready": true,
+            "route_coverage_blocker_codes": [],
             "probe_details_ready": true,
             "blocker_codes": []
         })
@@ -1196,7 +1227,11 @@ mod tests {
             "covered_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_required_routes": [],
+            "unknown_routes": [],
+            "duplicate_routes": [],
             "required_routes_covered": true,
+            "route_coverage_ready": true,
+            "route_coverage_blocker_codes": [],
             "blocker_codes": [],
             "probes": probes
         })

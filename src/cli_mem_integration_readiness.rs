@@ -2,7 +2,7 @@ use skein::{
     Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
@@ -777,7 +777,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "query_runtime_preflight.probe_count",
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
-                "query_runtime_preflight.required_routes_covered",
+                "query_runtime_preflight.route_coverage",
                 "query_runtime_preflight.probes",
             ],
             blocker_codes(
@@ -785,6 +785,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 &[
                     &["query_runtime_preflight", "blocker_codes"][..],
                     &["query_runtime_preflight", "failed_checks"][..],
+                    &["query_runtime_preflight", "route_coverage_blocker_codes"][..],
                 ],
             ),
         ),
@@ -1492,7 +1493,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "query_runtime_preflight.probe_count",
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
-                "query_runtime_preflight.required_routes_covered",
+                "query_runtime_preflight.route_coverage",
                 "query_runtime_preflight.blocker_codes",
                 "query_runtime_preflight.probes",
             ],
@@ -2119,16 +2120,40 @@ fn query_runtime_preflight_route_coverage_ready(bundle: &serde_json::Value) -> b
     let observed_routes = probes
         .iter()
         .filter_map(|probe| str_path(probe, &["route"]))
-        .collect::<BTreeSet<_>>();
+        .collect::<Vec<_>>();
+    let observed_route_set = observed_routes.iter().copied().collect::<BTreeSet<_>>();
+    let duplicate_routes = duplicate_routes(&observed_routes);
+    let unknown_routes = observed_route_set
+        .iter()
+        .filter(|route| !REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.contains(route))
+        .count();
     u64_path(value, &["required_route_count"])
         == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
         && u64_path(value, &["covered_route_count"])
             == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
         && bool_path(value, &["required_routes_covered"]) == Some(true)
         && string_array_path(value, &["missing_required_routes"]).is_empty()
+        && string_array_path(value, &["unknown_routes"]).is_empty()
+        && string_array_path(value, &["duplicate_routes"]).is_empty()
+        && bool_path(value, &["route_coverage_ready"]) == Some(true)
+        && string_array_path(value, &["route_coverage_blocker_codes"]).is_empty()
+        && unknown_routes == 0
+        && duplicate_routes.is_empty()
         && REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
             .iter()
-            .all(|route| observed_routes.contains(route))
+            .all(|route| observed_route_set.contains(route))
+}
+
+fn duplicate_routes(routes: &[&str]) -> Vec<String> {
+    let mut counts = BTreeMap::<&str, usize>::new();
+    for route in routes {
+        *counts.entry(*route).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .filter(|(_, count)| *count > 1)
+        .map(|(route, _)| route.to_string())
+        .collect()
 }
 
 fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
@@ -3308,7 +3333,7 @@ mod tests {
                 "query_runtime_preflight.probe_count",
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
-                "query_runtime_preflight.required_routes_covered",
+                "query_runtime_preflight.route_coverage",
                 "query_runtime_preflight.probes"
             ])
         );
@@ -3396,8 +3421,85 @@ mod tests {
             .unwrap();
         assert_eq!(
             check["failed_evidence_fields"],
-            serde_json::json!(["query_runtime_preflight.required_routes_covered"])
+            serde_json::json!(["query_runtime_preflight.route_coverage"])
         );
+    }
+
+    #[test]
+    fn rejects_query_runtime_preflight_with_unknown_route() {
+        let mut bundle = ready_bundle();
+        let mut probe = bundle["query_runtime_preflight"]["probes"][0].clone();
+        probe["route"] = serde_json::json!("/graph/stale-route");
+        bundle["query_runtime_preflight"]["probes"]
+            .as_array_mut()
+            .unwrap()
+            .push(probe);
+        bundle["query_runtime_preflight"]["unknown_routes"] =
+            serde_json::json!(["/graph/stale-route"]);
+        bundle["query_runtime_preflight"]["route_coverage_ready"] = serde_json::json!(false);
+        bundle["query_runtime_preflight"]["route_coverage_blocker_codes"] =
+            serde_json::json!(["query_runtime_unknown_routes"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_runtime_preflight")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!(["query_runtime_preflight.route_coverage"])
+        );
+        assert!(check["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_runtime_unknown_routes"));
+    }
+
+    #[test]
+    fn rejects_query_runtime_preflight_with_duplicate_route() {
+        let mut bundle = ready_bundle();
+        let probe = bundle["query_runtime_preflight"]["probes"][0].clone();
+        bundle["query_runtime_preflight"]["probes"]
+            .as_array_mut()
+            .unwrap()
+            .push(probe);
+        bundle["query_runtime_preflight"]["duplicate_routes"] =
+            serde_json::json!([REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES[0]]);
+        bundle["query_runtime_preflight"]["route_coverage_ready"] = serde_json::json!(false);
+        bundle["query_runtime_preflight"]["route_coverage_blocker_codes"] =
+            serde_json::json!(["query_runtime_duplicate_routes"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_runtime_preflight")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!(["query_runtime_preflight.route_coverage"])
+        );
+        assert!(check["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_runtime_duplicate_routes"));
     }
 
     #[test]
@@ -4385,6 +4487,10 @@ mod tests {
             "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_required_routes": [],
             "required_routes_covered": true,
+            "unknown_routes": [],
+            "duplicate_routes": [],
+            "route_coverage_ready": true,
+            "route_coverage_blocker_codes": [],
             "blocker_codes": [],
             "probes": ready_query_runtime_preflight_probes()
         });
@@ -4490,7 +4596,10 @@ mod tests {
             "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_required_routes": [],
             "required_routes_covered": true,
+            "unknown_routes": [],
+            "duplicate_routes": [],
             "route_coverage_ready": true,
+            "route_coverage_blocker_codes": [],
             "probe_details_ready": true,
             "blocker_codes": []
         })
