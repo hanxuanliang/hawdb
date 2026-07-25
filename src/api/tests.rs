@@ -25670,13 +25670,17 @@ fn retrieves_knowledge_neighbors_without_search_projection() {
 
 #[test]
 fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query(
         "CREATE (:Memory {id: 'root', title: 'Root', space_id: ''})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})",
     )
     .unwrap();
 
-    let scoped = db.knowledge_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
+    let scoped_request = KnowledgeScopedNeighborsRequest {
         navigation: KnowledgeNeighborsRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
@@ -25686,7 +25690,8 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
             max_hops: 1,
         },
         metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
-    });
+    };
+    let scoped = db.knowledge_scoped_neighbors(&scoped_request);
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -25700,6 +25705,14 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
             .map(String::as_str),
         Some("default")
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated_scoped = db.knowledge_scoped_neighbors(&scoped_request);
+    assert_eq!(repeated_scoped, scoped);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db.knowledge_scoped_neighbors(&KnowledgeScopedNeighborsRequest {
         navigation: KnowledgeNeighborsRequest {
