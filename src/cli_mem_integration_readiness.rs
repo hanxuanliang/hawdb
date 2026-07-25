@@ -571,6 +571,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     .is_some_and(|value| value > 0),
                 u64_path(bundle, &["graph_route_readiness", "required_route_count"])
                     == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
+                graph_route_readiness_route_coverage_ready(bundle),
                 string_array_path_is_empty(
                     bundle,
                     &["graph_route_readiness", "missing_required_routes"],
@@ -589,6 +590,18 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 graph_route_primary_ready_count_matches(bundle),
                 string_array_path(bundle, &["graph_route_readiness", "route_primary_blocker_codes"])
                     .is_empty(),
+                bool_path(bundle, &["graph_route_readiness", "evidence_route_coverage_present"])
+                    == Some(true),
+                bool_path(bundle, &["graph_route_readiness", "evidence_route_coverage_matches"])
+                    == Some(true),
+                string_array_path(
+                    bundle,
+                    &[
+                        "graph_route_readiness",
+                        "evidence_route_coverage_blocker_codes",
+                    ],
+                )
+                .is_empty(),
                 graph_route_query_profiles_ready(bundle),
             ],
             [
@@ -597,6 +610,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "graph_route_readiness.evidence_ready",
                 "graph_route_readiness.route_count",
                 "graph_route_readiness.required_route_count",
+                "graph_route_readiness.route_coverage",
                 "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
@@ -605,6 +619,9 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count",
                 "graph_route_readiness.route_primary_blocker_codes",
+                "graph_route_readiness.evidence_route_coverage_present",
+                "graph_route_readiness.evidence_route_coverage_matches",
+                "graph_route_readiness.evidence_route_coverage_blocker_codes",
                 "graph_route_readiness.routes",
             ],
             blocker_codes(
@@ -612,6 +629,10 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 &[
                     &["graph_route_readiness", "blocker_codes"][..],
                     &["graph_route_readiness", "route_primary_blocker_codes"][..],
+                    &[
+                        "graph_route_readiness",
+                        "evidence_route_coverage_blocker_codes",
+                    ][..],
                 ],
             ),
         ),
@@ -1412,6 +1433,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "graph_route_readiness.evidence_ready",
                 "graph_route_readiness.route_count",
                 "graph_route_readiness.required_route_count",
+                "graph_route_readiness.route_coverage",
                 "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
@@ -1420,6 +1442,9 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count",
                 "graph_route_readiness.route_primary_blocker_codes",
+                "graph_route_readiness.evidence_route_coverage_present",
+                "graph_route_readiness.evidence_route_coverage_matches",
+                "graph_route_readiness.evidence_route_coverage_blocker_codes",
                 "graph_route_readiness.routes",
             ],
         ));
@@ -1809,6 +1834,7 @@ fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
             .is_some_and(|value| value > 0)
         && u64_path(bundle, &["graph_route_readiness", "required_route_count"])
             == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && graph_route_readiness_route_coverage_ready(bundle)
         && string_array_path_is_empty(
             bundle,
             &["graph_route_readiness", "missing_required_routes"],
@@ -1837,7 +1863,42 @@ fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
             &["graph_route_readiness", "route_primary_blocker_codes"],
         )
         .is_empty()
+        && bool_path(
+            bundle,
+            &["graph_route_readiness", "evidence_route_coverage_present"],
+        ) == Some(true)
+        && bool_path(
+            bundle,
+            &["graph_route_readiness", "evidence_route_coverage_matches"],
+        ) == Some(true)
+        && string_array_path(
+            bundle,
+            &[
+                "graph_route_readiness",
+                "evidence_route_coverage_blocker_codes",
+            ],
+        )
+        .is_empty()
         && graph_route_query_profiles_ready(bundle)
+}
+
+fn graph_route_readiness_route_coverage_ready(bundle: &serde_json::Value) -> bool {
+    let Some(value) = json_get_path(bundle, &["graph_route_readiness"]) else {
+        return false;
+    };
+    let covered_routes = string_array_path(value, &["covered_routes"]);
+    covered_routes.len() == REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        && REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .all(|route| covered_routes.iter().any(|covered| covered == route))
+        && u64_path(value, &["covered_route_count"])
+            == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && bool_path(value, &["required_routes_covered"]) == Some(true)
+        && string_array_path(value, &["missing_required_routes"]).is_empty()
+        && string_array_path(value, &["unknown_routes"]).is_empty()
+        && string_array_path(value, &["duplicate_routes"]).is_empty()
+        && bool_path(value, &["route_coverage_ready"]) == Some(true)
+        && string_array_path(value, &["route_coverage_blocker_codes"]).is_empty()
 }
 
 fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
@@ -3109,6 +3170,7 @@ mod tests {
                 "graph_route_readiness.evidence_ready",
                 "graph_route_readiness.route_count",
                 "graph_route_readiness.required_route_count",
+                "graph_route_readiness.route_coverage",
                 "graph_route_readiness.missing_required_routes",
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
@@ -3116,6 +3178,8 @@ mod tests {
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count",
+                "graph_route_readiness.evidence_route_coverage_present",
+                "graph_route_readiness.evidence_route_coverage_matches",
                 "graph_route_readiness.routes"
             ])
         );
@@ -3124,6 +3188,94 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_graph_route_readiness_evidence"));
+    }
+
+    #[test]
+    fn rejects_graph_route_readiness_without_route_coverage_envelope() {
+        let mut bundle = ready_bundle();
+        for field in [
+            "covered_route_count",
+            "covered_routes",
+            "required_routes_covered",
+            "unknown_routes",
+            "duplicate_routes",
+            "route_coverage_ready",
+            "route_coverage_blocker_codes",
+            "evidence_route_coverage_present",
+            "evidence_route_coverage_matches",
+            "evidence_route_coverage_blocker_codes",
+        ] {
+            bundle["graph_route_readiness"]
+                .as_object_mut()
+                .unwrap()
+                .remove(field);
+        }
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert!(route_check["failed_evidence_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "graph_route_readiness.route_coverage"));
+        assert!(route_check["failed_evidence_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "graph_route_readiness.evidence_route_coverage_present"));
+    }
+
+    #[test]
+    fn rejects_graph_route_readiness_with_stale_route_coverage_envelope() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["covered_routes"] = serde_json::json!(["/graph/overview"]);
+        bundle["graph_route_readiness"]["covered_route_count"] = serde_json::json!(1);
+        bundle["graph_route_readiness"]["evidence_route_coverage_matches"] =
+            serde_json::json!(false);
+        bundle["graph_route_readiness"]["evidence_route_coverage_blocker_codes"] =
+            serde_json::json!(["route_coverage_evidence_mismatch"]);
+        bundle["graph_route_readiness"]["route_primary_blocker_codes"] =
+            serde_json::json!(["route_coverage_evidence_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert!(route_check["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_coverage_evidence_mismatch"));
+        assert!(route_check["failed_evidence_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "graph_route_readiness.route_coverage"));
+        assert!(route_check["failed_evidence_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "graph_route_readiness.evidence_route_coverage_matches"));
     }
 
     #[test]
@@ -4168,7 +4320,17 @@ mod tests {
             "evidence_ready": true,
             "route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_required_routes": [],
+            "required_routes_covered": true,
+            "unknown_routes": [],
+            "duplicate_routes": [],
+            "route_coverage_ready": true,
+            "route_coverage_blocker_codes": [],
+            "evidence_route_coverage_present": true,
+            "evidence_route_coverage_matches": true,
+            "evidence_route_coverage_blocker_codes": [],
             "shadow_compare_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "primary_ready_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "query_runtime_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),

@@ -518,4 +518,6 @@ fail-closed even if they bypass the evidence generator. When an evidence
 envelope carries route coverage fields, readiness compares them with the
 recomputed route set and emits `route_coverage_evidence_mismatch` if they have
 drifted; if the coverage fields are absent, it emits
-`route_coverage_evidence_missing`.
+`route_coverage_evidence_missing`. The final integration readiness gate consumes
+these fields as required evidence, so bundles with legacy route readiness JSON
+remain blocked until regenerated from the current graph-route evidence tool.
