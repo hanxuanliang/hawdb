@@ -26774,13 +26774,17 @@ fn retrieves_bounded_knowledge_subgraph_without_search_projection() {
 
 #[test]
 fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query(
         "CREATE (:Memory {id: 'root', title: 'Root', source_id: 'thread_1'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})",
     )
     .unwrap();
 
-    let scoped = db.knowledge_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
+    let scoped_request = KnowledgeScopedSubgraphRequest {
         navigation: KnowledgeSubgraphRequest {
             label: "Memory".to_string(),
             external_id: "root".to_string(),
@@ -26791,7 +26795,8 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
             relationship_limit: 4,
         },
         metadata_filters: BTreeMap::from([("source_id".to_string(), "thread_1".to_string())]),
-    });
+    };
+    let scoped = db.knowledge_scoped_subgraph(&scoped_request);
 
     assert_eq!(scoped.nodes.len(), 2);
     assert_eq!(scoped.relationships.len(), 1);
@@ -26806,6 +26811,14 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
             .map(String::as_str),
         Some("thread_1")
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated_scoped = db.knowledge_scoped_subgraph(&scoped_request);
+    assert_eq!(repeated_scoped, scoped);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db.knowledge_scoped_subgraph(&KnowledgeScopedSubgraphRequest {
         navigation: KnowledgeSubgraphRequest {
@@ -26842,7 +26855,11 @@ fn scoped_knowledge_subgraph_filters_seed_by_metadata() {
 
 #[test]
 fn knowledge_subgraph_reports_limits_and_missing_seed() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'left', name: 'Left'})")
             .unwrap();
     let right = db
@@ -26891,7 +26908,7 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         node_limited.fanout_reasons
     );
 
-    let relationship_limited = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
+    let relationship_limited_request = KnowledgeSubgraphRequest {
         label: "Memory".to_string(),
         external_id: "root".to_string(),
         relationship_type: None,
@@ -26899,7 +26916,8 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         max_hops: 1,
         node_limit: 8,
         relationship_limit: 1,
-    });
+    };
+    let relationship_limited = db.knowledge_subgraph(&relationship_limited_request);
     assert_eq!(relationship_limited.relationships.len(), 1);
     assert_eq!(relationship_limited.diagnostics.node_count, 2);
     assert_eq!(relationship_limited.diagnostics.relationship_count, 1);
@@ -26919,6 +26937,14 @@ fn knowledge_subgraph_reports_limits_and_missing_seed() {
         relationship_limited.diagnostics.fanout_reasons,
         relationship_limited.fanout_reasons
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated_relationship_limited = db.knowledge_subgraph(&relationship_limited_request);
+    assert_eq!(repeated_relationship_limited, relationship_limited);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 
     let node_disabled = db.knowledge_subgraph(&KnowledgeSubgraphRequest {
         label: "Memory".to_string(),
