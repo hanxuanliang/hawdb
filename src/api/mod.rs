@@ -7520,12 +7520,7 @@ impl Database {
     }
 
     pub fn knowledge_source_count(&self) -> KnowledgeSourceCountOutput {
-        knowledge_source_count_via_query_runtime(self).unwrap_or_else(|| {
-            KnowledgeSourceCountOutput {
-                graph_commit_epoch: self.store.commit_epoch(),
-                count: count_nodes_with_label(&self.catalog, &self.store, "Source"),
-            }
-        })
+        knowledge_source_count_via_query_runtime(self)
     }
 
     pub fn knowledge_source_sourced_memory_count(
@@ -7687,7 +7682,6 @@ impl Database {
         request: &KnowledgeThreadSourceListRequest,
     ) -> KnowledgeThreadSourceListOutput {
         knowledge_thread_sources_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_thread_sources_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_thread_title(
@@ -19024,23 +19018,28 @@ fn knowledge_source_ids_via_query_runtime(
     })
 }
 
-fn knowledge_source_count_via_query_runtime(db: &Database) -> Option<KnowledgeSourceCountOutput> {
-    let output = db
-        .query_read_only_with_params_bounded(
-            "MATCH (s:Source) RETURN count(s) AS count",
-            &BTreeMap::new(),
-            Some(1),
-        )
-        .ok()?;
+fn knowledge_source_count_via_query_runtime(db: &Database) -> KnowledgeSourceCountOutput {
+    let graph_commit_epoch = db.store.commit_epoch();
+    let Ok(output) = db.query_read_only_with_params_bounded(
+        "MATCH (s:Source) RETURN count(s) AS count",
+        &BTreeMap::new(),
+        Some(1),
+    ) else {
+        return KnowledgeSourceCountOutput {
+            graph_commit_epoch,
+            count: 0,
+        };
+    };
     let count = output
         .rows
         .first()
         .and_then(|row| row.get("count"))
-        .and_then(value_to_non_negative_usize)?;
-    Some(KnowledgeSourceCountOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
+        .and_then(value_to_non_negative_usize)
+        .unwrap_or(0);
+    KnowledgeSourceCountOutput {
+        graph_commit_epoch,
         count,
-    })
+    }
 }
 
 fn validate_knowledge_source_id_list_request(request: &KnowledgeSourceIdListRequest) -> Result<()> {
@@ -23092,17 +23091,23 @@ fn knowledge_thread_sources_for(
 fn knowledge_thread_sources_via_query_runtime(
     db: &Database,
     request: &KnowledgeThreadSourceListRequest,
-) -> Option<KnowledgeThreadSourceListOutput> {
-    let output = db
-        .query_read_only_with_params_bounded(
-            "MATCH (t:Thread) \
+) -> KnowledgeThreadSourceListOutput {
+    let graph_commit_epoch = db.store.commit_epoch();
+    let Ok(output) = db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread) \
              WHERE t.source IS NOT NULL AND t.source <> '' \
              RETURN DISTINCT t.source AS source \
              ORDER BY source ASC",
-            &BTreeMap::new(),
-            None,
-        )
-        .ok()?;
+        &BTreeMap::new(),
+        None,
+    ) else {
+        return KnowledgeThreadSourceListOutput {
+            graph_commit_epoch,
+            sources: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        };
+    };
     let matched_count = output.rows.len();
     let mut sources = output
         .rows
@@ -23113,12 +23118,12 @@ fn knowledge_thread_sources_via_query_runtime(
         sources.truncate(request.limit);
     }
     let returned_count = sources.len();
-    Some(KnowledgeThreadSourceListOutput {
-        graph_commit_epoch: db.store.commit_epoch(),
+    KnowledgeThreadSourceListOutput {
+        graph_commit_epoch,
         sources,
         matched_count,
         returned_count,
-    })
+    }
 }
 
 fn knowledge_thread_title_for(
