@@ -137,6 +137,11 @@ struct QueryRuntimeReport {
     fast_path_selected: Option<bool>,
     slow_log_candidate: Option<bool>,
     physical_plan_captured: Option<bool>,
+    elapsed_micros: Option<u64>,
+    physical_operator_counts_present: bool,
+    optimizer_decision_count: Option<u64>,
+    scan_pruning_report_count: Option<u64>,
+    scan_pruning_reports_present: bool,
     plan_cache_lookup: Option<String>,
     plan_cache_cacheable: Option<bool>,
     plan_cache_hit: Option<bool>,
@@ -165,6 +170,13 @@ impl QueryRuntimeReport {
             fast_path_selected: bool_path(value, &["fast_path_selected"]),
             slow_log_candidate: bool_path(value, &["slow_log_candidate"]),
             physical_plan_captured: bool_path(value, &["physical_plan_captured"]),
+            elapsed_micros: u64_path(value, &["elapsed_micros"]),
+            physical_operator_counts_present: value_path(value, &["physical_operator_counts"])
+                .is_some_and(serde_json::Value::is_object),
+            optimizer_decision_count: u64_path(value, &["optimizer_decision_count"]),
+            scan_pruning_report_count: u64_path(value, &["scan_pruning_report_count"]),
+            scan_pruning_reports_present: value_path(value, &["scan_pruning_reports"])
+                .is_some_and(serde_json::Value::is_array),
             plan_cache_lookup,
             plan_cache_cacheable,
             plan_cache_hit,
@@ -188,6 +200,11 @@ impl QueryRuntimeReport {
             "fast_path_selected": self.fast_path_selected,
             "slow_log_candidate": self.slow_log_candidate,
             "physical_plan_captured": self.physical_plan_captured,
+            "elapsed_micros": self.elapsed_micros,
+            "physical_operator_counts_present": self.physical_operator_counts_present,
+            "optimizer_decision_count": self.optimizer_decision_count,
+            "scan_pruning_report_count": self.scan_pruning_report_count,
+            "scan_pruning_reports_present": self.scan_pruning_reports_present,
             "plan_cache_lookup": self.plan_cache_lookup.clone(),
             "plan_cache": {
                 "lookup": self.plan_cache_lookup,
@@ -227,6 +244,18 @@ impl QueryRuntimeReport {
         }
         if self.physical_plan_captured.is_none() {
             blockers.insert("query_report_physical_plan_flag_missing".to_string());
+        }
+        if self.elapsed_micros.is_none() {
+            blockers.insert("query_report_elapsed_micros_missing".to_string());
+        }
+        if !self.physical_operator_counts_present {
+            blockers.insert("query_report_physical_operator_counts_missing".to_string());
+        }
+        if self.optimizer_decision_count.is_none() {
+            blockers.insert("query_report_optimizer_decision_count_missing".to_string());
+        }
+        if self.scan_pruning_report_count.is_none() || !self.scan_pruning_reports_present {
+            blockers.insert("query_report_scan_pruning_profile_missing".to_string());
         }
         if self.plan_cache_cacheable.is_none()
             || self.plan_cache_hit.is_none()
@@ -337,6 +366,10 @@ fn bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
 
 fn str_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a str> {
     value_path(value, path).and_then(serde_json::Value::as_str)
+}
+
+fn u64_path(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
+    value_path(value, path).and_then(serde_json::Value::as_u64)
 }
 
 fn string_array_path(value: &serde_json::Value, path: &[&str]) -> Vec<String> {
@@ -464,6 +497,32 @@ mod tests {
             .any(|code| code == "query_report_not_graph_read"));
     }
 
+    #[test]
+    fn route_readiness_fails_closed_without_query_report_profile() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("scan_pruning_report_count");
+        routes[0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("scan_pruning_reports");
+
+        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
+            "routes": routes
+        }))
+        .unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_scan_pruning_profile_missing"));
+    }
+
     fn ready_routes() -> Vec<serde_json::Value> {
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
             .iter()
@@ -487,6 +546,25 @@ mod tests {
             "fast_path_selected": true,
             "slow_log_candidate": false,
             "physical_plan_captured": false,
+            "elapsed_micros": 12,
+            "physical_operator_counts": {
+                "IndexNodeSeek": 1,
+                "ProjectExec": 1
+            },
+            "optimizer_decision_count": 2,
+            "scan_pruning_report_count": 1,
+            "scan_pruning_reports": [
+                {
+                    "label": "Memory",
+                    "strategy": {
+                        "type": "property_eq",
+                        "property": "id"
+                    },
+                    "segments_total": 2,
+                    "segments_pruned": 1,
+                    "segments_read": 1
+                }
+            ],
             "plan_cache": {
                 "lookup": "miss",
                 "cacheable": true,
