@@ -25891,7 +25891,11 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
 
 #[test]
 fn scoped_knowledge_relationships_report_filtered_seeds() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query(
         "CREATE (:Memory {id: 'memory_1', title: 'First', source_id: 'thread_1', space_id: ''})-[:HAS_LABEL]->(:Label {id: 'label_1', name: 'Database'})",
     )
@@ -25901,7 +25905,7 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
     )
     .unwrap();
 
-    let output = db.knowledge_scoped_relationships(&KnowledgeScopedRelationshipsRequest {
+    let request = KnowledgeScopedRelationshipsRequest {
         relationships: KnowledgeRelationshipsRequest {
             seeds: vec![
                 KnowledgeEntityRequest {
@@ -25921,7 +25925,8 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
             ("source_id".to_string(), "thread_1".to_string()),
             ("space_id".to_string(), "default".to_string()),
         ]),
-    });
+    };
+    let output = db.knowledge_scoped_relationships(&request);
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -25933,6 +25938,14 @@ fn scoped_knowledge_relationships_report_filtered_seeds() {
     assert_eq!(output.groups[0].relationships.len(), 1);
     assert!(output.groups[1].filtered_out);
     assert!(output.groups[1].relationships.is_empty());
+
+    let stats = db.plan_cache_stats();
+    let repeated_output = db.knowledge_scoped_relationships(&request);
+    assert_eq!(repeated_output, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 }
 
 #[test]

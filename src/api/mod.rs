@@ -8215,7 +8215,9 @@ impl Database {
         &self,
         request: &KnowledgeScopedRelationshipsRequest,
     ) -> KnowledgeRelationshipsOutput {
-        knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
+        knowledge_scoped_relationships_via_query_runtime(self, request).unwrap_or_else(|_| {
+            knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
+        })
     }
 
     pub fn knowledge_induced_edges(
