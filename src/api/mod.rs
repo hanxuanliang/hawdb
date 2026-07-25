@@ -7613,7 +7613,7 @@ impl Database {
         &self,
         request: &KnowledgeSkillMemoryListRequest,
     ) -> Result<KnowledgeSkillMemoryListOutput> {
-        knowledge_skill_memories_for(&self.catalog, &self.store, request)
+        knowledge_skill_memories_via_query_runtime(self, request)
     }
 
     pub fn knowledge_skill_thread_sources(
@@ -21899,25 +21899,34 @@ fn compare_skill_projected_ids(
         .then_with(|| left.node_id.cmp(&right.node_id))
 }
 
-fn knowledge_skill_memories_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_skill_memories_via_query_runtime(
+    db: &Database,
     request: &KnowledgeSkillMemoryListRequest,
 ) -> Result<KnowledgeSkillMemoryListOutput> {
     validate_knowledge_skill_memory_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let skill_nodes = skill_memory_seed_nodes(catalog, store, request);
-    let matched_skill_count = skill_nodes.len();
-    let mut missing_skill_count = 0;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::new();
+    let seed_predicate = knowledge_skill_memory_seed_predicate(request, &mut parameters);
 
-    if request.skill_id.is_some() && skill_nodes.is_empty() {
-        missing_skill_count = 1;
-    }
+    let skill_query =
+        format!("MATCH (s:Skill){seed_predicate} RETURN id(s) AS skill_node_id ORDER BY s.id ASC, id(s) ASC");
+    let skill_output = db.query_read_only_with_params_bounded(&skill_query, &parameters, None)?;
+    let matched_skill_count = skill_output.rows.len();
+    let missing_skill_count = usize::from(request.skill_id.is_some() && matched_skill_count == 0);
 
-    let mut rows = skill_nodes
-        .into_iter()
-        .flat_map(|skill| skill_memory_rows(catalog, store, skill))
-        .collect::<Vec<_>>();
+    let memory_query = format!(
+        "MATCH (s:Skill){seed_predicate} \
+         MATCH (s)-[r:SYNTHESIZED_FROM]->(m:Memory) \
+         RETURN s.id AS skill_id, id(s) AS skill_node_id, \
+         m.id AS memory_id, id(m) AS memory_node_id, id(r) AS relationship_id, \
+         m.title AS title, m.content AS content, m.unit_type AS unit_type, m.created_at AS created_at"
+    );
+    let memory_output = db.query_read_only_with_params_bounded(&memory_query, &parameters, None)?;
+    let mut rows = memory_output
+        .rows
+        .iter()
+        .map(knowledge_skill_memory_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
     sort_skill_memory_rows(&mut rows, request.order);
     let matched_count = rows.len();
     if request.limit > 0 {
@@ -21932,6 +21941,58 @@ fn knowledge_skill_memories_for(
         returned_count,
         matched_skill_count,
         missing_skill_count,
+    })
+}
+
+fn knowledge_skill_memory_seed_predicate(
+    request: &KnowledgeSkillMemoryListRequest,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    if let Some(skill_id) = &request.skill_id {
+        parameters.insert("skill_id".to_string(), Value::String(skill_id.clone()));
+        return " WHERE s.id = $skill_id".to_string();
+    }
+    parameters.insert(
+        "stages".to_string(),
+        Value::List(request.stages.iter().cloned().map(Value::String).collect()),
+    );
+    " WHERE s.stage IN $stages".to_string()
+}
+
+fn knowledge_skill_memory_row_from_query(row: &Row) -> Result<KnowledgeSkillMemoryRow> {
+    let skill_node_id = row
+        .get("skill_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution("knowledge skill memory row is missing skill_node_id".to_string())
+        })?;
+    let memory_node_id = row
+        .get("memory_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge skill memory row is missing memory_node_id".to_string(),
+            )
+        })?;
+    let relationship_id = row
+        .get("relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge skill memory row is missing relationship_id".to_string(),
+            )
+        })?;
+
+    Ok(KnowledgeSkillMemoryRow {
+        skill_id: optional_string_cell(row, "skill_id"),
+        skill_node_id,
+        memory_id: optional_string_cell(row, "memory_id"),
+        memory_node_id,
+        relationship_id,
+        title: optional_string_cell(row, "title"),
+        content: optional_string_cell(row, "content"),
+        unit_type: optional_string_cell(row, "unit_type"),
+        created_at: optional_value_cell(row, "created_at"),
     })
 }
 
@@ -22347,39 +22408,6 @@ fn validate_knowledge_skill_state_request(request: &KnowledgeSkillStateRequest) 
     Ok(())
 }
 
-fn skill_memory_seed_nodes<'a>(
-    catalog: &Catalog,
-    store: &'a GraphStore,
-    request: &KnowledgeSkillMemoryListRequest,
-) -> Vec<&'a NodeRecord> {
-    if let Some(skill_id) = request.skill_id.as_ref() {
-        return seed_node_by_label_and_external_id(catalog, store, "Skill", skill_id)
-            .into_iter()
-            .collect();
-    }
-
-    let Some(skill_label_id) = catalog.label_id("Skill") else {
-        return Vec::new();
-    };
-    let stages = request.stages.iter().collect::<BTreeSet<_>>();
-    let mut nodes = store
-        .scan_nodes(Some(skill_label_id))
-        .filter(|node| {
-            node.properties
-                .get("stage")
-                .map(value_to_external_id)
-                .as_ref()
-                .is_some_and(|stage| stages.contains(stage))
-        })
-        .collect::<Vec<_>>();
-    nodes.sort_by(|left, right| {
-        node_external_id(left)
-            .cmp(&node_external_id(right))
-            .then_with(|| left.id.0.cmp(&right.id.0))
-    });
-    nodes
-}
-
 fn skill_thread_source_rows(
     catalog: &Catalog,
     store: &GraphStore,
@@ -22468,46 +22496,6 @@ fn sort_skill_thread_source_rows(rows: &mut [KnowledgeSkillThreadSourceRow]) {
                     .cmp(&right.compacts_to_relationship_id)
             })
     });
-}
-
-fn skill_memory_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    skill: &NodeRecord,
-) -> Vec<KnowledgeSkillMemoryRow> {
-    let Some(rel_type_id) = catalog.rel_type_id("SYNTHESIZED_FROM") else {
-        return Vec::new();
-    };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Vec::new();
-    };
-    store
-        .outgoing_relationships(skill.id, rel_type_id)
-        .filter_map(|relationship| {
-            store
-                .node(relationship.target)
-                .filter(|memory| memory.labels.contains(&memory_label_id))
-                .map(|memory| skill_memory_row(skill, memory, relationship))
-        })
-        .collect()
-}
-
-fn skill_memory_row(
-    skill: &NodeRecord,
-    memory: &NodeRecord,
-    relationship: &RelRecord,
-) -> KnowledgeSkillMemoryRow {
-    KnowledgeSkillMemoryRow {
-        skill_id: node_external_id(skill),
-        skill_node_id: skill.id.0,
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        relationship_id: relationship.id.0,
-        title: string_property(memory, "title"),
-        content: string_property(memory, "content"),
-        unit_type: string_property(memory, "unit_type"),
-        created_at: memory.properties.get("created_at").cloned(),
-    }
 }
 
 fn sort_skill_memory_rows(

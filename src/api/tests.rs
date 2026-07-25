@@ -15549,7 +15549,11 @@ fn skill_source_merge_reports_missing_endpoint_and_rejects_empty_ids() {
 
 #[test]
 fn reads_skill_memories_for_nowledge_evidence_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Skill {id: 'skill_active', stage: 'active'})")
         .unwrap();
     db.query("CREATE (:Skill {id: 'skill_draft', stage: 'draft'})")
@@ -15634,6 +15638,20 @@ fn reads_skill_memories_for_nowledge_evidence_shapes() {
     assert_eq!(missing.matched_count, 0);
     assert_eq!(missing.returned_count, 0);
     assert!(missing.rows.is_empty());
+
+    let cache_before_lookup = db.plan_cache_stats();
+    let cached_request = KnowledgeSkillMemoryListRequest {
+        skill_id: None,
+        stages: vec!["draft".to_string()],
+        limit: 10,
+        order: KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+    };
+    db.knowledge_skill_memories(&cached_request).unwrap();
+    db.knowledge_skill_memories(&cached_request).unwrap();
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 2);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 2);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 2);
 }
 
 #[test]
