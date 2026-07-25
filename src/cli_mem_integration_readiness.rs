@@ -2636,7 +2636,7 @@ mod tests {
     use super::nowledge_mem_integration_readiness_json;
     use skein::{
         nowledge_mem_search_candidate_shadow_evidence_json,
-        NowledgeMemSearchCandidateShadowEvidence, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
 
@@ -4866,9 +4866,11 @@ mod tests {
             "blocker_codes": [],
             "probes": ready_query_runtime_preflight_probes()
         });
+        let mut search_candidate_evidence = NowledgeMemSearchCandidateShadowAccumulator::new();
+        search_candidate_evidence.record_compare(3, 3, 3);
         bundle["search_candidate_shadow_evidence"] =
             nowledge_mem_search_candidate_shadow_evidence_json(
-                &NowledgeMemSearchCandidateShadowEvidence::ready(1, 3, 3, 3),
+                &search_candidate_evidence.evidence(),
             );
         bundle["library_readiness"] = ready_library_readiness();
         bundle

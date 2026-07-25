@@ -324,6 +324,68 @@ pub struct NowledgeMemSearchCandidateShadowEvidence {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSearchCandidateShadowAccumulator {
+    request_count: u64,
+    primary_candidate_count: u64,
+    shadow_candidate_count: u64,
+    matched_candidate_count: u64,
+    primary_only_candidate_count: u64,
+    blocker_codes: BTreeSet<String>,
+}
+
+impl NowledgeMemSearchCandidateShadowAccumulator {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn record_compare(
+        &mut self,
+        primary_candidate_count: u64,
+        shadow_candidate_count: u64,
+        matched_candidate_count: u64,
+    ) {
+        self.request_count = self.request_count.saturating_add(1);
+        self.primary_candidate_count = self
+            .primary_candidate_count
+            .saturating_add(primary_candidate_count);
+        self.shadow_candidate_count = self
+            .shadow_candidate_count
+            .saturating_add(shadow_candidate_count);
+        self.matched_candidate_count = self
+            .matched_candidate_count
+            .saturating_add(matched_candidate_count);
+        self.primary_only_candidate_count = self
+            .primary_only_candidate_count
+            .saturating_add(primary_candidate_count.saturating_sub(matched_candidate_count));
+        if matched_candidate_count > primary_candidate_count
+            || matched_candidate_count > shadow_candidate_count
+        {
+            self.blocker_codes
+                .insert("search_candidate_invalid_match_count".to_string());
+        }
+    }
+
+    pub fn add_blocker_code(&mut self, code: impl Into<String>) {
+        self.blocker_codes.insert(code.into());
+    }
+
+    pub fn evidence(&self) -> NowledgeMemSearchCandidateShadowEvidence {
+        NowledgeMemSearchCandidateShadowEvidence {
+            request_count: self.request_count,
+            primary_candidate_count: self.primary_candidate_count,
+            shadow_candidate_count: self.shadow_candidate_count,
+            matched_candidate_count: self.matched_candidate_count,
+            primary_only_candidate_count: self.primary_only_candidate_count,
+            blocker_codes: self.blocker_codes.iter().cloned().collect(),
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        self.evidence().json()
+    }
+}
+
 impl NowledgeMemSearchCandidateShadowEvidence {
     pub fn ready(
         request_count: u64,
@@ -1779,11 +1841,11 @@ mod tests {
         NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions,
         NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
         NowledgeMemReadReport, NowledgeMemReadinessOptions,
-        NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
+        NowledgeMemSearchProjection, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
@@ -2224,6 +2286,47 @@ mod tests {
                 "search_candidate_mismatch",
                 "search_candidate_primary_only",
                 "search_candidate_shadow_no_requests"
+            ])
+        );
+    }
+
+    #[test]
+    fn search_candidate_shadow_accumulator_generates_bridge_evidence() {
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+        accumulator.record_compare(2, 2, 2);
+        accumulator.record_compare(1, 1, 1);
+
+        let evidence = accumulator.json();
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["request_count"], 2);
+        assert_eq!(evidence["primary_candidate_count"], 3);
+        assert_eq!(evidence["shadow_candidate_count"], 3);
+        assert_eq!(evidence["matched_candidate_count"], 3);
+        assert_eq!(evidence["primary_only_candidate_count"], 0);
+        assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_candidate_shadow_accumulator_preserves_request_blockers() {
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+        accumulator.record_compare(2, 1, 1);
+        accumulator.add_blocker_code("bridge_error");
+
+        let evidence = accumulator.json();
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["request_count"], 1);
+        assert_eq!(evidence["primary_candidate_count"], 2);
+        assert_eq!(evidence["shadow_candidate_count"], 1);
+        assert_eq!(evidence["matched_candidate_count"], 1);
+        assert_eq!(evidence["primary_only_candidate_count"], 1);
+        assert_eq!(
+            evidence["blocker_codes"],
+            serde_json::json!([
+                "bridge_error",
+                "search_candidate_mismatch",
+                "search_candidate_primary_only"
             ])
         );
     }

@@ -661,6 +661,9 @@ Rust bridge code should generate this object with
 `nowledge_mem_search_candidate_shadow_evidence_json` and
 `NowledgeMemSearchCandidateShadowEvidence` so `ready` and blocker codes are
 computed by Skein instead of handwritten by the caller.
+For multi-request bridge runs, use
+`NowledgeMemSearchCandidateShadowAccumulator::record_compare` once per
+LanceDB/Skein candidate comparison and emit `accumulator.json()` at the end.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover

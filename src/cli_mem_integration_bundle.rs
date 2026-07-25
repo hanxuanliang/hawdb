@@ -868,7 +868,7 @@ mod tests {
     use crate::cli_mem_integration_readiness::nowledge_mem_integration_readiness_json;
     use skein::{
         nowledge_mem_search_candidate_shadow_evidence_json,
-        NowledgeMemSearchCandidateShadowEvidence, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
 
@@ -1274,9 +1274,9 @@ mod tests {
     }
 
     fn ready_search_candidate_shadow_evidence() -> serde_json::Value {
-        nowledge_mem_search_candidate_shadow_evidence_json(
-            &NowledgeMemSearchCandidateShadowEvidence::ready(1, 3, 3, 3),
-        )
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+        accumulator.record_compare(3, 3, 3);
+        nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence())
     }
 
     fn ready_query_runtime_preflight() -> serde_json::Value {
