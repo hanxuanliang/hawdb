@@ -9,6 +9,7 @@ const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 const NMEM_GRAPH_ROUTE_PARITY_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-parity-evidence-v1";
 const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 const ROUTE_QUERY_INVENTORY_EVIDENCE_SOURCE: &str = "route_query_inventory";
+const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
 pub fn nowledge_graph_route_evidence_usage() -> String {
     "nowledge-graph-route-evidence requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--capture-physical-plan] [--slow-log-threshold-micros <n>] [--route-parity-json <path>] <graph-db> <route-query-json>".to_string()
@@ -238,6 +239,12 @@ impl RouteQuery {
         if shadow_compare.source != ROUTE_PARITY_EVIDENCE_SOURCE {
             blocker_codes.push("shadow_compare_evidence_missing".to_string());
         }
+        blocker_codes.extend(
+            shadow_compare
+                .blocker_codes
+                .iter()
+                .map(|code| (*code).to_string()),
+        );
         for (query_index, query) in self.queries.iter().enumerate() {
             match graph.query_with_params_with_report_options(
                 &query.cypher,
@@ -295,13 +302,14 @@ impl RouteQuery {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct RouteShadowCompareEvidence<'a> {
     source: &'static str,
     ready: bool,
     matched_per_million: Option<u64>,
     primary_engine: Option<&'a str>,
     shadow_engine: Option<&'a str>,
+    blocker_codes: Vec<&'static str>,
 }
 
 impl<'a> RouteShadowCompareEvidence<'a> {
@@ -312,6 +320,7 @@ impl<'a> RouteShadowCompareEvidence<'a> {
             matched_per_million: None,
             primary_engine: None,
             shadow_engine: None,
+            blocker_codes: Vec::new(),
         }
     }
 
@@ -322,16 +331,40 @@ impl<'a> RouteShadowCompareEvidence<'a> {
             matched_per_million: None,
             primary_engine: None,
             shadow_engine: None,
+            blocker_codes: vec!["route_parity_evidence_missing"],
         }
     }
 
     fn from_parity_route(route: &'a RouteParityEvidenceRoute) -> Self {
+        let matched_per_million_ready =
+            route.matched_per_million == Some(ROUTE_PARITY_FULL_MATCH_PER_MILLION);
+        let primary_engine_ready = route
+            .primary_engine
+            .as_deref()
+            .is_some_and(is_legacy_graph_engine);
+        let shadow_engine_ready = route.shadow_engine.as_deref() == Some("skein");
+        let ready =
+            route.ready && matched_per_million_ready && primary_engine_ready && shadow_engine_ready;
+        let mut blocker_codes = Vec::new();
+        if !route.ready {
+            blocker_codes.push("route_parity_not_ready");
+        }
+        if !matched_per_million_ready {
+            blocker_codes.push("route_parity_matched_per_million_not_full");
+        }
+        if !primary_engine_ready {
+            blocker_codes.push("route_parity_primary_engine_mismatch");
+        }
+        if !shadow_engine_ready {
+            blocker_codes.push("route_parity_shadow_engine_mismatch");
+        }
         Self {
             source: ROUTE_PARITY_EVIDENCE_SOURCE,
-            ready: route.ready,
+            ready,
             matched_per_million: route.matched_per_million,
             primary_engine: route.primary_engine.as_deref(),
             shadow_engine: route.shadow_engine.as_deref(),
+            blocker_codes,
         }
     }
 
@@ -342,8 +375,13 @@ impl<'a> RouteShadowCompareEvidence<'a> {
             "matched_per_million": self.matched_per_million,
             "primary_engine": self.primary_engine,
             "shadow_engine": self.shadow_engine,
+            "blocker_codes": self.blocker_codes,
         })
     }
+}
+
+fn is_legacy_graph_engine(engine: &str) -> bool {
+    matches!(engine, "kuzu" | "ladybug" | "kuzu/ladybug")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1180,6 +1218,55 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "shadow_compare_evidence_missing"));
+    }
+
+    #[test]
+    fn route_evidence_recomputes_route_parity_identity() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = parse_route_query_inventory(&serde_json::json!({
+            "routes": [ready_route_query("/graph/overview")]
+        }))
+        .unwrap();
+        let route_parity = parse_route_parity_evidence(&serde_json::json!({
+            "protocol": "nmem-graph-route-parity-evidence-v1",
+            "routes": [
+                {
+                    "route": "/graph/overview",
+                    "ready": true,
+                    "matched_per_million": 999999,
+                    "primary_engine": "skein",
+                    "shadow_engine": "kuzu"
+                }
+            ]
+        }))
+        .unwrap();
+
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["routes"][0]["shadow_compare_ready"], false);
+        assert_eq!(evidence["routes"][0]["primary_ready"], false);
+        assert_eq!(
+            evidence["routes"][0]["shadow_compare"]["blocker_codes"],
+            serde_json::json!([
+                "route_parity_matched_per_million_not_full",
+                "route_parity_primary_engine_mismatch",
+                "route_parity_shadow_engine_mismatch"
+            ])
+        );
+        assert!(evidence["routes"][0]["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_parity_primary_engine_mismatch"));
     }
 
     fn ready_route_parity() -> super::RouteParityEvidence {

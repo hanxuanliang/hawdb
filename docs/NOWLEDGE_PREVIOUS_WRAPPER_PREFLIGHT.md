@@ -379,7 +379,9 @@ the Cypher statements each route executes:
 Mem also supplies route-level parity evidence from the Kuzu/Ladybug shadow
 comparison. The graph route evidence command treats `shadow_compare_ready` in
 the query inventory as local debugging input only; production readiness requires
-an explicit parity artifact:
+an explicit parity artifact. Each route must independently prove full parity:
+`ready: true`, `matched_per_million: 1000000`, a legacy graph primary engine
+(`kuzu`, `ladybug`, or `kuzu/ladybug`), and `shadow_engine: "skein"`.
 
 ```json
 {
