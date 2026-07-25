@@ -7338,14 +7338,14 @@ impl Database {
         &self,
         request: &KnowledgePropertyBatchRequest,
     ) -> KnowledgePropertyBatchOutput {
-        knowledge_property_batch_for(&self.catalog, &self.store, request)
+        knowledge_property_batch_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_property_batch(
         &self,
         request: &KnowledgeScopedPropertyBatchRequest,
     ) -> KnowledgePropertyBatchOutput {
-        knowledge_scoped_property_batch_for(&self.catalog, &self.store, request)
+        knowledge_scoped_property_batch_via_query_runtime(self, request)
     }
 
     pub fn update_knowledge_properties(
@@ -9709,9 +9709,54 @@ fn knowledge_scoped_entity_batch_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedEntityBatchRequest,
 ) -> KnowledgeEntityBatchOutput {
+    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime(db, &request.entities);
+
+    let mut entities = Vec::with_capacity(request.entities.len());
+    let mut found_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    for entity_request in &request.entities {
+        if let Some(entity) = found
+            .get(&(
+                entity_request.label.clone(),
+                entity_request.external_id.clone(),
+            ))
+            .filter(|entity| {
+                request.metadata_filters.is_empty()
+                    || knowledge_entity_matches_filters(entity, &request.metadata_filters)
+            })
+            .cloned()
+        {
+            found_count += 1;
+            entities.push(Some(entity));
+        } else if found.contains_key(&(
+            entity_request.label.clone(),
+            entity_request.external_id.clone(),
+        )) {
+            filtered_out_count += 1;
+            entities.push(None);
+        } else {
+            missing_count += 1;
+            entities.push(None);
+        }
+    }
+
+    KnowledgeEntityBatchOutput {
+        graph_commit_epoch,
+        entities,
+        found_count,
+        missing_count,
+        filtered_out_count,
+    }
+}
+
+fn lookup_entities_via_query_runtime(
+    db: &Database,
+    entities: &[KnowledgeEntityRequest],
+) -> (u64, BTreeMap<(String, String), KnowledgeEntity>) {
     let graph_commit_epoch = db.store.commit_epoch();
     let mut entities_by_label = BTreeMap::<String, BTreeSet<String>>::new();
-    for entity in &request.entities {
+    for entity in entities {
         if entity.external_id.is_empty()
             || validate_cypher_identifier(&entity.label, "label").is_err()
         {
@@ -9755,43 +9800,7 @@ fn knowledge_scoped_entity_batch_via_query_runtime(
         }
     }
 
-    let mut entities = Vec::with_capacity(request.entities.len());
-    let mut found_count = 0;
-    let mut missing_count = 0;
-    let mut filtered_out_count = 0;
-    for entity_request in &request.entities {
-        if let Some(entity) = found
-            .get(&(
-                entity_request.label.clone(),
-                entity_request.external_id.clone(),
-            ))
-            .filter(|entity| {
-                request.metadata_filters.is_empty()
-                    || knowledge_entity_matches_filters(entity, &request.metadata_filters)
-            })
-            .cloned()
-        {
-            found_count += 1;
-            entities.push(Some(entity));
-        } else if found.contains_key(&(
-            entity_request.label.clone(),
-            entity_request.external_id.clone(),
-        )) {
-            filtered_out_count += 1;
-            entities.push(None);
-        } else {
-            missing_count += 1;
-            entities.push(None);
-        }
-    }
-
-    KnowledgeEntityBatchOutput {
-        graph_commit_epoch,
-        entities,
-        found_count,
-        missing_count,
-        filtered_out_count,
-    }
+    (graph_commit_epoch, found)
 }
 
 fn knowledge_memory_entities_for(
@@ -13956,6 +13965,19 @@ fn knowledge_property_batch_for(
     )
 }
 
+fn knowledge_property_batch_via_query_runtime(
+    db: &Database,
+    request: &KnowledgePropertyBatchRequest,
+) -> KnowledgePropertyBatchOutput {
+    knowledge_scoped_property_batch_via_query_runtime(
+        db,
+        &KnowledgeScopedPropertyBatchRequest {
+            projection: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
 fn knowledge_scoped_property_batch_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -14013,6 +14035,61 @@ fn knowledge_scoped_property_batch_for(
     }
 }
 
+fn knowledge_scoped_property_batch_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeScopedPropertyBatchRequest,
+) -> KnowledgePropertyBatchOutput {
+    let property_names = dedup_property_names(&request.projection.property_names);
+    let (graph_commit_epoch, found) =
+        lookup_entities_via_query_runtime(db, &request.projection.entities);
+    let mut rows = Vec::with_capacity(request.projection.entities.len());
+    let mut found_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    for entity_request in &request.projection.entities {
+        let Some(entity) = found.get(&(
+            entity_request.label.clone(),
+            entity_request.external_id.clone(),
+        )) else {
+            missing_count += 1;
+            rows.push(KnowledgePropertyRow {
+                entity: entity_request.clone(),
+                node_id: None,
+                filtered_out: false,
+                properties: empty_property_projection(&property_names),
+            });
+            continue;
+        };
+        if !request.metadata_filters.is_empty()
+            && !knowledge_entity_matches_filters(entity, &request.metadata_filters)
+        {
+            filtered_out_count += 1;
+            rows.push(KnowledgePropertyRow {
+                entity: entity_request.clone(),
+                node_id: Some(entity.node_id),
+                filtered_out: true,
+                properties: empty_property_projection(&property_names),
+            });
+            continue;
+        }
+        found_count += 1;
+        rows.push(KnowledgePropertyRow {
+            entity: entity_request.clone(),
+            node_id: Some(entity.node_id),
+            filtered_out: false,
+            properties: project_knowledge_entity_properties(entity, &property_names),
+        });
+    }
+    KnowledgePropertyBatchOutput {
+        graph_commit_epoch,
+        rows,
+        found_count,
+        missing_count,
+        filtered_out_count,
+        property_names,
+    }
+}
+
 fn dedup_property_names(property_names: &[String]) -> Vec<String> {
     let mut seen = BTreeSet::new();
     property_names
@@ -14039,6 +14116,20 @@ fn project_node_properties(
         .cloned()
         .map(|name| {
             let value = node.properties.get(&name).cloned();
+            (name, value)
+        })
+        .collect()
+}
+
+fn project_knowledge_entity_properties(
+    entity: &KnowledgeEntity,
+    property_names: &[String],
+) -> BTreeMap<String, Option<Value>> {
+    property_names
+        .iter()
+        .cloned()
+        .map(|name| {
+            let value = entity.properties.get(&name).cloned();
             (name, value)
         })
         .collect()

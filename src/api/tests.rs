@@ -8206,6 +8206,51 @@ fn retrieves_knowledge_property_batch_without_hydrating_full_entities() {
 }
 
 #[test]
+fn knowledge_property_batch_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'property_cache_1', title: 'First', source_id: 'thread_1'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'property_cache_2', title: 'Second', source_id: 'thread_2'})")
+        .unwrap();
+    let request = KnowledgePropertyBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "property_cache_2".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "property_cache_missing".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "property_cache_1".to_string(),
+            },
+        ],
+        property_names: vec!["title".to_string(), "source_id".to_string()],
+    };
+
+    let first = db.knowledge_property_batch(&request);
+    let second = db.knowledge_property_batch(&request);
+
+    assert_eq!(first, second);
+    assert_eq!(first.found_count, 2);
+    assert_eq!(first.missing_count, 1);
+    assert_eq!(
+        first.rows[0].properties.get("title"),
+        Some(&Some(Value::String("Second".to_string())))
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn scoped_knowledge_property_batch_reports_filtered_rows() {
     let mut db = Database::new();
     db.query(
@@ -8246,6 +8291,59 @@ fn scoped_knowledge_property_batch_reports_filtered_rows() {
     );
     assert!(output.rows[1].filtered_out);
     assert_eq!(output.rows[1].properties.get("title"), Some(&None));
+}
+
+#[test]
+fn scoped_knowledge_property_batch_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'scoped_property_cache_1', title: 'First', source_id: 'thread_1', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'scoped_property_cache_2', title: 'Second', source_id: 'thread_2', space_id: 'default'})")
+        .unwrap();
+    let request = KnowledgeScopedPropertyBatchRequest {
+        projection: KnowledgePropertyBatchRequest {
+            entities: vec![
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "scoped_property_cache_1".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "scoped_property_cache_2".to_string(),
+                },
+                KnowledgeEntityRequest {
+                    label: "Memory".to_string(),
+                    external_id: "scoped_property_cache_missing".to_string(),
+                },
+            ],
+            property_names: vec!["title".to_string(), "source_id".to_string()],
+        },
+        metadata_filters: BTreeMap::from([
+            ("source_id".to_string(), "thread_1".to_string()),
+            ("space_id".to_string(), "default".to_string()),
+        ]),
+    };
+
+    let first = db.knowledge_scoped_property_batch(&request);
+    let second = db.knowledge_scoped_property_batch(&request);
+
+    assert_eq!(first, second);
+    assert_eq!(first.found_count, 1);
+    assert_eq!(first.filtered_out_count, 1);
+    assert_eq!(first.missing_count, 1);
+    assert_eq!(
+        first.rows[0].properties.get("title"),
+        Some(&Some(Value::String("First".to_string())))
+    );
+    assert!(first.rows[1].filtered_out);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
 }
 
 #[test]
