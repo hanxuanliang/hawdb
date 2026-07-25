@@ -7121,7 +7121,7 @@ impl Database {
         &self,
         request: &KnowledgeEntityMentionCountListRequest,
     ) -> Result<KnowledgeEntityMentionCountListOutput> {
-        knowledge_entity_mention_counts_for(&self.catalog, &self.store, request)
+        knowledge_entity_mention_counts_via_query_runtime(self, request)
     }
 
     pub fn knowledge_community_entity_visibility(
@@ -10118,6 +10118,49 @@ fn knowledge_entity_mention_counts_for(
     })
 }
 
+fn knowledge_entity_mention_counts_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeEntityMentionCountListRequest,
+) -> Result<KnowledgeEntityMentionCountListOutput> {
+    validate_entity_mention_count_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (e:Entity) \
+         WHERE e.id IS NOT NULL AND e.name IS NOT NULL \
+         OPTIONAL MATCH (m:Memory)-[r:MENTIONS]->(e) \
+         WITH e, count(r) AS mention_count \
+         RETURN e.id AS entity_id, id(e) AS node_id, e.name AS name, \
+         e.updated_at AS updated_at, mention_count AS mention_count",
+        &BTreeMap::new(),
+        None,
+    )?;
+    let mut rows = output
+        .rows
+        .iter()
+        .map(knowledge_entity_mention_count_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    rows.sort_by(compare_entity_mention_count_rows);
+    if let Some(cursor) = &request.cursor {
+        rows.retain(|row| {
+            row.mention_count < cursor.after_count
+                || (row.mention_count == cursor.after_count
+                    && row.name.as_str() > cursor.after_name.as_str())
+        });
+    }
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeEntityMentionCountListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
 fn validate_entity_mention_count_request(
     request: &KnowledgeEntityMentionCountListRequest,
 ) -> Result<()> {
@@ -10253,6 +10296,40 @@ fn entity_mention_count_row(
         name,
         updated_at: entity.properties.get("updated_at").cloned(),
         mention_count: memory_mention_count_for_entity(catalog, store, entity.id),
+    })
+}
+
+fn knowledge_entity_mention_count_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeEntityMentionCountRow> {
+    let entity_id = optional_string_cell(row, "entity_id").ok_or_else(|| {
+        SkeinError::Execution("knowledge entity mention count row is missing entity_id".to_string())
+    })?;
+    let node_id = row
+        .get("node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge entity mention count row is missing node_id".to_string(),
+            )
+        })?;
+    let name = optional_string_cell(row, "name").ok_or_else(|| {
+        SkeinError::Execution("knowledge entity mention count row is missing name".to_string())
+    })?;
+    let mention_count = row
+        .get("mention_count")
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge entity mention count row is missing mention_count".to_string(),
+            )
+        })?;
+    Ok(KnowledgeEntityMentionCountRow {
+        entity_id,
+        node_id,
+        name,
+        updated_at: optional_value_cell(row, "updated_at"),
+        mention_count,
     })
 }
 

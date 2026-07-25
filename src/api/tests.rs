@@ -4550,6 +4550,47 @@ fn reads_entity_mention_counts_for_wiki_listing_shapes() {
 }
 
 #[test]
+fn entity_mention_counts_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'mention-count-cache-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'mention-count-cache-b'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'mention-count-entity-alpha', name: 'Alpha', updated_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'mention-count-entity-beta', name: 'Beta', updated_at: 20})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'mention-count-cache-a'}), (e:Entity {id: 'mention-count-entity-beta'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'mention-count-cache-b'}), (e:Entity {id: 'mention-count-entity-beta'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    let request = KnowledgeEntityMentionCountListRequest {
+        cursor: Some(KnowledgeEntityMentionCountCursor {
+            after_count: 2,
+            after_name: "Beta".to_string(),
+        }),
+        limit: 1,
+    };
+
+    let first = db.knowledge_entity_mention_counts(&request).unwrap();
+    let second = db.knowledge_entity_mention_counts(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 1);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].entity_id, "mention-count-entity-alpha");
+    assert_eq!(first.rows[0].mention_count, 0);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn entity_mention_count_read_rejects_empty_cursor_name() {
     let db = Database::new();
 
