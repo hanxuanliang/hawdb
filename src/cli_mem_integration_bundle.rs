@@ -849,7 +849,9 @@ fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a ser
 mod tests {
     use super::{nowledge_mem_integration_bundle_json, IntegrationBundleInputs};
     use crate::cli_mem_integration_readiness::nowledge_mem_integration_readiness_json;
-    use skein::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
+    use skein::{
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    };
 
     #[test]
     fn generated_bundle_feeds_integration_readiness_gate() {
@@ -1037,7 +1039,10 @@ mod tests {
                 "incremental_watermark_parity": true,
                 "pushdown_evidence": {
                     "ready": true,
-                    "shadow_segment_descriptor_scan_filter_fields_ready": true
+                    "shadow_segment_descriptor_scan_filter_fields_ready": true,
+                    "primary_scan_filter_fields": scan_filter_fields_json(),
+                    "shadow_scan_filter_fields": scan_filter_fields_json(),
+                    "shadow_segment_descriptor_field_summaries": scan_filter_field_summaries_json()
                 },
                 "blocker_codes": []
             },
@@ -1067,6 +1072,17 @@ mod tests {
                 "background_maintenance_blockers": []
             }
         })
+    }
+
+    fn scan_filter_fields_json() -> serde_json::Value {
+        serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS)
+    }
+
+    fn scan_filter_field_summaries_json() -> serde_json::Value {
+        serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            .iter()
+            .map(|field| serde_json::json!({ "field": field }))
+            .collect::<Vec<_>>())
     }
 
     fn ready_replacement_summary_query_runtime_preflight() -> serde_json::Value {

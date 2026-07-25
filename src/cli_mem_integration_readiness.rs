@@ -1,6 +1,7 @@
 use skein::{
     Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -354,6 +355,33 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                         "shadow_segment_descriptor_scan_filter_fields_ready",
                     ],
                 ) == Some(true),
+                search_projection_scan_filter_fields_cover_required(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "primary_scan_filter_fields",
+                    ],
+                ),
+                search_projection_scan_filter_fields_cover_required(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "shadow_scan_filter_fields",
+                    ],
+                ),
+                search_projection_segment_descriptor_summaries_cover_required(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "shadow_segment_descriptor_field_summaries",
+                    ],
+                ),
             ],
             [
                 "replacement_summary.search_projection_evidence.ready",
@@ -374,6 +402,9 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary.search_projection_shadow_evidence.incremental_watermark_parity",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.primary_scan_filter_fields",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_scan_filter_fields",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries",
             ],
             blocker_codes(
                 bundle,
@@ -2446,6 +2477,35 @@ fn string_array_path_is_empty(value: &serde_json::Value, path: &[&str]) -> bool 
         .is_some_and(Vec::is_empty)
 }
 
+fn search_projection_scan_filter_fields_cover_required(
+    value: &serde_json::Value,
+    path: &[&str],
+) -> bool {
+    let fields = string_array_path(value, path);
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .all(|required| fields.iter().any(|field| field == required))
+}
+
+fn search_projection_segment_descriptor_summaries_cover_required(
+    value: &serde_json::Value,
+    path: &[&str],
+) -> bool {
+    let Some(summaries) = json_get_path(value, path).and_then(serde_json::Value::as_array) else {
+        return false;
+    };
+    if summaries.is_empty() {
+        return false;
+    }
+    let fields = summaries
+        .iter()
+        .filter_map(|summary| str_path(summary, &["field"]))
+        .collect::<BTreeSet<_>>();
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .all(|required| fields.contains(required))
+}
+
 fn non_empty_str_path(value: &serde_json::Value, path: &[&str]) -> bool {
     str_path(value, path).is_some_and(|s| !s.trim().is_empty())
 }
@@ -2479,7 +2539,9 @@ fn json_get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a 
 #[cfg(test)]
 mod tests {
     use super::nowledge_mem_integration_readiness_json;
-    use skein::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
+    use skein::{
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    };
 
     #[test]
     fn reports_ready_when_mem_integration_evidence_is_complete() {
@@ -2770,6 +2832,46 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn recomputes_search_projection_shadow_descriptor_field_coverage() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["ready"] =
+            serde_json::json!(true);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["ready"] = serde_json::json!(true);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_scan_filter_fields_ready"] = serde_json::json!(true);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["primary_scan_filter_fields"] = serde_json::json!(["unit_type", "importance"]);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_scan_filter_fields"] = serde_json::json!(["unit_type", "importance"]);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_field_summaries"] =
+            serde_json::json!([{ "field": "unit_type" }, { "field": "importance" }]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.primary_scan_filter_fields",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_scan_filter_fields",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries"
             ])
         );
     }
@@ -4320,7 +4422,10 @@ mod tests {
                     "incremental_watermark_parity": true,
                     "pushdown_evidence": {
                         "ready": true,
-                        "shadow_segment_descriptor_scan_filter_fields_ready": true
+                        "shadow_segment_descriptor_scan_filter_fields_ready": true,
+                        "primary_scan_filter_fields": scan_filter_fields_json(),
+                        "shadow_scan_filter_fields": scan_filter_fields_json(),
+                        "shadow_segment_descriptor_field_summaries": scan_filter_field_summaries_json()
                     },
                     "blocker_codes": []
                 },
@@ -4506,6 +4611,17 @@ mod tests {
         });
         bundle["library_readiness"] = ready_library_readiness();
         bundle
+    }
+
+    fn scan_filter_fields_json() -> serde_json::Value {
+        serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS)
+    }
+
+    fn scan_filter_field_summaries_json() -> serde_json::Value {
+        serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            .iter()
+            .map(|field| serde_json::json!({ "field": field }))
+            .collect::<Vec<_>>())
     }
 
     fn ready_graph_route_profile_routes() -> Vec<serde_json::Value> {
