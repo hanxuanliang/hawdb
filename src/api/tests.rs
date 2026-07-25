@@ -7734,6 +7734,46 @@ fn crystal_source_visibility_rejects_invalid_scope() {
 }
 
 #[test]
+fn crystal_source_visibility_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query(
+        "CREATE (:Memory {id: 'visibility-cache-crystal', is_crystal: true, title: 'Cached'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'visibility-cache-source'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'visibility-cache-entity', community_id: 11})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'visibility-cache-crystal'}), (s:Memory {id: 'visibility-cache-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (s:Memory {id: 'visibility-cache-source'}), (e:Entity {id: 'visibility-cache-entity'}) CREATE (s)-[:MENTIONS]->(e)")
+        .unwrap();
+    let request = KnowledgeCrystalSourceVisibilityRequest {
+        community_ids: vec![Value::Int(11)],
+        limit: 0,
+    };
+
+    let first = db.knowledge_crystal_source_visibility(&request).unwrap();
+    let second = db.knowledge_crystal_source_visibility(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_path_count, 1);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(
+        first.rows[0].crystal_memory_id.as_deref(),
+        Some("visibility-cache-crystal")
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn reads_synthesized_source_coverage_for_existing_crystal_lookup_shapes() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'coverage-crystal-alpha', is_crystal: true, crystal_title: 'Coverage Alpha'})")

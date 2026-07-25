@@ -7275,7 +7275,7 @@ impl Database {
         &self,
         request: &KnowledgeCrystalSourceVisibilityRequest,
     ) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
-        knowledge_crystal_source_visibility_for(&self.catalog, &self.store, request)
+        knowledge_crystal_source_visibility_via_query_runtime(self, request)
     }
 
     pub fn knowledge_synthesized_source_coverage(
@@ -14599,6 +14599,44 @@ fn knowledge_crystal_source_visibility_for(
     })
 }
 
+fn knowledge_crystal_source_visibility_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeCrystalSourceVisibilityRequest,
+) -> Result<KnowledgeCrystalSourceVisibilityOutput> {
+    validate_knowledge_crystal_source_visibility_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "community_ids".to_string(),
+        Value::List(request.community_ids.clone()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory)-[:MENTIONS]->(e:Entity) \
+         WHERE c.is_crystal = true AND e.community_id IN $community_ids \
+         RETURN c AS crystal, s AS source_memory, e AS entity",
+        &parameters,
+        None,
+    )?;
+    let mut rows = output
+        .rows
+        .iter()
+        .map(knowledge_crystal_source_visibility_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+
+    sort_crystal_source_visibility_rows(&mut rows);
+    let matched_path_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCrystalSourceVisibilityOutput {
+        graph_commit_epoch,
+        rows,
+        matched_path_count,
+        returned_count,
+    })
+}
+
 fn empty_crystal_source_visibility_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeCrystalSourceVisibilityOutput {
@@ -14662,6 +14700,72 @@ fn knowledge_crystal_source_visibility_row(
         source_is_latest: boolean_property(source_memory, "is_latest").unwrap_or(true),
         source_lifecycle_state: string_property(source_memory, "lifecycle_state"),
     }
+}
+
+fn knowledge_crystal_source_visibility_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeCrystalSourceVisibilityRow> {
+    let crystal = row
+        .get("crystal")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge crystal source visibility row is missing crystal".to_string(),
+            )
+        })?;
+    let source_memory = row
+        .get("source_memory")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge crystal source visibility row is missing source_memory".to_string(),
+            )
+        })?;
+    let entity = row
+        .get("entity")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge crystal source visibility row is missing entity".to_string(),
+            )
+        })?;
+    let community_id = entity
+        .properties
+        .get("community_id")
+        .cloned()
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge crystal source visibility row is missing community_id".to_string(),
+            )
+        })?;
+    let crystal_title = string_property_value(&crystal.properties, "crystal_title");
+    let title = string_property_value(&crystal.properties, "title");
+    let display_title = crystal_title
+        .clone()
+        .or_else(|| title.clone())
+        .unwrap_or_default();
+
+    Ok(KnowledgeCrystalSourceVisibilityRow {
+        crystal_memory_id: crystal.external_id,
+        crystal_node_id: crystal.node_id,
+        source_memory_id: source_memory.external_id,
+        source_node_id: source_memory.node_id,
+        entity_id: entity.external_id,
+        entity_node_id: entity.node_id,
+        community_id,
+        crystal_title,
+        title,
+        display_title,
+        content: string_property_value(&crystal.properties, "content"),
+        importance: crystal.properties.get("importance").cloned(),
+        crystal_metadata: crystal.properties.get("metadata").cloned(),
+        crystal_is_latest: boolean_property_value(&crystal.properties, "is_latest").unwrap_or(true),
+        crystal_lifecycle_state: string_property_value(&crystal.properties, "lifecycle_state"),
+        source_metadata: source_memory.properties.get("metadata").cloned(),
+        source_is_latest: boolean_property_value(&source_memory.properties, "is_latest")
+            .unwrap_or(true),
+        source_lifecycle_state: string_property_value(&source_memory.properties, "lifecycle_state"),
+    })
 }
 
 fn sort_crystal_source_visibility_rows(rows: &mut [KnowledgeCrystalSourceVisibilityRow]) {
