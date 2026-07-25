@@ -1925,8 +1925,17 @@ fn graph_route_query_report_physical_operators_present(report: &serde_json::Valu
 }
 
 fn graph_route_query_report_scan_pruning_present(report: &serde_json::Value) -> bool {
-    bool_path(report, &["scan_pruning_reports_present"]) == Some(true)
-        || json_get_path(report, &["scan_pruning_reports"]).is_some_and(serde_json::Value::is_array)
+    let Some(report_count) = u64_path(report, &["scan_pruning_report_count"]) else {
+        return false;
+    };
+    let Some(reports) =
+        json_get_path(report, &["scan_pruning_reports"]).and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    report_count == reports.len() as u64
+        && !reports.is_empty()
+        && reports.iter().all(query_runtime_scan_pruning_report_ready)
 }
 
 fn graph_route_readiness_alignment_ready(bundle: &serde_json::Value) -> bool {
@@ -3321,7 +3330,7 @@ mod tests {
         bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
             .as_object_mut()
             .unwrap()
-            .remove("scan_pruning_reports_present");
+            .remove("scan_pruning_reports");
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
@@ -3345,6 +3354,35 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_graph_route_readiness_evidence"));
+    }
+
+    #[test]
+    fn rejects_graph_route_query_profiles_with_only_scan_pruning_presence_flag() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("scan_pruning_reports");
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
+            ["scan_pruning_reports_present"] = serde_json::json!(true);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
     }
 
     #[test]
@@ -4246,6 +4284,20 @@ mod tests {
             "optimizer_decision_count": 2,
             "scan_pruning_report_count": 1,
             "scan_pruning_reports_present": true,
+            "scan_pruning_reports": [
+                {
+                    "label_id": 1,
+                    "strategy": {
+                        "kind": "property_eq",
+                        "property": "id"
+                    },
+                    "pruned": true,
+                    "exact_empty": false,
+                    "candidate_count_before_filter": 1,
+                    "output_count": 1,
+                    "filtered_out_count": 0
+                }
+            ],
             "plan_cache_lookup": "miss",
             "plan_cache": {
                 "lookup": "miss",

@@ -1122,6 +1122,20 @@ mod tests {
             "optimizer_decision_count": 2,
             "scan_pruning_report_count": 1,
             "scan_pruning_reports_present": true,
+            "scan_pruning_reports": [
+                {
+                    "label_id": 1,
+                    "strategy": {
+                        "kind": "property_eq",
+                        "property": "id"
+                    },
+                    "pruned": true,
+                    "exact_empty": false,
+                    "candidate_count_before_filter": 1,
+                    "output_count": 1,
+                    "filtered_out_count": 0
+                }
+            ],
             "plan_cache_lookup": "miss",
             "plan_cache": {
                 "lookup": "miss",

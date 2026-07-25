@@ -151,7 +151,7 @@ struct QueryRuntimeReport {
     physical_operator_counts_present: bool,
     optimizer_decision_count: Option<u64>,
     scan_pruning_report_count: Option<u64>,
-    scan_pruning_reports_present: bool,
+    scan_pruning_reports: Vec<serde_json::Value>,
     plan_cache_lookup: Option<String>,
     plan_cache_cacheable: Option<bool>,
     plan_cache_hit: Option<bool>,
@@ -185,8 +185,10 @@ impl QueryRuntimeReport {
                 .is_some_and(serde_json::Value::is_object),
             optimizer_decision_count: u64_path(value, &["optimizer_decision_count"]),
             scan_pruning_report_count: u64_path(value, &["scan_pruning_report_count"]),
-            scan_pruning_reports_present: value_path(value, &["scan_pruning_reports"])
-                .is_some_and(serde_json::Value::is_array),
+            scan_pruning_reports: value_path(value, &["scan_pruning_reports"])
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default(),
             plan_cache_lookup,
             plan_cache_cacheable,
             plan_cache_hit,
@@ -214,7 +216,8 @@ impl QueryRuntimeReport {
             "physical_operator_counts_present": self.physical_operator_counts_present,
             "optimizer_decision_count": self.optimizer_decision_count,
             "scan_pruning_report_count": self.scan_pruning_report_count,
-            "scan_pruning_reports_present": self.scan_pruning_reports_present,
+            "scan_pruning_reports_present": !self.scan_pruning_reports.is_empty(),
+            "scan_pruning_reports": self.scan_pruning_reports,
             "plan_cache_lookup": self.plan_cache_lookup.clone(),
             "plan_cache": {
                 "lookup": self.plan_cache_lookup,
@@ -264,7 +267,7 @@ impl QueryRuntimeReport {
         if self.optimizer_decision_count.is_none() {
             blockers.insert("query_report_optimizer_decision_count_missing".to_string());
         }
-        if self.scan_pruning_report_count.is_none() || !self.scan_pruning_reports_present {
+        if !self.scan_pruning_reports_ready() {
             blockers.insert("query_report_scan_pruning_profile_missing".to_string());
         }
         if self.plan_cache_cacheable.is_none()
@@ -281,6 +284,29 @@ impl QueryRuntimeReport {
         }
         blockers.into_iter().collect()
     }
+
+    fn scan_pruning_reports_ready(&self) -> bool {
+        self.scan_pruning_report_count == Some(self.scan_pruning_reports.len() as u64)
+            && !self.scan_pruning_reports.is_empty()
+            && self
+                .scan_pruning_reports
+                .iter()
+                .all(scan_pruning_report_ready)
+    }
+}
+
+fn scan_pruning_report_ready(report: &serde_json::Value) -> bool {
+    value_path(report, &["strategy"])
+        .filter(|strategy| {
+            strategy.is_object()
+                && str_path(strategy, &["kind"]).is_some_and(|kind| !kind.is_empty())
+        })
+        .is_some()
+        && bool_path(report, &["pruned"]).is_some()
+        && bool_path(report, &["exact_empty"]).is_some()
+        && u64_path(report, &["candidate_count_before_filter"]).is_some()
+        && u64_path(report, &["output_count"]).is_some()
+        && u64_path(report, &["filtered_out_count"]).is_some()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -551,6 +577,25 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_fails_closed_without_scan_pruning_report_details() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]["scan_pruning_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("candidate_count_before_filter");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_scan_pruning_profile_missing"));
+    }
+
+    #[test]
     fn route_readiness_fails_closed_when_evidence_envelope_is_not_ready() {
         let mut evidence = ready_evidence(ready_routes());
         evidence["ready"] = serde_json::json!(false);
@@ -622,14 +667,16 @@ mod tests {
             "scan_pruning_report_count": 1,
             "scan_pruning_reports": [
                 {
-                    "label": "Memory",
+                    "label_id": 1,
                     "strategy": {
-                        "type": "property_eq",
+                        "kind": "property_eq",
                         "property": "id"
                     },
-                    "segments_total": 2,
-                    "segments_pruned": 1,
-                    "segments_read": 1
+                    "pruned": true,
+                    "exact_empty": false,
+                    "candidate_count_before_filter": 1,
+                    "output_count": 1,
+                    "filtered_out_count": 0
                 }
             ],
             "plan_cache": {
