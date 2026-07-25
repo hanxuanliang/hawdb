@@ -6241,6 +6241,62 @@ fn counts_memory_evolves_relations_for_decay_scheduler_shape() {
 }
 
 #[test]
+fn memory_evolves_relation_counts_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'evolves-count-cache-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves-count-cache-b'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves-count-cache-target'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'evolves-count-cache-source'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'evolves-count-cache-a'}), (n:Memory {id: 'evolves-count-cache-target'}) CREATE (m)-[:EVOLVES {content_relation: 'confirms'}]->(n)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'evolves-count-cache-a'}), (n:Memory {id: 'evolves-count-cache-target'}) CREATE (m)-[:EVOLVES {content_relation: 'enriches'}]->(n)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'evolves-count-cache-a'}), (n:Memory {id: 'evolves-count-cache-target'}) CREATE (m)-[:EVOLVES {content_relation: 'contradicts'}]->(n)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'evolves-count-cache-b'}), (s:Source {id: 'evolves-count-cache-source'}) CREATE (m)-[:EVOLVES {content_relation: 'confirms'}]->(s)")
+        .unwrap();
+    let request = KnowledgeMemoryEvolvesRelationCountRequest {
+        memory_ids: vec![
+            "evolves-count-cache-a".to_string(),
+            "missing-evolves-count-cache".to_string(),
+            "evolves-count-cache-b".to_string(),
+            "evolves-count-cache-a".to_string(),
+        ],
+        content_relations: vec!["confirms".to_string(), "enriches".to_string()],
+    };
+
+    let first = db
+        .knowledge_memory_evolves_relation_counts(&request)
+        .unwrap();
+    let second = db
+        .knowledge_memory_evolves_relation_counts(&request)
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_memory_count, 2);
+    assert_eq!(
+        first.missing_memory_ids,
+        vec!["missing-evolves-count-cache".to_string()]
+    );
+    assert_eq!(first.matched_relationship_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].memory_id, "evolves-count-cache-a");
+    assert_eq!(first.rows[0].count, 2);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn memory_evolves_relation_counts_rejects_empty_fields_without_wal() {
     let path = unique_test_dir("memory_evolves_relation_counts_empty_without_wal");
     let mut db = Database::open(&path).unwrap();
