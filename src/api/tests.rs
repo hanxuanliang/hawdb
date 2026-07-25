@@ -11068,6 +11068,49 @@ fn source_latest_version_rejects_ambiguous_lookup() {
 }
 
 #[test]
+fn knowledge_source_latest_version_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source-v1', original_name: 'Doc.md', space_id: 'default', version: 1})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source-v2', original_name: 'Doc.md', space_id: 'default', version: 2})")
+        .unwrap();
+    db.query(
+        "CREATE (:Source {id: 'source-unversioned', original_name: 'Doc.md', space_id: 'default'})",
+    )
+    .unwrap();
+    let request = KnowledgeSourceVersionLookupRequest {
+        original_name: Some("Doc.md".to_string()),
+        sha256: None,
+        space_id: "default".to_string(),
+    };
+
+    let first = db.knowledge_source_latest_version(&request).unwrap();
+    let second = db.knowledge_source_latest_version(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert!(first.found);
+    assert_eq!(first.source_id.as_deref(), Some("source-v2"));
+    assert_eq!(first.version, Some(2));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+
+    let summary = db
+        .query_sql(
+            "SELECT execution_count FROM system.statement_summary \
+             WHERE statement_kind = 'match_return' \
+             ORDER BY execution_count DESC LIMIT 1",
+        )
+        .unwrap();
+    assert_eq!(summary.rows[0].get("execution_count"), Some(&Value::Int(2)));
+}
+
+#[test]
 fn creates_source_revision_batch_for_nowledge_revision_edges() {
     let mut db = Database::new();
     db.query("CREATE (:Source {id: 'newer', version: 2})")

@@ -7457,7 +7457,7 @@ impl Database {
         &self,
         request: &KnowledgeSourceVersionLookupRequest,
     ) -> Result<KnowledgeSourceVersionLookupOutput> {
-        knowledge_source_latest_version_for(&self.catalog, &self.store, request)
+        knowledge_source_latest_version_via_query_runtime(self, request)
     }
 
     pub fn create_knowledge_source_revision_batch(
@@ -15605,37 +15605,54 @@ fn knowledge_source_parsed_entity_create(
     }
 }
 
-fn knowledge_source_latest_version_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_source_latest_version_via_query_runtime(
+    db: &Database,
     request: &KnowledgeSourceVersionLookupRequest,
 ) -> Result<KnowledgeSourceVersionLookupOutput> {
     validate_knowledge_source_version_lookup(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(source_label_id) = catalog.label_id("Source") else {
-        return Ok(KnowledgeSourceVersionLookupOutput {
-            graph_commit_epoch,
-            found: false,
-            source_id: None,
-            node_id: None,
-            version: None,
-            row: None,
-        });
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::from([(
+        "space_id".to_string(),
+        Value::String(request.space_id.clone()),
+    )]);
+    let lookup_predicate = if let Some(original_name) = &request.original_name {
+        parameters.insert(
+            "original_name".to_string(),
+            Value::String(original_name.clone()),
+        );
+        "s.original_name = $original_name"
+    } else if let Some(sha256) = &request.sha256 {
+        parameters.insert("sha256".to_string(), Value::String(sha256.clone()));
+        "s.sha256 = $sha256"
+    } else {
+        return Err(SkeinError::Semantic(
+            "knowledge source version lookup requires exactly one original name or sha256"
+                .to_string(),
+        ));
     };
 
-    let mut rows = store
-        .scan_nodes(Some(source_label_id))
-        .filter(|node| source_matches_version_lookup(node, request))
-        .map(|node| knowledge_source_list_row_direct(catalog, store, node))
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        right
-            .version
-            .cmp(&left.version)
-            .then_with(|| left.source_id.cmp(&right.source_id))
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    let row = rows.into_iter().next();
+    let query = format!(
+        "MATCH (s:Source) \
+         WHERE s.space_id = $space_id AND {lookup_predicate} \
+         OPTIONAL MATCH (m:Memory)-[r:SOURCED_FROM]->(s) \
+         WITH s, count(r) AS sourced_memory_count \
+         RETURN s.id AS source_id, id(s) AS node_id, s.original_name AS original_name, \
+         s.title AS title, s.summary AS summary, s.source_type AS source_type, \
+         s.lifecycle_state AS lifecycle_state, s.space_id AS raw_space_id, \
+         s.parsed_path AS parsed_path, s.file_path AS file_path, s.mime_type AS mime_type, \
+         s.source_url AS source_url, s.metadata AS metadata, s.memory_count AS memory_count, \
+         s.chunk_count AS chunk_count, s.size_bytes AS size_bytes, \
+         COALESCE(s.version, 1) AS version, \
+         s.created_at AS created_at, s.updated_at AS updated_at, \
+         sourced_memory_count AS sourced_memory_count \
+         ORDER BY version DESC, source_id ASC, node_id ASC LIMIT 1"
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, Some(1))?;
+    let row = output
+        .rows
+        .first()
+        .map(knowledge_source_list_row_from_query)
+        .transpose()?;
 
     Ok(KnowledgeSourceVersionLookupOutput {
         graph_commit_epoch,
@@ -15680,22 +15697,6 @@ fn validate_knowledge_source_version_lookup(
         ));
     }
     Ok(())
-}
-
-fn source_matches_version_lookup(
-    node: &NodeRecord,
-    request: &KnowledgeSourceVersionLookupRequest,
-) -> bool {
-    if string_property(node, "space_id").as_deref() != Some(request.space_id.as_str()) {
-        return false;
-    }
-    if let Some(original_name) = request.original_name.as_deref() {
-        return string_property(node, "original_name").as_deref() == Some(original_name);
-    }
-    if let Some(sha256) = request.sha256.as_deref() {
-        return string_property(node, "sha256").as_deref() == Some(sha256);
-    }
-    false
 }
 
 fn create_knowledge_source_revision_batch_for(
@@ -16895,47 +16896,6 @@ fn compare_source_projected_ids(
     left.source_id
         .cmp(&right.source_id)
         .then_with(|| left.node_id.cmp(&right.node_id))
-}
-
-fn knowledge_source_list_row_direct(
-    catalog: &Catalog,
-    store: &GraphStore,
-    node: &NodeRecord,
-) -> KnowledgeSourceListRow {
-    let original_name = string_property(node, "original_name");
-    let title = string_property(node, "title");
-    let file_path = string_property(node, "file_path");
-    let source_type = string_property(node, "source_type");
-    let display_name = original_name
-        .clone()
-        .or_else(|| title.clone())
-        .or_else(|| file_path.clone())
-        .or_else(|| source_type.clone())
-        .unwrap_or_else(|| "Source".to_string());
-    KnowledgeSourceListRow {
-        source_id: node_external_id(node),
-        node_id: node.id.0,
-        display_name,
-        original_name,
-        title,
-        summary: string_property(node, "summary"),
-        source_type,
-        lifecycle_state: string_property(node, "lifecycle_state"),
-        raw_space_id: string_property(node, "space_id"),
-        normalized_space_id: normalized_node_space_id(node),
-        parsed_path: string_property(node, "parsed_path"),
-        file_path,
-        mime_type: string_property(node, "mime_type"),
-        source_url: string_property(node, "source_url"),
-        metadata: node.properties.get("metadata").cloned(),
-        memory_count: integer_property(node, "memory_count").unwrap_or(0),
-        chunk_count: integer_property(node, "chunk_count").unwrap_or(0),
-        size_bytes: integer_property(node, "size_bytes").unwrap_or(0),
-        version: integer_property(node, "version").unwrap_or(1),
-        created_at: node.properties.get("created_at").cloned(),
-        updated_at: node.properties.get("updated_at").cloned(),
-        sourced_memory_count: source_sourced_memory_count(catalog, store, node.id),
-    }
 }
 
 fn knowledge_source_memories_via_query_runtime(
