@@ -298,6 +298,12 @@ Shadow evidence carries the same requirement as
 `pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready == true`.
 This keeps route-level replacement gates tied to fields that can be pruned by
 segment descriptor metadata instead of only proving row-filter fallback.
+Search projection evidence also recomputes incremental update readiness instead
+of trusting `incremental_update.ready` alone. A ready probe must prove
+`upsert_ready`, `delete_ready`, `watermark_ready`, and a concrete
+`source_graph_commit_epoch`; LanceDB/Skein shadow evidence compares that
+watermark so stale or full-rebuild-only projections do not pass as incremental
+replacement evidence.
 
 ## 8. Verify The Whole Preflight Bundle
 

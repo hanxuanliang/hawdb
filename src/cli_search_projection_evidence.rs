@@ -780,11 +780,23 @@ fn incremental_update_report(probe: &serde_json::Value) -> serde_json::Value {
     let incremental = value_path(probe, &["incremental_update"])
         .or_else(|| value_path(probe, &["incremental"]))
         .unwrap_or(&serde_json::Value::Null);
+    let upsert_ready = bool_path(incremental, &["upsert_ready"]).unwrap_or(false);
+    let delete_ready = bool_path(incremental, &["delete_ready"]).unwrap_or(false);
+    let watermark_ready = bool_path(incremental, &["watermark_ready"]).unwrap_or(false);
+    let source_graph_commit_epoch = u64_path(incremental, &["source_graph_commit_epoch"]);
+    let reported_ready = bool_path(incremental, &["ready"]).unwrap_or(false);
+    let ready = reported_ready
+        && upsert_ready
+        && delete_ready
+        && watermark_ready
+        && source_graph_commit_epoch.is_some();
     serde_json::json!({
-        "ready": bool_path(incremental, &["ready"]).unwrap_or(false),
-        "upsert_ready": bool_path(incremental, &["upsert_ready"]).unwrap_or(false),
-        "delete_ready": bool_path(incremental, &["delete_ready"]).unwrap_or(false),
-        "watermark_ready": bool_path(incremental, &["watermark_ready"]).unwrap_or(false),
+        "ready": ready,
+        "reported_ready": reported_ready,
+        "upsert_ready": upsert_ready,
+        "delete_ready": delete_ready,
+        "watermark_ready": watermark_ready,
+        "source_graph_commit_epoch": source_graph_commit_epoch,
     })
 }
 
@@ -1113,6 +1125,30 @@ mod tests {
         assert_eq!(
             report["blocker_codes"],
             serde_json::json!(["embedding_identity_not_ready"])
+        );
+    }
+
+    #[test]
+    fn search_projection_evidence_recomputes_incremental_watermark_readiness() {
+        let mut probe = ready_probe();
+        probe["incremental_update"]
+            .as_object_mut()
+            .unwrap()
+            .remove("source_graph_commit_epoch");
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["incremental_update_ready"], false);
+        assert_eq!(report["incremental_update"]["reported_ready"], true);
+        assert_eq!(report["incremental_update"]["watermark_ready"], true);
+        assert_eq!(
+            report["incremental_update"]["source_graph_commit_epoch"],
+            serde_json::Value::Null
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["incremental_update_not_ready"])
         );
     }
 
