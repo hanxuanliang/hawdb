@@ -511,3 +511,7 @@ route must include a ready query report with elapsed time, physical operator
 counts, optimizer decision count, scan-pruning profile presence with pruning
 before/after counts, and plan-cache state. A hand-authored summary with only
 `route_query_runtime_ready=true` is not release-ready evidence.
+`nowledge-graph-route-readiness` also independently reports route coverage
+diagnostics (`covered_routes`, `unknown_routes`, `duplicate_routes`, and
+`route_coverage_blocker_codes`), so direct or legacy evidence inputs remain
+fail-closed even if they bypass the evidence generator.

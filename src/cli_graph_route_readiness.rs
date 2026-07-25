@@ -2,7 +2,7 @@ use skein::{
     Result, SkeinError, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
@@ -47,20 +47,12 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
     let evidence_protocol = parsed_evidence.protocol.clone();
     let evidence_ready = parsed_evidence.ready;
     let routes = parsed_evidence.routes;
-    let route_names = routes
-        .iter()
-        .map(|route| route.route.clone())
-        .collect::<BTreeSet<_>>();
-    let missing_required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
-        .iter()
-        .filter(|route| !route_names.contains(**route))
-        .copied()
-        .collect::<Vec<_>>();
+    let route_coverage = route_coverage(&routes);
     let route_primary_blocker_codes = route_primary_blocker_codes(
         evidence_protocol.as_deref(),
         evidence_ready,
         &routes,
-        &missing_required_routes,
+        &route_coverage,
     );
     let shadow_compare_route_count = routes
         .iter()
@@ -83,8 +75,7 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
         .iter()
         .map(|route| route.query_reports.len())
         .sum::<usize>();
-    let route_primary_ready =
-        missing_required_routes.is_empty() && route_primary_blocker_codes.is_empty();
+    let route_primary_ready = route_coverage.ready && route_primary_blocker_codes.is_empty();
     let route_count = routes.len();
 
     Ok(serde_json::json!({
@@ -93,7 +84,14 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
         "evidence_ready": evidence_ready,
         "route_count": route_count,
         "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
-        "missing_required_routes": missing_required_routes,
+        "covered_route_count": route_coverage.covered_routes.len(),
+        "covered_routes": route_coverage.covered_routes,
+        "missing_required_routes": route_coverage.missing_required_routes,
+        "required_routes_covered": route_coverage.required_routes_covered,
+        "unknown_routes": route_coverage.unknown_routes,
+        "duplicate_routes": route_coverage.duplicate_routes,
+        "route_coverage_ready": route_coverage.ready,
+        "route_coverage_blocker_codes": route_coverage.blocker_codes,
         "shadow_compare_route_count": shadow_compare_route_count,
         "primary_ready_route_count": primary_ready_route_count,
         "query_runtime_route_count": query_runtime_route_count,
@@ -104,6 +102,70 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
         "route_primary_blocker_codes": route_primary_blocker_codes,
         "routes": routes.into_iter().map(RouteEvidence::json).collect::<Vec<_>>(),
     }))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteCoverage {
+    covered_routes: Vec<String>,
+    missing_required_routes: Vec<&'static str>,
+    required_routes_covered: bool,
+    unknown_routes: Vec<String>,
+    duplicate_routes: Vec<String>,
+    ready: bool,
+    blocker_codes: Vec<&'static str>,
+}
+
+fn route_coverage(routes: &[RouteEvidence]) -> RouteCoverage {
+    let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut route_counts = BTreeMap::<&str, usize>::new();
+    for route in routes {
+        *route_counts.entry(route.route.as_str()).or_default() += 1;
+    }
+    let route_names = route_counts.keys().copied().collect::<BTreeSet<_>>();
+    let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .filter(|route| route_names.contains(**route))
+        .map(|route| (*route).to_string())
+        .collect::<Vec<_>>();
+    let missing_required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .filter(|route| !route_names.contains(**route))
+        .copied()
+        .collect::<Vec<_>>();
+    let unknown_routes = route_names
+        .iter()
+        .filter(|route| !required_routes.contains(**route))
+        .map(|route| (*route).to_string())
+        .collect::<Vec<_>>();
+    let duplicate_routes = route_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(route, _)| (*route).to_string())
+        .collect::<Vec<_>>();
+    let required_routes_covered = missing_required_routes.is_empty();
+    let mut blocker_codes = Vec::new();
+    if !required_routes_covered {
+        blocker_codes.push("missing_required_routes");
+    }
+    if !unknown_routes.is_empty() {
+        blocker_codes.push("unknown_routes");
+    }
+    if !duplicate_routes.is_empty() {
+        blocker_codes.push("duplicate_routes");
+    }
+    let ready = blocker_codes.is_empty();
+    RouteCoverage {
+        covered_routes,
+        missing_required_routes,
+        required_routes_covered,
+        unknown_routes,
+        duplicate_routes,
+        ready,
+        blocker_codes,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,7 +448,7 @@ fn route_primary_blocker_codes(
     evidence_protocol: Option<&str>,
     evidence_ready: Option<bool>,
     routes: &[RouteEvidence],
-    missing_required_routes: &[&str],
+    route_coverage: &RouteCoverage,
 ) -> Vec<String> {
     let mut blockers = BTreeSet::new();
     if evidence_protocol != Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL) {
@@ -395,8 +457,11 @@ fn route_primary_blocker_codes(
     if evidence_ready != Some(true) {
         blockers.insert("graph_route_evidence_not_ready".to_string());
     }
-    if !missing_required_routes.is_empty() {
+    if !route_coverage.missing_required_routes.is_empty() {
         blockers.insert("missing_required_routes".to_string());
+    }
+    for blocker in &route_coverage.blocker_codes {
+        blockers.insert((*blocker).to_string());
     }
     for route in routes {
         if !route.shadow_compare_ready {
@@ -509,7 +574,23 @@ mod tests {
             readiness["route_primary_blocker_codes"],
             serde_json::json!([])
         );
+        assert_eq!(
+            readiness["covered_route_count"],
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len())
+        );
+        assert_eq!(
+            readiness["covered_routes"],
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES)
+        );
         assert_eq!(readiness["missing_required_routes"], serde_json::json!([]));
+        assert_eq!(readiness["required_routes_covered"], true);
+        assert_eq!(readiness["unknown_routes"], serde_json::json!([]));
+        assert_eq!(readiness["duplicate_routes"], serde_json::json!([]));
+        assert_eq!(readiness["route_coverage_ready"], true);
+        assert_eq!(
+            readiness["route_coverage_blocker_codes"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -524,10 +605,66 @@ mod tests {
             readiness["route_primary_blocker_codes"],
             serde_json::json!(["missing_required_routes"])
         );
+        assert_eq!(readiness["required_routes_covered"], false);
+        assert_eq!(readiness["route_coverage_ready"], false);
+        assert_eq!(
+            readiness["route_coverage_blocker_codes"],
+            serde_json::json!(["missing_required_routes"])
+        );
         assert_eq!(
             readiness["missing_required_routes"],
             serde_json::json!(["/graph/shortest-path"])
         );
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_for_unknown_route() {
+        let mut routes = ready_routes();
+        routes.push(ready_route("/graph/manual-extra-route"));
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["required_routes_covered"], true);
+        assert_eq!(readiness["route_coverage_ready"], false);
+        assert_eq!(
+            readiness["unknown_routes"],
+            serde_json::json!(["/graph/manual-extra-route"])
+        );
+        assert_eq!(
+            readiness["route_coverage_blocker_codes"],
+            serde_json::json!(["unknown_routes"])
+        );
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "unknown_routes"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_for_duplicate_route() {
+        let mut routes = ready_routes();
+        routes.push(ready_route("/graph/overview"));
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["required_routes_covered"], true);
+        assert_eq!(readiness["route_coverage_ready"], false);
+        assert_eq!(
+            readiness["duplicate_routes"],
+            serde_json::json!(["/graph/overview"])
+        );
+        assert_eq!(
+            readiness["route_coverage_blocker_codes"],
+            serde_json::json!(["duplicate_routes"])
+        );
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "duplicate_routes"));
     }
 
     #[test]
@@ -699,17 +836,19 @@ mod tests {
     fn ready_routes() -> Vec<serde_json::Value> {
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
             .iter()
-            .map(|route| {
-                serde_json::json!({
-                    "route": route,
-                    "shadow_compare_ready": true,
-                    "shadow_compare_evidence_source": "route_parity_evidence",
-                    "primary_ready": true,
-                    "query_reports": [ready_query_report()],
-                    "blocker_codes": []
-                })
-            })
+            .map(|route| ready_route(route))
             .collect()
+    }
+
+    fn ready_route(route: &str) -> serde_json::Value {
+        serde_json::json!({
+            "route": route,
+            "shadow_compare_ready": true,
+            "shadow_compare_evidence_source": "route_parity_evidence",
+            "primary_ready": true,
+            "query_reports": [ready_query_report()],
+            "blocker_codes": []
+        })
     }
 
     fn ready_query_report() -> serde_json::Value {
