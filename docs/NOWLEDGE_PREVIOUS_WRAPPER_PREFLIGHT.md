@@ -325,6 +325,11 @@ readiness area marked ready.
 The final preflight is stricter than compatibility summary generation: the
 replacement summary must carry `dual_engine_evidence.present == true` and
 `dual_engine_evidence.ready == true`.
+It also requires
+`search_projection_shadow_evidence.pushdown_evidence.ready == true`,
+`predicate_pushdown_parity == true`, and shadow segment descriptor scan-filter
+coverage, so LanceDB/Skein shadow parity cannot pass with row-filter fallback
+alone.
 When adapter smoke reports include `dual_engine_evidence`, the verifier also
 requires `dual_engine_evidence.ready == true` so side-by-side cutover evidence
 cannot silently degrade into a primary-only smoke run.

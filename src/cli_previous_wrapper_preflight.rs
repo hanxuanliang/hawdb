@@ -467,6 +467,34 @@ fn nowledge_previous_wrapper_preflight_check_json(
                         "incremental_watermark_parity",
                     ],
                 ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &["search_projection_shadow_evidence", "pushdown_evidence", "ready"],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "predicate_pushdown_parity",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "shadow_persisted_segment_descriptor_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "shadow_segment_descriptor_scan_filter_fields_ready",
+                    ],
+                ) == Some(true),
             ],
             [
                 "production_cutover_ready",
@@ -508,6 +536,10 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "search_projection_shadow_evidence.embedding_identity_parity",
                 "search_projection_shadow_evidence.lifecycle_parity",
                 "search_projection_shadow_evidence.incremental_watermark_parity",
+                "search_projection_shadow_evidence.pushdown_evidence.ready",
+                "search_projection_shadow_evidence.pushdown_evidence.predicate_pushdown_parity",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_persisted_segment_descriptor_ready",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
             ],
             blocker_codes(
                 &replacement_summary,
@@ -1038,6 +1070,54 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "search_projection_shadow_pushdown_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "ready",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_predicate_pushdown_parity",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "predicate_pushdown_parity",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_persisted_segment_descriptor_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_persisted_segment_descriptor_ready",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_segment_descriptor_scan_filter_fields_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_segment_descriptor_scan_filter_fields_ready",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "query_runtime_preflight_ready",
         bool_path(query_runtime_preflight, &["ready"]),
     );
@@ -1393,6 +1473,22 @@ mod tests {
             "search_projection_shadow_incremental_watermark_parity",
             true,
         );
+        assert_release_summary_field(summary, "search_projection_shadow_pushdown_ready", true);
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_predicate_pushdown_parity",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_persisted_segment_descriptor_ready",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_segment_descriptor_scan_filter_fields_ready",
+            true,
+        );
         assert_release_summary_field(summary, "query_runtime_preflight_ready", true);
         assert_release_summary_field(summary, "query_runtime_preflight_database_opened", true);
         assert_release_summary_field(summary, "query_runtime_preflight_probe_count", 1);
@@ -1482,7 +1578,11 @@ mod tests {
                 "search_projection_shadow_evidence.table_parity_ready",
                 "search_projection_shadow_evidence.embedding_identity_parity",
                 "search_projection_shadow_evidence.lifecycle_parity",
-                "search_projection_shadow_evidence.incremental_watermark_parity"
+                "search_projection_shadow_evidence.incremental_watermark_parity",
+                "search_projection_shadow_evidence.pushdown_evidence.ready",
+                "search_projection_shadow_evidence.pushdown_evidence.predicate_pushdown_parity",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_persisted_segment_descriptor_ready",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready"
             ])
         );
     }
@@ -1594,8 +1694,16 @@ mod tests {
             serde_json::json!(false);
         replacement_summary["search_projection_shadow_evidence"]["incremental_watermark_parity"] =
             serde_json::json!(false);
+        replacement_summary["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"] =
+            serde_json::json!(false);
+        replacement_summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_scan_filter_fields_ready"] = serde_json::json!(false);
         replacement_summary["search_projection_shadow_evidence"]["blocker_codes"] =
-            serde_json::json!(["table_parity_mismatch", "incremental_watermark_mismatch"]);
+            serde_json::json!([
+                "table_parity_mismatch",
+                "incremental_watermark_mismatch",
+                "skein_search_projection_segment_descriptor_fields_missing"
+            ]);
 
         let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
 
@@ -1608,12 +1716,18 @@ mod tests {
             check_by_name(&report, "replacement_summary")["failed_evidence_fields"],
             serde_json::json!([
                 "search_projection_shadow_evidence.table_parity_ready",
-                "search_projection_shadow_evidence.incremental_watermark_parity"
+                "search_projection_shadow_evidence.incremental_watermark_parity",
+                "search_projection_shadow_evidence.pushdown_evidence.ready",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready"
             ])
         );
         assert_eq!(
             check_by_name(&report, "replacement_summary")["blocker_codes"],
-            serde_json::json!(["incremental_watermark_mismatch", "table_parity_mismatch"])
+            serde_json::json!([
+                "incremental_watermark_mismatch",
+                "skein_search_projection_segment_descriptor_fields_missing",
+                "table_parity_mismatch"
+            ])
         );
     }
 
@@ -2184,6 +2298,43 @@ mod tests {
             "embedding_identity_parity": true,
             "lifecycle_parity": true,
             "incremental_watermark_parity": true,
+            "pushdown_evidence": {
+                "ready": true,
+                "predicate_pushdown_parity": true,
+                "primary_predicate_pushdown_ready": true,
+                "shadow_predicate_pushdown_ready": true,
+                "shadow_persisted_segment_descriptor_ready": true,
+                "shadow_segment_descriptor_scan_filter_fields_ready": true,
+                "primary_scan_filter_fields": [
+                    "kind",
+                    "external_id",
+                    "source_id",
+                    "space_id",
+                    "unit_type",
+                    "importance",
+                    "confidence",
+                    "created_at",
+                    "updated_at",
+                    "event_start",
+                    "event_end",
+                    "is_latest"
+                ],
+                "shadow_scan_filter_fields": [
+                    "kind",
+                    "external_id",
+                    "source_id",
+                    "space_id",
+                    "unit_type",
+                    "importance",
+                    "confidence",
+                    "created_at",
+                    "updated_at",
+                    "event_start",
+                    "event_end",
+                    "is_latest"
+                ],
+                "shadow_segment_descriptor_field_summaries": []
+            },
             "blocker_codes": []
         })
     }
