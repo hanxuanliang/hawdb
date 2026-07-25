@@ -7642,7 +7642,6 @@ impl Database {
         request: &KnowledgeSkillListRequest,
     ) -> Result<KnowledgeSkillListOutput> {
         knowledge_skills_via_query_runtime(self, request)
-            .or_else(|_| knowledge_skills_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_skill_projected_list(
@@ -7650,7 +7649,6 @@ impl Database {
         request: &KnowledgeSkillProjectedListRequest,
     ) -> Result<KnowledgeSkillProjectedListOutput> {
         knowledge_skill_projected_list_via_query_runtime(self, request)
-            .or_else(|_| knowledge_skill_projected_list_for(&self.catalog, &self.store, request))
     }
 
     pub fn update_knowledge_thread_metadata_batch(
