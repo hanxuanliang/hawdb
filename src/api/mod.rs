@@ -7550,7 +7550,7 @@ impl Database {
         &self,
         request: &KnowledgeMemorySourceAttributionRequest,
     ) -> Result<KnowledgeMemorySourceAttributionOutput> {
-        knowledge_memory_source_attributions_for(&self.catalog, &self.store, request)
+        knowledge_memory_source_attributions_via_query_runtime(self, request)
     }
 
     pub fn update_knowledge_memory_lifecycle_batch(
@@ -20081,91 +20081,80 @@ fn knowledge_source_sourced_memory_count_via_query_runtime(
     })
 }
 
-fn knowledge_memory_source_attributions_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_memory_source_attributions_via_query_runtime(
+    db: &Database,
     request: &KnowledgeMemorySourceAttributionRequest,
 ) -> Result<KnowledgeMemorySourceAttributionOutput> {
     validate_knowledge_memory_source_attribution_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(rel_type_id) = catalog.rel_type_id("SOURCED_FROM") else {
-        return Ok(KnowledgeMemorySourceAttributionOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: request.memory_ids.clone(),
-            missing_source_ids: request.source_ids.clone(),
-        });
+    let mut parameters = BTreeMap::new();
+    let mut predicates = Vec::new();
+    if !request.memory_ids.is_empty() {
+        predicates.push("m.id IN $memory_ids");
+        parameters.insert(
+            "memory_ids".to_string(),
+            Value::List(
+                request
+                    .memory_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    if !request.source_ids.is_empty() {
+        predicates.push("s.id IN $source_ids");
+        parameters.insert(
+            "source_ids".to_string(),
+            Value::List(
+                request
+                    .source_ids
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+    }
+    let predicate = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
     };
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemorySourceAttributionOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: request.memory_ids.clone(),
-            missing_source_ids: request.source_ids.clone(),
-        });
-    };
-    let Some(source_label_id) = catalog.label_id("Source") else {
-        return Ok(KnowledgeMemorySourceAttributionOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_memory_ids: request.memory_ids.clone(),
-            missing_source_ids: request.source_ids.clone(),
-        });
-    };
-
-    let requested_memory_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
-    let requested_source_ids = request.source_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let query = format!(
+        "MATCH (m:Memory)-[r:SOURCED_FROM]->(s:Source){predicate} \
+         RETURN m.id AS memory_id, id(m) AS memory_node_id, \
+         s.id AS source_id, id(s) AS source_node_id, id(r) AS relationship_id, \
+         m.title AS memory_title, m.content AS memory_content, \
+         m.unit_type AS memory_unit_type, m.importance AS memory_importance, \
+         m.pagerank_score AS memory_pagerank_score, m.community_id AS memory_community_id, \
+         m.space_id AS memory_space_id, m.source AS memory_source, \
+         m.created_at AS memory_created_at, m.updated_at AS memory_updated_at, \
+         m.event_start AS memory_event_start, m.event_end AS memory_event_end, \
+         s.original_name AS source_original_name, s.source_type AS source_type, \
+         s.file_path AS source_file_path, r.chunk_index AS chunk_index, \
+         r.chunk_range AS chunk_range, r.source_version AS source_version, \
+         r.created_at AS relationship_created_at \
+         ORDER BY source_id ASC, memory_id ASC, chunk_index ASC, relationship_id ASC"
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
     let mut seen_memory_ids = BTreeSet::new();
     let mut seen_source_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_relationships(Some(rel_type_id))
-        .filter_map(|relationship| {
-            let memory = store.node(relationship.source)?;
-            let source = store.node(relationship.target)?;
-            if !memory.labels.contains(&memory_label_id)
-                || !source.labels.contains(&source_label_id)
-            {
-                return None;
-            }
-            let memory_id = node_external_id(memory);
-            let source_id = node_external_id(source);
-            if !requested_memory_ids.is_empty()
-                && !memory_id
-                    .as_ref()
-                    .is_some_and(|memory_id| requested_memory_ids.contains(memory_id))
-            {
-                return None;
-            }
-            if !requested_source_ids.is_empty()
-                && !source_id
-                    .as_ref()
-                    .is_some_and(|source_id| requested_source_ids.contains(source_id))
-            {
-                return None;
-            }
-            if let Some(memory_id) = &memory_id {
-                seen_memory_ids.insert(memory_id.clone());
-            }
-            if let Some(source_id) = &source_id {
-                seen_source_ids.insert(source_id.clone());
-            }
-            Some(memory_source_attribution_row(memory, source, relationship))
-        })
-        .collect::<Vec<_>>();
-
-    rows.sort_by(|left, right| {
-        left.source_id
-            .cmp(&right.source_id)
-            .then_with(|| left.memory_id.cmp(&right.memory_id))
-            .then_with(|| left.chunk_index.cmp(&right.chunk_index))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
+    let mut rows = Vec::with_capacity(output.rows.len());
+    for row in &output.rows {
+        let attribution = memory_source_attribution_row_from_query(row)?;
+        if let Some(memory_id) = &attribution.memory_id {
+            seen_memory_ids.insert(memory_id.clone());
+        }
+        if let Some(source_id) = &attribution.source_id {
+            seen_source_ids.insert(source_id.clone());
+        }
+        rows.push(attribution);
+    }
     let matched_count = rows.len();
     if request.limit > 0 {
         rows.truncate(request.limit);
@@ -20185,7 +20174,7 @@ fn knowledge_memory_source_attributions_for(
         .collect::<Vec<_>>();
 
     Ok(KnowledgeMemorySourceAttributionOutput {
-        graph_commit_epoch,
+        graph_commit_epoch: db.store.commit_epoch(),
         rows,
         matched_count,
         returned_count,
@@ -20224,13 +20213,35 @@ fn validate_knowledge_memory_source_attribution_request(
     Ok(())
 }
 
-fn memory_source_attribution_row(
-    memory: &NodeRecord,
-    source: &NodeRecord,
-    relationship: &RelRecord,
-) -> KnowledgeMemorySourceAttributionRow {
-    let memory_title = string_property(memory, "title");
-    let memory_content = string_property(memory, "content");
+fn memory_source_attribution_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeMemorySourceAttributionRow> {
+    let memory_node_id = row
+        .get("memory_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory source attribution row is missing memory_node_id".to_string(),
+            )
+        })?;
+    let source_node_id = row
+        .get("source_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory source attribution row is missing source_node_id".to_string(),
+            )
+        })?;
+    let relationship_id = row
+        .get("relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory source attribution row is missing relationship_id".to_string(),
+            )
+        })?;
+    let memory_title = optional_string_cell(row, "memory_title");
+    let memory_content = optional_string_cell(row, "memory_content");
     let memory_content_preview = memory_content
         .as_ref()
         .map(|content| truncate_chars(content, 200));
@@ -20242,35 +20253,53 @@ fn memory_source_attribution_row(
                 .map(|content| truncate_chars(content, 60))
         })
         .unwrap_or_default();
-    KnowledgeMemorySourceAttributionRow {
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        source_id: node_external_id(source),
-        source_node_id: source.id.0,
-        relationship_id: relationship.id.0,
+
+    Ok(KnowledgeMemorySourceAttributionRow {
+        memory_id: optional_string_cell(row, "memory_id"),
+        memory_node_id,
+        source_id: optional_string_cell(row, "source_id"),
+        source_node_id,
+        relationship_id,
         memory_display_title,
         memory_title,
         memory_content_preview,
         memory_content,
-        memory_unit_type: string_property(memory, "unit_type"),
-        memory_importance: memory.properties.get("importance").cloned(),
-        memory_pagerank_score: memory.properties.get("pagerank_score").cloned(),
-        memory_community_id: memory.properties.get("community_id").cloned(),
-        memory_raw_space_id: string_property(memory, "space_id"),
-        memory_normalized_space_id: normalized_node_space_id(memory),
-        memory_source: string_property(memory, "source"),
-        memory_created_at: memory.properties.get("created_at").cloned(),
-        memory_updated_at: memory.properties.get("updated_at").cloned(),
-        memory_event_start: memory.properties.get("event_start").cloned(),
-        memory_event_end: memory.properties.get("event_end").cloned(),
-        source_original_name: string_property(source, "original_name"),
-        source_type: string_property(source, "source_type"),
-        source_file_path: string_property(source, "file_path"),
-        chunk_index: relationship_integer_property(relationship, "chunk_index"),
-        chunk_range: relationship_string_property(relationship, "chunk_range"),
-        source_version: relationship_string_property(relationship, "source_version"),
-        relationship_created_at: relationship.properties.get("created_at").cloned(),
-    }
+        memory_unit_type: optional_string_cell(row, "memory_unit_type"),
+        memory_importance: row
+            .get("memory_importance")
+            .and_then(optional_non_null_value),
+        memory_pagerank_score: row
+            .get("memory_pagerank_score")
+            .and_then(optional_non_null_value),
+        memory_community_id: row
+            .get("memory_community_id")
+            .and_then(optional_non_null_value),
+        memory_raw_space_id: optional_string_cell(row, "memory_space_id"),
+        memory_normalized_space_id: optional_string_cell(row, "memory_space_id")
+            .unwrap_or_else(|| "default".to_string()),
+        memory_source: optional_string_cell(row, "memory_source"),
+        memory_created_at: row
+            .get("memory_created_at")
+            .and_then(optional_non_null_value),
+        memory_updated_at: row
+            .get("memory_updated_at")
+            .and_then(optional_non_null_value),
+        memory_event_start: row
+            .get("memory_event_start")
+            .and_then(optional_non_null_value),
+        memory_event_end: row
+            .get("memory_event_end")
+            .and_then(optional_non_null_value),
+        source_original_name: optional_string_cell(row, "source_original_name"),
+        source_type: optional_string_cell(row, "source_type"),
+        source_file_path: optional_string_cell(row, "source_file_path"),
+        chunk_index: optional_i64_cell(row, "chunk_index"),
+        chunk_range: optional_string_cell(row, "chunk_range"),
+        source_version: optional_string_cell(row, "source_version"),
+        relationship_created_at: row
+            .get("relationship_created_at")
+            .and_then(optional_non_null_value),
+    })
 }
 
 fn relationship_string_property(relationship: &RelRecord, property: &str) -> Option<String> {

@@ -13235,6 +13235,70 @@ fn memory_source_attribution_rejects_unbounded_or_empty_filters() {
 }
 
 #[test]
+fn memory_source_attributions_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source-attribution-cache-a', original_name: 'Source A'})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source-attribution-cache-b', original_name: 'Source B'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-attribution-cache-a', title: 'Memory A', content: 'Content A', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-attribution-cache-b', content: 'Content B'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-attribution-cache-a'}), (s:Source {id: 'source-attribution-cache-a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '20..30'}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-attribution-cache-b'}), (s:Source {id: 'source-attribution-cache-a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '10..20'}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-attribution-cache-a'}), (s:Source {id: 'source-attribution-cache-b'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 3}]->(s)")
+        .unwrap();
+    let request = KnowledgeMemorySourceAttributionRequest {
+        memory_ids: vec![
+            "memory-attribution-cache-a".to_string(),
+            "missing-memory-attribution-cache".to_string(),
+        ],
+        source_ids: vec![
+            "source-attribution-cache-a".to_string(),
+            "missing-source-attribution-cache".to_string(),
+        ],
+        limit: 0,
+    };
+
+    let first = db.knowledge_memory_source_attributions(&request).unwrap();
+    let second = db.knowledge_memory_source_attributions(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 1);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(
+        first.missing_memory_ids,
+        vec!["missing-memory-attribution-cache".to_string()]
+    );
+    assert_eq!(
+        first.missing_source_ids,
+        vec!["missing-source-attribution-cache".to_string()]
+    );
+    assert_eq!(
+        first.rows[0].memory_id.as_deref(),
+        Some("memory-attribution-cache-a")
+    );
+    assert_eq!(
+        first.rows[0].source_id.as_deref(),
+        Some("source-attribution-cache-a")
+    );
+    assert_eq!(first.rows[0].memory_display_title, "Memory A");
+    assert_eq!(first.rows[0].memory_normalized_space_id, "default");
+    assert_eq!(first.rows[0].chunk_index, Some(2));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn updates_memory_lifecycle_batch_for_metadata_state() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'memory_1', metadata: '{}', is_latest: true, lifecycle_state: 'active', updated_at: 1})")
