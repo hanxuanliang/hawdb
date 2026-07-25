@@ -15991,6 +15991,47 @@ fn reads_memory_cleanup_fingerprints_for_scheduler_shape() {
 }
 
 #[test]
+fn memory_cleanup_fingerprints_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'cleanup-cache-a', title: 'Cleanup A', decay_score_cached: 0.6, future_cleanup_field: 'future-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'cleanup-cache-b', title: 'Cleanup B', decay_score_cached: 0.2, future_cleanup_field: 'future-b'})")
+        .unwrap();
+    let request = KnowledgeMemoryCleanupFingerprintRequest {
+        memory_ids: vec![
+            "cleanup-cache-b".to_string(),
+            "cleanup-cache-a".to_string(),
+            "cleanup-cache-missing".to_string(),
+        ],
+        property_names: vec!["future_cleanup_field".to_string()],
+    };
+
+    let first = db.knowledge_memory_cleanup_fingerprints(&request).unwrap();
+    let second = db.knowledge_memory_cleanup_fingerprints(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 2);
+    assert_eq!(
+        first.missing_memory_ids,
+        vec!["cleanup-cache-missing".to_string()]
+    );
+    assert_eq!(first.rows[0].memory_id.as_deref(), Some("cleanup-cache-b"));
+    assert_eq!(
+        first.rows[0].properties.get("future_cleanup_field"),
+        Some(&Value::String("future-b".to_string()))
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn memory_cleanup_fingerprints_reject_empty_inputs_without_wal() {
     let path = unique_test_dir("memory_cleanup_fingerprints_reject_empty_inputs_without_wal");
     let mut db = Database::open(&path).unwrap();

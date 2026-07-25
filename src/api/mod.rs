@@ -7177,7 +7177,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryCleanupFingerprintRequest,
     ) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
-        knowledge_memory_cleanup_fingerprints_for(&self.catalog, &self.store, request)
+        knowledge_memory_cleanup_fingerprints_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_metadata_related_projected_list(
@@ -11125,6 +11125,54 @@ fn knowledge_memory_cleanup_fingerprints_for(
     })
 }
 
+fn knowledge_memory_cleanup_fingerprints_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryCleanupFingerprintRequest,
+) -> Result<KnowledgeMemoryCleanupFingerprintOutput> {
+    validate_knowledge_memory_cleanup_fingerprint_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    if request.memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryCleanupFingerprintOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: Vec::new(),
+        });
+    }
+
+    let ordered_memory_ids = deduplicated_strings_in_order(&request.memory_ids);
+    let entity_requests = ordered_memory_ids
+        .iter()
+        .map(|memory_id| KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: memory_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let (graph_commit_epoch, matched_memories) =
+        lookup_entities_via_query_runtime(db, &entity_requests);
+    let mut rows = Vec::with_capacity(matched_memories.len());
+    let mut missing_memory_ids = Vec::new();
+    for memory_id in ordered_memory_ids {
+        match matched_memories.get(&("Memory".to_string(), memory_id.clone())) {
+            Some(memory) => {
+                rows.push(knowledge_memory_cleanup_fingerprint_row_from_entity(
+                    memory, request,
+                ));
+            }
+            None => missing_memory_ids.push(memory_id),
+        }
+    }
+    let matched_count = rows.len();
+    Ok(KnowledgeMemoryCleanupFingerprintOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count: matched_count,
+        missing_memory_ids,
+    })
+}
+
 fn validate_knowledge_memory_cleanup_fingerprint_request(
     request: &KnowledgeMemoryCleanupFingerprintRequest,
 ) -> Result<()> {
@@ -11164,6 +11212,32 @@ fn knowledge_memory_cleanup_fingerprint_row(
         importance: memory.properties.get("importance").cloned(),
         unit_type: string_property(memory, "unit_type"),
         semantic_field: string_property(memory, "semantic_field"),
+        properties: projected_properties(&memory.properties, &property_names),
+    }
+}
+
+fn knowledge_memory_cleanup_fingerprint_row_from_entity(
+    memory: &KnowledgeEntity,
+    request: &KnowledgeMemoryCleanupFingerprintRequest,
+) -> KnowledgeMemoryCleanupFingerprintRow {
+    let property_names = knowledge_memory_cleanup_fingerprint_property_names(request);
+    KnowledgeMemoryCleanupFingerprintRow {
+        memory_id: memory.external_id.clone(),
+        node_id: memory.node_id,
+        title: string_property_value(&memory.properties, "title"),
+        metadata: memory.properties.get("metadata").cloned(),
+        is_latest: boolean_property_value(&memory.properties, "is_latest"),
+        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
+        created_at: memory.properties.get("created_at").cloned(),
+        last_accessed_at: memory.properties.get("last_accessed_at").cloned(),
+        last_clicked_at: memory.properties.get("last_clicked_at").cloned(),
+        access_count: memory.properties.get("access_count").cloned(),
+        appearances: memory.properties.get("appearances").cloned(),
+        clicks: memory.properties.get("clicks").cloned(),
+        total_dwell_time_ms: memory.properties.get("total_dwell_time_ms").cloned(),
+        importance: memory.properties.get("importance").cloned(),
+        unit_type: string_property_value(&memory.properties, "unit_type"),
+        semantic_field: string_property_value(&memory.properties, "semantic_field"),
         properties: projected_properties(&memory.properties, &property_names),
     }
 }
@@ -12461,6 +12535,13 @@ fn deduplicated_strings_in_order(values: &[String]) -> Vec<String> {
 
 fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
     match node.properties.get(property) {
+        Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<bool> {
+    match properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
         _ => None,
     }
@@ -18052,6 +18133,13 @@ fn source_sourced_memory_count(
 
 fn string_property(node: &NodeRecord, property: &str) -> Option<String> {
     node.properties
+        .get(property)
+        .map(value_to_external_id)
+        .filter(|value| !value.is_empty())
+}
+
+fn string_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<String> {
+    properties
         .get(property)
         .map(value_to_external_id)
         .filter(|value| !value.is_empty())
