@@ -978,22 +978,15 @@ fn query_runtime_preflight_summary(bundle: &serde_json::Value) -> QueryRuntimePr
     let covered_route_count = json_get_u64_path_from_dynamic(bundle, path, "covered_route_count");
     let required_routes_covered =
         json_get_bool_path_from_dynamic(bundle, path, "required_routes_covered");
-    let top_level_covered_routes =
-        json_get_string_array_path_from_dynamic(bundle, path, "covered_routes");
     let probe_route_set = query_runtime_preflight_probe_route_set(bundle, path);
-    let covered_route_set = top_level_covered_routes
+    let covered_routes = probe_route_set
         .iter()
-        .map(String::as_str)
-        .chain(probe_route_set.iter().map(String::as_str))
-        .collect::<BTreeSet<_>>();
-    let covered_routes = covered_route_set
-        .iter()
-        .map(|route| (*route).to_string())
+        .map(String::to_string)
         .collect::<Vec<_>>();
     let missing_required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
         .iter()
         .copied()
-        .filter(|route| !covered_route_set.contains(route))
+        .filter(|route| !probe_route_set.contains(*route))
         .collect::<Vec<_>>();
     let required_route_len = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64;
     let route_coverage_ready = required_route_count == Some(required_route_len)
@@ -2403,6 +2396,40 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "query_runtime_preflight_ready"));
+    }
+
+    #[test]
+    fn replacement_summary_recomputes_query_runtime_route_coverage_from_probes() {
+        let mut bundle = production_ready_bundle();
+        bundle["query_runtime_preflight"]["covered_route_count"] = serde_json::json!(15);
+        bundle["query_runtime_preflight"]["required_routes_covered"] = serde_json::json!(true);
+        bundle["query_runtime_preflight"]["missing_required_routes"] = serde_json::json!([]);
+        bundle["query_runtime_preflight"]["covered_routes"] =
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES);
+        bundle["query_runtime_preflight"]["probes"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|probe| {
+                probe.get("route").and_then(serde_json::Value::as_str) != Some("/graph/explore")
+            });
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["query_runtime_preflight"]["ready"], false);
+        assert_eq!(
+            summary["query_runtime_preflight"]["route_coverage_ready"],
+            false
+        );
+        assert_eq!(
+            summary["query_runtime_preflight"]["missing_required_routes"],
+            serde_json::json!(["/graph/explore"])
+        );
+        assert!(!summary["query_runtime_preflight"]["covered_routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "/graph/explore"));
     }
 
     #[test]
