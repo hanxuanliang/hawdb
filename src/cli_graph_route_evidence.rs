@@ -1,6 +1,6 @@
 use skein::{
     NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemQueryReportOptions, Result, SkeinError,
-    Value, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    Value, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -406,6 +406,7 @@ struct RouteParityEvidenceRoute {
 #[derive(Debug, Clone, PartialEq)]
 struct RouteCypherQuery {
     name: String,
+    query_family: Option<String>,
     require_scan_pruning: bool,
     require_pruned: bool,
     cypher: String,
@@ -524,6 +525,7 @@ fn parse_route_cypher_query(
         .unwrap_or_default();
     Ok(RouteCypherQuery {
         name,
+        query_family: optional_string_field(value, "query_family")?,
         require_scan_pruning: bool_field(value, "require_scan_pruning"),
         require_pruned: bool_field(value, "require_pruned"),
         cypher,
@@ -553,6 +555,10 @@ fn query_report_with_route_context(
             serde_json::json!(query_index as u64),
         );
         object.insert(
+            "query_family".to_string(),
+            serde_json::json!(query.query_family.clone()),
+        );
+        object.insert(
             "require_scan_pruning".to_string(),
             serde_json::json!(query.require_scan_pruning),
         );
@@ -566,6 +572,11 @@ fn query_report_with_route_context(
 
 fn query_requirement_blockers(query: &RouteCypherQuery, report: &serde_json::Value) -> Vec<String> {
     let mut blockers = Vec::new();
+    match query.query_family.as_deref() {
+        Some(family) if REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.contains(&family) => {}
+        Some(_) => blockers.push("query_unknown_query_family".to_string()),
+        None => blockers.push("query_family_missing".to_string()),
+    }
     let scan_pruning_reports = report
         .get("scan_pruning_reports")
         .and_then(serde_json::Value::as_array)
@@ -779,6 +790,7 @@ mod tests {
                     "queries": [
                         {
                             "name": "overview-memory-lookup",
+                            "query_family": "memory_lookup",
                             "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
                             "parameters": {
                                 "id": "mem-route"
@@ -835,6 +847,10 @@ mod tests {
             evidence["routes"][0]["query_reports"][0]["query_name"],
             "overview-memory-lookup"
         );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_family"],
+            "memory_lookup"
+        );
         assert_eq!(evidence["routes"][0]["query_reports"][0]["query_index"], 0);
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["require_scan_pruning"],
@@ -869,6 +885,7 @@ mod tests {
                         "queries": [
                             {
                                 "name": format!("{}:memory-lookup", route),
+                                "query_family": "memory_lookup",
                                 "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
                                 "parameters": {
                                     "id": "mem-route"
@@ -1007,6 +1024,7 @@ mod tests {
                     "primary_ready": false,
                     "queries": [
                         {
+                            "query_family": "memory_lookup",
                             "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
                             "parameters": {
                                 "id": "mem-route"
@@ -1037,6 +1055,53 @@ mod tests {
     }
 
     #[test]
+    fn route_evidence_fails_closed_when_query_family_is_missing() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = parse_route_query_inventory(&serde_json::json!({
+            "routes": [
+                {
+                    "route": "/graph/overview",
+                    "shadow_compare_ready": true,
+                    "primary_ready": true,
+                    "queries": [
+                        {
+                            "name": "overview-unclassified-smoke",
+                            "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
+                            "parameters": {
+                                "id": "mem-route"
+                            }
+                        }
+                    ],
+                    "blocker_codes": []
+                }
+            ]
+        }))
+        .unwrap();
+
+        let route_parity = ready_route_parity();
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
+
+        assert_eq!(evidence["routes"][0]["primary_ready"], false);
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_family"],
+            serde_json::Value::Null
+        );
+        assert!(evidence["routes"][0]["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_family_missing"));
+    }
+
+    #[test]
     fn route_evidence_fails_closed_on_query_execution_error() {
         let db = Database::new();
         let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
@@ -1049,6 +1114,7 @@ mod tests {
                     "queries": [
                         {
                             "name": "broken-overview-query",
+                            "query_family": "memory_lookup",
                             "cypher": "MATCH (m:Memory) RETURN unknown.property AS value"
                         }
                     ]
@@ -1105,6 +1171,7 @@ mod tests {
                     "queries": [
                         {
                             "name": "overview-full-scan",
+                            "query_family": "memory_lookup",
                             "cypher": "MATCH (m:Memory) RETURN m.title AS title",
                             "require_pruned": true
                         }
@@ -1140,6 +1207,7 @@ mod tests {
     fn route_query_requirements_reject_malformed_scan_pruning_evidence() {
         let query = RouteCypherQuery {
             name: "malformed-pruning".to_string(),
+            query_family: Some("memory_lookup".to_string()),
             require_scan_pruning: true,
             require_pruned: false,
             cypher: "MATCH (m:Memory {id: $id}) RETURN m.title AS title".to_string(),
@@ -1175,6 +1243,23 @@ mod tests {
     }
 
     #[test]
+    fn route_query_requirements_reject_unknown_query_family() {
+        let query = RouteCypherQuery {
+            name: "unknown-family".to_string(),
+            query_family: Some("manual_smoke".to_string()),
+            require_scan_pruning: false,
+            require_pruned: false,
+            cypher: "MATCH (m:Memory {id: $id}) RETURN m.title AS title".to_string(),
+            parameters: BTreeMap::new(),
+        };
+
+        assert_eq!(
+            query_requirement_blockers(&query, &serde_json::json!({})),
+            vec!["query_unknown_query_family".to_string()]
+        );
+    }
+
+    #[test]
     fn route_evidence_fails_closed_without_route_parity_evidence() {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
@@ -1188,6 +1273,7 @@ mod tests {
                     "primary_ready": true,
                     "queries": [
                         {
+                            "query_family": "memory_lookup",
                             "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
                             "parameters": {
                                 "id": "mem-route"
@@ -1281,6 +1367,7 @@ mod tests {
             "queries": [
                 {
                     "name": format!("{}:memory-lookup", route),
+                    "query_family": "memory_lookup",
                     "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
                     "parameters": {
                         "id": "mem-route"
