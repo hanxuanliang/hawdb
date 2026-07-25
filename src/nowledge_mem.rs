@@ -321,6 +321,9 @@ pub struct NowledgeMemSearchCandidateShadowEvidence {
     pub shadow_candidate_count: u64,
     pub matched_candidate_count: u64,
     pub primary_only_candidate_count: u64,
+    pub primary_candidate_identity_checksum: Option<u64>,
+    pub shadow_candidate_identity_checksum: Option<u64>,
+    pub matched_candidate_identity_checksum: Option<u64>,
     pub blocker_codes: Vec<String>,
 }
 
@@ -331,6 +334,9 @@ pub struct NowledgeMemSearchCandidateShadowAccumulator {
     shadow_candidate_count: u64,
     matched_candidate_count: u64,
     primary_only_candidate_count: u64,
+    primary_candidate_identity_checksum: Option<u64>,
+    shadow_candidate_identity_checksum: Option<u64>,
+    matched_candidate_identity_checksum: Option<u64>,
     blocker_codes: BTreeSet<String>,
 }
 
@@ -370,6 +376,42 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
         self.blocker_codes.insert(code.into());
     }
 
+    pub fn record_compare_candidate_ids(
+        &mut self,
+        primary_candidate_ids: &[impl AsRef<str>],
+        shadow_candidate_ids: &[impl AsRef<str>],
+    ) {
+        let primary = primary_candidate_ids
+            .iter()
+            .map(|id| id.as_ref().to_string())
+            .collect::<BTreeSet<_>>();
+        let shadow = shadow_candidate_ids
+            .iter()
+            .map(|id| id.as_ref().to_string())
+            .collect::<BTreeSet<_>>();
+        let matched = primary
+            .intersection(&shadow)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        self.record_compare(
+            primary.len() as u64,
+            shadow.len() as u64,
+            matched.len() as u64,
+        );
+        update_search_candidate_identity_checksum(
+            &mut self.primary_candidate_identity_checksum,
+            &primary,
+        );
+        update_search_candidate_identity_checksum(
+            &mut self.shadow_candidate_identity_checksum,
+            &shadow,
+        );
+        update_search_candidate_identity_checksum(
+            &mut self.matched_candidate_identity_checksum,
+            &matched,
+        );
+    }
+
     pub fn evidence(&self) -> NowledgeMemSearchCandidateShadowEvidence {
         NowledgeMemSearchCandidateShadowEvidence {
             request_count: self.request_count,
@@ -377,6 +419,9 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             shadow_candidate_count: self.shadow_candidate_count,
             matched_candidate_count: self.matched_candidate_count,
             primary_only_candidate_count: self.primary_only_candidate_count,
+            primary_candidate_identity_checksum: self.primary_candidate_identity_checksum,
+            shadow_candidate_identity_checksum: self.shadow_candidate_identity_checksum,
+            matched_candidate_identity_checksum: self.matched_candidate_identity_checksum,
             blocker_codes: self.blocker_codes.iter().cloned().collect(),
         }
     }
@@ -399,6 +444,9 @@ impl NowledgeMemSearchCandidateShadowEvidence {
             shadow_candidate_count,
             matched_candidate_count,
             primary_only_candidate_count: 0,
+            primary_candidate_identity_checksum: None,
+            shadow_candidate_identity_checksum: None,
+            matched_candidate_identity_checksum: None,
             blocker_codes: Vec::new(),
         }
     }
@@ -412,6 +460,7 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
     evidence: &NowledgeMemSearchCandidateShadowEvidence,
 ) -> serde_json::Value {
     let blocker_codes = nowledge_mem_search_candidate_shadow_blocker_codes(evidence);
+    let candidate_identity = nowledge_mem_search_candidate_shadow_identity_json(evidence);
     let ready = blocker_codes.is_empty();
     serde_json::json!({
         "protocol": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
@@ -425,7 +474,28 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
         "shadow_candidate_count": evidence.shadow_candidate_count,
         "matched_candidate_count": evidence.matched_candidate_count,
         "primary_only_candidate_count": evidence.primary_only_candidate_count,
+        "candidate_identity": candidate_identity,
         "blocker_codes": blocker_codes,
+    })
+}
+
+fn nowledge_mem_search_candidate_shadow_identity_json(
+    evidence: &NowledgeMemSearchCandidateShadowEvidence,
+) -> serde_json::Value {
+    let primary_checksum = evidence.primary_candidate_identity_checksum;
+    let shadow_checksum = evidence.shadow_candidate_identity_checksum;
+    let matched_checksum = evidence.matched_candidate_identity_checksum;
+    let parity = primary_checksum.is_some()
+        && primary_checksum == shadow_checksum
+        && matched_checksum == shadow_checksum;
+    serde_json::json!({
+        "ready": parity,
+        "id_space": "search_candidate_id",
+        "representation": "per_request_sorted_candidate_ids",
+        "primary_checksum": primary_checksum,
+        "shadow_checksum": shadow_checksum,
+        "matched_checksum": matched_checksum,
+        "parity": parity,
     })
 }
 
@@ -448,7 +518,44 @@ fn nowledge_mem_search_candidate_shadow_blocker_codes(
     if evidence.primary_only_candidate_count != 0 {
         blockers.insert("search_candidate_primary_only".to_string());
     }
+    let identity_ready = evidence.primary_candidate_identity_checksum.is_some()
+        && evidence.primary_candidate_identity_checksum
+            == evidence.shadow_candidate_identity_checksum
+        && evidence.matched_candidate_identity_checksum
+            == evidence.shadow_candidate_identity_checksum;
+    if evidence.primary_candidate_identity_checksum.is_none()
+        || evidence.shadow_candidate_identity_checksum.is_none()
+        || evidence.matched_candidate_identity_checksum.is_none()
+    {
+        blockers.insert("search_candidate_identity_missing".to_string());
+    } else if !identity_ready {
+        blockers.insert("search_candidate_identity_mismatch".to_string());
+    }
     blockers.into_iter().collect()
+}
+
+fn update_search_candidate_identity_checksum(
+    checksum: &mut Option<u64>,
+    candidate_ids: &BTreeSet<String>,
+) {
+    let mut value = checksum.unwrap_or(FNV64_OFFSET);
+    value = fnv64_update(value, b"request\n");
+    for candidate_id in candidate_ids {
+        value = fnv64_update(value, candidate_id.as_bytes());
+        value = fnv64_update(value, b"\0");
+    }
+    *checksum = Some(value);
+}
+
+const FNV64_OFFSET: u64 = 0xcbf29ce484222325;
+const FNV64_PRIME: u64 = 0x100000001b3;
+
+fn fnv64_update(mut hash: u64, bytes: &[u8]) -> u64 {
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(FNV64_PRIME);
+    }
+    hash
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2240,9 +2347,13 @@ mod tests {
 
     #[test]
     fn search_candidate_shadow_evidence_reports_ready_counts() {
-        let evidence = nowledge_mem_search_candidate_shadow_evidence_json(
-            &NowledgeMemSearchCandidateShadowEvidence::ready(2, 5, 5, 5),
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+        accumulator.record_compare_candidate_ids(&["mem_1", "mem_2"], &["mem_1", "mem_2"]);
+        accumulator.record_compare_candidate_ids(
+            &["mem_3", "mem_4", "mem_5"],
+            &["mem_3", "mem_4", "mem_5"],
         );
+        let evidence = accumulator.json();
 
         assert_eq!(
             evidence["protocol"],
@@ -2262,6 +2373,11 @@ mod tests {
         assert_eq!(evidence["shadow_candidate_count"], 5);
         assert_eq!(evidence["matched_candidate_count"], 5);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
+        assert_eq!(evidence["candidate_identity"]["ready"], true);
+        assert_eq!(evidence["candidate_identity"]["parity"], true);
+        assert!(evidence["candidate_identity"]
+            .get("candidate_ids")
+            .is_none());
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
@@ -2274,6 +2390,9 @@ mod tests {
                 shadow_candidate_count: 2,
                 matched_candidate_count: 1,
                 primary_only_candidate_count: 1,
+                primary_candidate_identity_checksum: None,
+                shadow_candidate_identity_checksum: None,
+                matched_candidate_identity_checksum: None,
                 blocker_codes: vec!["bridge_timeout".to_string()],
             },
         );
@@ -2283,6 +2402,7 @@ mod tests {
             evidence["blocker_codes"],
             serde_json::json!([
                 "bridge_timeout",
+                "search_candidate_identity_missing",
                 "search_candidate_mismatch",
                 "search_candidate_primary_only",
                 "search_candidate_shadow_no_requests"
@@ -2293,8 +2413,8 @@ mod tests {
     #[test]
     fn search_candidate_shadow_accumulator_generates_bridge_evidence() {
         let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
-        accumulator.record_compare(2, 2, 2);
-        accumulator.record_compare(1, 1, 1);
+        accumulator.record_compare_candidate_ids(&["mem_1", "mem_2"], &["mem_1", "mem_2"]);
+        accumulator.record_compare_candidate_ids(&["mem_3"], &["mem_3"]);
 
         let evidence = accumulator.json();
 
@@ -2304,13 +2424,14 @@ mod tests {
         assert_eq!(evidence["shadow_candidate_count"], 3);
         assert_eq!(evidence["matched_candidate_count"], 3);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
+        assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
     #[test]
     fn search_candidate_shadow_accumulator_preserves_request_blockers() {
         let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
-        accumulator.record_compare(2, 1, 1);
+        accumulator.record_compare_candidate_ids(&["mem_1", "mem_2"], &["mem_1"]);
         accumulator.add_blocker_code("bridge_error");
 
         let evidence = accumulator.json();
@@ -2325,6 +2446,7 @@ mod tests {
             evidence["blocker_codes"],
             serde_json::json!([
                 "bridge_error",
+                "search_candidate_identity_mismatch",
                 "search_candidate_mismatch",
                 "search_candidate_primary_only"
             ])

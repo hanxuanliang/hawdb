@@ -657,13 +657,18 @@ non-zero `request_count`. Candidate parity is fail-closed unless
 `primary_candidate_count == shadow_candidate_count`,
 `matched_candidate_count == shadow_candidate_count`, and
 `primary_only_candidate_count == 0`.
+The nested `candidate_identity` summary must also be ready. It carries only
+rolling checksums over per-request sorted candidate IDs for the primary,
+shadow, and matched sets; it must not include raw candidate IDs.
 Rust bridge code should generate this object with
 `nowledge_mem_search_candidate_shadow_evidence_json` and
 `NowledgeMemSearchCandidateShadowEvidence` so `ready` and blocker codes are
 computed by Skein instead of handwritten by the caller.
-For multi-request bridge runs, use
-`NowledgeMemSearchCandidateShadowAccumulator::record_compare` once per
-LanceDB/Skein candidate comparison and emit `accumulator.json()` at the end.
+For multi-request bridge runs, prefer
+`NowledgeMemSearchCandidateShadowAccumulator::record_compare_candidate_ids`
+once per LanceDB/Skein candidate comparison and emit `accumulator.json()` at
+the end. Use `record_compare` only for count-only diagnostics; final
+integration readiness requires candidate identity evidence.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover

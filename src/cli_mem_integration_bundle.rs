@@ -1275,7 +1275,10 @@ mod tests {
 
     fn ready_search_candidate_shadow_evidence() -> serde_json::Value {
         let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
-        accumulator.record_compare(3, 3, 3);
+        accumulator.record_compare_candidate_ids(
+            &["mem_1", "mem_2", "mem_3"],
+            &["mem_1", "mem_2", "mem_3"],
+        );
         nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence())
     }
 
