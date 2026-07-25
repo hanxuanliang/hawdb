@@ -6,6 +6,7 @@ use crate::qos::{
 use crate::schema::Catalog;
 use crate::store::{GraphStore, NodeId, NodeRecord};
 use crate::value::Value;
+use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use skein_optimizer::{
     normalize_search_enum_value, push_search_predicates, search_field_is_enum_like,
     SearchPredicate, SearchPredicateOp, SearchPredicateSet, SearchScalarValue,
@@ -336,6 +337,7 @@ pub struct SearchPredicateFieldPruningReport {
     pub pruned_segment_count: usize,
     pub scanned_segment_count: usize,
     pub numeric_range_summary_used: bool,
+    pub timestamp_range_summary_used: bool,
     pub value_summary_used: bool,
 }
 
@@ -2049,6 +2051,7 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
         "row_filter_ready": true,
         "segment_pruning_ready": true,
         "numeric_min_max_ready": true,
+        "timestamp_min_max_ready": true,
         "persisted_segment_descriptor_ready": segment_descriptor_ready,
         "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
         "scan_filter_fields": [
@@ -2073,24 +2076,34 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
 fn search_projection_probe_segment_descriptor_field_summaries(
     descriptor: &SearchSegmentDescriptor,
 ) -> Vec<serde_json::Value> {
-    let mut fields = BTreeMap::<String, (usize, bool, bool)>::new();
+    let mut fields = BTreeMap::<String, (usize, bool, bool, bool)>::new();
     for segment in &descriptor.segments {
         for (field, summary) in &segment.metadata {
             let entry = fields.entry(field.clone()).or_default();
             entry.0 += 1;
             entry.1 |= !summary.values.is_empty();
             entry.2 |= summary.numeric_range.is_some();
+            entry.3 |= summary.timestamp_range.is_some();
         }
     }
     fields
         .into_iter()
         .map(
-            |(field, (segment_count, value_summary_used, numeric_range_summary_used))| {
+            |(
+                field,
+                (
+                    segment_count,
+                    value_summary_used,
+                    numeric_range_summary_used,
+                    timestamp_range_summary_used,
+                ),
+            )| {
                 serde_json::json!({
                     "field": field,
                     "segment_count": segment_count,
                     "value_summary_used": value_summary_used,
                     "numeric_range_summary_used": numeric_range_summary_used,
+                    "timestamp_range_summary_used": timestamp_range_summary_used,
                 })
             },
         )
@@ -2612,12 +2625,19 @@ struct SearchNumericRange {
     max: f64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SearchTimestampRange {
+    min_epoch_millis: i64,
+    max_epoch_millis: i64,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct SearchFilterSegmentSummary {
     document_count: usize,
     present_counts: BTreeMap<String, usize>,
     values: BTreeMap<String, BTreeSet<String>>,
     numeric_ranges: BTreeMap<String, SearchNumericRange>,
+    timestamp_ranges: BTreeMap<String, SearchTimestampRange>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -2640,6 +2660,7 @@ struct SearchSegmentFieldSummary {
     present_count: usize,
     values: BTreeSet<String>,
     numeric_range: Option<SearchNumericRange>,
+    timestamp_range: Option<SearchTimestampRange>,
 }
 
 fn filter_search_documents_with_segment_pruning<'a>(
@@ -2794,6 +2815,7 @@ struct SearchFieldPruningStats {
     pruned_segment_count: usize,
     scanned_segment_count: usize,
     numeric_range_summary_used: bool,
+    timestamp_range_summary_used: bool,
     value_summary_used: bool,
 }
 
@@ -2817,7 +2839,12 @@ impl SearchFieldPruningAccumulator {
                 SearchPredicateOp::Gt(_)
                 | SearchPredicateOp::Gte(_)
                 | SearchPredicateOp::Lt(_)
-                | SearchPredicateOp::Lte(_) => stats.numeric_range_summary_used = true,
+                | SearchPredicateOp::Lte(_) => {
+                    stats.numeric_range_summary_used = true;
+                    if range_predicate_expects_timestamp(predicate) {
+                        stats.timestamp_range_summary_used = true;
+                    }
+                }
             }
         }
         Self { fields }
@@ -2881,6 +2908,7 @@ impl SearchFieldPruningAccumulator {
                 pruned_segment_count: stats.pruned_segment_count,
                 scanned_segment_count: stats.scanned_segment_count,
                 numeric_range_summary_used: stats.numeric_range_summary_used,
+                timestamp_range_summary_used: stats.timestamp_range_summary_used,
                 value_summary_used: stats.value_summary_used,
             })
             .collect()
@@ -2932,11 +2960,22 @@ fn search_predicate_op_kind(op: &SearchPredicateOp) -> &'static str {
     }
 }
 
+fn range_predicate_expects_timestamp(predicate: &SearchPredicate) -> bool {
+    match predicate.op() {
+        SearchPredicateOp::Gt(value)
+        | SearchPredicateOp::Gte(value)
+        | SearchPredicateOp::Lt(value)
+        | SearchPredicateOp::Lte(value) => metadata_timestamp_value(value.as_str()).is_some(),
+        _ => false,
+    }
+}
+
 impl SearchFilterSegmentSummary {
     fn from_documents(documents: &[&SearchDocument], fields: &BTreeSet<String>) -> Self {
         let mut present_counts = BTreeMap::new();
         let mut values = BTreeMap::<String, BTreeSet<String>>::new();
         let mut numeric_ranges = BTreeMap::<String, SearchNumericRange>::new();
+        let mut timestamp_ranges = BTreeMap::<String, SearchTimestampRange>::new();
         for document in documents {
             for field in fields {
                 let Some(value) = search_document_field_value(document, field) else {
@@ -2953,6 +2992,12 @@ impl SearchFilterSegmentSummary {
                         .and_modify(|range| *range = range.with_value(number))
                         .or_insert_with(|| SearchNumericRange::point(number));
                 }
+                if let Some(timestamp) = metadata_timestamp_value(value) {
+                    timestamp_ranges
+                        .entry(field.clone())
+                        .and_modify(|range| *range = range.with_value(timestamp))
+                        .or_insert_with(|| SearchTimestampRange::point(timestamp));
+                }
             }
         }
         Self {
@@ -2960,6 +3005,7 @@ impl SearchFilterSegmentSummary {
             present_counts,
             values,
             numeric_ranges,
+            timestamp_ranges,
         }
     }
 
@@ -3030,7 +3076,12 @@ impl SearchFilterSegmentSummary {
     }
 
     fn numeric_range_may_match(&self, field: &str, op: &SearchPredicateOp, expected: &str) -> bool {
-        metadata_numeric_range_may_match(self.numeric_ranges.get(field).copied(), op, expected)
+        metadata_range_may_match(
+            self.numeric_ranges.get(field).copied(),
+            self.timestamp_ranges.get(field).copied(),
+            op,
+            expected,
+        )
     }
 }
 
@@ -3046,6 +3097,22 @@ impl SearchNumericRange {
         Self {
             min: self.min.min(value),
             max: self.max.max(value),
+        }
+    }
+}
+
+impl SearchTimestampRange {
+    fn point(value: i64) -> Self {
+        Self {
+            min_epoch_millis: value,
+            max_epoch_millis: value,
+        }
+    }
+
+    fn with_value(self, value: i64) -> Self {
+        Self {
+            min_epoch_millis: self.min_epoch_millis.min(value),
+            max_epoch_millis: self.max_epoch_millis.max(value),
         }
     }
 }
@@ -3115,7 +3182,7 @@ impl SearchSegmentDescriptorEntry {
                 summary
                     .values
                     .insert(search_segment_summary_value(field, value));
-                summary.update_numeric(value);
+                summary.update_range_summaries(value);
             }
         }
         Self {
@@ -3193,10 +3260,13 @@ impl SearchSegmentDescriptorEntry {
     }
 
     fn numeric_range_may_match(&self, field: &str, op: &SearchPredicateOp, expected: &str) -> bool {
-        metadata_numeric_range_may_match(
+        metadata_range_may_match(
             self.metadata
                 .get(field)
                 .and_then(|summary| summary.numeric_range),
+            self.metadata
+                .get(field)
+                .and_then(|summary| summary.timestamp_range),
             op,
             expected,
         )
@@ -3204,14 +3274,19 @@ impl SearchSegmentDescriptorEntry {
 }
 
 impl SearchSegmentFieldSummary {
-    fn update_numeric(&mut self, value: &str) {
-        let Some(number) = metadata_numeric_value(value) else {
-            return;
-        };
-        self.numeric_range = Some(match self.numeric_range {
-            Some(range) => range.with_value(number),
-            None => SearchNumericRange::point(number),
-        });
+    fn update_range_summaries(&mut self, value: &str) {
+        if let Some(number) = metadata_numeric_value(value) {
+            self.numeric_range = Some(match self.numeric_range {
+                Some(range) => range.with_value(number),
+                None => SearchNumericRange::point(number),
+            });
+        }
+        if let Some(timestamp) = metadata_timestamp_value(value) {
+            self.timestamp_range = Some(match self.timestamp_range {
+                Some(range) => range.with_value(timestamp),
+                None => SearchTimestampRange::point(timestamp),
+            });
+        }
     }
 }
 
@@ -3246,16 +3321,16 @@ fn search_document_matches_predicate(
             })
         }),
         SearchPredicateOp::Gt(expected) => {
-            actual.is_some_and(|actual| metadata_numeric_gt(actual, expected.as_str()))
+            actual.is_some_and(|actual| metadata_range_gt(actual, expected.as_str()))
         }
         SearchPredicateOp::Gte(expected) => {
-            actual.is_some_and(|actual| metadata_numeric_gte(actual, expected.as_str()))
+            actual.is_some_and(|actual| metadata_range_gte(actual, expected.as_str()))
         }
         SearchPredicateOp::Lt(expected) => {
-            actual.is_some_and(|actual| metadata_numeric_lt(actual, expected.as_str()))
+            actual.is_some_and(|actual| metadata_range_lt(actual, expected.as_str()))
         }
         SearchPredicateOp::Lte(expected) => {
-            actual.is_some_and(|actual| metadata_numeric_lte(actual, expected.as_str()))
+            actual.is_some_and(|actual| metadata_range_lte(actual, expected.as_str()))
         }
     }
 }
@@ -3297,24 +3372,56 @@ fn normalize_metadata_filter_value(value: &str) -> String {
 }
 
 fn metadata_numeric_value(value: &str) -> Option<f64> {
-    let number = value.parse::<f64>().ok()?;
+    let number = value.trim().parse::<f64>().ok()?;
     number.is_finite().then_some(number)
 }
 
-fn metadata_numeric_gt(actual: &str, expected: &str) -> bool {
+fn metadata_timestamp_value(value: &str) -> Option<i64> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(timestamp) = DateTime::parse_from_rfc3339(value) {
+        return Some(timestamp.timestamp_millis());
+    }
+    for format in [
+        "%Y-%m-%d %H:%M:%S%.f",
+        "%Y-%m-%dT%H:%M:%S%.f",
+        "%Y-%m-%d %H:%M:%S",
+        "%Y-%m-%dT%H:%M:%S",
+    ] {
+        if let Ok(timestamp) = NaiveDateTime::parse_from_str(value, format) {
+            return Some(timestamp.and_utc().timestamp_millis());
+        }
+    }
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|timestamp| timestamp.and_utc().timestamp_millis())
+}
+
+fn metadata_range_gt(actual: &str, expected: &str) -> bool {
     metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual > expected)
+        || metadata_timestamp_pair(actual, expected)
+            .is_some_and(|(actual, expected)| actual > expected)
 }
 
-fn metadata_numeric_gte(actual: &str, expected: &str) -> bool {
+fn metadata_range_gte(actual: &str, expected: &str) -> bool {
     metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual >= expected)
+        || metadata_timestamp_pair(actual, expected)
+            .is_some_and(|(actual, expected)| actual >= expected)
 }
 
-fn metadata_numeric_lt(actual: &str, expected: &str) -> bool {
+fn metadata_range_lt(actual: &str, expected: &str) -> bool {
     metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual < expected)
+        || metadata_timestamp_pair(actual, expected)
+            .is_some_and(|(actual, expected)| actual < expected)
 }
 
-fn metadata_numeric_lte(actual: &str, expected: &str) -> bool {
+fn metadata_range_lte(actual: &str, expected: &str) -> bool {
     metadata_numeric_pair(actual, expected).is_some_and(|(actual, expected)| actual <= expected)
+        || metadata_timestamp_pair(actual, expected)
+            .is_some_and(|(actual, expected)| actual <= expected)
 }
 
 fn metadata_numeric_pair(actual: &str, expected: &str) -> Option<(f64, f64)> {
@@ -3324,22 +3431,56 @@ fn metadata_numeric_pair(actual: &str, expected: &str) -> Option<(f64, f64)> {
     ))
 }
 
-fn metadata_numeric_range_may_match(
-    range: Option<SearchNumericRange>,
+fn metadata_timestamp_pair(actual: &str, expected: &str) -> Option<(i64, i64)> {
+    Some((
+        metadata_timestamp_value(actual)?,
+        metadata_timestamp_value(expected)?,
+    ))
+}
+
+fn metadata_range_may_match(
+    numeric_range: Option<SearchNumericRange>,
+    timestamp_range: Option<SearchTimestampRange>,
     op: &SearchPredicateOp,
     expected: &str,
 ) -> bool {
-    let Some(range) = range else {
-        return false;
-    };
-    let Some(expected) = metadata_numeric_value(expected) else {
-        return false;
-    };
+    if let Some(expected) = metadata_numeric_value(expected) {
+        return numeric_range
+            .map(|range| metadata_numeric_range_may_match(range, op, expected))
+            .unwrap_or(false);
+    }
+    if let Some(expected) = metadata_timestamp_value(expected) {
+        return timestamp_range
+            .map(|range| metadata_timestamp_range_may_match(range, op, expected))
+            .unwrap_or(false);
+    }
+    false
+}
+
+fn metadata_numeric_range_may_match(
+    range: SearchNumericRange,
+    op: &SearchPredicateOp,
+    expected: f64,
+) -> bool {
     match op {
         SearchPredicateOp::Gt(_) => range.max > expected,
         SearchPredicateOp::Gte(_) => range.max >= expected,
         SearchPredicateOp::Lt(_) => range.min < expected,
         SearchPredicateOp::Lte(_) => range.min <= expected,
+        SearchPredicateOp::Eq(_) | SearchPredicateOp::In(_) | SearchPredicateOp::NotIn(_) => true,
+    }
+}
+
+fn metadata_timestamp_range_may_match(
+    range: SearchTimestampRange,
+    op: &SearchPredicateOp,
+    expected: i64,
+) -> bool {
+    match op {
+        SearchPredicateOp::Gt(_) => range.max_epoch_millis > expected,
+        SearchPredicateOp::Gte(_) => range.max_epoch_millis >= expected,
+        SearchPredicateOp::Lt(_) => range.min_epoch_millis < expected,
+        SearchPredicateOp::Lte(_) => range.min_epoch_millis <= expected,
         SearchPredicateOp::Eq(_) | SearchPredicateOp::In(_) | SearchPredicateOp::NotIn(_) => true,
     }
 }
@@ -3956,7 +4097,7 @@ fn read_search_segment_descriptor(path: &Path) -> Result<Option<SearchSegmentDes
 
 fn encode_search_segment_descriptor_body(descriptor: &SearchSegmentDescriptor) -> String {
     let mut body = String::new();
-    body.push_str("SKEIN_SEARCH_SEGMENTS_V1\n");
+    body.push_str("SKEIN_SEARCH_SEGMENTS_V2\n");
     body.push_str(&format!(
         "target_documents\t{}\n",
         descriptor.target_documents
@@ -3971,13 +4112,17 @@ fn encode_search_segment_descriptor_body(descriptor: &SearchSegmentDescriptor) -
         ));
         for (field, summary) in &segment.metadata {
             let (numeric_min, numeric_max) = encode_search_numeric_range(summary.numeric_range);
+            let (timestamp_min, timestamp_max) =
+                encode_search_timestamp_range(summary.timestamp_range);
             body.push_str(&format!(
-                "field\t{}\t{}\t{}\t{}\t{}\n",
+                "field\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
                 encode_string(field),
                 summary.present_count,
                 encode_segment_values(&summary.values),
                 numeric_min,
-                numeric_max
+                numeric_max,
+                timestamp_min,
+                timestamp_max
             ));
         }
     }
@@ -3999,7 +4144,7 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
     let mut current_segment = None::<SearchSegmentDescriptorEntry>;
 
     for line in body.lines() {
-        if line == "SKEIN_SEARCH_SEGMENTS_V1" {
+        if line == "SKEIN_SEARCH_SEGMENTS_V1" || line == "SKEIN_SEARCH_SEGMENTS_V2" {
             continue;
         }
         let fields = line.split('\t').collect::<Vec<_>>();
@@ -4036,6 +4181,7 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
                         )?,
                         values: decode_segment_values(raw_values)?,
                         numeric_range: None,
+                        timestamp_range: None,
                     },
                 );
             }
@@ -4057,6 +4203,33 @@ fn decode_search_segment_descriptor_text(text: &str) -> Result<SearchSegmentDesc
                         numeric_range: decode_search_numeric_range(
                             raw_numeric_min,
                             raw_numeric_max,
+                        )?,
+                        timestamp_range: None,
+                    },
+                );
+            }
+            ["field", raw_field, raw_present_count, raw_values, raw_numeric_min, raw_numeric_max, raw_timestamp_min, raw_timestamp_max] =>
+            {
+                let Some(segment) = current_segment.as_mut() else {
+                    return Err(SkeinError::Storage(
+                        "search segment descriptor field appeared before segment".to_string(),
+                    ));
+                };
+                segment.metadata.insert(
+                    decode_string(raw_field)?,
+                    SearchSegmentFieldSummary {
+                        present_count: parse_usize(
+                            raw_present_count,
+                            "search segment field present count",
+                        )?,
+                        values: decode_segment_values(raw_values)?,
+                        numeric_range: decode_search_numeric_range(
+                            raw_numeric_min,
+                            raw_numeric_max,
+                        )?,
+                        timestamp_range: decode_search_timestamp_range(
+                            raw_timestamp_min,
+                            raw_timestamp_max,
                         )?,
                     },
                 );
@@ -4105,6 +4278,17 @@ fn encode_search_numeric_range(range: Option<SearchNumericRange>) -> (String, St
         .unwrap_or_else(|| (String::new(), String::new()))
 }
 
+fn encode_search_timestamp_range(range: Option<SearchTimestampRange>) -> (String, String) {
+    range
+        .map(|range| {
+            (
+                range.min_epoch_millis.to_string(),
+                range.max_epoch_millis.to_string(),
+            )
+        })
+        .unwrap_or_else(|| (String::new(), String::new()))
+}
+
 fn decode_search_numeric_range(raw_min: &str, raw_max: &str) -> Result<Option<SearchNumericRange>> {
     match (raw_min.is_empty(), raw_max.is_empty()) {
         (true, true) => Ok(None),
@@ -4120,6 +4304,33 @@ fn decode_search_numeric_range(raw_min: &str, raw_max: &str) -> Result<Option<Se
         }
         _ => Err(SkeinError::Storage(
             "search segment field numeric range is incomplete".to_string(),
+        )),
+    }
+}
+
+fn decode_search_timestamp_range(
+    raw_min: &str,
+    raw_max: &str,
+) -> Result<Option<SearchTimestampRange>> {
+    match (raw_min.is_empty(), raw_max.is_empty()) {
+        (true, true) => Ok(None),
+        (false, false) => {
+            let min_epoch_millis =
+                parse_i64(raw_min, "search segment field timestamp min epoch millis")?;
+            let max_epoch_millis =
+                parse_i64(raw_max, "search segment field timestamp max epoch millis")?;
+            if min_epoch_millis > max_epoch_millis {
+                return Err(SkeinError::Storage(
+                    "search segment field timestamp min is greater than max".to_string(),
+                ));
+            }
+            Ok(Some(SearchTimestampRange {
+                min_epoch_millis,
+                max_epoch_millis,
+            }))
+        }
+        _ => Err(SkeinError::Storage(
+            "search segment field timestamp range is incomplete".to_string(),
         )),
     }
 }
@@ -4309,6 +4520,12 @@ fn checksum_bytes(bytes: &[u8]) -> u64 {
 }
 
 fn parse_u64(input: &str, name: &str) -> Result<u64> {
+    input
+        .parse()
+        .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
+}
+
+fn parse_i64(input: &str, name: &str) -> Result<i64> {
     input
         .parse()
         .map_err(|_| SkeinError::Storage(format!("invalid {name}: {input}")))
@@ -4880,6 +5097,7 @@ mod tests {
                 pruned_segment_count: 0,
                 scanned_segment_count: 1,
                 numeric_range_summary_used: false,
+                timestamp_range_summary_used: false,
                 value_summary_used: true,
             }]
         );
@@ -5020,6 +5238,7 @@ mod tests {
                 pruned_segment_count: 1,
                 scanned_segment_count: 1,
                 numeric_range_summary_used: true,
+                timestamp_range_summary_used: false,
                 value_summary_used: false,
             }]
         );
@@ -6786,7 +7005,7 @@ mod tests {
 
         let descriptor_path = path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE);
         let descriptor = std::fs::read_to_string(&descriptor_path).unwrap();
-        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V1\n"));
+        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V2\n"));
         assert!(descriptor.contains("segment\t"));
         assert!(descriptor.contains("field\t"));
         assert!(descriptor.contains("checksum\t"));
@@ -6861,7 +7080,7 @@ mod tests {
 
         let descriptor =
             std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
-        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V1\n"));
+        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V2\n"));
         let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
         assert_eq!(
             descriptor.segments[0]
@@ -6940,6 +7159,124 @@ mod tests {
                 pruned_segment_count: 1,
                 scanned_segment_count: 1,
                 numeric_range_summary_used: true,
+                timestamp_range_summary_used: false,
+                value_summary_used: false,
+            }]
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_segment_descriptor_prunes_timestamp_range_filters() {
+        let path = unique_test_dir("search_segment_descriptor_timestamp_range");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for (id, created_at) in [
+                ("memory:0_old_0", "2026-01-01T00:00:00Z"),
+                ("memory:0_old_1", "2026-01-02T00:00:00Z"),
+                ("memory:1_new_0", "2026-02-01T12:00:00Z"),
+            ] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: "Graph memory".to_string(),
+                        content: "segment descriptor timestamp retrieval".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::from([(
+                            "created_at".to_string(),
+                            created_at.to_string(),
+                        )]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let descriptor =
+            std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
+        assert!(descriptor.contains("SKEIN_SEARCH_SEGMENTS_V2\n"));
+        let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
+        assert_eq!(
+            descriptor.segments[0]
+                .metadata
+                .get("created_at")
+                .and_then(|summary| summary.timestamp_range),
+            Some(SearchTimestampRange {
+                min_epoch_millis: metadata_timestamp_value("2026-01-01T00:00:00Z").unwrap(),
+                max_epoch_millis: metadata_timestamp_value("2026-01-02T00:00:00Z").unwrap(),
+            })
+        );
+        assert_eq!(
+            descriptor.segments[1]
+                .metadata
+                .get("created_at")
+                .and_then(|summary| summary.timestamp_range),
+            Some(SearchTimestampRange {
+                min_epoch_millis: metadata_timestamp_value("2026-02-01T12:00:00Z").unwrap(),
+                max_epoch_millis: metadata_timestamp_value("2026-02-01T12:00:00Z").unwrap(),
+            })
+        );
+
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index.search_with_options(
+            "segment descriptor timestamp retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "created_at__gte".to_string(),
+                    "2026-02-01T00:00:00Z".to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 1);
+        assert_eq!(result.hits[0].id, "memory:1_new_0");
+        assert!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .persisted_segment_descriptor_used
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            2
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .field_summaries,
+            vec![SearchPredicateFieldPruningReport {
+                field: "created_at".to_string(),
+                value_kind: "numeric_or_string".to_string(),
+                operation_kinds: vec!["gte".to_string()],
+                segment_count: 2,
+                pruned_segment_count: 1,
+                scanned_segment_count: 1,
+                numeric_range_summary_used: true,
+                timestamp_range_summary_used: true,
                 value_summary_used: false,
             }]
         );
@@ -7038,6 +7375,7 @@ mod tests {
                 pruned_segment_count: 1,
                 scanned_segment_count: 1,
                 numeric_range_summary_used: false,
+                timestamp_range_summary_used: false,
                 value_summary_used: true,
             }]
         );
@@ -7129,6 +7467,7 @@ mod tests {
                 pruned_segment_count: 1,
                 scanned_segment_count: 1,
                 numeric_range_summary_used: false,
+                timestamp_range_summary_used: false,
                 value_summary_used: true,
             }]
         );

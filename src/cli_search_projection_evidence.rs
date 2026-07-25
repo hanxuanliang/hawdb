@@ -113,6 +113,7 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "row_filter_ready",
             "segment_pruning_ready",
             "numeric_min_max_ready",
+            "timestamp_min_max_ready",
             "persisted_segment_descriptor_ready",
             "segment_descriptor_scan_filter_fields_ready",
             "supported_ops",
@@ -125,7 +126,8 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "field",
             "segment_count",
             "value_summary_used",
-            "numeric_range_summary_used"
+            "numeric_range_summary_used",
+            "timestamp_range_summary_used"
         ],
         "example_primary_probe": ready_probe_template("lancedb"),
         "example_skein_probe": ready_probe_template("skein"),
@@ -540,6 +542,7 @@ fn predicate_pushdown_parity_matches(
         "row_filter_ready",
         "segment_pruning_ready",
         "numeric_min_max_ready",
+        "timestamp_min_max_ready",
         "required_ops_ready",
     ];
     fields.iter().all(|field| {
@@ -627,6 +630,7 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "row_filter_ready": true,
             "segment_pruning_ready": true,
             "numeric_min_max_ready": true,
+            "timestamp_min_max_ready": true,
             "persisted_segment_descriptor_ready": true,
             "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
             "scan_filter_fields": SKEIN_REQUIRED_SCAN_FILTER_FIELDS,
@@ -650,18 +654,18 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
 
 fn ready_segment_descriptor_field_summaries_template() -> serde_json::Value {
     serde_json::json!([
-        ready_segment_descriptor_field_summary_template("kind", true, false),
-        ready_segment_descriptor_field_summary_template("external_id", true, false),
-        ready_segment_descriptor_field_summary_template("source_id", true, false),
-        ready_segment_descriptor_field_summary_template("space_id", true, false),
-        ready_segment_descriptor_field_summary_template("unit_type", true, false),
-        ready_segment_descriptor_field_summary_template("importance", true, true),
-        ready_segment_descriptor_field_summary_template("confidence", true, true),
-        ready_segment_descriptor_field_summary_template("created_at", true, true),
-        ready_segment_descriptor_field_summary_template("updated_at", true, true),
-        ready_segment_descriptor_field_summary_template("event_start", true, true),
-        ready_segment_descriptor_field_summary_template("event_end", true, true),
-        ready_segment_descriptor_field_summary_template("is_latest", true, false)
+        ready_segment_descriptor_field_summary_template("kind", true, false, false),
+        ready_segment_descriptor_field_summary_template("external_id", true, false, false),
+        ready_segment_descriptor_field_summary_template("source_id", true, false, false),
+        ready_segment_descriptor_field_summary_template("space_id", true, false, false),
+        ready_segment_descriptor_field_summary_template("unit_type", true, false, false),
+        ready_segment_descriptor_field_summary_template("importance", true, true, false),
+        ready_segment_descriptor_field_summary_template("confidence", true, true, false),
+        ready_segment_descriptor_field_summary_template("created_at", true, false, true),
+        ready_segment_descriptor_field_summary_template("updated_at", true, false, true),
+        ready_segment_descriptor_field_summary_template("event_start", true, false, true),
+        ready_segment_descriptor_field_summary_template("event_end", true, false, true),
+        ready_segment_descriptor_field_summary_template("is_latest", true, false, false)
     ])
 }
 
@@ -669,12 +673,14 @@ fn ready_segment_descriptor_field_summary_template(
     field: &str,
     value_summary_used: bool,
     numeric_range_summary_used: bool,
+    timestamp_range_summary_used: bool,
 ) -> serde_json::Value {
     serde_json::json!({
         "field": field,
         "segment_count": 1,
         "value_summary_used": value_summary_used,
         "numeric_range_summary_used": numeric_range_summary_used,
+        "timestamp_range_summary_used": timestamp_range_summary_used,
     })
 }
 
@@ -805,6 +811,8 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
     let row_filter_ready = bool_path(predicate, &["row_filter_ready"]).unwrap_or(false);
     let segment_pruning_ready = bool_path(predicate, &["segment_pruning_ready"]).unwrap_or(false);
     let numeric_min_max_ready = bool_path(predicate, &["numeric_min_max_ready"]).unwrap_or(false);
+    let timestamp_min_max_ready =
+        bool_path(predicate, &["timestamp_min_max_ready"]).unwrap_or(false);
     let persisted_segment_descriptor_ready =
         bool_path(predicate, &["persisted_segment_descriptor_ready"]).unwrap_or(false);
     let supported_ops = array_path(predicate, &["supported_ops"]).unwrap_or_default();
@@ -832,6 +840,7 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         && row_filter_ready
         && segment_pruning_ready
         && numeric_min_max_ready
+        && timestamp_min_max_ready
         && required_ops_ready;
     serde_json::json!({
         "ready": ready,
@@ -842,6 +851,7 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         "row_filter_ready": row_filter_ready,
         "segment_pruning_ready": segment_pruning_ready,
         "numeric_min_max_ready": numeric_min_max_ready,
+        "timestamp_min_max_ready": timestamp_min_max_ready,
         "persisted_segment_descriptor_ready": persisted_segment_descriptor_ready,
         "required_ops_ready": required_ops_ready,
         "required_ops": required_ops,
@@ -1129,7 +1139,10 @@ mod tests {
         assert_eq!(report["predicate_pushdown_ready"], false);
         assert_eq!(
             report["blocker_codes"],
-            serde_json::json!(["predicate_pushdown_not_ready"])
+            serde_json::json!([
+                "predicate_pushdown_not_ready",
+                "skein_predicate_pushdown_descriptor_not_ready"
+            ])
         );
     }
 
@@ -1408,6 +1421,7 @@ mod tests {
                 "row_filter_ready": true,
                 "segment_pruning_ready": true,
                 "numeric_min_max_ready": true,
+                "timestamp_min_max_ready": true,
                 "persisted_segment_descriptor_ready": true,
                 "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
                 "scan_filter_fields": [
@@ -1504,18 +1518,18 @@ mod tests {
 
     fn ready_segment_descriptor_field_summaries() -> serde_json::Value {
         serde_json::json!([
-            descriptor_field("kind", true, false),
-            descriptor_field("external_id", true, false),
-            descriptor_field("source_id", true, false),
-            descriptor_field("space_id", true, false),
-            descriptor_field("unit_type", true, false),
-            descriptor_field("importance", true, true),
-            descriptor_field("confidence", true, true),
-            descriptor_field("created_at", true, true),
-            descriptor_field("updated_at", true, true),
-            descriptor_field("event_start", true, true),
-            descriptor_field("event_end", true, true),
-            descriptor_field("is_latest", true, false)
+            descriptor_field("kind", true, false, false),
+            descriptor_field("external_id", true, false, false),
+            descriptor_field("source_id", true, false, false),
+            descriptor_field("space_id", true, false, false),
+            descriptor_field("unit_type", true, false, false),
+            descriptor_field("importance", true, true, false),
+            descriptor_field("confidence", true, true, false),
+            descriptor_field("created_at", true, false, true),
+            descriptor_field("updated_at", true, false, true),
+            descriptor_field("event_start", true, false, true),
+            descriptor_field("event_end", true, false, true),
+            descriptor_field("is_latest", true, false, false)
         ])
     }
 
@@ -1523,12 +1537,14 @@ mod tests {
         field: &str,
         value_summary_used: bool,
         numeric_range_summary_used: bool,
+        timestamp_range_summary_used: bool,
     ) -> serde_json::Value {
         serde_json::json!({
             "field": field,
             "segment_count": 1,
             "value_summary_used": value_summary_used,
             "numeric_range_summary_used": numeric_range_summary_used,
+            "timestamp_range_summary_used": timestamp_range_summary_used,
         })
     }
 }
