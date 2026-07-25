@@ -429,8 +429,10 @@ than only proving that a route had a successful row comparison.
 `nowledge-graph-route-evidence` also recomputes route coverage from the shared
 required-route list and emits `required_route_count`, `covered_route_count`,
 `covered_routes`, `missing_required_routes`, and `required_routes_covered`.
-With `--require-ready`, a partial route inventory is rejected at evidence
-generation time before the integration readiness compiler consumes it.
+It also reports `unknown_routes`, `duplicate_routes`,
+`route_coverage_ready`, and `route_coverage_blocker_codes`, so partial,
+duplicated, or stale route inventories are rejected at evidence generation time
+before the integration readiness compiler consumes them.
 Route query inventory can require scan pruning with `require_scan_pruning` and
 actual row reduction with `require_pruned`; missing or weak runtime evidence
 adds route blocker codes and keeps primary readiness fail-closed. Raw Cypher and
