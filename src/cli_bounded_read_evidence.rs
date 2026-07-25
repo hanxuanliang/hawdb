@@ -1,35 +1,64 @@
 use skein::{
-    nowledge_mem_bounded_read_evidence_json, NowledgeMemGraphMode, NowledgeMemReadReport, Result,
-    SkeinError,
+    nowledge_mem_bounded_read_evidence_json_with_routes, NowledgeMemGraphMode,
+    NowledgeMemReadReport, Result, SkeinError,
 };
 use std::path::Path;
 
 pub fn nowledge_bounded_read_evidence_usage() -> String {
-    "nowledge-bounded-read-evidence requires [--require-ready] <read-report-json>".to_string()
+    "nowledge-bounded-read-evidence requires [--require-ready] [--covered-route <route> ...] [--covered-routes-json <path>] <read-report-json>".to_string()
 }
 
 pub fn run_nowledge_bounded_read_evidence(
     mut args: impl Iterator<Item = String>,
 ) -> Result<(serde_json::Value, bool)> {
     let mut require_ready = false;
+    let mut covered_routes = Vec::new();
+    let mut report_path = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
             "--require-ready" => {
                 require_ready = true;
             }
+            "--covered-route" => {
+                covered_routes.push(
+                    args.next().ok_or_else(|| {
+                        SkeinError::Semantic(nowledge_bounded_read_evidence_usage())
+                    })?,
+                );
+            }
+            "--covered-routes-json" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(nowledge_bounded_read_evidence_usage()))?;
+                covered_routes.extend(parse_covered_routes_json(&read_json_file(Path::new(
+                    &path,
+                ))?)?);
+            }
+            value if value.starts_with("--") => {
+                return Err(SkeinError::Semantic(nowledge_bounded_read_evidence_usage()));
+            }
             path => {
-                if args.next().is_some() {
+                if report_path.replace(path.to_string()).is_some() {
                     return Err(SkeinError::Semantic(nowledge_bounded_read_evidence_usage()));
                 }
-                let report = parse_read_report_json(&read_json_file(Path::new(path))?)?;
-                return Ok((
-                    nowledge_mem_bounded_read_evidence_json(&report),
-                    require_ready,
-                ));
             }
         }
     }
-    Err(SkeinError::Semantic(nowledge_bounded_read_evidence_usage()))
+    let Some(report_path) = report_path else {
+        return Err(SkeinError::Semantic(nowledge_bounded_read_evidence_usage()));
+    };
+    let report = parse_read_report_json(&read_json_file(Path::new(&report_path))?)?;
+    Ok((
+        nowledge_mem_bounded_read_evidence_json_with_routes(&report, &covered_routes),
+        require_ready,
+    ))
+}
+
+fn parse_covered_routes_json(value: &serde_json::Value) -> Result<Vec<String>> {
+    if value.is_array() {
+        return required_string_array_value(value, "covered routes JSON");
+    }
+    required_string_array(value, "covered_routes")
 }
 
 fn parse_read_report_json(value: &serde_json::Value) -> Result<NowledgeMemReadReport> {
@@ -99,6 +128,17 @@ fn required_string_array(value: &serde_json::Value, field: &str) -> Result<Vec<S
         .get(field)
         .and_then(serde_json::Value::as_array)
         .ok_or_else(|| invalid_field(field, "string array"))?;
+    required_string_array_items(items, field)
+}
+
+fn required_string_array_value(value: &serde_json::Value, field: &str) -> Result<Vec<String>> {
+    let items = value
+        .as_array()
+        .ok_or_else(|| invalid_field(field, "string array"))?;
+    required_string_array_items(items, field)
+}
+
+fn required_string_array_items(items: &[serde_json::Value], field: &str) -> Result<Vec<String>> {
     items
         .iter()
         .map(|item| {
@@ -125,6 +165,7 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::run_nowledge_bounded_read_evidence;
+    use skein::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -133,12 +174,14 @@ mod tests {
         let path = unique_test_file("bounded_read_ready");
         std::fs::write(&path, ready_report().to_string()).unwrap();
 
-        let (evidence, require_ready) = run_nowledge_bounded_read_evidence(
-            ["--require-ready", path.to_str().unwrap()]
-                .into_iter()
-                .map(str::to_string),
-        )
-        .unwrap();
+        let mut args = vec!["--require-ready".to_string()];
+        for route in REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES {
+            args.extend(["--covered-route".to_string(), (*route).to_string()]);
+        }
+        args.push(path.to_string_lossy().to_string());
+
+        let (evidence, require_ready) =
+            run_nowledge_bounded_read_evidence(args.into_iter()).unwrap();
 
         assert!(require_ready);
         assert_eq!(
@@ -148,8 +191,44 @@ mod tests {
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["mode"], "shadow_read_only");
         assert_eq!(evidence["execution_row_cap"], 513);
+        assert_eq!(
+            evidence["covered_routes"].as_array().unwrap().len(),
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_read_evidence_command_accepts_covered_routes_json() {
+        let report_path = unique_test_file("bounded_read_ready");
+        let routes_path = unique_test_file("bounded_read_routes");
+        std::fs::write(&report_path, ready_report().to_string()).unwrap();
+        std::fs::write(
+            &routes_path,
+            serde_json::json!({
+                "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (evidence, _) = run_nowledge_bounded_read_evidence(
+            [
+                "--covered-routes-json",
+                routes_path.to_str().unwrap(),
+                report_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
+        std::fs::remove_file(report_path).unwrap();
+        std::fs::remove_file(routes_path).unwrap();
     }
 
     #[test]
@@ -167,7 +246,7 @@ mod tests {
         assert_eq!(evidence["ready"], false);
         assert_eq!(
             evidence["blocker_codes"],
-            serde_json::json!(["missing_execution_row_cap"])
+            serde_json::json!(["missing_execution_row_cap", "missing_covered_routes"])
         );
         std::fs::remove_file(path).unwrap();
     }

@@ -597,6 +597,58 @@ Pass the resulting JSON to `nowledge-cypher-migration-gate` with
 caller-owned durable database preflight instead of the fixture-local
 `background_maintenance` summary.
 
+For bounded graph-read evidence, first generate a read report and then compile
+it with route coverage:
+
+```text
+skein nowledge-bounded-read-report <database-path> <cypher> > read-report.json
+skein nowledge-bounded-read-evidence \
+  --covered-routes-json covered-routes.json \
+  read-report.json > bounded-read-evidence.json
+```
+
+`covered-routes.json` may be either a JSON array of route identifiers or an
+object with a `covered_routes` string array. The emitted evidence includes
+`covered_routes`, `required_covered_routes`, and `missing_covered_routes`.
+Missing production graph-read routes add the stable
+`missing_covered_routes` blocker and keep bounded-read readiness false, so a
+single bounded query probe cannot be mistaken for full route cutover coverage.
+
+The embedded library readiness report also accepts query-family replacement
+readiness evidence through `replacement_readiness_by_query_family`. It
+recomputes `skein-nowledge-query-family-evidence-v1` from the family rows and
+publishes it as `query_family_evidence` plus
+`readiness_by_area.query_family`. Missing, blocked, or malformed query-family
+rows keep library readiness false; callers should pass the same family evidence
+that will later feed `nowledge-replacement-summary`.
+
+Rust-only harnesses can generate the same library-level artifact without
+manually composing API calls:
+
+```text
+skein nowledge-mem-library-readiness \
+  --bounded-probe-json bounded-probe.json \
+  --covered-routes-json covered-routes.json \
+  --query-family-evidence-json query-family-evidence.json \
+  --primary-search-projection-probe-json lancedb-probe.json \
+  --search-projection skein-search-index \
+  skein-graph-db > library-readiness.json
+```
+
+The command opens the graph in `shadow_read_only` mode by default, uses the
+same `NowledgeMemEmbeddedStore::library_readiness_json` path as embedded
+callers, and includes only a sanitized `open_report` instead of local database
+paths. Use `--require-ready` in release automation when missing route coverage,
+query-family evidence, search projection parity, storage recovery, or
+background-maintenance readiness must fail the command.
+
+Nightly Mem replacement bundles should include this command output as the
+top-level `library_readiness` object. `nowledge-mem-integration-readiness
+--require-ready` treats `skein-nowledge-mem-library-readiness-v1` as required
+cutover evidence and fails closed unless the graph store, search projection,
+query families, bounded reads, storage recovery, and background maintenance are
+all ready through the Rust embedded library surface.
+
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
 automation that must reject self-shadow smoke runs, missing shadow parity

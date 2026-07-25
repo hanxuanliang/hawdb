@@ -21,6 +21,26 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--bounded-read-params-json <json-object>] \
   [--bounded-read-max-rows <n>] \
   [--bounded-read-max-estimated-payload-bytes <n>] \
+  [--library-readiness-json <path>] \
+  [--library-readiness-graph <path>] \
+  [--library-readiness-search-projection <path>] \
+  [--query-runtime-preflight-json <path>] \
+  [--query-runtime-probe-json <path>] \
+  [--query-runtime-database <path>] \
+  [--require-integration-readiness] \
+  [--graph-route-query-json <path>] \
+  [--graph-route-database <path>] \
+  [--graph-route-evidence-json <path>] \
+  [--graph-route-readiness-json <path>] \
+  [--integration-submodule-path <path>] \
+  [--integration-submodule-commit <commit>] \
+  [--integration-legacy-data-retained] \
+  [--integration-legacy-data-deleted] \
+  [--integration-coexistence-mode shadow|side_by_side] \
+  [--integration-content-store-present] \
+  [--integration-content-store-engine <engine>] \
+  [--integration-content-store-messages-available] \
+  [--integration-content-store-source-chunks-available] \
   -- <wrapper-command> [args...]
 
 Runs the Skein-side Nowledge previous-wrapper production preflight bundle.
@@ -42,6 +62,26 @@ bounded_read_cypher=
 bounded_read_params_json=
 bounded_read_max_rows=
 bounded_read_max_estimated_payload_bytes=
+library_readiness_json=
+library_readiness_graph=
+library_readiness_search_projection=
+query_runtime_preflight_json=
+query_runtime_probe_json=
+query_runtime_database=
+require_integration_readiness=false
+graph_route_query_json=
+graph_route_database=
+graph_route_evidence_json=
+graph_route_readiness_json=
+integration_submodule_path=
+integration_submodule_commit=
+integration_legacy_data_retained=false
+integration_legacy_data_deleted=false
+integration_coexistence_mode=
+integration_content_store_present=false
+integration_content_store_engine=
+integration_content_store_messages_available=false
+integration_content_store_source_chunks_available=false
 
 while (($# > 0)); do
   case "$1" in
@@ -97,6 +137,86 @@ while (($# > 0)); do
       bounded_read_max_estimated_payload_bytes="${2:-}"
       shift 2
       ;;
+    --library-readiness-json)
+      library_readiness_json="${2:-}"
+      shift 2
+      ;;
+    --library-readiness-graph)
+      library_readiness_graph="${2:-}"
+      shift 2
+      ;;
+    --library-readiness-search-projection)
+      library_readiness_search_projection="${2:-}"
+      shift 2
+      ;;
+    --query-runtime-preflight-json)
+      query_runtime_preflight_json="${2:-}"
+      shift 2
+      ;;
+    --query-runtime-probe-json)
+      query_runtime_probe_json="${2:-}"
+      shift 2
+      ;;
+    --query-runtime-database)
+      query_runtime_database="${2:-}"
+      shift 2
+      ;;
+    --require-integration-readiness)
+      require_integration_readiness=true
+      shift
+      ;;
+    --graph-route-query-json)
+      graph_route_query_json="${2:-}"
+      shift 2
+      ;;
+    --graph-route-database)
+      graph_route_database="${2:-}"
+      shift 2
+      ;;
+    --graph-route-readiness-json)
+      graph_route_readiness_json="${2:-}"
+      shift 2
+      ;;
+    --graph-route-evidence-json)
+      graph_route_evidence_json="${2:-}"
+      shift 2
+      ;;
+    --integration-submodule-path)
+      integration_submodule_path="${2:-}"
+      shift 2
+      ;;
+    --integration-submodule-commit)
+      integration_submodule_commit="${2:-}"
+      shift 2
+      ;;
+    --integration-legacy-data-retained)
+      integration_legacy_data_retained=true
+      shift
+      ;;
+    --integration-legacy-data-deleted)
+      integration_legacy_data_deleted=true
+      shift
+      ;;
+    --integration-coexistence-mode)
+      integration_coexistence_mode="${2:-}"
+      shift 2
+      ;;
+    --integration-content-store-present)
+      integration_content_store_present=true
+      shift
+      ;;
+    --integration-content-store-engine)
+      integration_content_store_engine="${2:-}"
+      shift 2
+      ;;
+    --integration-content-store-messages-available)
+      integration_content_store_messages_available=true
+      shift
+      ;;
+    --integration-content-store-source-chunks-available)
+      integration_content_store_source_chunks_available=true
+      shift
+      ;;
     --help|-h)
       usage
       exit 0
@@ -131,7 +251,13 @@ for evidence_path in \
   "$search_projection_evidence_json" \
   "$search_projection_shadow_evidence_json" \
   "$bounded_read_evidence_json" \
-  "$bounded_read_report_json"; do
+  "$bounded_read_report_json" \
+  "$library_readiness_json" \
+  "$query_runtime_preflight_json" \
+  "$query_runtime_probe_json" \
+  "$graph_route_query_json" \
+  "$graph_route_evidence_json" \
+  "$graph_route_readiness_json"; do
   if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
     echo "evidence JSON does not exist or is not a file: $evidence_path" >&2
     exit 2
@@ -155,6 +281,68 @@ fi
 
 if [[ -n "$bounded_read_database" && ! -e "$bounded_read_database" ]]; then
   echo "--bounded-read-database does not exist: $bounded_read_database" >&2
+  exit 2
+fi
+
+if [[ -n "$library_readiness_graph" && ! -e "$library_readiness_graph" ]]; then
+  echo "--library-readiness-graph does not exist: $library_readiness_graph" >&2
+  exit 2
+fi
+
+if [[ -n "$library_readiness_search_projection" && ! -e "$library_readiness_search_projection" ]]; then
+  echo "--library-readiness-search-projection does not exist: $library_readiness_search_projection" >&2
+  exit 2
+fi
+
+if [[ -n "$graph_route_database" && ! -e "$graph_route_database" ]]; then
+  echo "--graph-route-database does not exist: $graph_route_database" >&2
+  exit 2
+fi
+
+if [[ -n "$query_runtime_database" && ! -e "$query_runtime_database" ]]; then
+  echo "--query-runtime-database does not exist: $query_runtime_database" >&2
+  exit 2
+fi
+
+if [[ -n "$query_runtime_preflight_json" && -n "$query_runtime_probe_json" ]]; then
+  echo "--query-runtime-preflight-json cannot be combined with --query-runtime-probe-json" >&2
+  exit 2
+fi
+
+if [[ -n "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
+  echo "--graph-route-evidence-json cannot be combined with --graph-route-query-json" >&2
+  exit 2
+fi
+
+if [[ "$require_integration_readiness" == true ]]; then
+  if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" && -z "$graph_route_query_json" ]]; then
+    echo "--require-integration-readiness requires --graph-route-readiness-json, --graph-route-evidence-json, or --graph-route-query-json" >&2
+    exit 2
+  fi
+  if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" ]]; then
+    echo "--require-integration-readiness requires --query-runtime-preflight-json or --query-runtime-probe-json" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_submodule_path" ]]; then
+    echo "--require-integration-readiness requires --integration-submodule-path" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_submodule_commit" ]]; then
+    echo "--require-integration-readiness requires --integration-submodule-commit" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_coexistence_mode" ]]; then
+    echo "--require-integration-readiness requires --integration-coexistence-mode" >&2
+    exit 2
+  fi
+  if [[ -z "$integration_content_store_engine" ]]; then
+    echo "--require-integration-readiness requires --integration-content-store-engine" >&2
+    exit 2
+  fi
+fi
+
+if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" ]]; then
+  echo "previous-wrapper preflight requires --query-runtime-preflight-json or --query-runtime-probe-json" >&2
   exit 2
 fi
 
@@ -304,10 +492,111 @@ run_skein nowledge-replacement-summary \
   "$preflight_root/migration-gate.json" \
   > "$preflight_root/replacement-summary.json"
 
+if [[ -n "$library_readiness_json" ]]; then
+  if [[ "$library_readiness_json" != "$preflight_root/library-readiness.json" ]]; then
+    cp "$library_readiness_json" "$preflight_root/library-readiness.json"
+  fi
+else
+  if [[ -z "$bounded_read_evidence_json" ]]; then
+    echo "library readiness generation requires bounded read evidence; provide --bounded-read-evidence-json, --bounded-read-report-json, or --bounded-read-cypher" >&2
+    exit 2
+  fi
+  if [[ -z "$search_projection_evidence_json" ]]; then
+    echo "library readiness generation requires --search-projection-evidence-json" >&2
+    exit 2
+  fi
+  if [[ -z "$search_projection_shadow_evidence_json" ]]; then
+    echo "library readiness generation requires --search-projection-shadow-evidence-json" >&2
+    exit 2
+  fi
+  library_readiness_args=(
+    --bounded-read-evidence-json "$bounded_read_evidence_json"
+    --query-family-evidence-json "$preflight_root/query-family-evidence.json"
+    --search-projection-evidence-json "$search_projection_evidence_json"
+    --search-projection-shadow-evidence-json "$search_projection_shadow_evidence_json"
+  )
+  if [[ -n "$library_readiness_search_projection" ]]; then
+    library_readiness_args+=(
+      --search-projection "$library_readiness_search_projection"
+    )
+  fi
+  run_skein nowledge-mem-library-readiness \
+    --require-ready \
+    "${library_readiness_args[@]}" \
+    "${library_readiness_graph:-$skein_preflight_db}" \
+    > "$preflight_root/library-readiness.json"
+fi
+
+if [[ -z "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
+  run_skein nowledge-graph-route-evidence \
+    "${graph_route_database:-$skein_preflight_db}" \
+    "$graph_route_query_json" \
+    > "$preflight_root/graph-route-evidence.json"
+  graph_route_evidence_json="$preflight_root/graph-route-evidence.json"
+fi
+
+if [[ -z "$graph_route_readiness_json" && -n "$graph_route_evidence_json" ]]; then
+  run_skein nowledge-graph-route-readiness \
+    --require-ready \
+    "$graph_route_evidence_json" \
+    > "$preflight_root/graph-route-readiness.json"
+  graph_route_readiness_json="$preflight_root/graph-route-readiness.json"
+fi
+
+if [[ -n "$query_runtime_preflight_json" ]]; then
+  if [[ "$query_runtime_preflight_json" != "$preflight_root/query-runtime-preflight.json" ]]; then
+    cp "$query_runtime_preflight_json" "$preflight_root/query-runtime-preflight.json"
+  fi
+else
+  run_skein nowledge-query-runtime-preflight \
+    --require-ready \
+    --probe-json "$query_runtime_probe_json" \
+    "${query_runtime_database:-$skein_preflight_db}" \
+    > "$preflight_root/query-runtime-preflight.json"
+fi
+
 run_skein nowledge-previous-wrapper-preflight-check \
   --require-ready \
   --wrapper-identity "$wrapper_identity" \
   --bundle-dir "$preflight_root" \
   > "$preflight_root/preflight-check.json"
 
-cat "$preflight_root/preflight-check.json"
+if [[ "$require_integration_readiness" == true ]]; then
+  integration_bundle_args=(
+    --require-ready
+    --submodule-path "$integration_submodule_path"
+    --submodule-commit "$integration_submodule_commit"
+    --coexistence-mode "$integration_coexistence_mode"
+    --content-store-engine "$integration_content_store_engine"
+    --previous-wrapper-preflight-json "$preflight_root/preflight-check.json"
+    --replacement-summary-json "$preflight_root/replacement-summary.json"
+    --bounded-read-evidence-json "$bounded_read_evidence_json"
+    --graph-route-readiness-json "$graph_route_readiness_json"
+    --query-runtime-preflight-json "$preflight_root/query-runtime-preflight.json"
+    --library-readiness-json "$preflight_root/library-readiness.json"
+  )
+  if [[ "$integration_legacy_data_retained" == true ]]; then
+    integration_bundle_args+=(--legacy-data-retained)
+  fi
+  if [[ "$integration_legacy_data_deleted" == true ]]; then
+    integration_bundle_args+=(--legacy-data-deleted)
+  fi
+  if [[ "$integration_content_store_present" == true ]]; then
+    integration_bundle_args+=(--content-store-present)
+  fi
+  if [[ "$integration_content_store_messages_available" == true ]]; then
+    integration_bundle_args+=(--content-store-messages-available)
+  fi
+  if [[ "$integration_content_store_source_chunks_available" == true ]]; then
+    integration_bundle_args+=(--content-store-source-chunks-available)
+  fi
+  run_skein nowledge-mem-integration-bundle \
+    "${integration_bundle_args[@]}" \
+    > "$preflight_root/integration-bundle.json"
+fi
+
+if [[ "$require_integration_readiness" == true ]]; then
+  cat "$preflight_root/integration-bundle.json"
+else
+  cat "$preflight_root/preflight-check.json"
+fi

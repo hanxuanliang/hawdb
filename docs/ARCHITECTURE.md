@@ -392,16 +392,22 @@ The replacement should preserve the current local wrapper shape:
 - recovery path for WAL/lock sidecars
 - projected graph operations as rebuildable outputs, not canonical data
 
-`NowledgeGraphAdapter` is the typed front door for this local wrapper shape. It
-accepts `NowledgeGraphStatement` values containing Cypher text plus typed
-parameters, and exposes query, explain, and grouped mutation transaction
-execution through the same planner and storage paths as `Database`. It also
-forwards the Knowledge Retrieval facade over a caller-owned `SearchIndex`, plus
-typed knowledge navigation APIs for entity lookup, bounded neighbors, bounded
-paths, and bounded subgraph expansion, including traversal diagnostics. This
-keeps the compatibility boundary parameterized and reviewable without adding an
-ACL layer to the embedded built-in core, while preserving the rule that search
-projections stay outside canonical graph state.
+The preferred front door for new Nowledge integration is parameterized Cypher
+through the query runtime. `NowledgeGraphAdapter` keeps
+`NowledgeGraphStatement` values for query, explain, and grouped mutation
+transaction execution through the same planner and storage paths as `Database`.
+Older query-shape-specific typed APIs are compatibility surfaces for existing
+callers and fixture coverage; they should not expand unless an active migration
+caller cannot be expressed safely through Cypher. This keeps the compatibility
+boundary parameterized and reviewable without adding an ACL layer to the
+embedded built-in core, while preserving the rule that search projections stay
+outside canonical graph state.
+
+Mem integration should start with side-by-side writes to Kuzu/Ladybug and
+Skein, then select the read engine through runtime configuration. Kuzu/Ladybug
+remains the default read engine until route evidence proves that Skein can
+serve that read family. This avoids a large typed facade migration and keeps the
+cutover mechanism simple: write both, read one, compare when requested.
 
 Migration gates use a machine-readable query inventory. `scan-nowledge-inventory`
 walks Nowledge Rust source files, extracts conservative Cypher string-literal
@@ -754,12 +760,10 @@ falling back to untyped relationship expansion.
 `Database::knowledge_subgraph` expands a bounded typed subgraph from one
 identity, returning canonical node snapshots, relationship evidence segments,
 node/relationship fan-out reasons, and node/relationship count diagnostics.
-`DatabaseReadTransaction` exposes the same Knowledge Retrieval facade and typed
-knowledge operations over its pinned catalog and graph snapshot, so callers can
-perform stable retrieval and navigation without falling back to ad hoc Cypher.
-This makes common knowledge-application navigation a first-class API instead of
-forcing application code to construct ad hoc Cypher for every retrieval, entity
-lookup, neighborhood lookup, path query, or local subgraph expansion.
+`DatabaseReadTransaction` can continue to expose compatibility typed reads over
+its pinned catalog and graph snapshot, but new application integration should
+prefer parameterized Cypher and query-runtime reports. This keeps snapshot
+semantics available without making typed APIs the primary extension point.
 
 ## Milestones
 
@@ -784,9 +788,9 @@ Required test suites:
 - optimizer rule and plan-shape tests
 - deterministic optimizer trace tests
 - read-only parameterized `explain-json` CLI smoke tests for structured
-  optimizer search mode, plan-cache hit/miss/disabled/bypass/eviction stats,
-  selected-plan operator/class summaries, and effective query `WorkRequest`
-  observability
+  optimizer search mode, plan-cache hit/miss/admission/disabled/bypass/eviction
+  and memory-pressure stats, selected-plan operator/class summaries, and
+  effective query `WorkRequest` observability
 - transaction commit/rollback tests
 - WAL recovery and checkpoint tests
 - internal Nowledge-shaped compatibility fixtures against the Skein facade

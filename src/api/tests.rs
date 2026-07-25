@@ -107,8 +107,8 @@ use super::{
     KnowledgeThreadSourceListRequest, KnowledgeThreadSourceLookupRequest,
     KnowledgeThreadSyncMetadataRequest, KnowledgeThreadTitleLookupRequest,
     KnowledgeTraversalFallbackReasonCode, KnowledgeTruncationReasonCode, NowledgeGraphAdapter,
-    NowledgeGraphStatement, QueryOutput, RecoveryMode, SearchProjectionGraphDeltaRequest,
-    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
+    NowledgeGraphStatement, PlanCacheBypassReason, PlanCacheLookup, QueryOutput, RecoveryMode,
+    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
 };
 use crate::optimizer::PlanCost;
 use crate::qos::{
@@ -1309,67 +1309,6 @@ fn search_projection_row(external_id: &str, title: &str, body: &str) -> SearchPr
 }
 
 #[test]
-fn nowledge_graph_adapter_exposes_typed_knowledge_navigation() {
-    let mut db = Database::new();
-    db.query("CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf'})")
-            .unwrap();
-
-    let adapter = NowledgeGraphAdapter::new(&mut db);
-    let entity = adapter.knowledge_entity(&KnowledgeEntityRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-    });
-    assert_eq!(entity.graph_commit_epoch, 1);
-    assert_eq!(
-        entity
-            .entity
-            .as_ref()
-            .and_then(|entity| entity.external_id.as_deref()),
-        Some("root")
-    );
-
-    let neighbors = adapter.knowledge_neighbors(&KnowledgeNeighborsRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        limit: 4,
-        max_hops: 1,
-    });
-    assert_eq!(neighbors.paths.len(), 1);
-    assert_eq!(neighbors.diagnostics.path_count, 1);
-    assert_eq!(neighbors.diagnostics.fanout_reason_count, 0);
-
-    let paths = adapter.knowledge_paths(&KnowledgePathRequest {
-        source_label: "Memory".to_string(),
-        source_external_id: "root".to_string(),
-        target_label: "Entity".to_string(),
-        target_external_id: "leaf".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        limit: 4,
-    });
-    assert_eq!(paths.paths.len(), 1);
-    assert_eq!(paths.diagnostics.target_found, Some(true));
-    assert_eq!(paths.diagnostics.relationship_count, 1);
-
-    let subgraph = adapter.knowledge_subgraph(&KnowledgeSubgraphRequest {
-        label: "Memory".to_string(),
-        external_id: "root".to_string(),
-        relationship_type: Some("LINKS".to_string()),
-        direction: KnowledgeNeighborDirection::Outgoing,
-        max_hops: 1,
-        node_limit: 4,
-        relationship_limit: 4,
-    });
-    assert_eq!(subgraph.nodes.len(), 2);
-    assert_eq!(subgraph.relationships.len(), 1);
-    assert_eq!(subgraph.diagnostics.node_count, 2);
-    assert_eq!(subgraph.diagnostics.relationship_count, 1);
-}
-
-#[test]
 fn database_session_runs_transaction_control_statements() {
     let mut db = Database::new();
     {
@@ -1581,6 +1520,40 @@ fn session_explain_reports_session_scoped_resource_intent() {
 }
 
 #[test]
+fn session_cypher_explain_reports_session_scoped_resource_intent() {
+    let mut db = Database::new();
+    let mut session = db.session();
+    session
+        .query("SET system.work_priority = 'background'")
+        .unwrap();
+    session.query("SET system.work_class = 'import'").unwrap();
+    session
+        .query("SET system.estimated_operations = 8")
+        .unwrap();
+
+    let output = session
+        .query("EXPLAIN MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    let Some(Value::Map(work_request)) = output.rows[0].get("work_request") else {
+        panic!("expected work request map");
+    };
+    assert_eq!(
+        work_request.get("priority"),
+        Some(&Value::String("background".to_string()))
+    );
+    assert_eq!(
+        work_request.get("class"),
+        Some(&Value::String("import".to_string()))
+    );
+    assert_eq!(
+        work_request.get("estimated_operations"),
+        Some(&Value::Int(8))
+    );
+}
+
+#[test]
 fn session_explain_is_rejected_inside_active_transaction() {
     let mut db = Database::new();
     let mut session = db.session();
@@ -1588,6 +1561,13 @@ fn session_explain_is_rejected_inside_active_transaction() {
 
     let error = session
         .explain_query("MATCH (m:Memory) RETURN m.id AS id")
+        .unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("EXPLAIN is not allowed inside an active transaction"));
+
+    let error = session
+        .query("EXPLAIN MATCH (m:Memory) RETURN m.id AS id")
         .unwrap_err();
     assert!(error
         .to_string()
@@ -25372,6 +25352,138 @@ fn explain_query_reports_effective_resource_hints() {
 }
 
 #[test]
+fn explain_analyze_reports_storage_scan_pruning_profile() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem-analyze-1', kind: 'note', title: 'Analyze'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'mem-analyze-2', kind: 'note', title: 'Profile'})")
+        .unwrap();
+
+    let output = db
+        .explain_analyze_query("MATCH (m:Memory) WHERE m.kind = 'note' RETURN m.title AS title")
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 2);
+    assert!(output.physical_plan.explain(0).contains("ProjectExec"));
+    assert_eq!(output.execution_profile.scan_pruning_reports.len(), 1);
+    let scan = &output.execution_profile.scan_pruning_reports[0];
+    assert!(scan.pruned);
+    assert_eq!(scan.candidate_count_before_filter, 2);
+    assert_eq!(scan.output_count, 2);
+}
+
+#[test]
+fn cypher_explain_returns_structured_plan_row() {
+    let mut db = Database::new();
+
+    let output = db
+        .query("EXPLAIN MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    let row = &output.rows[0];
+    assert_eq!(row.get("mode"), Some(&Value::String("explain".to_string())));
+    assert_eq!(
+        row.get("statement_kind"),
+        Some(&Value::String("match_return".to_string()))
+    );
+    assert!(matches!(row.get("plan"), Some(Value::String(plan)) if plan.contains("ProjectExec")));
+    assert!(matches!(
+        row.get("selected_plan_fingerprint"),
+        Some(Value::String(fingerprint)) if fingerprint.contains("Memory")
+    ));
+    assert!(row.contains_key("work_request"));
+}
+
+#[test]
+fn cypher_explain_analyze_returns_execution_profile_row() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem-cypher-analyze-1', kind: 'note', title: 'Analyze'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'mem-cypher-analyze-2', kind: 'note', title: 'Profile'})")
+        .unwrap();
+
+    let output = db
+        .query(
+            "EXPLAIN ANALYZE MATCH (m:Memory) \
+             WHERE m.kind = 'note' RETURN m.title AS title",
+        )
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    let row = &output.rows[0];
+    assert_eq!(
+        row.get("mode"),
+        Some(&Value::String("explain_analyze".to_string()))
+    );
+    assert_eq!(row.get("row_count"), Some(&Value::Int(2)));
+    assert_eq!(row.get("scan_pruning_report_count"), Some(&Value::Int(1)));
+    let Some(Value::List(scan_reports)) = row.get("scan_pruning_reports") else {
+        panic!("expected scan pruning reports");
+    };
+    assert_eq!(scan_reports.len(), 1);
+    let Value::Map(scan_report) = &scan_reports[0] else {
+        panic!("expected scan pruning report map");
+    };
+    assert_eq!(scan_report.get("pruned"), Some(&Value::Bool(true)));
+    assert_eq!(scan_report.get("output_count"), Some(&Value::Int(2)));
+    let Some(Value::Map(strategy)) = scan_report.get("strategy") else {
+        panic!("expected scan pruning strategy map");
+    };
+    assert_eq!(
+        strategy.get("kind"),
+        Some(&Value::String("property_eq".to_string()))
+    );
+    assert_eq!(
+        strategy.get("property"),
+        Some(&Value::String("kind".to_string()))
+    );
+    assert_eq!(
+        row.get("operator_row_cap_enabled"),
+        Some(&Value::Bool(false))
+    );
+}
+
+#[test]
+fn read_transaction_cypher_explain_analyze_uses_snapshot() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem-read-explain-1', kind: 'note'})")
+        .unwrap();
+    let mut read_tx = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'mem-read-explain-2', kind: 'note'})")
+        .unwrap();
+
+    let output = read_tx
+        .query(
+            "EXPLAIN ANALYZE MATCH (m:Memory) \
+             WHERE m.kind = 'note' RETURN m.id AS id",
+        )
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(output.rows[0].get("row_count"), Some(&Value::Int(1)));
+    assert_eq!(
+        output.rows[0].get("scan_pruning_report_count"),
+        Some(&Value::Int(1))
+    );
+}
+
+#[test]
+fn cypher_explain_analyze_rejects_mutation() {
+    let mut db = Database::new();
+
+    let error = db
+        .query("EXPLAIN ANALYZE CREATE (:Memory {id: 1})")
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("EXPLAIN ANALYZE only supports read queries"));
+    let output = db.query("MATCH (m:Memory) RETURN m.id AS id").unwrap();
+    assert!(output.rows.is_empty());
+}
+
+#[test]
 fn plan_cache_reuses_exact_parameterized_physical_plan() {
     let db = Database::new_with_config(DatabaseConfig {
         max_plan_cache_entries: Some(8),
@@ -25384,6 +25496,8 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
     let first = db.explain_query_with_params(query, &parameters).unwrap();
     let second = db.explain_query_with_params(query, &parameters).unwrap();
 
+    assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Hit);
     assert!(
         first
             .trace
@@ -25405,8 +25519,555 @@ fn plan_cache_reuses_exact_parameterized_physical_plan() {
     assert_eq!(stats.entries, 1);
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 1);
+    assert_eq!(stats.admissions, 1);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 0);
+    assert_eq!(stats.memory_pressure_events, 0);
+}
+
+#[test]
+fn sql_reads_plan_cache_virtual_table() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+
+    db.explain_query(query).unwrap();
+    db.explain_query(query).unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT metric, value FROM system.plan_cache \
+             WHERE metric IN ('admissions', 'entries', 'hits', 'memory_pressure_events', 'misses') \
+             ORDER BY metric",
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![
+            BTreeMap::from([
+                (
+                    "metric".to_string(),
+                    Value::String("admissions".to_string())
+                ),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+            BTreeMap::from([
+                ("metric".to_string(), Value::String("entries".to_string())),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+            BTreeMap::from([
+                ("metric".to_string(), Value::String("hits".to_string())),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+            BTreeMap::from([
+                (
+                    "metric".to_string(),
+                    Value::String("memory_pressure_events".to_string())
+                ),
+                ("value".to_string(), Value::Int(0)),
+            ]),
+            BTreeMap::from([
+                ("metric".to_string(), Value::String("misses".to_string())),
+                ("value".to_string(), Value::Int(1)),
+            ]),
+        ]
+    );
+}
+
+#[test]
+fn sql_system_table_queries_do_not_use_plan_cache() {
+    let db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title";
+
+    db.explain_query(query).unwrap();
+    db.explain_query(query).unwrap();
+    let before = db.plan_cache_stats();
+
+    db.query_sql("SELECT * FROM system.plan_cache").unwrap();
+    db.query_sql("SELECT * FROM system.slow_queries").unwrap();
+    db.query_sql("SELECT * FROM system.statement_summary")
+        .unwrap();
+
+    let after = db.plan_cache_stats();
+    assert_eq!(after, before);
+}
+
+#[test]
+fn sql_reads_completed_slow_query_ring() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'm1', title: 'Graph foundations'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'm1'}) RETURN m.title AS title")
+        .unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT query_language, row_count, slow_log_candidate \
+             FROM system.slow_queries \
+             WHERE query_language = 'cypher' AND slow_log_candidate = true \
+             ORDER BY sequence DESC LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([
+            (
+                "query_language".to_string(),
+                Value::String("cypher".to_string())
+            ),
+            ("row_count".to_string(), Value::Int(1)),
+            ("slow_log_candidate".to_string(), Value::Bool(true)),
+        ])]
+    );
+}
+
+#[test]
+fn failed_cypher_queries_do_not_enter_slow_query_ring() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        read_only: true,
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    let error = db
+        .query("CREATE (:Memory {id: 'blocked', title: 'Blocked write'})")
+        .expect_err("read-only mutation should fail");
+    assert!(error.to_string().contains("read-only"));
+
+    let output = db.query_sql("SELECT * FROM system.slow_queries").unwrap();
+
+    assert!(output.rows.is_empty());
+
+    let summary = db
+        .query_sql(
+            "SELECT statement_kind, execution_count, success_count, error_count, \
+             last_success, last_error \
+             FROM system.statement_summary \
+             WHERE statement_kind = 'create_node'",
+        )
+        .unwrap();
+
+    assert_eq!(summary.rows.len(), 1);
+    assert_eq!(
+        summary.rows[0].get("statement_kind"),
+        Some(&Value::String("create_node".to_string()))
+    );
+    assert_eq!(summary.rows[0].get("execution_count"), Some(&Value::Int(1)));
+    assert_eq!(summary.rows[0].get("success_count"), Some(&Value::Int(0)));
+    assert_eq!(summary.rows[0].get("error_count"), Some(&Value::Int(1)));
+    assert_eq!(
+        summary.rows[0].get("last_success"),
+        Some(&Value::Bool(false))
+    );
+    assert!(matches!(
+        summary.rows[0].get("last_error"),
+        Some(Value::String(message)) if message.contains("read-only")
+    ));
+}
+
+#[test]
+fn cypher_queries_below_slow_threshold_do_not_enter_slow_query_ring() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: u128::MAX,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'fast', title: 'Fast path'})")
+        .unwrap();
+
+    let output = db.query_sql("SELECT * FROM system.slow_queries").unwrap();
+
+    assert!(output.rows.is_empty());
+}
+
+#[test]
+fn read_transaction_sql_reads_slow_query_snapshot() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'before-read-tx', title: 'Before'})")
+        .unwrap();
+    let read_tx = db.begin_read_transaction();
+    db.query("CREATE (:Memory {id: 'after-read-tx', title: 'After'})")
+        .unwrap();
+
+    let output = read_tx
+        .query_sql("SELECT sequence FROM system.slow_queries ORDER BY sequence")
+        .unwrap();
+
+    assert_eq!(output.rows.len(), 1);
+    assert_eq!(output.rows[0].get("sequence"), Some(&Value::Int(1)));
+}
+
+#[test]
+fn sql_reads_statement_summary_virtual_table() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    let query = "MATCH (m:Memory {id: 'summary'}) RETURN m.title AS title";
+
+    db.query("CREATE (:Memory {id: 'summary', title: 'Statement summary'})")
+        .unwrap();
+    db.query(query).unwrap();
+    db.query(query).unwrap();
+
+    let output = db
+        .query_sql(
+            "SELECT statement_kind, execution_count, success_count, error_count, \
+             total_row_count \
+             FROM system.statement_summary \
+             WHERE statement_kind = 'match_return' \
+             ORDER BY execution_count DESC LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.rows,
+        vec![BTreeMap::from([
+            (
+                "statement_kind".to_string(),
+                Value::String("match_return".to_string())
+            ),
+            ("execution_count".to_string(), Value::Int(2)),
+            ("success_count".to_string(), Value::Int(2)),
+            ("error_count".to_string(), Value::Int(0)),
+            ("total_row_count".to_string(), Value::Int(2)),
+        ])]
+    );
+}
+
+#[test]
+fn knowledge_source_ids_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query(
+        "CREATE (:Source {id: 'source_a', lifecycle_state: 'extracted', space_id: 'default'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Source {id: 'source_b', lifecycle_state: 'raw', space_id: 'default'})")
+        .unwrap();
+    let request = KnowledgeSourceIdListRequest {
+        lifecycle_state: Some("extracted".to_string()),
+        normalized_space_id: Some("default".to_string()),
+        limit: 10,
+    };
+
+    let first = db.knowledge_source_ids(&request).unwrap();
+    let second = db.knowledge_source_ids(&request).unwrap();
+
+    assert_eq!(first.source_ids, vec!["source_a".to_string()]);
+    assert_eq!(first, second);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+
+    let summary = db
+        .query_sql(
+            "SELECT execution_count FROM system.statement_summary \
+             WHERE statement_kind = 'match_return' \
+             ORDER BY execution_count DESC LIMIT 1",
+        )
+        .unwrap();
+
+    assert_eq!(summary.rows[0].get("execution_count"), Some(&Value::Int(2)));
+}
+
+#[test]
+fn knowledge_source_count_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
+    db.query("CREATE (:Source {id: 'source_b'})").unwrap();
+
+    let first = db.knowledge_source_count();
+    let second = db.knowledge_source_count();
+
+    assert_eq!(first.count, 2);
+    assert_eq!(first, second);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+
+    let summary = db
+        .query_sql(
+            "SELECT execution_count, total_row_count FROM system.statement_summary \
+             WHERE query_text = 'MATCH (s:Source) RETURN count(s) AS count'",
+        )
+        .unwrap();
+
+    assert_eq!(summary.rows.len(), 1);
+    assert_eq!(summary.rows[0].get("execution_count"), Some(&Value::Int(2)));
+    assert_eq!(summary.rows[0].get("total_row_count"), Some(&Value::Int(2)));
+}
+
+#[test]
+fn knowledge_sources_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha', memory_count: 2})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', memory_count: 5})")
+        .unwrap();
+    let request = KnowledgeSourceListRequest {
+        source_ids: vec!["source_b".to_string(), "source_a".to_string()],
+        limit: 1,
+        order: KnowledgeSourceListOrder::MemoryCountDesc,
+        ..KnowledgeSourceListRequest::default()
+    };
+
+    let first = db.knowledge_sources(&request).unwrap();
+    let second = db.knowledge_sources(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].source_id.as_deref(), Some("source_b"));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 3);
+    assert_eq!(stats.misses, 3);
+    assert_eq!(stats.hits, 3);
+}
+
+#[test]
+fn knowledge_source_projected_list_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source_a', original_name: 'Alpha', memory_count: 2})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'source_b', original_name: 'Beta', memory_count: 5})")
+        .unwrap();
+    let request = KnowledgeSourceProjectedListRequest {
+        list: KnowledgeSourceListRequest {
+            limit: 1,
+            order: KnowledgeSourceListOrder::MemoryCountDesc,
+            ..KnowledgeSourceListRequest::default()
+        },
+        property_names: vec!["original_name".to_string()],
+    };
+
+    let first = db.knowledge_source_projected_list(&request).unwrap();
+    let second = db.knowledge_source_projected_list(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].source_id.as_deref(), Some("source_b"));
+    assert_eq!(
+        first.rows[0].properties.get("original_name"),
+        Some(&Value::String("Beta".to_string()))
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
+fn knowledge_source_detail_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source_a', title: 'Alpha', space_id: '', memory_count: 1})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) \
+         CREATE (m)-[:SOURCED_FROM]->(s)",
+    )
+    .unwrap();
+    let request = KnowledgeSourceRequest {
+        source_id: "source_a".to_string(),
+    };
+
+    let first = db.knowledge_source(&request).unwrap();
+    let second = db.knowledge_source(&request).unwrap();
+
+    assert_eq!(first, second);
+    let row = first.row.expect("source row");
+    assert_eq!(row.source_id.as_deref(), Some("source_a"));
+    assert_eq!(row.title.as_deref(), Some("Alpha"));
+    assert_eq!(row.normalized_space_id, "default");
+    assert_eq!(row.memory_count, Some(1));
+    assert_eq!(row.sourced_memory_count, 1);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
+fn knowledge_source_sourced_memory_count_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) \
+         CREATE (m)-[:SOURCED_FROM]->(s)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (e:Entity {id: 'entity_a'}), (s:Source {id: 'source_a'}) \
+         CREATE (e)-[:SOURCED_FROM]->(s)",
+    )
+    .unwrap();
+    let request = KnowledgeSourceSourcedMemoryCountRequest {
+        source_id: "source_a".to_string(),
+    };
+
+    let first = db.knowledge_source_sourced_memory_count(&request).unwrap();
+    let second = db.knowledge_source_sourced_memory_count(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert!(first.found);
+    assert_eq!(first.sourced_memory_count, 1);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
+fn knowledge_source_memories_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a', title: 'Alpha', content: 'alpha', unit_type: 'fact', confidence: 0.8})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b', title: 'Beta', content: 'beta', unit_type: 'note', confidence: 0.6})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', created_at: 200}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v1', created_at: 100}]->(s)")
+        .unwrap();
+    db.query(
+        "MATCH (e:Entity {id: 'entity_a'}), (s:Source {id: 'source_a'}) \
+         CREATE (e)-[:SOURCED_FROM {chunk_index: 0}]->(s)",
+    )
+    .unwrap();
+    let request = KnowledgeSourceMemoryListRequest {
+        source_id: "source_a".to_string(),
+        limit: 1,
+    };
+
+    let first = db.knowledge_source_memories(&request).unwrap();
+    let second = db.knowledge_source_memories(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert!(first.found);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].memory_id.as_deref(), Some("memory_b"));
+    assert_eq!(first.rows[0].chunk_index, Some(1));
+    assert_eq!(first.rows[0].created_at, Some(Value::Int(100)));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 3);
+    assert_eq!(stats.misses, 3);
+    assert_eq!(stats.hits, 3);
+}
+
+#[test]
+fn knowledge_source_memory_projected_list_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Source {id: 'source_a'})").unwrap();
+    db.query("CREATE (:Memory {id: 'memory_a', title: 'Alpha', unit_type: 'fact', space_id: 'space_a', hidden: 'no'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory_b', title: 'Beta', unit_type: 'note', space_id: '', hidden: 'no'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity_a', title: 'Entity'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_a'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 2, chunk_range: '10..20', source_version: 'v1', hidden: 'no'}]->(s)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory_b'}), (s:Source {id: 'source_a'}) CREATE (m)-[:SOURCED_FROM {chunk_index: 1, chunk_range: '0..10', source_version: 'v2', hidden: 'no'}]->(s)")
+        .unwrap();
+    db.query(
+        "MATCH (e:Entity {id: 'entity_a'}), (s:Source {id: 'source_a'}) \
+         CREATE (e)-[:SOURCED_FROM {chunk_index: 0, chunk_range: 'ignored'}]->(s)",
+    )
+    .unwrap();
+    let request = KnowledgeSourceMemoryProjectedListRequest {
+        list: KnowledgeSourceMemoryListRequest {
+            source_id: "source_a".to_string(),
+            limit: 1,
+        },
+        memory_property_names: vec!["title".to_string(), "unit_type".to_string()],
+        relationship_property_names: vec!["chunk_range".to_string()],
+    };
+
+    let first = db.knowledge_source_memory_projected_list(&request).unwrap();
+    let second = db.knowledge_source_memory_projected_list(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert!(first.found);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].memory_id.as_deref(), Some("memory_b"));
+    assert_eq!(first.rows[0].normalized_space_id, "default");
+    assert_eq!(
+        first.rows[0].memory_properties,
+        BTreeMap::from([
+            ("title".to_string(), Value::String("Beta".to_string())),
+            ("unit_type".to_string(), Value::String("note".to_string())),
+        ])
+    );
+    assert_eq!(
+        first.rows[0].relationship_properties,
+        BTreeMap::from([(
+            "chunk_range".to_string(),
+            Value::String("0..10".to_string())
+        )])
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 3);
+    assert_eq!(stats.misses, 3);
+    assert_eq!(stats.hits, 3);
 }
 
 #[test]
@@ -25423,6 +26084,7 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
         .unwrap();
     let after_commit = db.explain_query(query).unwrap();
 
+    assert_eq!(after_commit.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(
         after_commit
             .trace
@@ -25434,8 +26096,10 @@ fn plan_cache_misses_after_graph_commit_epoch_changes() {
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.admissions, 2);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 1);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]
@@ -25451,6 +26115,9 @@ fn plan_cache_misses_after_index_descriptor_changes() {
     db.query("CREATE INDEX ON :Memory(id)").unwrap();
     let after_index = db.explain_query(query).unwrap();
 
+    assert_eq!(before_index.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(cached_before_index.plan_cache_lookup, PlanCacheLookup::Hit);
+    assert_eq!(after_index.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(before_index.trace.selected_plan.contains("SeqNodeScan"));
     assert!(!before_index.trace.selected_plan.contains("IndexNodeSeek"));
     assert!(cached_before_index
@@ -25471,8 +26138,10 @@ fn plan_cache_misses_after_index_descriptor_changes() {
     let stats = db.plan_cache_stats();
     assert_eq!(stats.hits, 1);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.admissions, 2);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 1);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]
@@ -25493,6 +26162,8 @@ fn plan_cache_evicts_least_frequently_used_plan() {
     let hot = db.explain_query(q1).unwrap();
     let evicted = db.explain_query(q2).unwrap();
 
+    assert_eq!(hot.plan_cache_lookup, PlanCacheLookup::Hit);
+    assert_eq!(evicted.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(hot
         .trace
         .decisions
@@ -25510,9 +26181,11 @@ fn plan_cache_evicts_least_frequently_used_plan() {
     assert_eq!(stats.entries, 2);
     assert_eq!(stats.hits, 2);
     assert_eq!(stats.misses, 4);
+    assert_eq!(stats.admissions, 4);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 0);
     assert_eq!(stats.evictions, 2);
+    assert_eq!(stats.memory_pressure_events, 2);
 }
 
 #[test]
@@ -25526,6 +26199,8 @@ fn plan_cache_can_be_disabled_with_zero_capacity() {
     let first = db.explain_query(query).unwrap();
     let second = db.explain_query(query).unwrap();
 
+    assert_eq!(first.plan_cache_lookup, PlanCacheLookup::Miss);
+    assert_eq!(second.plan_cache_lookup, PlanCacheLookup::Miss);
     assert!(
         first
             .trace
@@ -25547,9 +26222,11 @@ fn plan_cache_can_be_disabled_with_zero_capacity() {
     assert_eq!(stats.entries, 0);
     assert_eq!(stats.hits, 0);
     assert_eq!(stats.misses, 2);
+    assert_eq!(stats.admissions, 0);
     assert_eq!(stats.disabled_misses, 2);
     assert_eq!(stats.bypasses, 0);
     assert_eq!(stats.evictions, 0);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]
@@ -25563,6 +26240,10 @@ fn plan_cache_records_bypassed_mutation_explain_separately() {
         .explain_query("CREATE (:Memory {id: 1, title: 'Bypassed'})")
         .unwrap();
 
+    assert_eq!(
+        output.plan_cache_lookup,
+        PlanCacheLookup::Bypass(PlanCacheBypassReason::StatementNotCacheable)
+    );
     assert!(output
         .trace
         .decisions
@@ -25572,9 +26253,11 @@ fn plan_cache_records_bypassed_mutation_explain_separately() {
     assert_eq!(stats.entries, 0);
     assert_eq!(stats.hits, 0);
     assert_eq!(stats.misses, 0);
+    assert_eq!(stats.admissions, 0);
     assert_eq!(stats.disabled_misses, 0);
     assert_eq!(stats.bypasses, 1);
     assert_eq!(stats.evictions, 0);
+    assert_eq!(stats.memory_pressure_events, 0);
 }
 
 #[test]

@@ -1,6 +1,6 @@
 use skein::{
     replacement_readiness_family_evidence_health_from_bundle,
-    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::BTreeSet;
 
@@ -10,7 +10,10 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
-
+const SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY: &str =
+    "search_projection_shadow_pushdown_evidence_not_ready";
+const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING: &str =
+    "skein_search_projection_segment_descriptor_missing";
 pub fn nowledge_replacement_summary_usage() -> String {
     "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
         .to_string()
@@ -208,6 +211,8 @@ pub fn nowledge_replacement_summary_json_with_options(
             "embedding_identity_parity": search_projection_shadow_evidence.embedding_identity_parity,
             "lifecycle_parity": search_projection_shadow_evidence.lifecycle_parity,
             "incremental_watermark_parity": search_projection_shadow_evidence.incremental_watermark_parity,
+            "predicate_pushdown_parity": search_projection_shadow_evidence.predicate_pushdown_parity,
+            "pushdown_evidence": search_projection_shadow_evidence.pushdown_evidence,
             "primary_engine": search_projection_shadow_evidence.primary_engine,
             "shadow_engine": search_projection_shadow_evidence.shadow_engine,
             "blocker_codes": search_projection_shadow_evidence.blocker_codes,
@@ -223,6 +228,9 @@ pub fn nowledge_replacement_summary_json_with_options(
             "operator_row_cap_enabled": bounded_read_evidence.operator_row_cap_enabled,
             "streaming": bounded_read_evidence.streaming,
             "blocking_operator_count": bounded_read_evidence.blocking_operator_count,
+            "covered_routes": bounded_read_evidence.covered_routes,
+            "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "missing_covered_routes": bounded_read_evidence.missing_covered_routes,
             "blocker_codes": bounded_read_evidence.blocker_codes,
         },
         "cutover_evidence": {
@@ -490,6 +498,8 @@ struct SearchProjectionShadowEvidenceSummary<'a> {
     embedding_identity_parity: Option<bool>,
     lifecycle_parity: Option<bool>,
     incremental_watermark_parity: Option<bool>,
+    predicate_pushdown_parity: Option<bool>,
+    pushdown_evidence: serde_json::Value,
     primary_engine: Option<&'a str>,
     shadow_engine: Option<&'a str>,
     blocker_codes: serde_json::Value,
@@ -506,6 +516,8 @@ struct BoundedReadEvidenceSummary<'a> {
     operator_row_cap_enabled: Option<bool>,
     streaming: Option<bool>,
     blocking_operator_count: Option<u64>,
+    covered_routes: Vec<String>,
+    missing_covered_routes: Vec<&'static str>,
     blocker_codes: serde_json::Value,
 }
 
@@ -696,6 +708,12 @@ fn search_projection_shadow_evidence_summary(
     let lifecycle_parity = json_get_bool_path_from_dynamic(bundle, path, "lifecycle_parity");
     let incremental_watermark_parity =
         json_get_bool_path_from_dynamic(bundle, path, "incremental_watermark_parity");
+    let predicate_pushdown_parity =
+        json_get_bool_path_from_dynamic(bundle, path, "predicate_pushdown_parity");
+    let pushdown_evidence = search_projection_shadow_pushdown_evidence_json(bundle, path);
+    let pushdown_ready = json_get_bool_path(&pushdown_evidence, &["ready"]);
+    let blocker_codes =
+        search_projection_shadow_blocker_codes_with_pushdown(bundle, path, &pushdown_evidence);
     let ready = present
         && protocol.as_deref() == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL)
         && primary_ready == Some(true)
@@ -704,7 +722,9 @@ fn search_projection_shadow_evidence_summary(
         && table_parity_ready == Some(true)
         && embedding_identity_parity == Some(true)
         && lifecycle_parity == Some(true)
-        && incremental_watermark_parity == Some(true);
+        && incremental_watermark_parity == Some(true)
+        && predicate_pushdown_parity == Some(true)
+        && pushdown_ready == Some(true);
     SearchProjectionShadowEvidenceSummary {
         protocol,
         present,
@@ -716,10 +736,100 @@ fn search_projection_shadow_evidence_summary(
         embedding_identity_parity,
         lifecycle_parity,
         incremental_watermark_parity,
+        predicate_pushdown_parity,
+        pushdown_evidence,
         primary_engine: json_get_str_path_from_dynamic(bundle, path, "primary_engine"),
         shadow_engine: json_get_str_path_from_dynamic(bundle, path, "shadow_engine"),
-        blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
+        blocker_codes,
     }
+}
+
+fn search_projection_shadow_pushdown_evidence_json(
+    bundle: &serde_json::Value,
+    path: &[&str],
+) -> serde_json::Value {
+    let mut pushdown_path = path.to_vec();
+    pushdown_path.push("pushdown_evidence");
+    if let Some(pushdown) = json_get_path(bundle, &pushdown_path).filter(|value| value.is_object())
+    {
+        return pushdown.clone();
+    }
+
+    let predicate_pushdown_parity =
+        json_get_bool_path_from_dynamic(bundle, path, "predicate_pushdown_parity").unwrap_or(false);
+    let primary_predicate_pushdown_ready = {
+        let mut nested = path.to_vec();
+        nested.extend(["primary_evidence", "predicate_pushdown_ready"]);
+        json_get_bool_path(bundle, &nested)
+    }
+    .unwrap_or(false);
+    let shadow_predicate_pushdown_ready = {
+        let mut nested = path.to_vec();
+        nested.extend(["shadow_evidence", "predicate_pushdown_ready"]);
+        json_get_bool_path(bundle, &nested)
+    }
+    .unwrap_or(false);
+    let shadow_persisted_segment_descriptor_ready = {
+        let mut nested = path.to_vec();
+        nested.extend([
+            "shadow_evidence",
+            "predicate_pushdown",
+            "persisted_segment_descriptor_ready",
+        ]);
+        json_get_bool_path(bundle, &nested).unwrap_or(false)
+    };
+    let primary_scan_filter_fields = {
+        let mut nested = path.to_vec();
+        nested.extend([
+            "primary_evidence",
+            "predicate_pushdown",
+            "scan_filter_fields",
+        ]);
+        json_get_array_path(bundle, &nested)
+    };
+    let shadow_scan_filter_fields = {
+        let mut nested = path.to_vec();
+        nested.extend([
+            "shadow_evidence",
+            "predicate_pushdown",
+            "scan_filter_fields",
+        ]);
+        json_get_array_path(bundle, &nested)
+    };
+    let ready = predicate_pushdown_parity
+        && primary_predicate_pushdown_ready
+        && shadow_predicate_pushdown_ready
+        && shadow_persisted_segment_descriptor_ready;
+    serde_json::json!({
+        "ready": ready,
+        "predicate_pushdown_parity": predicate_pushdown_parity,
+        "primary_predicate_pushdown_ready": primary_predicate_pushdown_ready,
+        "shadow_predicate_pushdown_ready": shadow_predicate_pushdown_ready,
+        "shadow_persisted_segment_descriptor_ready": shadow_persisted_segment_descriptor_ready,
+        "primary_scan_filter_fields": primary_scan_filter_fields,
+        "shadow_scan_filter_fields": shadow_scan_filter_fields,
+    })
+}
+
+fn search_projection_shadow_blocker_codes_with_pushdown(
+    bundle: &serde_json::Value,
+    path: &[&str],
+    pushdown_evidence: &serde_json::Value,
+) -> serde_json::Value {
+    let mut blockers = json_get_string_array_path_from_dynamic(bundle, path, "blocker_codes")
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    if json_get_bool_path(pushdown_evidence, &["ready"]) != Some(true) {
+        blockers.insert(SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY.to_string());
+    }
+    if json_get_bool_path(
+        pushdown_evidence,
+        &["shadow_persisted_segment_descriptor_ready"],
+    ) != Some(true)
+    {
+        blockers.insert(SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING.to_string());
+    }
+    serde_json::json!(blockers.into_iter().collect::<Vec<_>>())
 }
 
 fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvidenceSummary<'_> {
@@ -740,13 +850,24 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     let streaming = json_get_bool_path_from_dynamic(bundle, path, "streaming");
     let blocking_operator_count =
         json_get_u64_path_from_dynamic(bundle, path, "blocking_operator_count");
+    let covered_routes = json_get_string_array_path_from_dynamic(bundle, path, "covered_routes");
+    let covered_route_set = covered_routes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let missing_covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !covered_route_set.contains(route))
+        .collect::<Vec<_>>();
     let ready = present
         && protocol.as_deref() == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL)
         && mode == Some("shadow_read_only")
         && max_rows.is_some_and(|value| value > 0)
         && execution_row_cap == max_rows.and_then(|value| value.checked_add(1))
         && row_limit_enforced_before_output == Some(true)
-        && operator_row_cap_enabled == Some(true);
+        && operator_row_cap_enabled == Some(true)
+        && missing_covered_routes.is_empty();
     BoundedReadEvidenceSummary {
         protocol,
         present,
@@ -758,8 +879,20 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         operator_row_cap_enabled,
         streaming,
         blocking_operator_count,
+        covered_routes,
+        missing_covered_routes,
         blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
     }
+}
+
+fn json_get_string_array_path_from_dynamic(
+    value: &serde_json::Value,
+    base_path: &[&str],
+    field: &str,
+) -> Vec<String> {
+    let mut path = base_path.to_vec();
+    path.push(field);
+    json_get_string_array_path(value, &path)
 }
 
 fn json_get_array_path_from_dynamic(
@@ -1005,6 +1138,7 @@ fn nowledge_replacement_next_actions(
                 "bounded_read_evidence.row_limit_enforced_before_output",
                 "bounded_read_evidence.operator_row_cap_enabled",
                 "bounded_read_evidence.blocking_operator_count",
+                "bounded_read_evidence.covered_routes",
                 "bounded_read_evidence.blocker_codes",
             ],
         ));
@@ -1272,6 +1406,8 @@ mod tests {
     use super::{
         nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
         nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
+        SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
+        SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING,
     };
 
     #[test]
@@ -1446,6 +1582,19 @@ mod tests {
         );
         assert_eq!(
             summary["search_projection_shadow_evidence"]["table_parity_ready"],
+            true
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["predicate_pushdown_parity"],
+            true
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"],
+            true
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+                ["shadow_persisted_segment_descriptor_ready"],
             true
         );
         assert_eq!(
@@ -1674,6 +1823,50 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_search_projection_shadow_pushdown_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"] =
+            serde_json::json!(false);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_persisted_segment_descriptor_ready"] = serde_json::json!(false);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"],
+            false
+        );
+        assert!(
+            summary["search_projection_shadow_evidence"]["blocker_codes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY)
+        );
+        assert!(
+            summary["search_projection_shadow_evidence"]["blocker_codes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING)
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_shadow_evidence_ready"));
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_projection_shadow_evidence"));
+    }
+
+    #[test]
     fn replacement_summary_requires_search_projection_shadow_evidence_protocol() {
         let mut bundle = production_ready_bundle();
         bundle["search_projection_shadow_evidence"]["protocol"] = serde_json::json!("handwritten");
@@ -1753,6 +1946,58 @@ mod tests {
             .unwrap()
             .iter()
             .any(|item| item == "bounded_read_evidence_ready"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_bounded_read_route_coverage() {
+        let mut bundle = production_ready_bundle();
+        bundle["bounded_read_evidence"]["covered_routes"] = serde_json::json!([
+            "/graph/overview",
+            "/graph/expand/{node_id}",
+            "/graph/live-preview",
+            "/graph/live-preview/{node_id}",
+            "/graph/community-members/{community_id}",
+            "/library/community/{community_id}/subgraph",
+            "/library/community/{community_id}/recent-memories",
+            "/library/community/{community_id}/related",
+            "/graph/analysis",
+            "/graph/augmentation/state",
+            "/graph/augmentation/pagerank/plan",
+            "/graph/node-details/{node_id}",
+            "/graph/orphans",
+            "/graph/shortest-path"
+        ]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert_eq!(
+            summary["bounded_read_evidence"]["missing_covered_routes"],
+            serde_json::json!(["/graph/explore"])
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence_ready"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_bounded_read_profile"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "bounded_read_evidence.covered_routes")
+            }));
     }
 
     #[test]
@@ -2375,6 +2620,7 @@ mod tests {
                         "bounded_read_evidence.row_limit_enforced_before_output",
                         "bounded_read_evidence.operator_row_cap_enabled",
                         "bounded_read_evidence.blocking_operator_count",
+                        "bounded_read_evidence.covered_routes",
                         "bounded_read_evidence.blocker_codes"
                     ]
                 },
@@ -2521,6 +2767,16 @@ mod tests {
                 "embedding_identity_parity": true,
                 "lifecycle_parity": true,
                 "incremental_watermark_parity": true,
+                "predicate_pushdown_parity": true,
+                "pushdown_evidence": {
+                    "ready": true,
+                    "predicate_pushdown_parity": true,
+                    "primary_predicate_pushdown_ready": true,
+                    "shadow_predicate_pushdown_ready": true,
+                    "shadow_persisted_segment_descriptor_ready": true,
+                    "primary_scan_filter_fields": ["unit_type", "metadata", "importance", "confidence", "history", "latest"],
+                    "shadow_scan_filter_fields": ["unit_type", "metadata", "importance", "confidence", "history", "latest"]
+                },
                 "blocker_codes": []
             },
             "bounded_read_evidence": {
@@ -2532,6 +2788,23 @@ mod tests {
                 "operator_row_cap_enabled": true,
                 "streaming": false,
                 "blocking_operator_count": 0,
+                "covered_routes": [
+                    "/graph/overview",
+                    "/graph/explore",
+                    "/graph/expand/{node_id}",
+                    "/graph/live-preview",
+                    "/graph/live-preview/{node_id}",
+                    "/graph/community-members/{community_id}",
+                    "/library/community/{community_id}/subgraph",
+                    "/library/community/{community_id}/recent-memories",
+                    "/library/community/{community_id}/related",
+                    "/graph/analysis",
+                    "/graph/augmentation/state",
+                    "/graph/augmentation/pagerank/plan",
+                    "/graph/node-details/{node_id}",
+                    "/graph/orphans",
+                    "/graph/shortest-path"
+                ],
                 "blocker_codes": []
             },
             "previous_wrapper_contract_evidence": {

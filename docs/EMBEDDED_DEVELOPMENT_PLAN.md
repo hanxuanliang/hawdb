@@ -150,9 +150,11 @@ Exit gate:
 - the first read and mutation fixture families match Ladybug behavior
 
 Status: parameter binding is implemented. `NowledgeGraphAdapter` now exposes a
-typed front door for parameterized query, explain, and grouped mutation
-transaction execution without requiring raw string interpolation.
-The typed knowledge facade also covers endpoint-known entity lookup,
+parameterized query front door for query, explain, work-request inspection, and
+grouped mutation transaction execution without requiring raw string
+interpolation. The remaining query-shape-specific typed knowledge facade is a
+legacy compatibility surface on `Database`, not the adapter extension model. It
+currently covers endpoint-known entity lookup,
 create/upsert/update/delete, relationship lookup/create/upsert/update/delete,
 normalized-space batch moves, memory access/click-dwell touches, ordered batch
 mutation, source memory-count adjustments, source lifecycle updates, source
@@ -340,14 +342,14 @@ mutation, schema/index change, or statistics epoch change naturally misses
 instead of reusing a stale physical plan. This is intentionally not yet a
 cross-parameter prepared-plan cache because the current logical plan stores
 bound `Value`s. Plan-cache stats also distinguish cache hits, misses,
-disabled-capacity misses, explicit bypasses, and evictions so production
-explain artifacts can tell configuration, statement-shape, and eviction
-behavior apart without parsing optimizer decision strings. `foyer` remains a
-candidate backend once the cache surface is abstracted, but v1 keeps a small
-in-process LFU cache in the `skein-plan-cache` crate to avoid unnecessary
-runtime/dependency and memory-growth risk in embedded deployments while keeping
-the `Database` facade focused on graph-specific cache keys and cached physical
-plans.
+admissions, disabled-capacity misses, explicit bypasses, evictions, and
+capacity-pressure events so production explain artifacts can tell
+configuration, statement-shape, admission, and eviction behavior apart without
+parsing optimizer decision strings. `foyer` remains a candidate backend once the
+cache surface is abstracted, but v1 keeps a small in-process LFU cache in the
+`skein-plan-cache` crate to avoid unnecessary runtime/dependency and
+memory-growth risk in embedded deployments while keeping the `Database` facade
+focused on graph-specific cache keys and cached physical plans.
 
 ### Phase 2: Snapshot Transactions and MVCC
 
@@ -1407,12 +1409,10 @@ Scope:
   storage, search, compatibility, and executor boundaries; use internal module
   splits first when public contracts are still moving, and promote boundaries to
   workspace packages only when the dependency direction is acyclic and stable
-- `skein-api-types` owns stable typed facade DTOs that only depend on
-  `skein-core`, including scheduler Memory read/write contracts, Memory
-  evolution/crystal scheduler count contracts, neighbor/projection result
-  DTOs, and shared traversal direction contracts; root `src/api` remains the
-  execution facade while more DTOs and implementation families are migrated
-  behind acyclic crate boundaries
+- avoid growing query-shape-specific typed facade DTOs; keep existing typed
+  surfaces only where they preserve migration compatibility, and route new
+  integration work through parameterized Cypher, query reports, and the shared
+  planner/executor boundary
 - `skein-cypher` owns syntax-only AST and parser modules, while root
   `src/cypher.rs` remains a compatibility re-export facade
 - Chryso-style rule and cost interfaces

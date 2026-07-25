@@ -2,9 +2,14 @@ mod cli_background_maintenance_evidence;
 mod cli_bounded_read_evidence;
 mod cli_fixture_contract;
 mod cli_fixture_contract_check;
+mod cli_graph_route_evidence;
+mod cli_graph_route_readiness;
+mod cli_mem_integration_bundle;
 mod cli_mem_integration_readiness;
+mod cli_mem_library_readiness;
 mod cli_previous_wrapper_preflight;
 mod cli_query_family_evidence;
+mod cli_query_runtime_preflight;
 mod cli_replacement_summary;
 mod cli_storage_recovery_evidence;
 
@@ -12,9 +17,16 @@ use cli_background_maintenance_evidence::run_nowledge_background_maintenance_evi
 use cli_bounded_read_evidence::run_nowledge_bounded_read_evidence;
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
-use cli_mem_integration_readiness::run_nowledge_mem_integration_readiness;
+use cli_graph_route_evidence::run_nowledge_graph_route_evidence;
+use cli_graph_route_readiness::run_nowledge_graph_route_readiness;
+use cli_mem_integration_bundle::run_nowledge_mem_integration_bundle;
+use cli_mem_integration_readiness::{
+    nowledge_mem_integration_readiness_json, run_nowledge_mem_integration_readiness,
+};
+use cli_mem_library_readiness::run_nowledge_mem_library_readiness;
 use cli_previous_wrapper_preflight::run_nowledge_previous_wrapper_preflight_check;
 use cli_query_family_evidence::run_nowledge_query_family_evidence;
+use cli_query_runtime_preflight::run_nowledge_query_runtime_preflight;
 use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
@@ -104,6 +116,26 @@ fn main() -> Result<()> {
                 "fixture contract command check failed".to_string(),
             ));
         }
+        if command == "nowledge-graph-route-readiness" {
+            let (json, require_ready) = run_nowledge_graph_route_readiness(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready
+                && json
+                    .get("route_primary_ready")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge graph route readiness is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-graph-route-evidence" {
+            let json = run_nowledge_graph_route_evidence(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            return Ok(());
+        }
         if command == "nowledge-previous-wrapper-preflight-check" {
             let (json, require_ready) = run_nowledge_previous_wrapper_preflight_check(args)?;
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
@@ -122,6 +154,32 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge mem integration readiness is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-mem-integration-bundle" {
+            let (json, require_ready) = run_nowledge_mem_integration_bundle(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready
+                && nowledge_mem_integration_readiness_json(&json)
+                    .get("ready")
+                    .and_then(serde_json::Value::as_bool)
+                    != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge mem integration bundle is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-mem-library-readiness" {
+            let (json, require_ready) = run_nowledge_mem_library_readiness(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge mem library readiness is not ready".to_string(),
                 ));
             }
             return Ok(());
@@ -252,6 +310,17 @@ fn main() -> Result<()> {
             }
             return Ok(());
         }
+        if command == "nowledge-query-runtime-preflight" {
+            let (json, require_ready) = run_nowledge_query_runtime_preflight(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge query runtime preflight is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
         if command == "explain-json" {
             let mut parameters = BTreeMap::new();
             while let Some(flag) = args.peek() {
@@ -285,6 +354,42 @@ fn main() -> Result<()> {
             let explain = db.explain_query_with_params(&query, &parameters)?;
             let rendered =
                 explain_output_json(&query, &parameters, &explain, &db.plan_cache_stats());
+            println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
+            return Ok(());
+        }
+        if command == "explain-analyze-json" {
+            let mut parameters = BTreeMap::new();
+            while let Some(flag) = args.peek() {
+                match flag.as_str() {
+                    "--params-json" => {
+                        args.next();
+                        let raw_parameters = args
+                            .next()
+                            .ok_or_else(|| SkeinError::Semantic(explain_analyze_json_usage()))?;
+                        parameters = parse_parameters_json(&raw_parameters)?;
+                    }
+                    _ => break,
+                }
+            }
+            let path = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(explain_analyze_json_usage()))?;
+            let query = args
+                .next()
+                .ok_or_else(|| SkeinError::Semantic(explain_analyze_json_usage()))?;
+            if args.next().is_some() {
+                return Err(SkeinError::Semantic(explain_analyze_json_usage()));
+            }
+            let mut db = Database::open_with_config(
+                path,
+                DatabaseConfig {
+                    read_only: true,
+                    ..DatabaseConfig::default()
+                },
+            )?;
+            let explain = db.explain_analyze_query_with_params(&query, &parameters)?;
+            let rendered =
+                explain_analyze_output_json(&query, &parameters, &explain, &db.plan_cache_stats());
             println!("{}", serde_json::to_string_pretty(&rendered).unwrap());
             return Ok(());
         }
@@ -1151,6 +1256,11 @@ fn external_shadow_adapter_smoke_usage() -> String {
 
 fn explain_json_usage() -> String {
     "explain-json requires [--params-json <json-object>] <database-path> <cypher>".to_string()
+}
+
+fn explain_analyze_json_usage() -> String {
+    "explain-analyze-json requires [--params-json <json-object>] <database-path> <cypher>"
+        .to_string()
 }
 
 fn validate_canonical_snapshot_usage() -> String {
@@ -4255,58 +4365,172 @@ fn explain_output_json(
     output: &skein::api::ExplainOutput,
     plan_cache_stats: &skein::PlanCacheStats,
 ) -> serde_json::Value {
+    explain_diagnostics_json(
+        "skein-explain",
+        query,
+        output.statement_kind,
+        parameters,
+        &output.trace,
+        &output.work_request,
+        output.plan_cache_lookup,
+        plan_cache_stats,
+    )
+}
+
+fn explain_analyze_output_json(
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
+    output: &skein::api::ExplainAnalyzeOutput,
+    plan_cache_stats: &skein::PlanCacheStats,
+) -> serde_json::Value {
+    let mut json = explain_diagnostics_json(
+        "skein-explain-analyze",
+        query,
+        output.statement_kind,
+        parameters,
+        &output.trace,
+        &output.work_request,
+        output.plan_cache_lookup,
+        plan_cache_stats,
+    );
+    if let serde_json::Value::Object(object) = &mut json {
+        object.insert(
+            "output_row_count".to_string(),
+            serde_json::json!(output.output.rows.len()),
+        );
+        object.insert(
+            "execution_profile".to_string(),
+            read_execution_profile_json(&output.execution_profile),
+        );
+    }
+    json
+}
+
+fn explain_diagnostics_json(
+    protocol: &str,
+    query: &str,
+    statement_kind: &str,
+    parameters: &BTreeMap<String, Value>,
+    trace: &skein::optimizer::OptimizerTrace,
+    work_request: &skein::WorkRequest,
+    plan_cache_lookup: skein::PlanCacheLookup,
+    plan_cache_stats: &skein::PlanCacheStats,
+) -> serde_json::Value {
     serde_json::json!({
-        "protocol": "skein-explain",
+        "protocol": protocol,
         "protocol_version": 1,
         "query": query,
+        "statement_kind": statement_kind,
         "parameters": serde_json::Value::Object(
             parameters
                 .iter()
                 .map(|(key, value)| (key.clone(), value_json(value)))
                 .collect()
         ),
-        "groups": output.trace.groups,
-        "search_mode": output.trace.search_mode.as_str(),
-        "selected_plan": output.trace.selected_plan,
-        "selected_plan_fingerprint": output.trace.selected_plan_fingerprint,
+        "groups": trace.groups,
+        "search_mode": trace.search_mode.as_str(),
+        "selected_plan": trace.selected_plan,
+        "selected_plan_fingerprint": trace.selected_plan_fingerprint,
         "selected_plan_cost": {
-            "estimated_rows": output.trace.selected_plan_cost.estimated_rows,
-            "cost": output.trace.selected_plan_cost.cost,
+            "estimated_rows": trace.selected_plan_cost.estimated_rows,
+            "cost": trace.selected_plan_cost.cost,
         },
         "selected_plan_cost_breakdown": {
-            "estimated_rows": output.trace.selected_plan_cost_breakdown.estimated_rows,
-            "cost": output.trace.selected_plan_cost_breakdown.cost,
-            "cpu": output.trace.selected_plan_cost_breakdown.cpu,
-            "random_io": output.trace.selected_plan_cost_breakdown.random_io,
-            "sequential_io": output.trace.selected_plan_cost_breakdown.sequential_io,
-            "output_rows": output.trace.selected_plan_cost_breakdown.output_rows,
+            "estimated_rows": trace.selected_plan_cost_breakdown.estimated_rows,
+            "cost": trace.selected_plan_cost_breakdown.cost,
+            "cpu": trace.selected_plan_cost_breakdown.cpu,
+            "random_io": trace.selected_plan_cost_breakdown.random_io,
+            "sequential_io": trace.selected_plan_cost_breakdown.sequential_io,
+            "output_rows": trace.selected_plan_cost_breakdown.output_rows,
         },
-        "selected_plan_properties": physical_properties_json(&output.trace.selected_plan_properties),
-        "selected_plan_operator_counts": output.trace.selected_plan_operator_counts,
-        "selected_plan_class_counts": output.trace.selected_plan_class_counts,
+        "selected_plan_properties": physical_properties_json(&trace.selected_plan_properties),
+        "selected_plan_operator_counts": trace.selected_plan_operator_counts,
+        "selected_plan_class_counts": trace.selected_plan_class_counts,
         "work_request": {
-            "priority": output.work_request.priority.as_str(),
-            "class": output.work_request.class.as_str(),
-            "estimated_operations": output.work_request.estimated_operations,
+            "priority": work_request.priority.as_str(),
+            "class": work_request.class.as_str(),
+            "estimated_operations": work_request.estimated_operations,
+        },
+        "plan_cache_lookup": {
+            "event": plan_cache_lookup.as_str(),
+            "bypass_reason": plan_cache_lookup
+                .bypass_reason()
+                .map(|reason| reason.as_str()),
         },
         "plan_cache_stats": {
             "max_entries": plan_cache_stats.max_entries,
             "entries": plan_cache_stats.entries,
             "hits": plan_cache_stats.hits,
             "misses": plan_cache_stats.misses,
+            "admissions": plan_cache_stats.admissions,
             "disabled_misses": plan_cache_stats.disabled_misses,
             "bypasses": plan_cache_stats.bypasses,
             "evictions": plan_cache_stats.evictions,
+            "memory_pressure_events": plan_cache_stats.memory_pressure_events,
         },
-        "warnings": output.trace.warnings,
-        "decisions": output.trace.decisions,
-        "rule_events": output
-            .trace
+        "warnings": trace.warnings,
+        "decisions": trace.decisions,
+        "rule_events": trace
             .rule_events
             .iter()
             .map(rule_event_json)
             .collect::<Vec<_>>(),
     })
+}
+
+fn read_execution_profile_json(
+    profile: &skein::executor::ReadExecutionProfile,
+) -> serde_json::Value {
+    serde_json::json!({
+        "max_rows": profile.max_rows,
+        "detection_row_cap": profile.detection_row_cap,
+        "row_limit_enforced_before_output": profile.row_limit_enforced_before_output,
+        "operator_row_cap_enabled": profile.operator_row_cap_enabled,
+        "blocking_operator_kinds": profile.blocking_operator_kinds,
+        "scan_pruning_report_count": profile.scan_pruning_reports.len(),
+        "scan_pruning_reports": profile
+            .scan_pruning_reports
+            .iter()
+            .map(scan_pruning_report_json)
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn scan_pruning_report_json(report: &skein::store::ScanPruningReport) -> serde_json::Value {
+    serde_json::json!({
+        "label_id": report.label_id.map(|label_id| label_id.0),
+        "strategy": scan_pruning_strategy_json(&report.strategy),
+        "pruned": report.pruned,
+        "exact_empty": report.exact_empty,
+        "candidate_count_before_filter": report.candidate_count_before_filter,
+        "output_count": report.output_count,
+        "filtered_out_count": report.filtered_out_count,
+    })
+}
+
+fn scan_pruning_strategy_json(strategy: &skein::store::ScanPruningStrategy) -> serde_json::Value {
+    match strategy {
+        skein::store::ScanPruningStrategy::FullLabelScan => {
+            serde_json::json!({"kind": "full_label_scan"})
+        }
+        skein::store::ScanPruningStrategy::Empty => serde_json::json!({"kind": "empty"}),
+        skein::store::ScanPruningStrategy::IdEq => serde_json::json!({"kind": "id_eq"}),
+        skein::store::ScanPruningStrategy::IdIn => serde_json::json!({"kind": "id_in"}),
+        skein::store::ScanPruningStrategy::IdRange => serde_json::json!({"kind": "id_range"}),
+        skein::store::ScanPruningStrategy::PropertyEq { property } => {
+            serde_json::json!({"kind": "property_eq", "property": property})
+        }
+        skein::store::ScanPruningStrategy::PropertyNotEq { property } => {
+            serde_json::json!({"kind": "property_not_eq", "property": property})
+        }
+        skein::store::ScanPruningStrategy::PropertyIn { property } => {
+            serde_json::json!({"kind": "property_in", "property": property})
+        }
+        skein::store::ScanPruningStrategy::PropertyRange { property } => {
+            serde_json::json!({"kind": "property_range", "property": property})
+        }
+        skein::store::ScanPruningStrategy::OrUnion => serde_json::json!({"kind": "or_union"}),
+    }
 }
 
 fn physical_properties_json(
@@ -4426,7 +4650,8 @@ mod tests {
         add_shadow_trace_report, background_maintenance_report_json_with_options,
         background_maintenance_report_usage, canonical_snapshot_validation_json,
         cutover_evidence_is_eligible, enforce_external_shadow_adapter_smoke_requirements,
-        enforce_storage_recovery_requirements, explain_json_usage, explain_output_json,
+        enforce_storage_recovery_requirements, explain_analyze_json_usage,
+        explain_analyze_output_json, explain_json_usage, explain_output_json,
         external_shadow_adapter_smoke_fixture, external_shadow_adapter_smoke_report_json,
         graph_lightning_bootstrap_bundle_json,
         graph_lightning_bootstrap_bundle_json_with_storage_recovery,
@@ -5646,6 +5871,8 @@ mod tests {
                 label: "Memory".to_string(),
             },
             work_request: WorkRequest::background(WorkClass::Analytics, 64),
+            plan_cache_lookup: skein::PlanCacheLookup::Miss,
+            statement_kind: "match_return",
             trace: OptimizerTrace {
                 groups: 1,
                 search_mode: skein::optimizer::SearchMode::Memo,
@@ -5684,9 +5911,11 @@ mod tests {
             entries: 1,
             hits: 2,
             misses: 3,
+            admissions: 6,
             disabled_misses: 1,
             bypasses: 5,
             evictions: 4,
+            memory_pressure_events: 2,
         };
         let json = explain_output_json(
             "MATCH (m:Memory {id: $id}) RETURN m",
@@ -5698,6 +5927,7 @@ mod tests {
         assert_eq!(json["protocol"], "skein-explain");
         assert_eq!(json["protocol_version"], 1);
         assert_eq!(json["search_mode"], "memo");
+        assert_eq!(json["statement_kind"], "match_return");
         assert_eq!(json["parameters"]["id"], 42);
         assert_eq!(
             json["selected_plan_fingerprint"],
@@ -5718,13 +5948,20 @@ mod tests {
         assert_eq!(json["work_request"]["priority"], "background");
         assert_eq!(json["work_request"]["class"], "analytics");
         assert_eq!(json["work_request"]["estimated_operations"], 64);
+        assert_eq!(json["plan_cache_lookup"]["event"], "miss");
+        assert_eq!(
+            json["plan_cache_lookup"]["bypass_reason"],
+            serde_json::Value::Null
+        );
         assert_eq!(json["plan_cache_stats"]["max_entries"], 128);
         assert_eq!(json["plan_cache_stats"]["entries"], 1);
         assert_eq!(json["plan_cache_stats"]["hits"], 2);
         assert_eq!(json["plan_cache_stats"]["misses"], 3);
+        assert_eq!(json["plan_cache_stats"]["admissions"], 6);
         assert_eq!(json["plan_cache_stats"]["disabled_misses"], 1);
         assert_eq!(json["plan_cache_stats"]["bypasses"], 5);
         assert_eq!(json["plan_cache_stats"]["evictions"], 4);
+        assert_eq!(json["plan_cache_stats"]["memory_pressure_events"], 2);
         assert_eq!(json["warnings"][0], "diagnostic warning");
         assert_eq!(json["decisions"][0], "diagnostic decision");
         assert_eq!(
@@ -5733,6 +5970,41 @@ mod tests {
         );
         assert_eq!(json["rule_events"][0]["outcome"], "apply");
         assert_eq!(json["rule_events"][0]["detail"], "priority=100 property=id");
+    }
+
+    #[test]
+    fn renders_explain_analyze_output_json_with_scan_pruning_reports() {
+        let db_path = unique_main_test_dir("explain-analyze-json");
+        let mut db = Database::open(&db_path).unwrap();
+        db.query("CREATE (:Memory {id: 'mem-a', kind: 'note', title: 'A'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem-b', kind: 'task', title: 'B'})")
+            .unwrap();
+
+        let query = "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.title AS title";
+        let parameters = BTreeMap::from([("kind".to_string(), Value::String("note".to_string()))]);
+        let output = db
+            .explain_analyze_query_with_params(query, &parameters)
+            .unwrap();
+        let json = explain_analyze_output_json(query, &parameters, &output, &db.plan_cache_stats());
+
+        assert_eq!(json["protocol"], "skein-explain-analyze");
+        assert_eq!(json["protocol_version"], 1);
+        assert_eq!(json["statement_kind"], "match_return");
+        assert_eq!(json["parameters"]["kind"], "note");
+        assert_eq!(json["output_row_count"], 1);
+        assert_eq!(json["execution_profile"]["scan_pruning_report_count"], 1);
+        assert_eq!(
+            json["execution_profile"]["scan_pruning_reports"][0]["strategy"]["kind"],
+            "property_eq"
+        );
+        assert_eq!(
+            json["execution_profile"]["scan_pruning_reports"][0]["strategy"]["property"],
+            "kind"
+        );
+        assert!(json["execution_profile"]["scan_pruning_reports"][0]
+            .get("value")
+            .is_none());
     }
 
     #[test]
@@ -7552,6 +7824,13 @@ mod tests {
         assert!(explain_json_usage().contains("<database-path>"));
         assert!(explain_json_usage().contains("<cypher>"));
         assert!(explain_json_usage().contains("--params-json"));
+    }
+
+    #[test]
+    fn validates_explain_analyze_json_usage_text() {
+        assert!(explain_analyze_json_usage().contains("<database-path>"));
+        assert!(explain_analyze_json_usage().contains("<cypher>"));
+        assert!(explain_analyze_json_usage().contains("--params-json"));
     }
 
     #[test]
