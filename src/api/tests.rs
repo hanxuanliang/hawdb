@@ -22382,19 +22382,22 @@ fn typed_augmentation_job_lifecycle_persists_as_one_wal_batch_and_replays() {
 
 #[test]
 fn reads_augmentation_job_status_for_nowledge_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:AugmentationJob {job_id: 'job_1', job_type: 'pagerank', status: 'running', progress: 42.5, message: 'Working', result: '{}', error_message: '', started_at: 100, completed_at: NULL, created_at: 90})")
         .unwrap();
 
-    let output = db
-        .knowledge_augmentation_job(&KnowledgeAugmentationJobRequest {
-            job_id: "job_1".to_string(),
-        })
-        .unwrap();
+    let request = KnowledgeAugmentationJobRequest {
+        job_id: "job_1".to_string(),
+    };
+    let output = db.knowledge_augmentation_job(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 1);
     assert!(output.found);
-    let job = output.job.unwrap();
+    let job = output.job.as_ref().unwrap();
     assert_eq!(job.job_id.as_deref(), Some("job_1"));
     assert_eq!(job.job_type.as_deref(), Some("pagerank"));
     assert_eq!(job.status.as_deref(), Some("running"));
@@ -22405,6 +22408,12 @@ fn reads_augmentation_job_status_for_nowledge_shapes() {
     assert_eq!(job.started_at, Some(Value::Int(100)));
     assert_eq!(job.completed_at, Some(Value::Null));
     assert_eq!(job.created_at, Some(Value::Int(90)));
+    let repeated = db.knowledge_augmentation_job(&request).unwrap();
+    assert_eq!(repeated, output);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
 
     let missing = db
         .knowledge_augmentation_job(&KnowledgeAugmentationJobRequest {
@@ -22417,7 +22426,11 @@ fn reads_augmentation_job_status_for_nowledge_shapes() {
 
 #[test]
 fn lists_augmentation_jobs_by_started_at_for_nowledge_graph_api() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:AugmentationJob {job_id: 'old_running', job_type: 'pagerank', status: 'running', progress: 10.0, message: 'old', started_at: 10, created_at: 1})")
         .unwrap();
     db.query("CREATE (:AugmentationJob {job_id: 'new_running', job_type: 'louvain', status: 'running', progress: 20.0, message: 'new', started_at: 30, created_at: 2})")
@@ -22425,13 +22438,12 @@ fn lists_augmentation_jobs_by_started_at_for_nowledge_graph_api() {
     db.query("CREATE (:AugmentationJob {job_id: 'pending', job_type: 'louvain', status: 'pending', progress: 0.0, message: 'pending', created_at: 3})")
         .unwrap();
 
-    let output = db
-        .knowledge_augmentation_jobs(&KnowledgeAugmentationJobListRequest {
-            status_filter: Some("running".to_string()),
-            order_by: KnowledgeAugmentationJobListOrder::StartedAtDesc,
-            limit: 1,
-        })
-        .unwrap();
+    let request = KnowledgeAugmentationJobListRequest {
+        status_filter: Some("running".to_string()),
+        order_by: KnowledgeAugmentationJobListOrder::StartedAtDesc,
+        limit: 1,
+    };
+    let output = db.knowledge_augmentation_jobs(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 3);
     assert_eq!(output.matched_count, 2);
@@ -22439,6 +22451,12 @@ fn lists_augmentation_jobs_by_started_at_for_nowledge_graph_api() {
     assert_eq!(output.rows.len(), 1);
     assert_eq!(output.rows[0].job_id.as_deref(), Some("new_running"));
     assert_eq!(output.rows[0].started_at, Some(Value::Int(30)));
+    let repeated = db.knowledge_augmentation_jobs(&request).unwrap();
+    assert_eq!(repeated, output);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
 }
 
 #[test]

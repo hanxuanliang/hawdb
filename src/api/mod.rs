@@ -8079,14 +8079,16 @@ impl Database {
         &self,
         request: &KnowledgeAugmentationJobRequest,
     ) -> Result<KnowledgeAugmentationJobOutput> {
-        knowledge_augmentation_job_for(&self.catalog, &self.store, request)
+        knowledge_augmentation_job_via_query_runtime(self, request)
+            .or_else(|_| knowledge_augmentation_job_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_augmentation_jobs(
         &self,
         request: &KnowledgeAugmentationJobListRequest,
     ) -> Result<KnowledgeAugmentationJobListOutput> {
-        knowledge_augmentation_jobs_for(&self.catalog, &self.store, request)
+        knowledge_augmentation_jobs_via_query_runtime(self, request)
+            .or_else(|_| knowledge_augmentation_jobs_for(&self.catalog, &self.store, request))
     }
 
     pub fn interrupt_knowledge_augmentation_jobs(
@@ -19197,6 +19199,13 @@ fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
         .filter(|value| !matches!(value, Value::Null))
         .map(value_to_external_id)
         .filter(|value| !value.is_empty())
+}
+
+fn optional_raw_string_cell(row: &Row, column: &str) -> Option<String> {
+    match row.get(column) {
+        Some(Value::String(value)) => Some(value.clone()),
+        _ => None,
+    }
 }
 
 fn optional_i64_cell(row: &Row, column: &str) -> Option<i64> {
@@ -30341,6 +30350,36 @@ fn knowledge_augmentation_job_for(
     })
 }
 
+fn knowledge_augmentation_job_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeAugmentationJobRequest,
+) -> Result<KnowledgeAugmentationJobOutput> {
+    validate_knowledge_augmentation_job_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters =
+        BTreeMap::from([("job_id".to_string(), Value::String(request.job_id.clone()))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (j:AugmentationJob) WHERE j.job_id = $job_id \
+         RETURN j.job_id AS job_id, id(j) AS node_id, j.job_type AS job_type, \
+         j.status AS status, j.progress AS progress, j.message AS message, \
+         j.result AS result, j.error_message AS error_message, j.started_at AS started_at, \
+         j.completed_at AS completed_at, j.created_at AS created_at \
+         ORDER BY node_id ASC LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let job = output
+        .rows
+        .first()
+        .map(knowledge_augmentation_job_from_query)
+        .transpose()?;
+    Ok(KnowledgeAugmentationJobOutput {
+        graph_commit_epoch,
+        found: job.is_some(),
+        job,
+    })
+}
+
 fn knowledge_augmentation_jobs_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -30389,6 +30428,116 @@ fn knowledge_augmentation_jobs_for(
     })
 }
 
+fn knowledge_augmentation_jobs_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeAugmentationJobListRequest,
+) -> Result<KnowledgeAugmentationJobListOutput> {
+    validate_knowledge_augmentation_job_list_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::new();
+    let predicate = augmentation_job_list_predicate(request, &mut parameters);
+    let count_query = format!("MATCH (j:AugmentationJob){predicate} RETURN count(j) AS total");
+    let matched_count = pagerank_count_via_query_runtime(db, &count_query, parameters.clone())?;
+    if request.limit == 0 {
+        return Ok(KnowledgeAugmentationJobListOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count,
+            returned_count: 0,
+        });
+    }
+
+    parameters.insert(
+        "limit".to_string(),
+        Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
+    );
+    let order_column = match request.order_by {
+        KnowledgeAugmentationJobListOrder::StartedAtDesc => "j.started_at",
+        KnowledgeAugmentationJobListOrder::CreatedAtDesc => "j.created_at",
+    };
+    let query = format!(
+        "MATCH (j:AugmentationJob){predicate} \
+         RETURN j.job_id AS job_id, id(j) AS node_id, j.job_type AS job_type, \
+         j.status AS status, j.progress AS progress, j.message AS message, \
+         j.result AS result, j.error_message AS error_message, j.started_at AS started_at, \
+         j.completed_at AS completed_at, j.created_at AS created_at \
+         ORDER BY {order_column} DESC, node_id ASC LIMIT $limit"
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let rows = output
+        .rows
+        .iter()
+        .map(knowledge_augmentation_job_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    let returned_count = rows.len();
+
+    Ok(KnowledgeAugmentationJobListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn validate_knowledge_augmentation_job_request(
+    request: &KnowledgeAugmentationJobRequest,
+) -> Result<()> {
+    if request.job_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge augmentation job read requires a non-empty job id".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_knowledge_augmentation_job_list_request(
+    request: &KnowledgeAugmentationJobListRequest,
+) -> Result<()> {
+    if request
+        .status_filter
+        .as_ref()
+        .is_some_and(|status| status.is_empty())
+    {
+        return Err(SkeinError::Semantic(
+            "knowledge augmentation job list requires a non-empty status filter".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn augmentation_job_list_predicate(
+    request: &KnowledgeAugmentationJobListRequest,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    let Some(status) = &request.status_filter else {
+        return String::new();
+    };
+    parameters.insert("status".to_string(), Value::String(status.clone()));
+    " WHERE j.status = $status".to_string()
+}
+
+fn knowledge_augmentation_job_from_query(row: &Row) -> Result<KnowledgeAugmentationJob> {
+    let node_id = row
+        .get("node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution("knowledge augmentation job row is missing node_id".to_string())
+        })?;
+    Ok(KnowledgeAugmentationJob {
+        job_id: optional_string_cell(row, "job_id"),
+        node_id,
+        job_type: optional_raw_string_cell(row, "job_type"),
+        status: optional_raw_string_cell(row, "status"),
+        progress: row.get("progress").and_then(value_to_finite_f64),
+        message: optional_raw_string_cell(row, "message"),
+        result: row.get("result").cloned(),
+        error_message: optional_raw_string_cell(row, "error_message"),
+        started_at: row.get("started_at").cloned(),
+        completed_at: row.get("completed_at").cloned(),
+        created_at: row.get("created_at").cloned(),
+    })
+}
+
 fn knowledge_augmentation_job_from_node(node: &NodeRecord) -> KnowledgeAugmentationJob {
     KnowledgeAugmentationJob {
         job_id: node
@@ -30417,9 +30566,15 @@ fn node_string_property(node: &NodeRecord, property_name: &str) -> Option<String
 }
 
 fn node_number_property(node: &NodeRecord, property_name: &str) -> Option<f64> {
-    match node.properties.get(property_name) {
-        Some(Value::Int(value)) => Some(*value as f64),
-        Some(Value::Float(value)) if value.is_finite() => Some(*value),
+    node.properties
+        .get(property_name)
+        .and_then(value_to_finite_f64)
+}
+
+fn value_to_finite_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Int(value) => Some(*value as f64),
+        Value::Float(value) if value.is_finite() => Some(*value),
         _ => None,
     }
 }
