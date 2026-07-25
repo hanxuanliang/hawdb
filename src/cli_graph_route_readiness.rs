@@ -242,10 +242,10 @@ impl QueryRuntimeReport {
 
     fn computed_blocker_codes(&self) -> Vec<String> {
         let mut blockers = BTreeSet::new();
-        if !self
+        if self
             .query_name
             .as_deref()
-            .is_some_and(|name| !name.trim().is_empty())
+            .is_none_or(|name| name.trim().is_empty())
             || self.query_index.is_none()
         {
             blockers.insert("query_report_identity_missing".to_string());

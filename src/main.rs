@@ -4387,16 +4387,16 @@ fn explain_output_json(
     output: &skein::api::ExplainOutput,
     plan_cache_stats: &skein::PlanCacheStats,
 ) -> serde_json::Value {
-    explain_diagnostics_json(
-        "skein-explain",
+    explain_diagnostics_json(ExplainDiagnosticsJsonInput {
+        protocol: "skein-explain",
         query,
-        output.statement_kind,
+        statement_kind: output.statement_kind,
         parameters,
-        &output.trace,
-        &output.work_request,
-        output.plan_cache_lookup,
+        trace: &output.trace,
+        work_request: &output.work_request,
+        plan_cache_lookup: output.plan_cache_lookup,
         plan_cache_stats,
-    )
+    })
 }
 
 fn explain_analyze_output_json(
@@ -4405,16 +4405,16 @@ fn explain_analyze_output_json(
     output: &skein::api::ExplainAnalyzeOutput,
     plan_cache_stats: &skein::PlanCacheStats,
 ) -> serde_json::Value {
-    let mut json = explain_diagnostics_json(
-        "skein-explain-analyze",
+    let mut json = explain_diagnostics_json(ExplainDiagnosticsJsonInput {
+        protocol: "skein-explain-analyze",
         query,
-        output.statement_kind,
+        statement_kind: output.statement_kind,
         parameters,
-        &output.trace,
-        &output.work_request,
-        output.plan_cache_lookup,
+        trace: &output.trace,
+        work_request: &output.work_request,
+        plan_cache_lookup: output.plan_cache_lookup,
         plan_cache_stats,
-    );
+    });
     if let serde_json::Value::Object(object) = &mut json {
         object.insert(
             "output_row_count".to_string(),
@@ -4428,71 +4428,73 @@ fn explain_analyze_output_json(
     json
 }
 
-fn explain_diagnostics_json(
-    protocol: &str,
-    query: &str,
-    statement_kind: &str,
-    parameters: &BTreeMap<String, Value>,
-    trace: &skein::optimizer::OptimizerTrace,
-    work_request: &skein::WorkRequest,
+struct ExplainDiagnosticsJsonInput<'a> {
+    protocol: &'a str,
+    query: &'a str,
+    statement_kind: &'static str,
+    parameters: &'a BTreeMap<String, Value>,
+    trace: &'a skein::optimizer::OptimizerTrace,
+    work_request: &'a skein::WorkRequest,
     plan_cache_lookup: skein::PlanCacheLookup,
-    plan_cache_stats: &skein::PlanCacheStats,
-) -> serde_json::Value {
+    plan_cache_stats: &'a skein::PlanCacheStats,
+}
+
+fn explain_diagnostics_json(input: ExplainDiagnosticsJsonInput<'_>) -> serde_json::Value {
     serde_json::json!({
-        "protocol": protocol,
+        "protocol": input.protocol,
         "protocol_version": 1,
-        "query": query,
-        "statement_kind": statement_kind,
+        "query": input.query,
+        "statement_kind": input.statement_kind,
         "parameters": serde_json::Value::Object(
-            parameters
+            input.parameters
                 .iter()
                 .map(|(key, value)| (key.clone(), value_json(value)))
                 .collect()
         ),
-        "groups": trace.groups,
-        "search_mode": trace.search_mode.as_str(),
-        "selected_plan": trace.selected_plan,
-        "selected_plan_fingerprint": trace.selected_plan_fingerprint,
+        "groups": input.trace.groups,
+        "search_mode": input.trace.search_mode.as_str(),
+        "selected_plan": input.trace.selected_plan,
+        "selected_plan_fingerprint": input.trace.selected_plan_fingerprint,
         "selected_plan_cost": {
-            "estimated_rows": trace.selected_plan_cost.estimated_rows,
-            "cost": trace.selected_plan_cost.cost,
+            "estimated_rows": input.trace.selected_plan_cost.estimated_rows,
+            "cost": input.trace.selected_plan_cost.cost,
         },
         "selected_plan_cost_breakdown": {
-            "estimated_rows": trace.selected_plan_cost_breakdown.estimated_rows,
-            "cost": trace.selected_plan_cost_breakdown.cost,
-            "cpu": trace.selected_plan_cost_breakdown.cpu,
-            "random_io": trace.selected_plan_cost_breakdown.random_io,
-            "sequential_io": trace.selected_plan_cost_breakdown.sequential_io,
-            "output_rows": trace.selected_plan_cost_breakdown.output_rows,
+            "estimated_rows": input.trace.selected_plan_cost_breakdown.estimated_rows,
+            "cost": input.trace.selected_plan_cost_breakdown.cost,
+            "cpu": input.trace.selected_plan_cost_breakdown.cpu,
+            "random_io": input.trace.selected_plan_cost_breakdown.random_io,
+            "sequential_io": input.trace.selected_plan_cost_breakdown.sequential_io,
+            "output_rows": input.trace.selected_plan_cost_breakdown.output_rows,
         },
-        "selected_plan_properties": physical_properties_json(&trace.selected_plan_properties),
-        "selected_plan_operator_counts": trace.selected_plan_operator_counts,
-        "selected_plan_class_counts": trace.selected_plan_class_counts,
+        "selected_plan_properties": physical_properties_json(&input.trace.selected_plan_properties),
+        "selected_plan_operator_counts": input.trace.selected_plan_operator_counts,
+        "selected_plan_class_counts": input.trace.selected_plan_class_counts,
         "work_request": {
-            "priority": work_request.priority.as_str(),
-            "class": work_request.class.as_str(),
-            "estimated_operations": work_request.estimated_operations,
+            "priority": input.work_request.priority.as_str(),
+            "class": input.work_request.class.as_str(),
+            "estimated_operations": input.work_request.estimated_operations,
         },
         "plan_cache_lookup": {
-            "event": plan_cache_lookup.as_str(),
-            "bypass_reason": plan_cache_lookup
+            "event": input.plan_cache_lookup.as_str(),
+            "bypass_reason": input.plan_cache_lookup
                 .bypass_reason()
                 .map(|reason| reason.as_str()),
         },
         "plan_cache_stats": {
-            "max_entries": plan_cache_stats.max_entries,
-            "entries": plan_cache_stats.entries,
-            "hits": plan_cache_stats.hits,
-            "misses": plan_cache_stats.misses,
-            "admissions": plan_cache_stats.admissions,
-            "disabled_misses": plan_cache_stats.disabled_misses,
-            "bypasses": plan_cache_stats.bypasses,
-            "evictions": plan_cache_stats.evictions,
-            "memory_pressure_events": plan_cache_stats.memory_pressure_events,
+            "max_entries": input.plan_cache_stats.max_entries,
+            "entries": input.plan_cache_stats.entries,
+            "hits": input.plan_cache_stats.hits,
+            "misses": input.plan_cache_stats.misses,
+            "admissions": input.plan_cache_stats.admissions,
+            "disabled_misses": input.plan_cache_stats.disabled_misses,
+            "bypasses": input.plan_cache_stats.bypasses,
+            "evictions": input.plan_cache_stats.evictions,
+            "memory_pressure_events": input.plan_cache_stats.memory_pressure_events,
         },
-        "warnings": trace.warnings,
-        "decisions": trace.decisions,
-        "rule_events": trace
+        "warnings": input.trace.warnings,
+        "decisions": input.trace.decisions,
+        "rule_events": input.trace
             .rule_events
             .iter()
             .map(rule_event_json)

@@ -2686,25 +2686,19 @@ fn filter_search_documents_with_segment_pruning<'a>(
     }
 
     let predicate_fields = search_predicate_fields(predicates);
-    let mut field_pruning = SearchFieldPruningAccumulator::new(predicates);
     let mut filtered_documents = Vec::new();
     let mut segment_documents = Vec::with_capacity(SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS);
-    let mut segment_count = 0;
-    let mut pruned_segment_count = 0;
-    let mut scanned_segment_count = 0;
+    let mut pruning = SearchSegmentPruningState::new(predicates);
 
     for document in documents.values() {
         segment_documents.push(document);
         if segment_documents.len() == SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS {
             filter_search_document_segment(
                 &mut filtered_documents,
-                &mut segment_count,
-                &mut pruned_segment_count,
-                &mut scanned_segment_count,
+                &mut pruning,
                 &segment_documents,
                 &predicate_fields,
                 predicates,
-                &mut field_pruning,
             );
             segment_documents.clear();
         }
@@ -2713,23 +2707,20 @@ fn filter_search_documents_with_segment_pruning<'a>(
     if !segment_documents.is_empty() {
         filter_search_document_segment(
             &mut filtered_documents,
-            &mut segment_count,
-            &mut pruned_segment_count,
-            &mut scanned_segment_count,
+            &mut pruning,
             &segment_documents,
             &predicate_fields,
             predicates,
-            &mut field_pruning,
         );
     }
 
     FilteredSearchDocuments {
         documents: filtered_documents,
-        segment_count,
-        pruned_segment_count,
-        scanned_segment_count,
+        segment_count: pruning.segment_count,
+        pruned_segment_count: pruning.pruned_segment_count,
+        scanned_segment_count: pruning.scanned_segment_count,
         persisted_segment_descriptor_used: false,
-        field_summaries: field_pruning.into_reports(),
+        field_summaries: pruning.field_pruning.into_reports(),
     }
 }
 
@@ -2770,22 +2761,21 @@ fn filter_search_documents_with_persisted_segments<'a>(
 
 fn filter_search_document_segment<'a>(
     output: &mut Vec<&'a SearchDocument>,
-    segment_count: &mut usize,
-    pruned_segment_count: &mut usize,
-    scanned_segment_count: &mut usize,
+    pruning: &mut SearchSegmentPruningState,
     segment_documents: &[&'a SearchDocument],
     predicate_fields: &BTreeSet<String>,
     predicates: &SearchPredicateSet,
-    field_pruning: &mut SearchFieldPruningAccumulator,
 ) {
-    *segment_count += 1;
+    pruning.segment_count += 1;
     let summary = SearchFilterSegmentSummary::from_documents(segment_documents, predicate_fields);
-    field_pruning.observe_in_memory_segment(&summary, predicates);
+    pruning
+        .field_pruning
+        .observe_in_memory_segment(&summary, predicates);
     if !summary.may_match_predicates(predicates) {
-        *pruned_segment_count += 1;
+        pruning.pruned_segment_count += 1;
         return;
     }
-    *scanned_segment_count += 1;
+    pruning.scanned_segment_count += 1;
     output.extend(
         segment_documents
             .iter()
@@ -2800,6 +2790,25 @@ fn search_predicate_fields(predicates: &SearchPredicateSet) -> BTreeSet<String> 
         .iter()
         .map(|predicate| predicate.field().name().to_string())
         .collect()
+}
+
+#[derive(Debug, Clone)]
+struct SearchSegmentPruningState {
+    segment_count: usize,
+    pruned_segment_count: usize,
+    scanned_segment_count: usize,
+    field_pruning: SearchFieldPruningAccumulator,
+}
+
+impl SearchSegmentPruningState {
+    fn new(predicates: &SearchPredicateSet) -> Self {
+        Self {
+            segment_count: 0,
+            pruned_segment_count: 0,
+            scanned_segment_count: 0,
+            field_pruning: SearchFieldPruningAccumulator::new(predicates),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
