@@ -7742,7 +7742,9 @@ impl Database {
         &self,
         request: &KnowledgeThreadDistillationCandidateRequest,
     ) -> Result<KnowledgeThreadDistillationCandidateOutput> {
-        knowledge_thread_distillation_candidates_for(&self.catalog, &self.store, request)
+        knowledge_thread_distillation_candidates_via_query_runtime(self, request).or_else(|_| {
+            knowledge_thread_distillation_candidates_for(&self.catalog, &self.store, request)
+        })
     }
 
     pub fn knowledge_thread_compacted_memories(
@@ -23897,6 +23899,106 @@ fn knowledge_thread_distillation_candidates_for(
         rows,
         matched_count,
         returned_count,
+    })
+}
+
+fn knowledge_thread_distillation_candidates_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadDistillationCandidateRequest,
+) -> Result<KnowledgeThreadDistillationCandidateOutput> {
+    validate_knowledge_thread_distillation_candidate_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::from([(
+        "normalized_space_id".to_string(),
+        Value::String(request.normalized_space_id.clone()),
+    )]);
+    let predicate = thread_distillation_candidate_query_predicate(request, &mut parameters);
+    let count_query = format!("MATCH (t:Thread) WHERE {predicate} RETURN count(t) AS total");
+    let matched_count = pagerank_count_via_query_runtime(db, &count_query, parameters.clone())?;
+    if request.limit == 0 {
+        return Ok(KnowledgeThreadDistillationCandidateOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count,
+            returned_count: 0,
+        });
+    }
+
+    parameters.insert(
+        "offset".to_string(),
+        Value::Int(i64::try_from(request.offset).unwrap_or(i64::MAX)),
+    );
+    parameters.insert(
+        "limit".to_string(),
+        Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
+    );
+    let page_query = format!(
+        "MATCH (t:Thread) WHERE {predicate} \
+         WITH t, COALESCE(t.updated_at, t.import_date, t.created_at) AS recent_at, \
+         CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END AS normalized_space_id \
+         RETURN t.id AS id, t.thread_id AS thread_id, id(t) AS node_id, \
+         t.source AS source, t.space_id AS raw_space_id, normalized_space_id AS normalized_space_id, \
+         recent_at AS recent_at \
+         ORDER BY recent_at DESC, thread_id ASC, id ASC, node_id ASC SKIP $offset LIMIT $limit"
+    );
+    let output = db.query_read_only_with_params_bounded(&page_query, &parameters, None)?;
+    let rows = output
+        .rows
+        .iter()
+        .map(knowledge_thread_distillation_candidate_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    let returned_count = rows.len();
+
+    Ok(KnowledgeThreadDistillationCandidateOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn thread_distillation_candidate_query_predicate(
+    request: &KnowledgeThreadDistillationCandidateRequest,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    let mut predicates = vec![
+        "t.thread_id IS NOT NULL".to_string(),
+        "t.thread_id <> ''".to_string(),
+        "(CASE WHEN t.space_id IS NULL OR t.space_id = '' THEN 'default' ELSE t.space_id END) = $normalized_space_id"
+            .to_string(),
+    ];
+    if let Some(source) = &request.source {
+        parameters.insert("source".to_string(), Value::String(source.clone()));
+        predicates.push("t.source = $source".to_string());
+    }
+    predicates.join(" AND ")
+}
+
+fn knowledge_thread_distillation_candidate_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeThreadDistillationCandidateRow> {
+    let thread_id = optional_string_cell(row, "thread_id").ok_or_else(|| {
+        SkeinError::Execution(
+            "knowledge thread distillation candidate row is missing thread_id".to_string(),
+        )
+    })?;
+    let node_id = row
+        .get("node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge thread distillation candidate row is missing node_id".to_string(),
+            )
+        })?;
+    Ok(KnowledgeThreadDistillationCandidateRow {
+        id: optional_string_cell(row, "id"),
+        thread_id,
+        node_id,
+        source: optional_string_cell(row, "source"),
+        raw_space_id: optional_string_cell(row, "raw_space_id"),
+        normalized_space_id: optional_string_cell(row, "normalized_space_id")
+            .unwrap_or_else(|| "default".to_string()),
+        recent_at: row.get("recent_at").and_then(optional_non_null_value),
     })
 }
 

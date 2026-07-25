@@ -18687,6 +18687,45 @@ fn reads_thread_distillation_candidates_for_optional_source_shapes() {
 }
 
 #[test]
+fn thread_distillation_candidates_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Thread {id: 'distill-cache-a', thread_id: 'logical_a', source: 'codex', space_id: '', updated_at: 40})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'distill-cache-b', thread_id: 'logical_b', source: 'codex', space_id: 'default', import_date: 50})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'distill-cache-c', thread_id: 'logical_c', source: 'email', space_id: 'default', created_at: 60})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'distill-cache-skip', source: 'codex', space_id: 'default', updated_at: 90})")
+        .unwrap();
+    let request = KnowledgeThreadDistillationCandidateRequest {
+        normalized_space_id: "default".to_string(),
+        source: Some("codex".to_string()),
+        limit: 1,
+        offset: 1,
+    };
+
+    let first = db
+        .knowledge_thread_distillation_candidates(&request)
+        .unwrap();
+    let second = db
+        .knowledge_thread_distillation_candidates(&request)
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].thread_id, "logical_a");
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn thread_distillation_candidate_read_rejects_empty_filters() {
     let db = Database::new();
 
