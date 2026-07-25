@@ -4688,6 +4688,17 @@ fn reads_community_entity_visibility_for_wiki_anchor_shapes() {
     );
     assert!(visibility.rows[3].memory_is_latest);
 
+    let cached_visibility = db
+        .knowledge_community_entity_visibility(&KnowledgeCommunityEntityVisibilityRequest {
+            community_ids: vec![Value::Int(7), Value::Int(8)],
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(cached_visibility, visibility);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+
     let tx = db.begin_read_transaction();
     db.query("CREATE (:Memory {id: 'memory_alpha_after', metadata: '{\"rank\":4}'})")
         .unwrap();

@@ -7128,7 +7128,7 @@ impl Database {
         &self,
         request: &KnowledgeCommunityEntityVisibilityRequest,
     ) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
-        knowledge_community_entity_visibility_for(&self.catalog, &self.store, request)
+        knowledge_community_entity_visibility_via_query_runtime(self, request)
     }
 
     pub fn knowledge_entity_delete_guard(
@@ -10551,6 +10551,216 @@ fn knowledge_community_entity_visibility_for(
         matched_entity_count,
         matched_row_count,
         returned_count,
+    })
+}
+
+fn knowledge_community_entity_visibility_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeCommunityEntityVisibilityRequest,
+) -> Result<KnowledgeCommunityEntityVisibilityOutput> {
+    validate_knowledge_community_entity_visibility_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    if db.catalog.label_id("Entity").is_none() || db.catalog.label_id("Memory").is_none() {
+        return Ok(empty_community_entity_visibility_output(graph_commit_epoch));
+    }
+
+    let parameters = BTreeMap::from([(
+        "community_ids".to_string(),
+        Value::List(request.community_ids.clone()),
+    )]);
+    let entity_output = db.query_read_only_with_params_bounded(
+        "MATCH (e:Entity) \
+         WHERE e.community_id IN $community_ids \
+         RETURN e.community_id AS community_id, e.id AS entity_id, \
+         id(e) AS entity_node_id, e.name AS entity_name, e.entity_type AS entity_type",
+        &parameters,
+        None,
+    )?;
+    let mut entities = entity_output
+        .rows
+        .iter()
+        .map(community_entity_visibility_entity_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    let matched_entity_count = entities.len();
+    if entities.is_empty() {
+        return Ok(KnowledgeCommunityEntityVisibilityOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_entity_count: 0,
+            matched_row_count: 0,
+            returned_count: 0,
+        });
+    }
+
+    let entity_node_ids = entities
+        .iter()
+        .map(|entity| {
+            i64::try_from(entity.entity_node_id)
+                .map(Value::Int)
+                .map_err(|_| {
+                    SkeinError::Execution(format!(
+                        "entity node id {} exceeds query parameter range",
+                        entity.entity_node_id
+                    ))
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let memory_parameters =
+        BTreeMap::from([("entity_node_ids".to_string(), Value::List(entity_node_ids))]);
+    let memory_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) \
+         WHERE id(e) IN $entity_node_ids \
+         RETURN id(e) AS entity_node_id, m.id AS memory_id, id(m) AS memory_node_id, \
+         m.metadata AS memory_metadata, m.is_latest AS memory_is_latest, \
+         m.lifecycle_state AS memory_lifecycle_state",
+        &memory_parameters,
+        None,
+    )?;
+    let mut memory_rows_by_entity = BTreeMap::<u64, Vec<CommunityEntityVisibilityMemoryRow>>::new();
+    for row in &memory_output.rows {
+        let memory_row = community_entity_visibility_memory_row_from_query(row)?;
+        memory_rows_by_entity
+            .entry(memory_row.entity_node_id)
+            .or_default()
+            .push(memory_row);
+    }
+
+    let mut rows = Vec::new();
+    entities.sort_by(|left, right| left.entity_node_id.cmp(&right.entity_node_id));
+    for entity in entities {
+        if let Some(memory_rows) = memory_rows_by_entity.remove(&entity.entity_node_id) {
+            rows.extend(
+                memory_rows
+                    .into_iter()
+                    .map(|memory| entity.clone().with_memory(Some(memory))),
+            );
+        } else {
+            rows.push(entity.with_memory(None));
+        }
+    }
+
+    sort_community_entity_visibility_rows(&mut rows);
+    let matched_row_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCommunityEntityVisibilityOutput {
+        graph_commit_epoch,
+        rows,
+        matched_entity_count,
+        matched_row_count,
+        returned_count,
+    })
+}
+
+#[derive(Debug, Clone)]
+struct CommunityEntityVisibilityEntityRow {
+    community_id: Value,
+    entity_id: Option<String>,
+    entity_node_id: u64,
+    entity_name: Option<String>,
+    entity_type: Option<String>,
+}
+
+impl CommunityEntityVisibilityEntityRow {
+    fn with_memory(
+        self,
+        memory: Option<CommunityEntityVisibilityMemoryRow>,
+    ) -> KnowledgeCommunityEntityVisibilityRow {
+        KnowledgeCommunityEntityVisibilityRow {
+            community_id: self.community_id,
+            entity_id: self.entity_id,
+            entity_node_id: self.entity_node_id,
+            entity_name: self.entity_name,
+            entity_type: self.entity_type,
+            memory_id: memory.as_ref().and_then(|memory| memory.memory_id.clone()),
+            memory_node_id: memory.as_ref().map(|memory| memory.memory_node_id),
+            memory_metadata: memory
+                .as_ref()
+                .and_then(|memory| memory.memory_metadata.clone()),
+            memory_is_latest: memory
+                .as_ref()
+                .and_then(|memory| memory.memory_is_latest)
+                .unwrap_or(true),
+            memory_lifecycle_state: memory.and_then(|memory| memory.memory_lifecycle_state),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CommunityEntityVisibilityMemoryRow {
+    entity_node_id: u64,
+    memory_id: Option<String>,
+    memory_node_id: u64,
+    memory_metadata: Option<Value>,
+    memory_is_latest: Option<bool>,
+    memory_lifecycle_state: Option<String>,
+}
+
+fn community_entity_visibility_entity_row_from_query(
+    row: &Row,
+) -> Result<CommunityEntityVisibilityEntityRow> {
+    let community_id = row.get("community_id").cloned().ok_or_else(|| {
+        SkeinError::Execution(
+            "knowledge community entity visibility row is missing community_id".to_string(),
+        )
+    })?;
+    let entity_node_id = row
+        .get("entity_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge community entity visibility row is missing entity_node_id".to_string(),
+            )
+        })?;
+    Ok(CommunityEntityVisibilityEntityRow {
+        community_id,
+        entity_id: optional_string_cell(row, "entity_id"),
+        entity_node_id,
+        entity_name: optional_string_cell(row, "entity_name"),
+        entity_type: optional_string_cell(row, "entity_type"),
+    })
+}
+
+fn community_entity_visibility_memory_row_from_query(
+    row: &Row,
+) -> Result<CommunityEntityVisibilityMemoryRow> {
+    let entity_node_id = row
+        .get("entity_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge community entity visibility memory row is missing entity_node_id"
+                    .to_string(),
+            )
+        })?;
+    let memory_node_id = row
+        .get("memory_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge community entity visibility memory row is missing memory_node_id"
+                    .to_string(),
+            )
+        })?;
+    let memory_is_latest = match row.get("memory_is_latest") {
+        Some(Value::Bool(value)) => Some(*value),
+        Some(Value::Null) | None => None,
+        Some(value) => {
+            return Err(SkeinError::Execution(format!(
+                "knowledge community entity visibility memory row has non-boolean memory_is_latest: {value:?}"
+            )));
+        }
+    };
+    Ok(CommunityEntityVisibilityMemoryRow {
+        entity_node_id,
+        memory_id: optional_string_cell(row, "memory_id"),
+        memory_node_id,
+        memory_metadata: optional_value_cell(row, "memory_metadata"),
+        memory_is_latest,
+        memory_lifecycle_state: optional_string_cell(row, "memory_lifecycle_state"),
     })
 }
 
