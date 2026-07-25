@@ -8243,7 +8243,6 @@ impl Database {
         request: &KnowledgeSubgraphRequest,
     ) -> KnowledgeSubgraphOutput {
         knowledge_subgraph_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_subgraph_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_scoped_subgraph(
@@ -8251,7 +8250,6 @@ impl Database {
         request: &KnowledgeScopedSubgraphRequest,
     ) -> KnowledgeSubgraphOutput {
         knowledge_scoped_subgraph_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_scoped_subgraph_for(&self.catalog, &self.store, request))
     }
 
     fn ensure_writable(&self) -> Result<()> {
@@ -33597,7 +33595,7 @@ fn knowledge_subgraph_for(
 fn knowledge_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeSubgraphRequest,
-) -> Option<KnowledgeSubgraphOutput> {
+) -> KnowledgeSubgraphOutput {
     knowledge_scoped_subgraph_via_query_runtime(
         db,
         &KnowledgeScopedSubgraphRequest {
@@ -33635,11 +33633,8 @@ fn knowledge_query_runtime_failed_subgraph_output(
 fn knowledge_scoped_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedSubgraphRequest,
-) -> Option<KnowledgeSubgraphOutput> {
+) -> KnowledgeSubgraphOutput {
     let navigation = &request.navigation;
-    if navigation.max_hops != 1 {
-        return None;
-    }
 
     let graph_commit_epoch = db.store.commit_epoch();
     let seed_request = KnowledgeEntityRequest {
@@ -33649,10 +33644,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
     let seed = match knowledge_relationship_seed_via_query_runtime(db, &seed_request) {
         Ok(seed) => seed,
         Err(_) => {
-            return Some(knowledge_query_runtime_failed_subgraph_output(
-                graph_commit_epoch,
-                request,
-            ));
+            return knowledge_query_runtime_failed_subgraph_output(graph_commit_epoch, request);
         }
     };
     let Some(seed) = seed else {
@@ -33676,7 +33668,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             relationship_limit: Some(navigation.relationship_limit),
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return Some(KnowledgeSubgraphOutput {
+        return KnowledgeSubgraphOutput {
             graph_commit_epoch,
             seed_node_id: None,
             nodes: Vec::new(),
@@ -33685,7 +33677,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        });
+        };
     };
     if !request.metadata_filters.is_empty()
         && !knowledge_entity_matches_filters(&seed, &request.metadata_filters)
@@ -33707,7 +33699,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             relationship_limit: Some(navigation.relationship_limit),
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return Some(KnowledgeSubgraphOutput {
+        return KnowledgeSubgraphOutput {
             graph_commit_epoch,
             seed_node_id: Some(seed.node_id),
             nodes: Vec::new(),
@@ -33716,17 +33708,17 @@ fn knowledge_scoped_subgraph_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        });
+        };
     }
 
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
                 if validate_cypher_identifier(name, "relationship type").is_err() {
-                    return Some(knowledge_query_runtime_failed_subgraph_output(
+                    return knowledge_query_runtime_failed_subgraph_output(
                         graph_commit_epoch,
                         request,
-                    ));
+                    );
                 }
                 Some(name.to_string())
             }
@@ -33749,7 +33741,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
                         relationship_limit: Some(navigation.relationship_limit),
                     });
                 attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return Some(KnowledgeSubgraphOutput {
+                return KnowledgeSubgraphOutput {
                     graph_commit_epoch,
                     seed_node_id: Some(seed.node_id),
                     nodes: Vec::new(),
@@ -33758,27 +33750,25 @@ fn knowledge_scoped_subgraph_via_query_runtime(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                });
+                };
             }
         },
         None => None,
     };
 
     let (nodes, relationships, fanout_reason_details) =
-        match knowledge_one_hop_subgraph_via_query_runtime(
+        match expand_knowledge_subgraph_via_query_runtime(
             db,
             &seed,
             relationship_type_name.as_deref(),
             navigation.direction,
+            navigation.max_hops,
             navigation.node_limit,
             navigation.relationship_limit,
         ) {
             Ok(output) => output,
             Err(_) => {
-                return Some(knowledge_query_runtime_failed_subgraph_output(
-                    graph_commit_epoch,
-                    request,
-                ));
+                return knowledge_query_runtime_failed_subgraph_output(graph_commit_epoch, request);
             }
         };
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
@@ -33798,7 +33788,7 @@ fn knowledge_scoped_subgraph_via_query_runtime(
         relationship_limit: Some(navigation.relationship_limit),
     });
     attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    Some(KnowledgeSubgraphOutput {
+    KnowledgeSubgraphOutput {
         graph_commit_epoch,
         seed_node_id: Some(seed.node_id),
         diagnostics,
@@ -33807,14 +33797,15 @@ fn knowledge_scoped_subgraph_via_query_runtime(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
-    })
+    }
 }
 
-fn knowledge_one_hop_subgraph_via_query_runtime(
+fn expand_knowledge_subgraph_via_query_runtime(
     db: &Database,
     seed: &KnowledgeEntity,
     relationship_type_name: Option<&str>,
     direction: KnowledgeNeighborDirection,
+    max_hops: usize,
     node_limit: usize,
     relationship_limit: usize,
 ) -> Result<(
@@ -33827,6 +33818,8 @@ fn knowledge_one_hop_subgraph_via_query_runtime(
     let mut fanout_reason_details = Vec::new();
     let mut seen_nodes = BTreeSet::new();
     let mut seen_relationships = BTreeSet::new();
+    let mut reported_dense_groups = BTreeSet::new();
+    let mut frontier = VecDeque::from([(NodeId(seed.node_id), 0usize)]);
 
     if node_limit == 0 {
         fanout_reason_details.push(KnowledgeFanoutReasonDetail::node_limit(0));
@@ -33836,82 +33829,41 @@ fn knowledge_one_hop_subgraph_via_query_runtime(
     seen_nodes.insert(seed.node_id);
 
     let relationship_type = relationship_type_name.and_then(|name| db.catalog.rel_type_id(name));
-    record_dense_adjacency_diagnostics(
-        DenseAdjacencyDiagnosticContext {
-            catalog: &db.catalog,
-            store: &db.store,
-            operation: "knowledge_subgraph",
-            relationship_type,
-            requested_direction: direction,
-        },
-        NodeId(seed.node_id),
-        &mut BTreeSet::new(),
-        &mut fanout_reason_details,
-    );
 
-    let rel_pattern = relationship_type_name
-        .map(|name| format!(":{name}"))
-        .unwrap_or_default();
-    let parameters = BTreeMap::from([(
-        "seed_node_id".to_string(),
-        Value::Int(i64::try_from(seed.node_id).map_err(|_| {
-            SkeinError::Execution("knowledge subgraph seed node id exceeds i64".to_string())
-        })?),
-    )]);
-
-    if matches!(
-        direction,
-        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
-    ) {
-        let query = format!(
-            "MATCH (source)-[r{rel_pattern}]->(target) \
-             WHERE id(source) = $seed_node_id \
-             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
-             ORDER BY relationship_id ASC"
-        );
-        knowledge_one_hop_subgraph_for_direction_via_query_runtime(
-            KnowledgeOneHopSubgraphDirectionQuery {
-                db,
-                query: &query,
-                parameters: &parameters,
-                direction: KnowledgeGraphPathDirection::Outgoing,
-                next_endpoint: KnowledgeSubgraphNextEndpoint::Target,
-                node_limit,
-                relationship_limit,
-                seen_nodes: &mut seen_nodes,
-                seen_relationships: &mut seen_relationships,
-                nodes: &mut nodes,
-                relationships: &mut relationships,
-                fanout_reason_details: &mut fanout_reason_details,
+    while let Some((current_node, depth)) = frontier.pop_front() {
+        if depth >= max_hops {
+            continue;
+        }
+        record_dense_adjacency_diagnostics(
+            DenseAdjacencyDiagnosticContext {
+                catalog: &db.catalog,
+                store: &db.store,
+                operation: "knowledge_subgraph",
+                relationship_type,
+                requested_direction: direction,
             },
-        )?;
-    }
-    if matches!(
-        direction,
-        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
-    ) {
-        let query = format!(
-            "MATCH (source)-[r{rel_pattern}]->(target) \
-             WHERE id(target) = $seed_node_id \
-             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
-             ORDER BY relationship_id ASC"
+            current_node,
+            &mut reported_dense_groups,
+            &mut fanout_reason_details,
         );
-        knowledge_one_hop_subgraph_for_direction_via_query_runtime(
-            KnowledgeOneHopSubgraphDirectionQuery {
-                db,
-                query: &query,
-                parameters: &parameters,
-                direction: KnowledgeGraphPathDirection::Incoming,
-                next_endpoint: KnowledgeSubgraphNextEndpoint::Source,
-                node_limit,
-                relationship_limit,
-                seen_nodes: &mut seen_nodes,
-                seen_relationships: &mut seen_relationships,
-                nodes: &mut nodes,
-                relationships: &mut relationships,
-                fanout_reason_details: &mut fanout_reason_details,
-            },
-        )?;
+        if expand_knowledge_subgraph_node_via_query_runtime(ExpandKnowledgeSubgraphNodeQuery {
+            db,
+            current_node,
+            relationship_type_name,
+            direction,
+            next_depth: depth + 1,
+            max_hops,
+            node_limit,
+            relationship_limit,
+            seen_nodes: &mut seen_nodes,
+            seen_relationships: &mut seen_relationships,
+            frontier: &mut frontier,
+            nodes: &mut nodes,
+            relationships: &mut relationships,
+            fanout_reason_details: &mut fanout_reason_details,
+        })? {
+            break;
+        }
     }
 
     Ok((nodes, relationships, fanout_reason_details))
@@ -33923,24 +33875,122 @@ enum KnowledgeSubgraphNextEndpoint {
     Target,
 }
 
-struct KnowledgeOneHopSubgraphDirectionQuery<'a> {
+struct ExpandKnowledgeSubgraphNodeQuery<'a> {
     db: &'a Database,
-    query: &'a str,
-    parameters: &'a BTreeMap<String, Value>,
-    direction: KnowledgeGraphPathDirection,
-    next_endpoint: KnowledgeSubgraphNextEndpoint,
+    current_node: NodeId,
+    relationship_type_name: Option<&'a str>,
+    direction: KnowledgeNeighborDirection,
+    next_depth: usize,
+    max_hops: usize,
     node_limit: usize,
     relationship_limit: usize,
     seen_nodes: &'a mut BTreeSet<u64>,
     seen_relationships: &'a mut BTreeSet<u64>,
+    frontier: &'a mut VecDeque<(NodeId, usize)>,
     nodes: &'a mut Vec<KnowledgeEntity>,
     relationships: &'a mut Vec<KnowledgeGraphContextPath>,
     fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
 }
 
-fn knowledge_one_hop_subgraph_for_direction_via_query_runtime(
-    context: KnowledgeOneHopSubgraphDirectionQuery<'_>,
-) -> Result<()> {
+struct KnowledgeSubgraphDirectionQuery<'a> {
+    db: &'a Database,
+    query: &'a str,
+    parameters: &'a BTreeMap<String, Value>,
+    direction: KnowledgeGraphPathDirection,
+    next_endpoint: KnowledgeSubgraphNextEndpoint,
+    next_depth: usize,
+    max_hops: usize,
+    node_limit: usize,
+    relationship_limit: usize,
+    seen_nodes: &'a mut BTreeSet<u64>,
+    seen_relationships: &'a mut BTreeSet<u64>,
+    frontier: &'a mut VecDeque<(NodeId, usize)>,
+    nodes: &'a mut Vec<KnowledgeEntity>,
+    relationships: &'a mut Vec<KnowledgeGraphContextPath>,
+    fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
+}
+
+fn expand_knowledge_subgraph_node_via_query_runtime(
+    context: ExpandKnowledgeSubgraphNodeQuery<'_>,
+) -> Result<bool> {
+    let rel_pattern = context
+        .relationship_type_name
+        .map(|name| format!(":{name}"))
+        .unwrap_or_default();
+    let parameters = BTreeMap::from([(
+        "current_node_id".to_string(),
+        Value::Int(i64::try_from(context.current_node.0).map_err(|_| {
+            SkeinError::Execution("knowledge subgraph frontier node id exceeds i64".to_string())
+        })?),
+    )]);
+
+    if matches!(
+        context.direction,
+        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
+    ) {
+        let query = format!(
+            "MATCH (source)-[r{rel_pattern}]->(target) \
+             WHERE id(source) = $current_node_id \
+             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
+             ORDER BY relationship_id ASC"
+        );
+        if knowledge_subgraph_for_direction_via_query_runtime(KnowledgeSubgraphDirectionQuery {
+            db: context.db,
+            query: &query,
+            parameters: &parameters,
+            direction: KnowledgeGraphPathDirection::Outgoing,
+            next_endpoint: KnowledgeSubgraphNextEndpoint::Target,
+            next_depth: context.next_depth,
+            max_hops: context.max_hops,
+            node_limit: context.node_limit,
+            relationship_limit: context.relationship_limit,
+            seen_nodes: context.seen_nodes,
+            seen_relationships: context.seen_relationships,
+            frontier: context.frontier,
+            nodes: context.nodes,
+            relationships: context.relationships,
+            fanout_reason_details: context.fanout_reason_details,
+        })? {
+            return Ok(true);
+        }
+    }
+    if matches!(
+        context.direction,
+        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
+    ) {
+        let query = format!(
+            "MATCH (source)-[r{rel_pattern}]->(target) \
+             WHERE id(target) = $current_node_id \
+             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
+             ORDER BY relationship_id ASC"
+        );
+        if knowledge_subgraph_for_direction_via_query_runtime(KnowledgeSubgraphDirectionQuery {
+            db: context.db,
+            query: &query,
+            parameters: &parameters,
+            direction: KnowledgeGraphPathDirection::Incoming,
+            next_endpoint: KnowledgeSubgraphNextEndpoint::Source,
+            next_depth: context.next_depth,
+            max_hops: context.max_hops,
+            node_limit: context.node_limit,
+            relationship_limit: context.relationship_limit,
+            seen_nodes: context.seen_nodes,
+            seen_relationships: context.seen_relationships,
+            frontier: context.frontier,
+            nodes: context.nodes,
+            relationships: context.relationships,
+            fanout_reason_details: context.fanout_reason_details,
+        })? {
+            return Ok(true);
+        }
+    }
+
+    Ok(false)
+}
+
+fn knowledge_subgraph_for_direction_via_query_runtime(
+    context: KnowledgeSubgraphDirectionQuery<'_>,
+) -> Result<bool> {
     let output =
         context
             .db
@@ -33973,7 +34023,7 @@ fn knowledge_one_hop_subgraph_for_direction_via_query_runtime(
             context
                 .fanout_reason_details
                 .push(KnowledgeFanoutReasonDetail::node_limit(context.node_limit));
-            return Ok(());
+            return Ok(true);
         }
         if context.relationships.len() >= context.relationship_limit {
             context
@@ -33981,21 +34031,27 @@ fn knowledge_one_hop_subgraph_for_direction_via_query_runtime(
                 .push(KnowledgeFanoutReasonDetail::relationship_limit(
                     context.relationship_limit,
                 ));
-            return Ok(());
+            return Ok(true);
         }
-        context
-            .relationships
-            .push(knowledge_context_path_from_query_row(
-                row,
-                "subgraph",
-                context.direction,
-                relationship_id,
-            )?);
+        let mut relationship = knowledge_context_path_from_query_row(
+            row,
+            "subgraph",
+            context.direction,
+            relationship_id,
+        )?;
+        relationship.hop = context.next_depth;
+        context.relationships.push(relationship);
         if new_node && context.seen_nodes.insert(next_node.node_id) {
+            let next_node_id = NodeId(next_node.node_id);
             context.nodes.push(next_node);
+            if context.next_depth < context.max_hops {
+                context
+                    .frontier
+                    .push_back((next_node_id, context.next_depth));
+            }
         }
     }
-    Ok(())
+    Ok(false)
 }
 
 fn knowledge_scoped_subgraph_for(
