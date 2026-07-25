@@ -8192,7 +8192,8 @@ impl Database {
         &self,
         request: &KnowledgeNeighborsRequest,
     ) -> KnowledgeNeighborsOutput {
-        knowledge_neighbors_for(&self.catalog, &self.store, request)
+        knowledge_neighbors_via_query_runtime(self, request)
+            .unwrap_or_else(|| knowledge_neighbors_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_scoped_neighbors(
@@ -30676,6 +30677,124 @@ fn knowledge_neighbors_for(
             metadata_filters: BTreeMap::new(),
         },
     )
+}
+
+fn knowledge_neighbors_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeNeighborsRequest,
+) -> Option<KnowledgeNeighborsOutput> {
+    if request.max_hops > 1 {
+        return None;
+    }
+    let graph_commit_epoch = db.store.commit_epoch();
+    let seed_request = KnowledgeEntityRequest {
+        label: request.label.clone(),
+        external_id: request.external_id.clone(),
+    };
+    let seed = knowledge_relationship_seed_via_query_runtime(db, &seed_request).ok()?;
+    let Some(seed) = seed else {
+        let diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch,
+            seed_found: false,
+            target_found: None,
+            path_count: 0,
+            node_count: 0,
+            relationship_count: 0,
+            fanout_reason_details: Vec::new(),
+            missing_seed_identity: Some(knowledge_identity_description(
+                request.label.as_str(),
+                request.external_id.as_str(),
+            )),
+            missing_target_identity: None,
+            missing_relationship_type: None,
+            max_hops: request.max_hops,
+            path_limit: Some(request.limit),
+            node_limit: None,
+            relationship_limit: None,
+        });
+        return Some(KnowledgeNeighborsOutput {
+            graph_commit_epoch,
+            seed_node_id: None,
+            paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
+            fanout_reasons: Vec::new(),
+            diagnostics,
+        });
+    };
+
+    let relationship_type_name = match request.relationship_type.as_deref() {
+        Some(name) => match db.catalog.rel_type_id(name) {
+            Some(_) => {
+                validate_cypher_identifier(name, "relationship type").ok()?;
+                Some(name.to_string())
+            }
+            None => {
+                let diagnostics =
+                    knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                        graph_commit_epoch,
+                        seed_found: true,
+                        target_found: None,
+                        path_count: 0,
+                        node_count: 0,
+                        relationship_count: 0,
+                        fanout_reason_details: Vec::new(),
+                        missing_seed_identity: None,
+                        missing_target_identity: None,
+                        missing_relationship_type: Some(name.to_string()),
+                        max_hops: request.max_hops,
+                        path_limit: Some(request.limit),
+                        node_limit: None,
+                        relationship_limit: None,
+                    });
+                return Some(KnowledgeNeighborsOutput {
+                    graph_commit_epoch,
+                    seed_node_id: Some(seed.node_id),
+                    paths: Vec::new(),
+                    fanout_reason_codes: Vec::new(),
+                    fanout_reason_details: Vec::new(),
+                    fanout_reasons: Vec::new(),
+                    diagnostics,
+                });
+            }
+        },
+        None => None,
+    };
+
+    let (paths, fanout_reason_details) = knowledge_relationship_rows_via_query_runtime(
+        db,
+        "seed",
+        seed.node_id,
+        relationship_type_name.as_deref(),
+        request.direction,
+        request.limit,
+    )
+    .ok()?;
+    let diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+        graph_commit_epoch,
+        seed_found: true,
+        target_found: None,
+        path_count: paths.len(),
+        node_count: knowledge_context_path_node_count(&paths),
+        relationship_count: paths.len(),
+        fanout_reason_details: fanout_reason_details.clone(),
+        missing_seed_identity: None,
+        missing_target_identity: None,
+        missing_relationship_type: None,
+        max_hops: request.max_hops,
+        path_limit: Some(request.limit),
+        node_limit: None,
+        relationship_limit: None,
+    });
+    Some(KnowledgeNeighborsOutput {
+        graph_commit_epoch,
+        seed_node_id: Some(seed.node_id),
+        paths,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
+        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
+        fanout_reason_details,
+        diagnostics,
+    })
 }
 
 fn knowledge_scoped_neighbors_for(

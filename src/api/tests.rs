@@ -26025,7 +26025,11 @@ fn typed_knowledge_navigation_uses_projected_identity_for_idless_seed() {
 
 #[test]
 fn knowledge_neighbors_reports_limit_and_missing_seed() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'left', name: 'Left'})")
             .unwrap();
     let right = db
@@ -26043,14 +26047,15 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
         .create_relationship(&mut db.catalog, NodeId(0), right, "LINKS", BTreeMap::new())
         .unwrap();
 
-    let limited = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
+    let limited_request = KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
         external_id: "root".to_string(),
         relationship_type: None,
         direction: KnowledgeNeighborDirection::Both,
         limit: 1,
         max_hops: 1,
-    });
+    };
+    let limited = db.knowledge_neighbors(&limited_request);
     assert_eq!(limited.paths.len(), 1);
     assert!(limited.diagnostics.seed_found);
     assert_eq!(limited.diagnostics.path_count, 1);
@@ -26070,6 +26075,14 @@ fn knowledge_neighbors_reports_limit_and_missing_seed() {
         limited.fanout_reason_codes
     );
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
+
+    let stats = db.plan_cache_stats();
+    let repeated_limited = db.knowledge_neighbors(&limited_request);
+    assert_eq!(repeated_limited, limited);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 
     let disabled = db.knowledge_neighbors(&KnowledgeNeighborsRequest {
         label: "Memory".to_string(),
