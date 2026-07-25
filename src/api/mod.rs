@@ -30217,6 +30217,14 @@ fn scan_pruning_report_value(report: &ScanPruningReport) -> Value {
         ("pruned".to_string(), Value::Bool(report.pruned)),
         ("exact_empty".to_string(), Value::Bool(report.exact_empty)),
         (
+            "candidate_count_before_pruning".to_string(),
+            usize_value(report.candidate_count_before_pruning),
+        ),
+        (
+            "pruned_candidate_count".to_string(),
+            usize_value(report.pruned_candidate_count),
+        ),
+        (
             "candidate_count_before_filter".to_string(),
             usize_value(report.candidate_count_before_filter),
         ),

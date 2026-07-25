@@ -1893,6 +1893,7 @@ fn execute_bindings_with_limit(
             let nodes = store
                 .seek_nodes_by_property(label_id, property, value)
                 .collect::<Vec<_>>();
+            let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
                 label_id: Some(label_id),
                 strategy: ScanPruningStrategy::PropertyEq {
@@ -1900,6 +1901,8 @@ fn execute_bindings_with_limit(
                 },
                 pruned: true,
                 exact_empty: nodes.is_empty(),
+                candidate_count_before_pruning,
+                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
                 candidate_count_before_filter: nodes.len(),
                 output_count: nodes
                     .len()
@@ -1935,6 +1938,7 @@ fn execute_bindings_with_limit(
                     }
                 }
             }
+            let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
                 label_id: Some(label_id),
                 strategy: ScanPruningStrategy::PropertyIn {
@@ -1942,6 +1946,8 @@ fn execute_bindings_with_limit(
                 },
                 pruned: true,
                 exact_empty: nodes.is_empty(),
+                candidate_count_before_pruning,
+                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
                 candidate_count_before_filter: nodes.len(),
                 output_count: nodes
                     .len()
@@ -1993,6 +1999,7 @@ fn execute_bindings_with_limit(
                 .seek_nodes_by_property_range(label_id, property, lower.as_ref(), upper.as_ref())
                 .into_iter()
                 .collect::<Vec<_>>();
+            let candidate_count_before_pruning = store.node_count_for_label(Some(label_id));
             record_scan_pruning_report(ScanPruningReport {
                 label_id: Some(label_id),
                 strategy: ScanPruningStrategy::PropertyRange {
@@ -2000,6 +2007,8 @@ fn execute_bindings_with_limit(
                 },
                 pruned: true,
                 exact_empty: nodes.is_empty(),
+                candidate_count_before_pruning,
+                pruned_candidate_count: candidate_count_before_pruning.saturating_sub(nodes.len()),
                 candidate_count_before_filter: nodes.len(),
                 output_count: nodes
                     .len()

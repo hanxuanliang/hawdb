@@ -478,6 +478,8 @@ pub struct ScanPruningReport {
     pub strategy: ScanPruningStrategy,
     pub pruned: bool,
     pub exact_empty: bool,
+    pub candidate_count_before_pruning: usize,
+    pub pruned_candidate_count: usize,
     pub candidate_count_before_filter: usize,
     pub output_count: usize,
     pub filtered_out_count: usize,
@@ -4870,7 +4872,7 @@ impl GraphStore {
     ) -> ScanPrunedNodeScan<'a> {
         let candidate = filter.and_then(|filter| self.prune_node_candidates(label_id, filter));
         let Some(candidate) = candidate else {
-            let candidate_count_before_filter = self.label_node_count(label_id);
+            let candidate_count_before_filter = self.node_count_for_label(label_id);
             let nodes = self
                 .scan_nodes(label_id)
                 .filter(|node| {
@@ -4887,6 +4889,8 @@ impl GraphStore {
                     strategy: ScanPruningStrategy::FullLabelScan,
                     pruned: false,
                     exact_empty: false,
+                    candidate_count_before_pruning: candidate_count_before_filter,
+                    pruned_candidate_count: 0,
                     candidate_count_before_filter,
                     output_count,
                     filtered_out_count: candidate_count_before_filter.saturating_sub(output_count),
@@ -4894,6 +4898,7 @@ impl GraphStore {
             };
         };
 
+        let candidate_count_before_pruning = self.node_count_for_label(label_id);
         let candidate_count_before_filter = candidate.node_ids.len();
         let nodes = candidate
             .node_ids
@@ -4914,6 +4919,9 @@ impl GraphStore {
                 strategy: candidate.strategy,
                 pruned: true,
                 exact_empty: candidate.exact_empty,
+                candidate_count_before_pruning,
+                pruned_candidate_count: candidate_count_before_pruning
+                    .saturating_sub(candidate_count_before_filter),
                 candidate_count_before_filter,
                 output_count,
                 filtered_out_count: candidate_count_before_filter.saturating_sub(output_count),
@@ -4921,7 +4929,7 @@ impl GraphStore {
         }
     }
 
-    fn label_node_count(&self, label_id: Option<LabelId>) -> usize {
+    pub fn node_count_for_label(&self, label_id: Option<LabelId>) -> usize {
         self.nodes
             .values()
             .filter(|node| self.node_matches_label(node, label_id))
@@ -10421,6 +10429,8 @@ mod tests {
         );
         assert!(scan.report.pruned);
         assert_eq!(scan.report.candidate_count_before_filter, 1);
+        assert_eq!(scan.report.candidate_count_before_pruning, 2);
+        assert_eq!(scan.report.pruned_candidate_count, 1);
         assert_eq!(scan.report.filtered_out_count, 0);
     }
 
@@ -10469,6 +10479,8 @@ mod tests {
             }
         );
         assert_eq!(scan.report.candidate_count_before_filter, 2);
+        assert_eq!(scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(scan.report.pruned_candidate_count, 1);
     }
 
     #[test]
@@ -10532,6 +10544,8 @@ mod tests {
             }
         );
         assert_eq!(scan.report.candidate_count_before_filter, 1);
+        assert_eq!(scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(scan.report.pruned_candidate_count, 2);
     }
 
     #[test]
@@ -10566,6 +10580,8 @@ mod tests {
         assert_eq!(scan.nodes.len(), 2);
         assert_eq!(scan.report.strategy, ScanPruningStrategy::OrUnion);
         assert_eq!(scan.report.candidate_count_before_filter, 2);
+        assert_eq!(scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(scan.report.pruned_candidate_count, 1);
         assert!(scan.report.pruned);
     }
 
@@ -10594,6 +10610,8 @@ mod tests {
         assert_eq!(scan.report.strategy, ScanPruningStrategy::Empty);
         assert!(scan.report.exact_empty);
         assert_eq!(scan.report.candidate_count_before_filter, 0);
+        assert_eq!(scan.report.candidate_count_before_pruning, 1);
+        assert_eq!(scan.report.pruned_candidate_count, 1);
     }
 
     #[test]
@@ -10648,6 +10666,8 @@ mod tests {
             }
         );
         assert_eq!(numeric_scan.report.candidate_count_before_filter, 1);
+        assert_eq!(numeric_scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(numeric_scan.report.pruned_candidate_count, 2);
 
         let date_scan = store.scan_nodes_with_filter_pruning(
             Some(label),
@@ -10665,6 +10685,8 @@ mod tests {
             }
         );
         assert_eq!(date_scan.report.candidate_count_before_filter, 2);
+        assert_eq!(date_scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(date_scan.report.pruned_candidate_count, 1);
     }
 
     #[test]
@@ -10699,6 +10721,8 @@ mod tests {
         assert_eq!(scan.report.strategy, ScanPruningStrategy::FullLabelScan);
         assert!(!scan.report.pruned);
         assert_eq!(scan.report.candidate_count_before_filter, 2);
+        assert_eq!(scan.report.candidate_count_before_pruning, 2);
+        assert_eq!(scan.report.pruned_candidate_count, 0);
         assert_eq!(scan.report.filtered_out_count, 1);
     }
 

@@ -1388,6 +1388,8 @@ fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
     value_path(report, &["strategy"]).is_some_and(serde_json::Value::is_object)
         && bool_path(report, &["pruned"]).is_some()
         && bool_path(report, &["exact_empty"]).is_some()
+        && u64_path(report, &["candidate_count_before_pruning"]).is_some()
+        && u64_path(report, &["pruned_candidate_count"]).is_some()
         && u64_path(report, &["candidate_count_before_filter"]).is_some()
         && u64_path(report, &["output_count"]).is_some()
         && u64_path(report, &["filtered_out_count"]).is_some()
@@ -2371,12 +2373,14 @@ mod tests {
                         "strategy": {
                             "kind": "property_eq",
                             "property": "id"
-                        },
-                        "pruned": true,
-                        "exact_empty": false,
-                        "candidate_count_before_filter": 1,
-                        "output_count": 1,
-                        "filtered_out_count": 0
+                                },
+                                "pruned": true,
+                                "exact_empty": false,
+                                "candidate_count_before_pruning": 2,
+                                "pruned_candidate_count": 1,
+                                "candidate_count_before_filter": 1,
+                                "output_count": 1,
+                                "filtered_out_count": 0
                     }
                 ]
             },

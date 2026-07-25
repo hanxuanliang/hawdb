@@ -4524,6 +4524,8 @@ fn scan_pruning_report_json(report: &skein::store::ScanPruningReport) -> serde_j
         "strategy": scan_pruning_strategy_json(&report.strategy),
         "pruned": report.pruned,
         "exact_empty": report.exact_empty,
+        "candidate_count_before_pruning": report.candidate_count_before_pruning,
+        "pruned_candidate_count": report.pruned_candidate_count,
         "candidate_count_before_filter": report.candidate_count_before_filter,
         "output_count": report.output_count,
         "filtered_out_count": report.filtered_out_count,

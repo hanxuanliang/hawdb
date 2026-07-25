@@ -1131,6 +1131,8 @@ mod tests {
                     },
                     "pruned": true,
                     "exact_empty": false,
+                    "candidate_count_before_pruning": 2,
+                    "pruned_candidate_count": 1,
                     "candidate_count_before_filter": 1,
                     "output_count": 1,
                     "filtered_out_count": 0
@@ -1222,6 +1224,8 @@ mod tests {
                         },
                         "pruned": true,
                         "exact_empty": false,
+                        "candidate_count_before_pruning": 2,
+                        "pruned_candidate_count": 1,
                         "candidate_count_before_filter": 1,
                         "output_count": 1,
                         "filtered_out_count": 0

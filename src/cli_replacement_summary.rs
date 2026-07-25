@@ -3045,6 +3045,7 @@ mod tests {
                     "reason": "LanceDB/Skein search projection side-by-side evidence is missing or not ready",
                     "evidence_fields": [
                         "search_projection_shadow_evidence.protocol",
+                        "search_projection_shadow_evidence.evidence_source",
                         "search_projection_shadow_evidence.present",
                         "search_projection_shadow_evidence.ready",
                         "search_projection_shadow_evidence.primary_ready",

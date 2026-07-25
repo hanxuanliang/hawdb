@@ -25426,6 +25426,14 @@ fn cypher_explain_analyze_returns_execution_profile_row() {
         panic!("expected scan pruning report map");
     };
     assert_eq!(scan_report.get("pruned"), Some(&Value::Bool(true)));
+    assert_eq!(
+        scan_report.get("candidate_count_before_pruning"),
+        Some(&Value::Int(2))
+    );
+    assert_eq!(
+        scan_report.get("pruned_candidate_count"),
+        Some(&Value::Int(0))
+    );
     assert_eq!(scan_report.get("output_count"), Some(&Value::Int(2)));
     let Some(Value::Map(strategy)) = scan_report.get("strategy") else {
         panic!("expected scan pruning strategy map");

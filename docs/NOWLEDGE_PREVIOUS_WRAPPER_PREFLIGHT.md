@@ -441,9 +441,11 @@ weak probe evidence keeps integration readiness fail-closed.
 Each successful probe must include a selected plan fingerprint, non-empty
 selected plan operator/class counts, optimizer decision count, plan-cache state,
 and `execution_profile.scan_pruning_reports` whose length matches
-`scan_pruning_report_count`. This keeps the runtime preflight useful for
-observability and prevents a count-only probe summary from being treated as
-cutover evidence.
+`scan_pruning_report_count`. Each scan-pruning report must include the selected
+strategy, `pruned`, `exact_empty`, `candidate_count_before_pruning`,
+`pruned_candidate_count`, `candidate_count_before_filter`, `output_count`, and
+`filtered_out_count`. This keeps the runtime preflight useful for observability
+and prevents a count-only probe summary from being treated as cutover evidence.
 
 ## 11. Compile The Mem Integration Bundle
 
@@ -485,6 +487,6 @@ automation consumes the bundle.
 Integration readiness also revalidates
 `graph_route_readiness.routes[].query_reports[]`: every required graph read
 route must include a ready query report with elapsed time, physical operator
-counts, optimizer decision count, scan-pruning profile presence, and plan-cache
-state. A hand-authored summary with only `route_query_runtime_ready=true` is not
-release-ready evidence.
+counts, optimizer decision count, scan-pruning profile presence with pruning
+before/after counts, and plan-cache state. A hand-authored summary with only
+`route_query_runtime_ready=true` is not release-ready evidence.

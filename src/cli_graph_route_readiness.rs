@@ -304,6 +304,8 @@ fn scan_pruning_report_ready(report: &serde_json::Value) -> bool {
         .is_some()
         && bool_path(report, &["pruned"]).is_some()
         && bool_path(report, &["exact_empty"]).is_some()
+        && u64_path(report, &["candidate_count_before_pruning"]).is_some()
+        && u64_path(report, &["pruned_candidate_count"]).is_some()
         && u64_path(report, &["candidate_count_before_filter"]).is_some()
         && u64_path(report, &["output_count"]).is_some()
         && u64_path(report, &["filtered_out_count"]).is_some()
@@ -582,7 +584,7 @@ mod tests {
         routes[0]["query_reports"][0]["scan_pruning_reports"][0]
             .as_object_mut()
             .unwrap()
-            .remove("candidate_count_before_filter");
+            .remove("candidate_count_before_pruning");
 
         let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
@@ -674,6 +676,8 @@ mod tests {
                     },
                     "pruned": true,
                     "exact_empty": false,
+                    "candidate_count_before_pruning": 2,
+                    "pruned_candidate_count": 1,
                     "candidate_count_before_filter": 1,
                     "output_count": 1,
                     "filtered_out_count": 0
