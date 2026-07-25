@@ -233,6 +233,20 @@ impl RouteQuery {
         if self.queries.is_empty() {
             blocker_codes.push("missing_route_queries".to_string());
         }
+        let required_query_families = required_query_families_for_route(&self.route);
+        if !required_query_families.is_empty() {
+            let observed_query_families = self
+                .queries
+                .iter()
+                .filter_map(|query| query.query_family.as_deref())
+                .collect::<BTreeSet<_>>();
+            if !required_query_families
+                .iter()
+                .any(|family| observed_query_families.contains(family))
+            {
+                blocker_codes.push("route_required_query_family_missing".to_string());
+            }
+        }
         if !shadow_compare.ready {
             blocker_codes.push("shadow_compare_evidence_not_ready".to_string());
         }
@@ -282,6 +296,7 @@ impl RouteQuery {
             "primary_ready": (self.primary_ready || self.primary_read_routing_enabled)
                 && query_runtime_succeeded
                 && blocker_codes.is_empty(),
+            "required_query_families": required_query_families,
             "query_reports": query_reports,
             "query_errors": query_errors,
             "blocker_codes": blocker_codes,
@@ -299,6 +314,27 @@ impl RouteQuery {
             return RouteShadowCompareEvidence::missing_parity();
         };
         RouteShadowCompareEvidence::from_parity_route(route)
+    }
+}
+
+fn required_query_families_for_route(route: &str) -> &'static [&'static str] {
+    match route {
+        "/graph/overview"
+        | "/graph/live-preview"
+        | "/graph/live-preview/{node_id}"
+        | "/graph/community-members/{community_id}"
+        | "/library/community/{community_id}/recent-memories"
+        | "/graph/node-details/{node_id}" => &["memory_lookup"],
+        "/graph/explore"
+        | "/graph/expand/{node_id}"
+        | "/library/community/{community_id}/subgraph"
+        | "/library/community/{community_id}/related"
+        | "/graph/orphans"
+        | "/graph/shortest-path" => &["graph_traversal"],
+        "/graph/analysis" | "/graph/augmentation/state" | "/graph/augmentation/pagerank/plan" => {
+            &["projected_graph"]
+        }
+        _ => &[],
     }
 }
 
@@ -864,6 +900,10 @@ mod tests {
             evidence["routes"][0]["query_reports"][0]["statement_kind"],
             "match_return"
         );
+        assert_eq!(
+            evidence["routes"][0]["required_query_families"],
+            serde_json::json!(["memory_lookup"])
+        );
     }
 
     #[test]
@@ -877,26 +917,7 @@ mod tests {
         let route_queries = parse_route_query_inventory(&serde_json::json!({
             "routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
                 .iter()
-                .map(|route| {
-                    serde_json::json!({
-                        "route": route,
-                        "shadow_compare_ready": true,
-                        "primary_ready": true,
-                        "queries": [
-                            {
-                                "name": format!("{}:memory-lookup", route),
-                                "query_family": "memory_lookup",
-                                "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
-                                "parameters": {
-                                    "id": "mem-route"
-                                },
-                                "require_scan_pruning": true,
-                                "require_pruned": true
-                            }
-                        ],
-                        "blocker_codes": []
-                    })
-                })
+                .map(|route| ready_route_query(route))
                 .collect::<Vec<_>>()
         }))
         .unwrap();
@@ -1099,6 +1120,59 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "query_family_missing"));
+        assert!(evidence["routes"][0]["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_required_query_family_missing"));
+    }
+
+    #[test]
+    fn route_evidence_fails_closed_when_route_family_does_not_match() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = parse_route_query_inventory(&serde_json::json!({
+            "routes": [
+                {
+                    "route": "/graph/shortest-path",
+                    "shadow_compare_ready": true,
+                    "primary_ready": true,
+                    "queries": [
+                        {
+                            "name": "shortest-path-smoke",
+                            "query_family": "memory_lookup",
+                            "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
+                            "parameters": {
+                                "id": "mem-route"
+                            }
+                        }
+                    ],
+                    "blocker_codes": []
+                }
+            ]
+        }))
+        .unwrap();
+
+        let route_parity = ready_route_parity_for(&["/graph/shortest-path"]);
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
+
+        assert_eq!(evidence["routes"][0]["primary_ready"], false);
+        assert_eq!(
+            evidence["routes"][0]["required_query_families"],
+            serde_json::json!(["graph_traversal"])
+        );
+        assert!(evidence["routes"][0]["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_required_query_family_missing"));
     }
 
     #[test]
@@ -1360,6 +1434,10 @@ mod tests {
     }
 
     fn ready_route_query(route: &str) -> serde_json::Value {
+        let query_family = super::required_query_families_for_route(route)
+            .first()
+            .copied()
+            .unwrap_or("memory_lookup");
         serde_json::json!({
             "route": route,
             "shadow_compare_ready": true,
@@ -1367,7 +1445,7 @@ mod tests {
             "queries": [
                 {
                     "name": format!("{}:memory-lookup", route),
-                    "query_family": "memory_lookup",
+                    "query_family": query_family,
                     "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
                     "parameters": {
                         "id": "mem-route"
