@@ -7198,7 +7198,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryTitleContentRequest,
     ) -> Result<KnowledgeMemoryTitleContentOutput> {
-        knowledge_memory_title_contents_for(&self.catalog, &self.store, request)
+        knowledge_memory_title_contents_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_evolves_latest(
@@ -11510,6 +11510,73 @@ fn knowledge_memory_title_contents_for(
     })
 }
 
+fn knowledge_memory_title_contents_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryTitleContentRequest,
+) -> Result<KnowledgeMemoryTitleContentOutput> {
+    validate_knowledge_memory_title_content_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    if request.memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryTitleContentOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+            missing_memory_ids: Vec::new(),
+        });
+    }
+
+    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let parameters = BTreeMap::from([(
+        "memory_ids".to_string(),
+        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id, id(m) AS node_id, m.title AS title, m.content AS content, m.created_at AS created_at",
+        &parameters,
+        None,
+    )?;
+    let mut matched_ids = BTreeSet::new();
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(knowledge_memory_title_content_row_from_query)
+        .inspect(|row| {
+            if let Some(memory_id) = &row.memory_id {
+                matched_ids.insert(memory_id.clone());
+            }
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_skill_memory_created_at(
+            &left.created_at,
+            &right.created_at,
+            KnowledgeSkillMemoryListOrder::CreatedAtAsc,
+        )
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
+        .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+    let matched_count = rows.len();
+    let returned_count = rows.len();
+
+    let mut seen_missing = BTreeSet::new();
+    let missing_memory_ids = request
+        .memory_ids
+        .iter()
+        .filter(|memory_id| !matched_ids.contains(*memory_id))
+        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeMemoryTitleContentOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_memory_ids,
+    })
+}
+
 fn validate_knowledge_memory_title_content_request(
     request: &KnowledgeMemoryTitleContentRequest,
 ) -> Result<()> {
@@ -11529,6 +11596,18 @@ fn knowledge_memory_title_content_row(memory: &NodeRecord) -> KnowledgeMemoryTit
         content: string_property(memory, "content"),
         created_at: memory.properties.get("created_at").cloned(),
     }
+}
+
+fn knowledge_memory_title_content_row_from_query(
+    row: &Row,
+) -> Option<KnowledgeMemoryTitleContentRow> {
+    Some(KnowledgeMemoryTitleContentRow {
+        memory_id: optional_string_cell(row, "memory_id"),
+        node_id: row.get("node_id").and_then(value_to_non_negative_u64)?,
+        title: optional_string_cell(row, "title"),
+        content: optional_string_cell(row, "content"),
+        created_at: optional_value_cell(row, "created_at"),
+    })
 }
 
 fn knowledge_memory_evolves_latest_for(
