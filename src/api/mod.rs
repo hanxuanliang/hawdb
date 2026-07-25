@@ -7683,7 +7683,8 @@ impl Database {
         &self,
         request: &KnowledgeThreadSourceListRequest,
     ) -> KnowledgeThreadSourceListOutput {
-        knowledge_thread_sources_for(&self.catalog, &self.store, request)
+        knowledge_thread_sources_via_query_runtime(self, request)
+            .unwrap_or_else(|| knowledge_thread_sources_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_thread_title(
@@ -22629,6 +22630,38 @@ fn knowledge_thread_sources_for(
         matched_count,
         returned_count,
     }
+}
+
+fn knowledge_thread_sources_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadSourceListRequest,
+) -> Option<KnowledgeThreadSourceListOutput> {
+    let output = db
+        .query_read_only_with_params_bounded(
+            "MATCH (t:Thread) \
+             WHERE t.source IS NOT NULL AND t.source <> '' \
+             RETURN DISTINCT t.source AS source \
+             ORDER BY source ASC",
+            &BTreeMap::new(),
+            None,
+        )
+        .ok()?;
+    let matched_count = output.rows.len();
+    let mut sources = output
+        .rows
+        .iter()
+        .filter_map(|row| optional_string_cell(row, "source"))
+        .collect::<Vec<_>>();
+    if request.limit > 0 {
+        sources.truncate(request.limit);
+    }
+    let returned_count = sources.len();
+    Some(KnowledgeThreadSourceListOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        sources,
+        matched_count,
+        returned_count,
+    })
 }
 
 fn knowledge_thread_title_for(

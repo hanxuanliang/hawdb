@@ -17620,7 +17620,11 @@ fn thread_list_rejects_unbounded_or_empty_filters() {
 
 #[test]
 fn lists_distinct_thread_sources_for_rest_fs_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'thread_a', source: 'slack'})")
         .unwrap();
     db.query("CREATE (:Thread {id: 'thread_b', source: 'codex'})")
@@ -17633,6 +17637,7 @@ fn lists_distinct_thread_sources_for_rest_fs_shape() {
     db.query("CREATE (:Memory {id: 'memory_source', source: 'ignored'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
+    let cache_before_lookup = db.plan_cache_stats();
 
     let output = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 });
     assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
@@ -17643,6 +17648,12 @@ fn lists_distinct_thread_sources_for_rest_fs_shape() {
         vec!["codex".to_string(), "slack".to_string()]
     );
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    let repeated = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 0 });
+    assert_eq!(output, repeated);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
     let limited = db.knowledge_thread_sources(&KnowledgeThreadSourceListRequest { limit: 1 });
     assert_eq!(limited.matched_count, 2);
