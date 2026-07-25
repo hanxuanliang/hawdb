@@ -5527,6 +5527,50 @@ fn projects_metadata_related_memories_for_rest_list_shape() {
 }
 
 #[test]
+fn metadata_related_memory_projected_list_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'metadata-cache-old', title: 'Old related', metadata: '{\"source_id\": \"external-thread-cache\"}', space_id: '', created_at: 10, future_field: 'old-future'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'metadata-cache-new', title: 'New related', metadata: '{\"source_thread_id\":\"external-thread-cache\"}', space_id: 'default', created_at: 20, future_field: 'new-future'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'metadata-cache-other', title: 'Other', metadata: '{\"source_id\":\"external-thread-other\"}', space_id: 'default', created_at: 30, future_field: 'wrong-source'})")
+        .unwrap();
+    let request = KnowledgeMemoryMetadataRelatedProjectedListRequest {
+        normalized_space_id: "default".to_string(),
+        source_id: "external-thread-cache".to_string(),
+        limit: 1,
+        property_names: vec!["title".to_string(), "future_field".to_string()],
+    };
+
+    let first = db
+        .knowledge_memory_metadata_related_projected_list(&request)
+        .unwrap();
+    let second = db
+        .knowledge_memory_metadata_related_projected_list(&request)
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(
+        first.rows[0].memory_id.as_deref(),
+        Some("metadata-cache-new")
+    );
+    assert_eq!(
+        first.rows[0].properties.get("future_field"),
+        Some(&Value::String("new-future".to_string()))
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn metadata_related_memory_projected_list_rejects_invalid_input_without_wal() {
     let path = unique_test_dir("metadata_related_memory_projected_invalid_without_wal");
     let mut db = Database::open(&path).unwrap();

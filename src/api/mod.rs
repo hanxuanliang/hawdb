@@ -7184,7 +7184,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
     ) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
-        knowledge_memory_metadata_related_projected_list_for(&self.catalog, &self.store, request)
+        knowledge_memory_metadata_related_projected_list_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_prefix_ownership(
@@ -11306,6 +11306,90 @@ fn knowledge_memory_metadata_related_projected_list_for(
     })
 }
 
+fn knowledge_memory_metadata_related_projected_list_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
+) -> Result<KnowledgeMemoryMetadataRelatedProjectedListOutput> {
+    validate_knowledge_memory_metadata_related_projected_list_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let markers = metadata_related_memory_markers(&request.source_id);
+    let parameters = BTreeMap::from([
+        (
+            "normalized_space_id".to_string(),
+            Value::String(request.normalized_space_id.clone()),
+        ),
+        (
+            "source_id_marker".to_string(),
+            Value::String(markers[0].clone()),
+        ),
+        (
+            "source_id_compact_marker".to_string(),
+            Value::String(markers[1].clone()),
+        ),
+        (
+            "source_thread_id_marker".to_string(),
+            Value::String(markers[2].clone()),
+        ),
+        (
+            "source_thread_id_compact_marker".to_string(),
+            Value::String(markers[3].clone()),
+        ),
+    ]);
+    let space_predicate = if request.normalized_space_id == "default" {
+        "(m.space_id IS NULL OR m.space_id = '' OR m.space_id = $normalized_space_id)"
+    } else {
+        "m.space_id = $normalized_space_id"
+    };
+    let query = format!(
+        "MATCH (m:Memory) WHERE {space_predicate} AND \
+         (m.metadata CONTAINS $source_id_marker OR \
+          m.metadata CONTAINS $source_id_compact_marker OR \
+          m.metadata CONTAINS $source_thread_id_marker OR \
+          m.metadata CONTAINS $source_thread_id_compact_marker) \
+         RETURN m AS memory"
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(|row| {
+            row.get("memory")
+                .and_then(knowledge_entity_from_value)
+                .map(|memory| {
+                    (
+                        knowledge_memory_projected_row_from_entity(
+                            &memory,
+                            &request.property_names,
+                        ),
+                        memory.properties.get("created_at").cloned(),
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        compare_skill_memory_created_at(
+            &left.1,
+            &right.1,
+            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        )
+        .then_with(|| compare_memory_projected_ids(&left.0, &right.0))
+    });
+    let matched_count = rows.len();
+    rows.truncate(request.limit);
+    let returned_count = rows.len();
+    let rows = rows
+        .into_iter()
+        .map(|(row, _created_at)| row)
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeMemoryMetadataRelatedProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
 fn validate_knowledge_memory_metadata_related_projected_list_request(
     request: &KnowledgeMemoryMetadataRelatedProjectedListRequest,
 ) -> Result<()> {
@@ -11429,6 +11513,18 @@ fn knowledge_memory_projected_row(
         node_id: memory.id.0,
         properties: projected_properties(&memory.properties, property_names),
         normalized_space_id: normalized_node_space_id(memory),
+    }
+}
+
+fn knowledge_memory_projected_row_from_entity(
+    memory: &KnowledgeEntity,
+    property_names: &[String],
+) -> KnowledgeMemoryProjectedRow {
+    KnowledgeMemoryProjectedRow {
+        memory_id: memory.external_id.clone(),
+        node_id: memory.node_id,
+        properties: projected_properties(&memory.properties, property_names),
+        normalized_space_id: knowledge_entity_normalized_space_id(memory),
     }
 }
 
