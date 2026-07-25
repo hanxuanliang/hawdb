@@ -132,8 +132,14 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if command == "nowledge-graph-route-evidence" {
-            let json = run_nowledge_graph_route_evidence(args)?;
+            let (json, require_ready) = run_nowledge_graph_route_evidence(args)?;
             println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge graph route evidence is not ready".to_string(),
+                ));
+            }
             return Ok(());
         }
         if command == "nowledge-previous-wrapper-preflight-check" {

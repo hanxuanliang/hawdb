@@ -8,12 +8,13 @@ use std::path::Path;
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 
 pub fn nowledge_graph_route_evidence_usage() -> String {
-    "nowledge-graph-route-evidence requires [--mode shadow_read_only|writable_cutover] [--capture-physical-plan] [--slow-log-threshold-micros <n>] <graph-db> <route-query-json>".to_string()
+    "nowledge-graph-route-evidence requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--capture-physical-plan] [--slow-log-threshold-micros <n>] <graph-db> <route-query-json>".to_string()
 }
 
 pub fn run_nowledge_graph_route_evidence(
     mut args: impl Iterator<Item = String>,
-) -> Result<serde_json::Value> {
+) -> Result<(serde_json::Value, bool)> {
+    let mut require_ready = false;
     let mut mode = NowledgeMemGraphMode::ShadowReadOnly;
     let mut options = NowledgeMemQueryReportOptions::default();
     let mut graph_path = None;
@@ -21,6 +22,9 @@ pub fn run_nowledge_graph_route_evidence(
 
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--require-ready" => {
+                require_ready = true;
+            }
             "--mode" => {
                 mode =
                     parse_mode(&args.next().ok_or_else(|| {
@@ -63,10 +67,9 @@ pub fn run_nowledge_graph_route_evidence(
     let mut graph = NowledgeMemGraph::open(graph_path, mode)?;
     let route_queries =
         parse_route_query_inventory(&read_json_file(Path::new(&route_query_path))?)?;
-    Ok(nowledge_graph_route_evidence_json(
-        &mut graph,
-        &route_queries,
-        options,
+    Ok((
+        nowledge_graph_route_evidence_json(&mut graph, &route_queries, options),
+        require_ready,
     ))
 }
 
@@ -79,12 +82,36 @@ fn nowledge_graph_route_evidence_json(
         .iter()
         .map(|route| route.query_runtime_evidence(graph, options))
         .collect::<Vec<_>>();
+    let ready = routes.iter().all(route_evidence_ready);
     serde_json::json!({
         "protocol": NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
         "mode": graph.mode().as_str(),
+        "ready": !routes.is_empty() && ready,
         "route_count": routes.len(),
         "routes": routes,
     })
+}
+
+fn route_evidence_ready(route: &serde_json::Value) -> bool {
+    let Some(query_reports) = route
+        .get("query_reports")
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    route
+        .get("primary_ready")
+        .and_then(serde_json::Value::as_bool)
+        == Some(true)
+        && !query_reports.is_empty()
+        && route
+            .get("query_errors")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|errors| errors.is_empty())
+        && route
+            .get("blocker_codes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|blockers| blockers.is_empty())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -346,6 +373,7 @@ mod tests {
             nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
 
         assert_eq!(evidence["protocol"], "nmem-graph-route-evidence-v1");
+        assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["routes"][0]["route"], "/graph/overview");
         assert_eq!(evidence["routes"][0]["primary_ready"], true);
         assert_eq!(
@@ -427,6 +455,7 @@ mod tests {
         let evidence =
             nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
 
+        assert_eq!(evidence["ready"], false);
         assert_eq!(evidence["routes"][0]["primary_ready"], false);
         assert_eq!(
             evidence["routes"][0]["query_reports"]
