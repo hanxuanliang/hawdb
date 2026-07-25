@@ -20814,7 +20814,11 @@ fn updates_community_lifecycle_for_nowledge_detection_and_summary() {
 
 #[test]
 fn reads_communities_for_nowledge_summary_list_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Community {id: 'community_a', community_id: 1, name: 'Alpha', description: 'alpha description', ai_summary: 'alpha summary', member_count: 5, updated_at: 10})")
         .unwrap();
     db.query("CREATE (:Community {id: 'community_b', community_id: 2, name: 'Beta', description: 'beta description', ai_summary: '', member_count: 10, updated_at: 20})")
@@ -20868,6 +20872,21 @@ fn reads_communities_for_nowledge_summary_list_shapes() {
     assert_eq!(presence_ranked.rows[2].id.as_deref(), Some("community_b"));
     assert!(!presence_ranked.rows[2].has_summary);
 
+    let stats = db.plan_cache_stats();
+    let repeated_presence_ranked = db
+        .knowledge_communities(&KnowledgeCommunityListRequest {
+            require_summary: false,
+            require_non_negative_community_id: true,
+            order: KnowledgeCommunityListOrder::SummaryPresenceThenMemberCountDesc,
+            limit: 0,
+        })
+        .unwrap();
+    assert_eq!(repeated_presence_ranked, presence_ranked);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 1);
+
     let snapshot = db.begin_read_transaction();
     db.query("CREATE (:Community {id: 'community_later', community_id: 4, name: 'Later', ai_summary: 'later summary', member_count: 200})")
         .unwrap();
@@ -20905,21 +20924,24 @@ fn community_list_read_returns_empty_without_community_label() {
 
 #[test]
 fn reads_community_detail_for_wiki_and_mcp_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Community {id: 'community_a', community_id: 7, name: 'Alpha', description: 'alpha description', ai_summary: 'alpha summary', member_count: 5, updated_at: 10})")
         .unwrap();
     db.query("CREATE (:Community {id: 'community_b', community_id: 8, name: 'Beta', description: 'beta description', ai_summary: '', member_count: 3})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let by_community_id = db
-        .knowledge_community(&KnowledgeCommunityRequest {
-            key: KnowledgeCommunityLookupKey::CommunityId(7),
-        })
-        .unwrap();
+    let community_id_request = KnowledgeCommunityRequest {
+        key: KnowledgeCommunityLookupKey::CommunityId(7),
+    };
+    let by_community_id = db.knowledge_community(&community_id_request).unwrap();
     assert_eq!(by_community_id.graph_commit_epoch, graph_commit_epoch);
     assert!(by_community_id.found);
-    let row = by_community_id.row.unwrap();
+    let row = by_community_id.row.as_ref().unwrap();
     assert_eq!(row.id.as_deref(), Some("community_a"));
     assert_eq!(row.community_id, Some(7));
     assert_eq!(row.name.as_deref(), Some("Alpha"));
@@ -20934,6 +20956,14 @@ fn reads_community_detail_for_wiki_and_mcp_shapes() {
     assert_eq!(row.member_count, Some(5));
     assert_eq!(row.updated_at, Some(Value::Int(10)));
     assert!(row.has_summary);
+
+    let stats = db.plan_cache_stats();
+    let repeated_by_community_id = db.knowledge_community(&community_id_request).unwrap();
+    assert_eq!(repeated_by_community_id, by_community_id);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 1);
 
     let by_id = db
         .knowledge_community(&KnowledgeCommunityRequest {

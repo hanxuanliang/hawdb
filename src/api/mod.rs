@@ -7954,14 +7954,14 @@ impl Database {
         &self,
         request: &KnowledgeCommunityListRequest,
     ) -> Result<KnowledgeCommunityListOutput> {
-        knowledge_communities_for(&self.catalog, &self.store, request)
+        knowledge_communities_via_query_runtime(self, request)
     }
 
     pub fn knowledge_community(
         &self,
         request: &KnowledgeCommunityRequest,
     ) -> Result<KnowledgeCommunityOutput> {
-        knowledge_community_for(&self.catalog, &self.store, request)
+        knowledge_community_via_query_runtime(self, request)
     }
 
     pub fn delete_knowledge_communities(
@@ -26993,6 +26993,43 @@ fn knowledge_communities_for(
     })
 }
 
+fn knowledge_communities_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeCommunityListRequest,
+) -> Result<KnowledgeCommunityListOutput> {
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (c:Community) RETURN c AS community",
+        &BTreeMap::new(),
+        None,
+    )?;
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(|row| row.get("community").and_then(knowledge_entity_from_value))
+        .map(|community| knowledge_community_row_from_entity(&community))
+        .filter(|row| !request.require_summary || row.has_summary)
+        .filter(|row| {
+            !request.require_non_negative_community_id
+                || row
+                    .community_id
+                    .is_some_and(|community_id| community_id >= 0)
+        })
+        .collect::<Vec<_>>();
+    let matched_count = rows.len();
+    rows.sort_by(|left, right| compare_knowledge_community_rows(left, right, request.order));
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCommunityListOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
 fn knowledge_community_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -27021,6 +27058,42 @@ fn knowledge_community_for(
     })
 }
 
+fn knowledge_community_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeCommunityRequest,
+) -> Result<KnowledgeCommunityOutput> {
+    validate_knowledge_community_request(request)?;
+    let (query, parameters) = match &request.key {
+        KnowledgeCommunityLookupKey::Id(id) => (
+            "MATCH (c:Community {id: $id}) \
+             RETURN c AS community, id(c) AS node_id \
+             ORDER BY node_id ASC \
+             LIMIT 1",
+            BTreeMap::from([("id".to_string(), Value::String(id.clone()))]),
+        ),
+        KnowledgeCommunityLookupKey::CommunityId(community_id) => (
+            "MATCH (c:Community {community_id: $community_id}) \
+             RETURN c AS community, id(c) AS node_id \
+             ORDER BY node_id ASC \
+             LIMIT 1",
+            BTreeMap::from([("community_id".to_string(), Value::Int(*community_id))]),
+        ),
+    };
+    let output = db.query_read_only_with_params_bounded(query, &parameters, Some(1))?;
+    let row = output
+        .rows
+        .first()
+        .and_then(|row| row.get("community"))
+        .and_then(knowledge_entity_from_value)
+        .map(|community| knowledge_community_row_from_entity(&community));
+    let found = row.is_some();
+    Ok(KnowledgeCommunityOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        row,
+        found,
+    })
+}
+
 fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> Result<()> {
     if let KnowledgeCommunityLookupKey::Id(id) = &request.key {
         if id.is_empty() {
@@ -27030,6 +27103,24 @@ fn validate_knowledge_community_request(request: &KnowledgeCommunityRequest) -> 
         }
     }
     Ok(())
+}
+
+fn knowledge_community_row_from_entity(community: &KnowledgeEntity) -> KnowledgeCommunityRow {
+    let ai_summary = community.properties.get("ai_summary").cloned();
+    KnowledgeCommunityRow {
+        id: string_property_value(&community.properties, "id")
+            .or_else(|| community.external_id.clone()),
+        node_id: community.node_id,
+        community_id: integer_property_value(&community.properties, "community_id"),
+        name: string_property_value(&community.properties, "name"),
+        description: community.properties.get("description").cloned(),
+        has_summary: ai_summary.as_ref().is_some_and(|value| {
+            !matches!(value, Value::Null) && !value_to_external_id(value).is_empty()
+        }),
+        ai_summary,
+        member_count: integer_property_value(&community.properties, "member_count"),
+        updated_at: community.properties.get("updated_at").cloned(),
+    }
 }
 
 fn community_matches_lookup_key(node: &NodeRecord, key: &KnowledgeCommunityLookupKey) -> bool {
