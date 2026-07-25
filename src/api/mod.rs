@@ -7755,7 +7755,6 @@ impl Database {
         request: &KnowledgeMemoryDecayDetailRequest,
     ) -> Result<KnowledgeMemoryDecayDetailOutput> {
         knowledge_memory_decay_detail_via_query_runtime(self, request)
-            .or_else(|_| knowledge_memory_decay_detail_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_thread_compacted_memory_projected_list(
@@ -7791,7 +7790,6 @@ impl Database {
         request: &KnowledgeThreadMessageListRequest,
     ) -> Result<KnowledgeThreadMessageListOutput> {
         knowledge_thread_messages_via_query_runtime(self, request)
-            .or_else(|_| knowledge_thread_messages_for(&self.catalog, &self.store, request))
     }
 
     pub fn delete_knowledge_thread_messages(
@@ -25246,47 +25244,6 @@ fn compacting_thread_row_from_query(
         raw_space_id: string_property_value(&thread.properties, "space_id"),
         normalized_space_id: Some(knowledge_entity_normalized_space_id(&thread)),
         relationship_id: Some(relationship_id),
-    })
-}
-
-fn knowledge_thread_messages_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeThreadMessageListRequest,
-) -> Result<KnowledgeThreadMessageListOutput> {
-    if request.thread_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge thread message read requires a non-empty thread id".to_string(),
-        ));
-    }
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(thread) =
-        seed_node_by_label_and_external_id(catalog, store, "Thread", &request.thread_id)
-    else {
-        return Ok(KnowledgeThreadMessageListOutput {
-            graph_commit_epoch,
-            thread_id: request.thread_id.clone(),
-            thread_node_id: None,
-            found: false,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-        });
-    };
-    let mut rows = thread_message_rows(catalog, store, thread.id);
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-    Ok(KnowledgeThreadMessageListOutput {
-        graph_commit_epoch,
-        thread_id: request.thread_id.clone(),
-        thread_node_id: Some(thread.id.0),
-        found: true,
-        rows,
-        matched_count,
-        returned_count,
     })
 }
 
