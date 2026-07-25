@@ -7958,16 +7958,13 @@ impl Database {
         request: &KnowledgePageRankMembershipRequest,
     ) -> Result<KnowledgePageRankMembershipOutput> {
         knowledge_pagerank_membership_via_query_runtime(self, request)
-            .or_else(|_| knowledge_pagerank_membership_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_pagerank_memory_visibility(
         &self,
         request: &KnowledgePageRankMemoryVisibilityRequest,
     ) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
-        knowledge_pagerank_memory_visibility_via_query_runtime(self, request).or_else(|_| {
-            knowledge_pagerank_memory_visibility_for(&self.catalog, &self.store, request)
-        })
+        knowledge_pagerank_memory_visibility_via_query_runtime(self, request)
     }
 
     pub fn knowledge_pagerank_central_entity(
@@ -7975,7 +7972,6 @@ impl Database {
         request: &KnowledgePageRankCentralEntityRequest,
     ) -> Result<KnowledgePageRankCentralEntityOutput> {
         knowledge_pagerank_central_entity_via_query_runtime(self, request)
-            .or_else(|_| knowledge_pagerank_central_entity_for(&self.catalog, &self.store, request))
     }
 
     pub fn clear_knowledge_community_assignments(
@@ -9816,7 +9812,25 @@ fn knowledge_scoped_entity_batch_via_query_runtime(
 fn lookup_entities_via_query_runtime(
     db: &Database,
     entities: &[KnowledgeEntityRequest],
-) -> (u64, BTreeMap<(String, String), KnowledgeEntity>) {
+) -> KnowledgeEntityLookup {
+    lookup_entities_via_query_runtime_with_mode(db, entities, false)
+        .unwrap_or_else(|_| (db.store.commit_epoch(), BTreeMap::new()))
+}
+
+type KnowledgeEntityLookup = (u64, BTreeMap<(String, String), KnowledgeEntity>);
+
+fn lookup_entities_via_query_runtime_strict(
+    db: &Database,
+    entities: &[KnowledgeEntityRequest],
+) -> Result<KnowledgeEntityLookup> {
+    lookup_entities_via_query_runtime_with_mode(db, entities, true)
+}
+
+fn lookup_entities_via_query_runtime_with_mode(
+    db: &Database,
+    entities: &[KnowledgeEntityRequest],
+    fail_on_query_error: bool,
+) -> Result<KnowledgeEntityLookup> {
     let graph_commit_epoch = db.store.commit_epoch();
     let mut entities_by_label = BTreeMap::<String, BTreeSet<String>>::new();
     for entity in entities {
@@ -9849,8 +9863,10 @@ fn lookup_entities_via_query_runtime(
             ),
             ("node_ids".to_string(), Value::List(node_ids)),
         ]);
-        let Ok(output) = db.query_read_only_with_params_bounded(&query, &parameters, None) else {
-            continue;
+        let output = match db.query_read_only_with_params_bounded(&query, &parameters, None) {
+            Ok(output) => output,
+            Err(error) if fail_on_query_error => return Err(error),
+            Err(_) => continue,
         };
         for row in &output.rows {
             let Some(entity) = row.get("entity").and_then(knowledge_entity_from_value) else {
@@ -9863,7 +9879,7 @@ fn lookup_entities_via_query_runtime(
         }
     }
 
-    (graph_commit_epoch, found)
+    Ok((graph_commit_epoch, found))
 }
 
 fn knowledge_memory_entities_for(
@@ -28392,49 +28408,6 @@ fn pagerank_count_via_query_runtime(
         .ok_or_else(|| SkeinError::Execution("pagerank count query returned no total".to_string()))
 }
 
-fn knowledge_pagerank_membership_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgePageRankMembershipRequest,
-) -> Result<KnowledgePageRankMembershipOutput> {
-    validate_pagerank_label(request.label.as_str())?;
-    validate_non_empty_external_ids(
-        &request.external_ids,
-        "knowledge pagerank membership requires non-empty external ids",
-    )?;
-    let label = pagerank_label(request.label.as_str());
-    let mut rows = Vec::with_capacity(request.external_ids.len());
-    let mut matched_count = 0;
-    let mut missing_count = 0;
-    for external_id in &request.external_ids {
-        let node = seed_node_by_label_and_external_id(catalog, store, label, external_id);
-        if let Some(node) = node {
-            matched_count += 1;
-            rows.push(KnowledgePageRankMembershipRow {
-                label: label.to_string(),
-                external_id: external_id.clone(),
-                node_id: Some(node.id.0),
-                matched: true,
-            });
-        } else {
-            missing_count += 1;
-            rows.push(KnowledgePageRankMembershipRow {
-                label: label.to_string(),
-                external_id: external_id.clone(),
-                node_id: None,
-                matched: false,
-            });
-        }
-    }
-
-    Ok(KnowledgePageRankMembershipOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        matched_count,
-        missing_count,
-    })
-}
-
 fn knowledge_pagerank_membership_via_query_runtime(
     db: &Database,
     request: &KnowledgePageRankMembershipRequest,
@@ -28453,7 +28426,7 @@ fn knowledge_pagerank_membership_via_query_runtime(
             external_id: external_id.clone(),
         })
         .collect::<Vec<_>>();
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime(db, &entities);
+    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(db, &entities)?;
     let mut rows = Vec::with_capacity(request.external_ids.len());
     let mut matched_count = 0;
     let mut missing_count = 0;
@@ -28485,49 +28458,6 @@ fn knowledge_pagerank_membership_via_query_runtime(
     })
 }
 
-fn knowledge_pagerank_memory_visibility_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgePageRankMemoryVisibilityRequest,
-) -> Result<KnowledgePageRankMemoryVisibilityOutput> {
-    validate_non_empty_external_ids(
-        &request.memory_ids,
-        "knowledge pagerank memory visibility requires non-empty memory ids",
-    )?;
-    let mut rows = Vec::with_capacity(request.memory_ids.len());
-    let mut matched_count = 0;
-    let mut missing_count = 0;
-    for memory_id in &request.memory_ids {
-        let Some(node) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
-        else {
-            missing_count += 1;
-            rows.push(KnowledgePageRankMemoryVisibilityRow {
-                memory_id: memory_id.clone(),
-                node_id: None,
-                matched: false,
-                metadata: None,
-                is_latest: true,
-            });
-            continue;
-        };
-        matched_count += 1;
-        rows.push(KnowledgePageRankMemoryVisibilityRow {
-            memory_id: memory_id.clone(),
-            node_id: Some(node.id.0),
-            matched: true,
-            metadata: node.properties.get("metadata").cloned(),
-            is_latest: node.properties.get("is_latest") != Some(&Value::Bool(false)),
-        });
-    }
-
-    Ok(KnowledgePageRankMemoryVisibilityOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        rows,
-        matched_count,
-        missing_count,
-    })
-}
-
 fn knowledge_pagerank_memory_visibility_via_query_runtime(
     db: &Database,
     request: &KnowledgePageRankMemoryVisibilityRequest,
@@ -28544,7 +28474,7 @@ fn knowledge_pagerank_memory_visibility_via_query_runtime(
             external_id: memory_id.clone(),
         })
         .collect::<Vec<_>>();
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime(db, &entities);
+    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(db, &entities)?;
     let mut rows = Vec::with_capacity(request.memory_ids.len());
     let mut matched_count = 0;
     let mut missing_count = 0;
@@ -28578,28 +28508,6 @@ fn knowledge_pagerank_memory_visibility_via_query_runtime(
     })
 }
 
-fn knowledge_pagerank_central_entity_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgePageRankCentralEntityRequest,
-) -> Result<KnowledgePageRankCentralEntityOutput> {
-    if request.entity_id.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge pagerank central entity requires a non-empty entity id".to_string(),
-        ));
-    }
-    let node = seed_node_by_label_and_external_id(catalog, store, "Entity", &request.entity_id);
-    Ok(KnowledgePageRankCentralEntityOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        found: node.is_some(),
-        node_id: node.map(|node| node.id.0),
-        name: node
-            .and_then(|node| node.properties.get("name"))
-            .map(value_to_external_id)
-            .filter(|name| !name.is_empty()),
-    })
-}
-
 fn knowledge_pagerank_central_entity_via_query_runtime(
     db: &Database,
     request: &KnowledgePageRankCentralEntityRequest,
@@ -28609,13 +28517,13 @@ fn knowledge_pagerank_central_entity_via_query_runtime(
             "knowledge pagerank central entity requires a non-empty entity id".to_string(),
         ));
     }
-    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime(
+    let (graph_commit_epoch, found) = lookup_entities_via_query_runtime_strict(
         db,
         &[KnowledgeEntityRequest {
             label: "Entity".to_string(),
             external_id: request.entity_id.clone(),
         }],
-    );
+    )?;
     let entity = found.get(&("Entity".to_string(), request.entity_id.clone()));
     Ok(KnowledgePageRankCentralEntityOutput {
         graph_commit_epoch,
