@@ -15097,7 +15097,11 @@ fn projected_skill_list_rejects_empty_property_names_without_wal() {
 
 #[test]
 fn reads_skill_detail_lookup_for_rest_fs_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-1', name: 'rest-fs-detail', title: 'REST FS Detail Skill', stage: 'active', version: 3, created_at: 1700000102, updated_at: 1700000103})")
         .unwrap();
     db.query("CREATE (:Skill {id: 'rest-fs-skill-detail-2', name: 'rest-fs-detail-two', title: 'REST FS Detail Two', stage: 'draft', version: 4, created_at: 1700000202, updated_at: 1700000203})")
@@ -15150,6 +15154,17 @@ fn reads_skill_detail_lookup_for_rest_fs_shape() {
     assert_eq!(missing.skill_node_id, None);
     assert_eq!(missing.matched_count, 0);
 
+    let cache_before_lookup = db.plan_cache_stats();
+    let cached_request = KnowledgeSkillDetailLookupRequest {
+        key: "rest-fs-skill-detail-2".to_string(),
+    };
+    db.knowledge_skill_detail_lookup(&cached_request).unwrap();
+    db.knowledge_skill_detail_lookup(&cached_request).unwrap();
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
+
     let tx = db.begin_read_transaction();
     db.query("MATCH (s:Skill {id: 'rest-fs-skill-detail-1'}) SET s.title = 'Changed'")
         .unwrap();
@@ -15173,7 +15188,11 @@ fn skill_detail_lookup_rejects_empty_key() {
 
 #[test]
 fn reads_skill_state_for_rest_skills_write_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Skill {id: 'skill-state-1', stage: 'candidate', metadata: '{\"phase\":\"candidate\"}', version: 3, use_count: 7, bundle_path: '/tmp/skill', content_hash: 'hash-1', name: 'state-skill', description: 'state desc', title: 'State Skill'})")
         .unwrap();
     db.query("CREATE (:Memory {id: 'skill-state-1', stage: 'memory-stage'})")
@@ -15212,6 +15231,17 @@ fn reads_skill_state_for_rest_skills_write_shapes() {
     assert!(!missing.found_skill);
     assert_eq!(missing.skill_node_id, None);
     assert_eq!(missing.id, None);
+
+    let cache_before_lookup = db.plan_cache_stats();
+    let cached_request = KnowledgeSkillStateRequest {
+        skill_id: "missing-cache".to_string(),
+    };
+    db.knowledge_skill_state(&cached_request).unwrap();
+    db.knowledge_skill_state(&cached_request).unwrap();
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
     let tx = db.begin_read_transaction();
     db.query("MATCH (s:Skill {id: 'skill-state-1'}) SET s.stage = 'draft', s.metadata = '{\"phase\":\"draft\"}'")

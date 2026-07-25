@@ -7627,14 +7627,14 @@ impl Database {
         &self,
         request: &KnowledgeSkillDetailLookupRequest,
     ) -> Result<KnowledgeSkillDetailLookupOutput> {
-        knowledge_skill_detail_lookup_for(&self.catalog, &self.store, request)
+        knowledge_skill_detail_lookup_via_query_runtime(self, request)
     }
 
     pub fn knowledge_skill_state(
         &self,
         request: &KnowledgeSkillStateRequest,
     ) -> Result<KnowledgeSkillStateOutput> {
-        knowledge_skill_state_for(&self.catalog, &self.store, request)
+        knowledge_skill_state_via_query_runtime(self, request)
     }
 
     pub fn knowledge_skills(
@@ -22056,6 +22056,45 @@ fn knowledge_skill_detail_lookup_for(
     })
 }
 
+fn knowledge_skill_detail_lookup_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSkillDetailLookupRequest,
+) -> Result<KnowledgeSkillDetailLookupOutput> {
+    validate_knowledge_skill_detail_lookup_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([("key".to_string(), Value::String(request.key.clone()))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (s:Skill) \
+         WHERE s.id = $key OR s.id STARTS WITH $key OR s.id CONTAINS $key \
+         RETURN s AS skill \
+         ORDER BY id(s) ASC",
+        &parameters,
+        None,
+    )?;
+    let matched = output
+        .rows
+        .iter()
+        .filter_map(|row| row.get("skill").and_then(knowledge_entity_from_value))
+        .collect::<Vec<_>>();
+    let matched_count = matched.len();
+    let first = matched.first();
+
+    Ok(KnowledgeSkillDetailLookupOutput {
+        graph_commit_epoch,
+        key: request.key.clone(),
+        skill_node_id: first.map(|skill| skill.node_id),
+        found_skill: first.is_some(),
+        id: first.and_then(|skill| string_property_value(&skill.properties, "id")),
+        name: first.and_then(|skill| string_property_value(&skill.properties, "name")),
+        title: first.and_then(|skill| string_property_value(&skill.properties, "title")),
+        stage: first.and_then(|skill| string_property_value(&skill.properties, "stage")),
+        version: first.and_then(|skill| skill.properties.get("version").cloned()),
+        created_at: first.and_then(|skill| skill.properties.get("created_at").cloned()),
+        updated_at: first.and_then(|skill| skill.properties.get("updated_at").cloned()),
+        matched_count,
+    })
+}
+
 fn validate_knowledge_skill_detail_lookup_request(
     request: &KnowledgeSkillDetailLookupRequest,
 ) -> Result<()> {
@@ -22107,6 +22146,65 @@ fn knowledge_skill_state_for(
         name: skill.and_then(|node| string_property(node, "name")),
         description: skill.and_then(|node| string_property(node, "description")),
         title: skill.and_then(|node| string_property(node, "title")),
+    })
+}
+
+fn knowledge_skill_state_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSkillStateRequest,
+) -> Result<KnowledgeSkillStateOutput> {
+    validate_knowledge_skill_state_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "skill_id".to_string(),
+        Value::String(request.skill_id.clone()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (s:Skill {id: $skill_id}) RETURN s AS skill LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let skill = output
+        .rows
+        .first()
+        .and_then(|row| row.get("skill"))
+        .and_then(knowledge_entity_from_value);
+
+    Ok(KnowledgeSkillStateOutput {
+        graph_commit_epoch,
+        skill_id: request.skill_id.clone(),
+        skill_node_id: skill.as_ref().map(|skill| skill.node_id),
+        found_skill: skill.is_some(),
+        id: skill
+            .as_ref()
+            .and_then(|skill| string_property_value(&skill.properties, "id")),
+        stage: skill
+            .as_ref()
+            .and_then(|skill| string_property_value(&skill.properties, "stage")),
+        metadata: skill
+            .as_ref()
+            .and_then(|skill| skill.properties.get("metadata").cloned()),
+        version: skill
+            .as_ref()
+            .and_then(|skill| skill.properties.get("version").cloned()),
+        use_count: skill
+            .as_ref()
+            .and_then(|skill| skill.properties.get("use_count").cloned()),
+        bundle_path: skill
+            .as_ref()
+            .and_then(|skill| string_property_value(&skill.properties, "bundle_path")),
+        content_hash: skill
+            .as_ref()
+            .and_then(|skill| string_property_value(&skill.properties, "content_hash")),
+        name: skill
+            .as_ref()
+            .and_then(|skill| string_property_value(&skill.properties, "name")),
+        description: skill
+            .as_ref()
+            .and_then(|skill| string_property_value(&skill.properties, "description")),
+        title: skill
+            .as_ref()
+            .and_then(|skill| string_property_value(&skill.properties, "title")),
     })
 }
 
