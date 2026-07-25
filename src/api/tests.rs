@@ -18836,7 +18836,11 @@ fn typed_label_lifecycle_batch_persists_as_one_wal_batch_and_replays() {
 
 #[test]
 fn reads_labels_by_canonical_name_for_nowledge_collision_checks() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Label {id: 'source', name: 'Source', canonical_name: 'canonical_source'})")
         .unwrap();
     db.query("CREATE (:Label {id: 'target', name: 'Target', canonical_name: 'canonical_target'})")
@@ -18846,12 +18850,13 @@ fn reads_labels_by_canonical_name_for_nowledge_collision_checks() {
     )
     .unwrap();
 
+    let request = KnowledgeLabelCanonicalLookupRequest {
+        canonical_name: "canonical_target".to_string(),
+        exclude_label_id: Some("source".to_string()),
+        limit: 1,
+    };
     let output = db
-        .lookup_knowledge_labels_by_canonical_name(&KnowledgeLabelCanonicalLookupRequest {
-            canonical_name: "canonical_target".to_string(),
-            exclude_label_id: Some("source".to_string()),
-            limit: 1,
-        })
+        .lookup_knowledge_labels_by_canonical_name(&request)
         .unwrap();
 
     assert_eq!(output.graph_commit_epoch, 3);
@@ -18862,11 +18867,25 @@ fn reads_labels_by_canonical_name_for_nowledge_collision_checks() {
         output.rows[0].canonical_name.as_deref(),
         Some("canonical_target")
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated = db
+        .lookup_knowledge_labels_by_canonical_name(&request)
+        .unwrap();
+    assert_eq!(repeated, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 1);
 }
 
 #[test]
 fn scans_labels_missing_canonical_name_for_nowledge_backfill() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Label {id: 'missing_1', name: 'Missing 1', canonical_name: NULL})")
         .unwrap();
     db.query("CREATE (:Label {id: 'missing_2', name: 'Missing 2'})")
@@ -18874,11 +18893,12 @@ fn scans_labels_missing_canonical_name_for_nowledge_backfill() {
     db.query("CREATE (:Label {id: 'present', name: 'Present', canonical_name: 'present'})")
         .unwrap();
 
+    let request = KnowledgeLabelBackfillScanRequest {
+        exclude_label_id: Some("missing_1".to_string()),
+        limit: 10,
+    };
     let output = db
-        .scan_knowledge_labels_missing_canonical_name(&KnowledgeLabelBackfillScanRequest {
-            exclude_label_id: Some("missing_1".to_string()),
-            limit: 10,
-        })
+        .scan_knowledge_labels_missing_canonical_name(&request)
         .unwrap();
 
     assert_eq!(output.matched_count, 1);
@@ -18886,6 +18906,16 @@ fn scans_labels_missing_canonical_name_for_nowledge_backfill() {
     assert_eq!(output.rows[0].label_id.as_deref(), Some("missing_2"));
     assert_eq!(output.rows[0].name.as_deref(), Some("Missing 2"));
     assert_eq!(output.rows[0].canonical_name, None);
+
+    let stats = db.plan_cache_stats();
+    let repeated = db
+        .scan_knowledge_labels_missing_canonical_name(&request)
+        .unwrap();
+    assert_eq!(repeated, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 1);
 }
 
 #[test]
