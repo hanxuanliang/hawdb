@@ -19163,7 +19163,11 @@ fn label_regex_memory_connections_support_snapshots_and_validate_requests() {
 
 #[test]
 fn projects_entity_labels_for_nowledge_growth() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'projected_label_memory_a'})")
         .unwrap();
     db.query("CREATE (:Memory {id: 'projected_label_memory_b'})")
@@ -19194,28 +19198,29 @@ fn projects_entity_labels_for_nowledge_growth() {
     db.query("MATCH (m:Memory {id: 'projected_label_memory_a'}), (l:Label {id: 'label_alpha'}) CREATE (m)-[:HAS_LABEL {assigned_by: 'later', weight: 9, future_edge_field: 'edge-a'}]->(l)")
         .unwrap();
 
+    let projected_request = KnowledgeEntityLabelProjectedListRequest {
+        list: KnowledgeEntityLabelListRequest {
+            entity_label: "Memory".to_string(),
+            external_ids: vec![
+                "projected_label_memory_a".to_string(),
+                "missing_projected_label_memory".to_string(),
+                "projected_label_memory_b".to_string(),
+            ],
+            limit_per_entity: 1,
+        },
+        label_property_names: vec![
+            "name".to_string(),
+            "future_label_field".to_string(),
+            "canonical_name".to_string(),
+            "name".to_string(),
+        ],
+        relationship_property_names: vec![
+            "assigned_by".to_string(),
+            "future_edge_field".to_string(),
+        ],
+    };
     let projected = db
-        .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
-            list: KnowledgeEntityLabelListRequest {
-                entity_label: "Memory".to_string(),
-                external_ids: vec![
-                    "projected_label_memory_a".to_string(),
-                    "missing_projected_label_memory".to_string(),
-                    "projected_label_memory_b".to_string(),
-                ],
-                limit_per_entity: 1,
-            },
-            label_property_names: vec![
-                "name".to_string(),
-                "future_label_field".to_string(),
-                "canonical_name".to_string(),
-                "name".to_string(),
-            ],
-            relationship_property_names: vec![
-                "assigned_by".to_string(),
-                "future_edge_field".to_string(),
-            ],
-        })
+        .knowledge_entity_label_projected_list(&projected_request)
         .unwrap();
     assert_eq!(projected.found_entity_count, 2);
     assert_eq!(projected.missing_entity_count, 1);
@@ -19250,6 +19255,16 @@ fn projects_entity_labels_for_nowledge_growth() {
         projected.groups[2].labels[0].label_id.as_deref(),
         Some("label_zeta")
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated_projected = db
+        .knowledge_entity_label_projected_list(&projected_request)
+        .unwrap();
+    assert_eq!(repeated_projected, projected);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let source_projected = db
         .knowledge_entity_label_projected_list(&KnowledgeEntityLabelProjectedListRequest {
@@ -19925,7 +19940,11 @@ fn typed_memory_label_delete_persists_as_one_wal_batch_and_replays() {
 
 #[test]
 fn reads_entity_labels_for_nowledge_has_label_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Label {id: 'alpha', name: 'Alpha', canonical_name: 'alpha', color: '#fff', description: 'Alpha label'})")
         .unwrap();
     db.query("CREATE (:Label {id: 'beta', name: 'Beta', canonical_name: 'beta'})")
@@ -19949,17 +19968,16 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let memories = db
-        .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
-            entity_label: "Memory".to_string(),
-            external_ids: vec![
-                "memory_1".to_string(),
-                "memory_2".to_string(),
-                "missing".to_string(),
-            ],
-            limit_per_entity: 0,
-        })
-        .unwrap();
+    let memories_request = KnowledgeEntityLabelListRequest {
+        entity_label: "Memory".to_string(),
+        external_ids: vec![
+            "memory_1".to_string(),
+            "memory_2".to_string(),
+            "missing".to_string(),
+        ],
+        limit_per_entity: 0,
+    };
+    let memories = db.knowledge_entity_labels(&memories_request).unwrap();
 
     assert_eq!(memories.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
@@ -19995,6 +20013,14 @@ fn reads_entity_labels_for_nowledge_has_label_shapes() {
     assert_eq!(memories.groups[1].returned_count, 0);
     assert!(!memories.groups[2].found);
     assert_eq!(memories.groups[2].node_id, None);
+
+    let stats = db.plan_cache_stats();
+    let repeated_memories = db.knowledge_entity_labels(&memories_request).unwrap();
+    assert_eq!(repeated_memories, memories);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 3);
 
     let sources = db
         .knowledge_entity_labels(&KnowledgeEntityLabelListRequest {
