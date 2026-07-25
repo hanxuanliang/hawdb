@@ -56,6 +56,7 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "engine",
             "derived_projection",
             "document_count",
+            "document_identity",
             "tables",
             "embedding_manifest",
             "fail_soft",
@@ -116,6 +117,13 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "value_summary_used",
             "numeric_range_summary_used",
             "timestamp_range_summary_used"
+        ],
+        "document_identity_fields": [
+            "ready",
+            "id_space",
+            "representation",
+            "document_count",
+            "checksum"
         ],
         "example_primary_probe": ready_probe_template("lancedb"),
         "example_skein_probe": ready_probe_template("skein"),
@@ -243,6 +251,8 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
             && bool_path(table, &["fts_ready"]) == Some(true)
             && bool_path(table, &["vector_ready"]) == Some(true)
     });
+    let document_identity = document_identity_report(probe);
+    let document_identity_ready = bool_path(&document_identity, &["ready"]) == Some(true);
     let embedding_identity = embedding_identity_report(probe);
     let embedding_identity_ready = bool_path(&embedding_identity, &["ready"]) == Some(true);
     let fail_soft = fail_soft_report(probe);
@@ -302,6 +312,9 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
     if !source_chunk_ready {
         blocker_codes.insert("source_chunks_index_not_ready".to_string());
     }
+    if !document_identity_ready {
+        blocker_codes.insert("document_identity_not_ready".to_string());
+    }
     if !predicate_pushdown_ready {
         blocker_codes.insert("predicate_pushdown_not_ready".to_string());
     }
@@ -323,6 +336,7 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         "required_tables": REQUIRED_TABLES,
         "fts_ready": fts_ready,
         "vector_ready": vector_ready,
+        "document_identity_ready": document_identity_ready,
         "embedding_identity_ready": embedding_identity_ready,
         "fail_soft_ready": fail_soft_ready,
         "rebuild_marker_ready": rebuild_marker_ready,
@@ -334,6 +348,7 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
         "compressed_vector_projection_required": compressed_vector_projection_required,
         "compressed_vector_projection_ready": compressed_vector_projection_ready,
         "tables": table_reports,
+        "document_identity": document_identity,
         "embedding_identity": embedding_identity,
         "fail_soft": fail_soft,
         "lifecycle": lifecycle,
@@ -353,6 +368,8 @@ pub fn nowledge_search_projection_shadow_evidence_json(
     let table_parity = search_projection_table_parity(&primary_evidence, &shadow_evidence);
     let document_count_parity =
         u64_path(primary_probe, &["document_count"]) == u64_path(shadow_probe, &["document_count"]);
+    let document_identity_parity = value_path(&primary_evidence, &["document_identity"])
+        == value_path(&shadow_evidence, &["document_identity"]);
     let embedding_identity_parity = value_path(&primary_evidence, &["embedding_identity"])
         == value_path(&shadow_evidence, &["embedding_identity"]);
     let lifecycle_parity = value_path(&primary_evidence, &["lifecycle"])
@@ -383,6 +400,9 @@ pub fn nowledge_search_projection_shadow_evidence_json(
     }
     if !document_count_parity {
         blocker_codes.insert("document_count_mismatch".to_string());
+    }
+    if !document_identity_parity {
+        blocker_codes.insert("document_identity_mismatch".to_string());
     }
     if !embedding_identity_parity {
         blocker_codes.insert("embedding_identity_mismatch".to_string());
@@ -423,6 +443,7 @@ pub fn nowledge_search_projection_shadow_evidence_json(
         "primary_ready": bool_path(&primary_evidence, &["ready"]).unwrap_or(false),
         "shadow_ready": bool_path(&shadow_evidence, &["ready"]).unwrap_or(false),
         "document_count_parity": document_count_parity,
+        "document_identity_parity": document_identity_parity,
         "primary_document_count": u64_path(primary_probe, &["document_count"]),
         "shadow_document_count": u64_path(shadow_probe, &["document_count"]),
         "table_parity": table_parity,
@@ -580,6 +601,13 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
         "engine": engine,
         "derived_projection": true,
         "document_count": 6,
+        "document_identity": {
+            "ready": true,
+            "id_space": "search_projection_document_id",
+            "representation": "sorted_document_ids",
+            "document_count": 6,
+            "checksum": 42
+        },
         "tables": [
             ready_probe_table("memories_index", true),
             ready_probe_table("messages_index", false),
@@ -680,6 +708,30 @@ fn ready_probe_table(name: &str, vector_ready: bool) -> serde_json::Value {
         "vector_ready": vector_ready,
         "row_count": 1,
         "blocker_codes": []
+    })
+}
+
+fn document_identity_report(probe: &serde_json::Value) -> serde_json::Value {
+    let identity = value_path(probe, &["document_identity"])
+        .or_else(|| value_path(probe, &["projection_identity"]))
+        .unwrap_or(&serde_json::Value::Null);
+    let document_count = u64_path(probe, &["document_count"]);
+    let identity_document_count = u64_path(identity, &["document_count"]);
+    let document_count_matches =
+        document_count.is_some() && identity_document_count == document_count;
+    let ready = bool_path(identity, &["ready"]) == Some(true)
+        && str_path(identity, &["id_space"]) == Some("search_projection_document_id")
+        && str_path(identity, &["representation"]) == Some("sorted_document_ids")
+        && u64_path(identity, &["checksum"]).is_some()
+        && document_count_matches;
+    serde_json::json!({
+        "ready": ready,
+        "id_space": str_path(identity, &["id_space"]),
+        "representation": str_path(identity, &["representation"]),
+        "document_count": identity_document_count,
+        "top_level_document_count": document_count,
+        "document_count_matches": document_count_matches,
+        "checksum": u64_path(identity, &["checksum"]),
     })
 }
 
@@ -989,6 +1041,7 @@ mod tests {
         assert_eq!(report["fts_ready"], true);
         assert_eq!(report["vector_ready"], true);
         assert_eq!(report["embedding_identity_ready"], true);
+        assert_eq!(report["document_identity_ready"], true);
         assert_eq!(report["fail_soft_ready"], true);
         assert_eq!(report["rebuild_marker_ready"], true);
         assert_eq!(report["metadata_repair_marker_ready"], true);
@@ -1125,6 +1178,22 @@ mod tests {
         assert_eq!(
             report["blocker_codes"],
             serde_json::json!(["embedding_identity_not_ready"])
+        );
+    }
+
+    #[test]
+    fn search_projection_evidence_recomputes_document_identity() {
+        let mut probe = ready_probe();
+        probe["document_identity"]["document_count"] = serde_json::json!(5);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["document_identity_ready"], false);
+        assert_eq!(report["document_identity"]["document_count_matches"], false);
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["document_identity_not_ready"])
         );
     }
 
@@ -1274,6 +1343,7 @@ mod tests {
         assert_eq!(report["primary_ready"], true);
         assert_eq!(report["shadow_ready"], true);
         assert_eq!(report["document_count_parity"], true);
+        assert_eq!(report["document_identity_parity"], true);
         assert_eq!(report["table_parity"]["ready"], true);
         assert_eq!(report["embedding_identity_parity"], true);
         assert_eq!(report["lifecycle_parity"], true);
@@ -1393,6 +1463,24 @@ mod tests {
     }
 
     #[test]
+    fn search_projection_shadow_evidence_fails_closed_on_document_identity_mismatch() {
+        let primary = ready_probe();
+        let mut shadow = ready_probe();
+        shadow["document_identity"]["checksum"] = serde_json::json!(999);
+
+        let report = nowledge_search_projection_shadow_evidence_json(&primary, &shadow);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["document_count_parity"], true);
+        assert_eq!(report["document_identity_parity"], false);
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "document_identity_mismatch"));
+    }
+
+    #[test]
     fn search_projection_evidence_read_errors_do_not_echo_paths() {
         let path = PathBuf::from("missing-search-projection-evidence-redaction.json");
 
@@ -1406,6 +1494,13 @@ mod tests {
             "engine": "skein",
             "derived_projection": true,
             "document_count": 6,
+            "document_identity": {
+                "ready": true,
+                "id_space": "search_projection_document_id",
+                "representation": "sorted_document_ids",
+                "document_count": 6,
+                "checksum": 42
+            },
             "tables": [
                 table("memories_index", true),
                 table("messages_index", false),

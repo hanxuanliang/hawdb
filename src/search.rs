@@ -924,6 +924,7 @@ impl SearchIndex {
             "protocol": "skein-nowledge-search-projection-probe",
             "derived_projection": true,
             "document_count": self.documents.len(),
+            "document_identity": search_projection_probe_document_identity_report(&self.documents),
             "tables": table_reports,
             "embedding_manifest": {
                 "model": model,
@@ -2043,6 +2044,23 @@ fn search_projection_probe_table_reports(
             })
         })
         .collect()
+}
+
+fn search_projection_probe_document_identity_report(
+    documents: &BTreeMap<String, SearchDocument>,
+) -> serde_json::Value {
+    let mut body = String::new();
+    for document_id in documents.keys() {
+        body.push_str(document_id);
+        body.push('\n');
+    }
+    serde_json::json!({
+        "ready": true,
+        "id_space": "search_projection_document_id",
+        "representation": "sorted_document_ids",
+        "document_count": documents.len(),
+        "checksum": checksum_bytes(body.as_bytes()),
+    })
 }
 
 fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> serde_json::Value {
@@ -7699,6 +7717,17 @@ mod tests {
 
         assert_eq!(probe["derived_projection"], true);
         assert_eq!(probe["document_count"], 6);
+        assert_eq!(probe["document_identity"]["ready"], true);
+        assert_eq!(
+            probe["document_identity"]["id_space"],
+            "search_projection_document_id"
+        );
+        assert_eq!(
+            probe["document_identity"]["representation"],
+            "sorted_document_ids"
+        );
+        assert_eq!(probe["document_identity"]["document_count"], 6);
+        assert!(probe["document_identity"].get("document_ids").is_none());
         assert_eq!(probe["tables"].as_array().unwrap().len(), 6);
         assert!(probe["tables"].as_array().unwrap().iter().all(|table| {
             table["present"] == true && table["fts_ready"] == true && table["vector_ready"] == true

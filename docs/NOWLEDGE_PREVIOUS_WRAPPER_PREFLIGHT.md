@@ -304,6 +304,12 @@ of trusting `incremental_update.ready` alone. A ready probe must prove
 `source_graph_commit_epoch`; LanceDB/Skein shadow evidence compares that
 watermark so stale or full-rebuild-only projections do not pass as incremental
 replacement evidence.
+Search projection probes must also include a redacted `document_identity`
+summary with `id_space`, `representation`, `document_count`, and `checksum`.
+The checksum is computed over sorted projection document IDs; raw IDs are not
+emitted in readiness artifacts. Shadow evidence compares this identity summary
+in addition to row counts so equal-size but different document sets remain
+blocked.
 
 ## 8. Verify The Whole Preflight Bundle
 
