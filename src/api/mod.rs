@@ -7268,7 +7268,7 @@ impl Database {
         &self,
         request: &KnowledgeCrystalCommunityListRequest,
     ) -> Result<KnowledgeCrystalCommunityListOutput> {
-        knowledge_crystal_communities_for(&self.catalog, &self.store, request)
+        knowledge_crystal_communities_via_query_runtime(self, request)
     }
 
     pub fn knowledge_crystal_source_visibility(
@@ -14493,6 +14493,50 @@ fn knowledge_crystal_communities_for(
     })
 }
 
+fn knowledge_crystal_communities_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeCrystalCommunityListRequest,
+) -> Result<KnowledgeCrystalCommunityListOutput> {
+    validate_knowledge_crystal_community_list_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::new();
+    let predicate = knowledge_crystal_community_query_predicate(request, &mut parameters);
+    let query = format!(
+        "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory)-[:MENTIONS]->(e:Entity) \
+         WHERE c.is_crystal = true AND {predicate} \
+         WITH c.id AS crystal_memory_id, id(c) AS crystal_node_id, \
+         c.crystal_title AS crystal_title, c.title AS title, c.content AS content, \
+         c.importance AS importance, c.metadata AS metadata, c.is_latest AS is_latest, \
+         c.lifecycle_state AS lifecycle_state, e.community_id AS community_id, \
+         count(*) AS hit_count, \
+         count(DISTINCT s) AS source_memory_count \
+         RETURN crystal_memory_id, crystal_node_id, community_id, hit_count, \
+         source_memory_count, crystal_title, title, content, importance, metadata, \
+         is_latest, lifecycle_state"
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let mut rows = output
+        .rows
+        .iter()
+        .map(knowledge_crystal_community_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    sort_crystal_community_rows(&mut rows, request.order);
+    let matched_path_count = rows.iter().map(|row| row.hit_count).sum();
+    let matched_pair_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCrystalCommunityListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_path_count,
+        matched_pair_count,
+        returned_count,
+    })
+}
+
 fn empty_crystal_community_output(graph_commit_epoch: u64) -> KnowledgeCrystalCommunityListOutput {
     KnowledgeCrystalCommunityListOutput {
         graph_commit_epoch,
@@ -14525,6 +14569,24 @@ fn validate_knowledge_crystal_community_list_request(
         KnowledgeCrystalCommunityScope::NonNullCommunity => {}
     }
     Ok(())
+}
+
+fn knowledge_crystal_community_query_predicate(
+    request: &KnowledgeCrystalCommunityListRequest,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    match &request.scope {
+        KnowledgeCrystalCommunityScope::CommunityIds(community_ids) => {
+            parameters.insert(
+                "community_ids".to_string(),
+                Value::List(community_ids.clone()),
+            );
+            "e.community_id IN $community_ids".to_string()
+        }
+        KnowledgeCrystalCommunityScope::NonNullCommunity => {
+            "e.community_id IS NOT NULL".to_string()
+        }
+    }
 }
 
 fn crystal_community_filter_values(
@@ -14569,6 +14631,66 @@ fn knowledge_crystal_community_row(
         is_latest: boolean_property(crystal, "is_latest"),
         lifecycle_state: string_property(crystal, "lifecycle_state"),
     }
+}
+
+fn knowledge_crystal_community_row_from_query(row: &Row) -> Result<KnowledgeCrystalCommunityRow> {
+    let crystal_memory_id = row
+        .get("crystal_memory_id")
+        .map(value_to_external_id)
+        .filter(|memory_id| !memory_id.is_empty());
+    let crystal_node_id = row
+        .get("crystal_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge crystal community row is missing crystal_node_id".to_string(),
+            )
+        })?;
+    let community_id = row.get("community_id").cloned().ok_or_else(|| {
+        SkeinError::Execution("knowledge crystal community row is missing community_id".to_string())
+    })?;
+    let hit_count = row
+        .get("hit_count")
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge crystal community row is missing hit_count".to_string(),
+            )
+        })?;
+    let source_memory_count = row
+        .get("source_memory_count")
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge crystal community row is missing source_memory_count".to_string(),
+            )
+        })?;
+    let crystal_title = row
+        .get("crystal_title")
+        .and_then(optional_external_id_value);
+    let title = row.get("title").and_then(optional_external_id_value);
+    let display_title = crystal_title
+        .clone()
+        .or_else(|| title.clone())
+        .unwrap_or_default();
+
+    Ok(KnowledgeCrystalCommunityRow {
+        crystal_memory_id,
+        crystal_node_id,
+        community_id,
+        hit_count,
+        source_memory_count,
+        crystal_title,
+        title,
+        display_title,
+        content: row.get("content").and_then(optional_external_id_value),
+        importance: row.get("importance").and_then(optional_non_null_value),
+        metadata: row.get("metadata").and_then(optional_non_null_value),
+        is_latest: row.get("is_latest").and_then(value_to_bool),
+        lifecycle_state: row
+            .get("lifecycle_state")
+            .and_then(optional_external_id_value),
+    })
 }
 
 fn sort_crystal_community_rows(
@@ -18564,6 +18686,25 @@ fn value_to_non_negative_u64(value: &Value) -> Option<u64> {
         Value::Int(value) if *value >= 0 => u64::try_from(*value).ok(),
         _ => None,
     }
+}
+
+fn value_to_bool(value: &Value) -> Option<bool> {
+    match value {
+        Value::Bool(value) => Some(*value),
+        _ => None,
+    }
+}
+
+fn optional_external_id_value(value: &Value) -> Option<String> {
+    if matches!(value, Value::Null) {
+        return None;
+    }
+    let external_id = value_to_external_id(value);
+    (!external_id.is_empty()).then_some(external_id)
+}
+
+fn optional_non_null_value(value: &Value) -> Option<Value> {
+    (!matches!(value, Value::Null)).then(|| value.clone())
 }
 
 fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {

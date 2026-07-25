@@ -7603,6 +7603,54 @@ fn crystal_community_read_rejects_invalid_scope() {
 }
 
 #[test]
+fn crystal_community_reads_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'community-cache-crystal', is_crystal: true, importance: 0.8})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'community-cache-source-one'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'community-cache-source-two'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'community-cache-entity-one', community_id: 13})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'community-cache-entity-two', community_id: 13})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'community-cache-crystal'}), (s:Memory {id: 'community-cache-source-one'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'community-cache-crystal'}), (s:Memory {id: 'community-cache-source-two'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (s:Memory {id: 'community-cache-source-one'}), (e:Entity {id: 'community-cache-entity-one'}) CREATE (s)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (s:Memory {id: 'community-cache-source-one'}), (e:Entity {id: 'community-cache-entity-two'}) CREATE (s)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (s:Memory {id: 'community-cache-source-two'}), (e:Entity {id: 'community-cache-entity-one'}) CREATE (s)-[:MENTIONS]->(e)")
+        .unwrap();
+    let request = KnowledgeCrystalCommunityListRequest {
+        scope: KnowledgeCrystalCommunityScope::CommunityIds(vec![Value::Int(13)]),
+        limit: 0,
+        order: KnowledgeCrystalCommunityListOrder::HitsDescImportanceDesc,
+    };
+
+    let first = db.knowledge_crystal_communities(&request).unwrap();
+    let second = db.knowledge_crystal_communities(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_path_count, 3);
+    assert_eq!(first.matched_pair_count, 1);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].hit_count, 3);
+    assert_eq!(first.rows[0].source_memory_count, 2);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn reads_crystal_source_visibility_for_wiki_community_rows() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'crystal-alpha', is_crystal: true, crystal_title: 'Alpha Crystal', title: 'Alpha Title', content: 'Alpha content', importance: 0.8, metadata: '{\"c\":1}', is_latest: false, lifecycle_state: 'active'})")
