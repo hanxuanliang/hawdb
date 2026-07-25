@@ -1813,15 +1813,53 @@ fn query_runtime_preflight_probe_details_ready(bundle: &serde_json::Value) -> bo
     else {
         return false;
     };
-    !probes.is_empty()
-        && probes.iter().all(|probe| {
-            bool_path(probe, &["ready"]) == Some(true)
-                && bool_path(probe, &["success"]) == Some(true)
-                && non_empty_str_path(probe, &["selected_plan_fingerprint"])
-                && u64_path(probe, &["output_row_count"]).is_some()
-                && u64_path(probe, &["execution_profile", "scan_pruning_report_count"]).is_some()
-                && string_array_path(probe, &["blocker_codes"]).is_empty()
-        })
+    !probes.is_empty() && probes.iter().all(query_runtime_preflight_probe_ready)
+}
+
+fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
+    bool_path(probe, &["ready"]) == Some(true)
+        && bool_path(probe, &["success"]) == Some(true)
+        && non_empty_str_path(probe, &["selected_plan_fingerprint"])
+        && u64_path(probe, &["output_row_count"]).is_some()
+        && json_object_path_is_non_empty(probe, &["selected_plan_operator_counts"])
+        && json_object_path_is_non_empty(probe, &["selected_plan_class_counts"])
+        && u64_path(probe, &["optimizer_decision_count"]).is_some()
+        && query_runtime_preflight_probe_plan_cache_ready(probe)
+        && query_runtime_preflight_probe_scan_pruning_ready(probe)
+        && string_array_path(probe, &["blocker_codes"]).is_empty()
+}
+
+fn query_runtime_preflight_probe_plan_cache_ready(probe: &serde_json::Value) -> bool {
+    non_empty_str_path(probe, &["plan_cache_lookup"])
+        && non_empty_str_path(probe, &["plan_cache", "lookup"])
+        && bool_path(probe, &["plan_cache", "cacheable"]).is_some()
+        && bool_path(probe, &["plan_cache", "hit"]).is_some()
+        && bool_path(probe, &["plan_cache", "miss"]).is_some()
+        && bool_path(probe, &["plan_cache", "bypassed"]) == Some(false)
+}
+
+fn query_runtime_preflight_probe_scan_pruning_ready(probe: &serde_json::Value) -> bool {
+    let Some(report_count) = u64_path(probe, &["execution_profile", "scan_pruning_report_count"])
+    else {
+        return false;
+    };
+    let Some(reports) = json_get_path(probe, &["execution_profile", "scan_pruning_reports"])
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    report_count == reports.len() as u64
+        && u64_path(probe, &["execution_profile", "pruned_scan_count"]).is_some()
+        && reports.iter().all(query_runtime_scan_pruning_report_ready)
+}
+
+fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
+    json_get_path(report, &["strategy"]).is_some_and(serde_json::Value::is_object)
+        && bool_path(report, &["pruned"]).is_some()
+        && bool_path(report, &["exact_empty"]).is_some()
+        && u64_path(report, &["candidate_count_before_filter"]).is_some()
+        && u64_path(report, &["output_count"]).is_some()
+        && u64_path(report, &["filtered_out_count"]).is_some()
 }
 
 fn library_readiness_ready(bundle: &serde_json::Value) -> bool {
@@ -2008,6 +2046,12 @@ fn string_array_path_is_empty(value: &serde_json::Value, path: &[&str]) -> bool 
 
 fn non_empty_str_path(value: &serde_json::Value, path: &[&str]) -> bool {
     str_path(value, path).is_some_and(|s| !s.trim().is_empty())
+}
+
+fn json_object_path_is_non_empty(value: &serde_json::Value, path: &[&str]) -> bool {
+    json_get_path(value, path)
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|object| !object.is_empty())
 }
 
 fn bool_path(value: &serde_json::Value, path: &[&str]) -> Option<bool> {
@@ -2754,6 +2798,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_query_runtime_preflight_without_scan_pruning_reports() {
+        let mut bundle = ready_bundle();
+        bundle["query_runtime_preflight"]["probes"][0]["execution_profile"]
+            .as_object_mut()
+            .unwrap()
+            .remove("scan_pruning_reports");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_runtime_preflight")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!(["query_runtime_preflight.probes"])
+        );
+    }
+
+    #[test]
     fn rejects_weak_graph_route_query_profiles_even_if_summary_is_ready() {
         let mut bundle = ready_bundle();
         bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
@@ -3441,9 +3512,41 @@ mod tests {
                     "success": true,
                     "output_row_count": 1,
                     "selected_plan_fingerprint": "IndexNodeSeek(1:m:6:Memory)",
+                    "selected_plan_operator_counts": {
+                        "IndexNodeSeek": 1,
+                        "ProjectExec": 1
+                    },
+                    "selected_plan_class_counts": {
+                        "access": 1,
+                        "relational": 1
+                    },
+                    "optimizer_decision_count": 2,
+                    "plan_cache_lookup": "miss",
+                    "plan_cache": {
+                        "lookup": "miss",
+                        "bypass_reason": null,
+                        "cacheable": true,
+                        "hit": false,
+                        "miss": true,
+                        "bypassed": false
+                    },
                     "execution_profile": {
                         "scan_pruning_report_count": 1,
-                        "pruned_scan_count": 1
+                        "pruned_scan_count": 1,
+                        "scan_pruning_reports": [
+                            {
+                                "label_id": 1,
+                                "strategy": {
+                                    "kind": "property_eq",
+                                    "property": "id"
+                                },
+                                "pruned": true,
+                                "exact_empty": false,
+                                "candidate_count_before_filter": 1,
+                                "output_count": 1,
+                                "filtered_out_count": 0
+                            }
+                        ]
                     },
                     "blocker_codes": []
                 }

@@ -438,6 +438,12 @@ cargo run --quiet --bin skein -- \
 Use probes from active Nowledge Mem route fixtures. A probe can require scan
 pruning evidence with `require_scan_pruning` and `require_pruned`; missing or
 weak probe evidence keeps integration readiness fail-closed.
+Each successful probe must include a selected plan fingerprint, non-empty
+selected plan operator/class counts, optimizer decision count, plan-cache state,
+and `execution_profile.scan_pruning_reports` whose length matches
+`scan_pruning_report_count`. This keeps the runtime preflight useful for
+observability and prevents a count-only probe summary from being treated as
+cutover evidence.
 
 ## 11. Compile The Mem Integration Bundle
 

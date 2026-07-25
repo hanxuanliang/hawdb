@@ -777,9 +777,41 @@ mod tests {
                     "success": true,
                     "output_row_count": 1,
                     "selected_plan_fingerprint": "IndexNodeSeek(1:m:6:Memory)",
+                    "selected_plan_operator_counts": {
+                        "IndexNodeSeek": 1,
+                        "ProjectExec": 1
+                    },
+                    "selected_plan_class_counts": {
+                        "access": 1,
+                        "relational": 1
+                    },
+                    "optimizer_decision_count": 2,
+                    "plan_cache_lookup": "miss",
+                    "plan_cache": {
+                        "lookup": "miss",
+                        "bypass_reason": null,
+                        "cacheable": true,
+                        "hit": false,
+                        "miss": true,
+                        "bypassed": false
+                    },
                     "execution_profile": {
                         "scan_pruning_report_count": 1,
-                        "pruned_scan_count": 1
+                        "pruned_scan_count": 1,
+                        "scan_pruning_reports": [
+                            {
+                                "label_id": 1,
+                                "strategy": {
+                                    "kind": "property_eq",
+                                    "property": "id"
+                                },
+                                "pruned": true,
+                                "exact_empty": false,
+                                "candidate_count_before_filter": 1,
+                                "output_count": 1,
+                                "filtered_out_count": 0
+                            }
+                        ]
                     },
                     "blocker_codes": []
                 }

@@ -139,6 +139,16 @@ fn run_probe(db: &mut Database, probe: &QueryRuntimeProbe) -> serde_json::Value 
                 "search_mode": output.trace.search_mode.as_str(),
                 "selected_plan_operator_counts": output.trace.selected_plan_operator_counts,
                 "selected_plan_class_counts": output.trace.selected_plan_class_counts,
+                "optimizer_decision_count": output.trace.decisions.len(),
+                "plan_cache_lookup": output.plan_cache_lookup.as_str(),
+                "plan_cache": {
+                    "lookup": output.plan_cache_lookup.as_str(),
+                    "bypass_reason": output.plan_cache_lookup.bypass_reason().map(|reason| reason.as_str()),
+                    "cacheable": output.plan_cache_lookup.bypass_reason().is_none(),
+                    "hit": matches!(output.plan_cache_lookup, skein::PlanCacheLookup::Hit),
+                    "miss": matches!(output.plan_cache_lookup, skein::PlanCacheLookup::Miss),
+                    "bypassed": matches!(output.plan_cache_lookup, skein::PlanCacheLookup::Bypass(_)),
+                },
                 "work_request": {
                     "priority": output.work_request.priority.as_str(),
                     "class": output.work_request.class.as_str(),
@@ -152,6 +162,10 @@ fn run_probe(db: &mut Database, probe: &QueryRuntimeProbe) -> serde_json::Value 
                     "blocking_operator_kinds": output.execution_profile.blocking_operator_kinds,
                     "scan_pruning_report_count": scan_pruning_report_count,
                     "pruned_scan_count": pruned_scan_count,
+                    "scan_pruning_reports": output.execution_profile.scan_pruning_reports
+                        .iter()
+                        .map(scan_pruning_report_json)
+                        .collect::<Vec<_>>(),
                 },
                 "blocker_codes": blocker_codes,
             })
@@ -198,6 +212,43 @@ fn probe_blocker_codes(
         }
     }
     blockers
+}
+
+fn scan_pruning_report_json(report: &skein::store::ScanPruningReport) -> serde_json::Value {
+    serde_json::json!({
+        "label_id": report.label_id.map(|label_id| label_id.0),
+        "strategy": scan_pruning_strategy_json(&report.strategy),
+        "pruned": report.pruned,
+        "exact_empty": report.exact_empty,
+        "candidate_count_before_filter": report.candidate_count_before_filter,
+        "output_count": report.output_count,
+        "filtered_out_count": report.filtered_out_count,
+    })
+}
+
+fn scan_pruning_strategy_json(strategy: &skein::store::ScanPruningStrategy) -> serde_json::Value {
+    match strategy {
+        skein::store::ScanPruningStrategy::FullLabelScan => {
+            serde_json::json!({"kind": "full_label_scan"})
+        }
+        skein::store::ScanPruningStrategy::Empty => serde_json::json!({"kind": "empty"}),
+        skein::store::ScanPruningStrategy::IdEq => serde_json::json!({"kind": "id_eq"}),
+        skein::store::ScanPruningStrategy::IdIn => serde_json::json!({"kind": "id_in"}),
+        skein::store::ScanPruningStrategy::IdRange => serde_json::json!({"kind": "id_range"}),
+        skein::store::ScanPruningStrategy::PropertyEq { property } => {
+            serde_json::json!({"kind": "property_eq", "property": property})
+        }
+        skein::store::ScanPruningStrategy::PropertyNotEq { property } => {
+            serde_json::json!({"kind": "property_not_eq", "property": property})
+        }
+        skein::store::ScanPruningStrategy::PropertyIn { property } => {
+            serde_json::json!({"kind": "property_in", "property": property})
+        }
+        skein::store::ScanPruningStrategy::PropertyRange { property } => {
+            serde_json::json!({"kind": "property_range", "property": property})
+        }
+        skein::store::ScanPruningStrategy::OrUnion => serde_json::json!({"kind": "or_union"}),
+    }
 }
 
 fn parse_probe_file(value: &serde_json::Value) -> Result<Vec<QueryRuntimeProbe>> {
@@ -434,6 +485,28 @@ mod tests {
         assert_eq!(
             report["probes"][0]["execution_profile"]["pruned_scan_count"],
             1
+        );
+        assert_eq!(
+            report["probes"][0]["selected_plan_operator_counts"]["IndexNodeSeek"],
+            1
+        );
+        assert_eq!(
+            report["probes"][0]["selected_plan_class_counts"]["access"],
+            1
+        );
+        assert!(report["probes"][0]["optimizer_decision_count"]
+            .as_u64()
+            .is_some());
+        assert_eq!(report["probes"][0]["plan_cache"]["lookup"], "miss");
+        assert_eq!(report["probes"][0]["plan_cache"]["bypassed"], false);
+        assert_eq!(
+            report["probes"][0]["execution_profile"]["scan_pruning_reports"][0]["strategy"]["kind"],
+            "property_eq"
+        );
+        assert_eq!(
+            report["probes"][0]["execution_profile"]["scan_pruning_reports"][0]["strategy"]
+                ["property"],
+            "kind"
         );
         assert!(report["probes"][0].get("rows").is_none());
         assert!(report["probes"][0].get("parameters").is_none());

@@ -1314,15 +1314,54 @@ fn query_runtime_preflight_probe_details_ready(value: &serde_json::Value) -> boo
     else {
         return false;
     };
-    probes.iter().all(|probe| {
-        bool_path(probe, &["ready"]) == Some(true)
-            && bool_path(probe, &["success"]) == Some(true)
-            && str_path(probe, &["selected_plan_fingerprint"])
-                .is_some_and(|value| !value.trim().is_empty())
-            && value_path(probe, &["output_row_count"]).is_some()
-            && value_path(probe, &["execution_profile", "scan_pruning_report_count"]).is_some()
-            && empty_array_path(probe, &["blocker_codes"])
-    })
+    probes.iter().all(query_runtime_preflight_probe_ready)
+}
+
+fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
+    bool_path(probe, &["ready"]) == Some(true)
+        && bool_path(probe, &["success"]) == Some(true)
+        && str_path(probe, &["selected_plan_fingerprint"])
+            .is_some_and(|value| !value.trim().is_empty())
+        && value_path(probe, &["output_row_count"]).is_some()
+        && json_object_path_is_non_empty(probe, &["selected_plan_operator_counts"])
+        && json_object_path_is_non_empty(probe, &["selected_plan_class_counts"])
+        && u64_path(probe, &["optimizer_decision_count"]).is_some()
+        && query_runtime_preflight_probe_plan_cache_ready(probe)
+        && query_runtime_preflight_probe_scan_pruning_ready(probe)
+        && empty_array_path(probe, &["blocker_codes"])
+}
+
+fn query_runtime_preflight_probe_plan_cache_ready(probe: &serde_json::Value) -> bool {
+    str_path(probe, &["plan_cache_lookup"]).is_some_and(|value| !value.trim().is_empty())
+        && str_path(probe, &["plan_cache", "lookup"]).is_some_and(|value| !value.trim().is_empty())
+        && bool_path(probe, &["plan_cache", "cacheable"]).is_some()
+        && bool_path(probe, &["plan_cache", "hit"]).is_some()
+        && bool_path(probe, &["plan_cache", "miss"]).is_some()
+        && bool_path(probe, &["plan_cache", "bypassed"]) == Some(false)
+}
+
+fn query_runtime_preflight_probe_scan_pruning_ready(probe: &serde_json::Value) -> bool {
+    let Some(report_count) = u64_path(probe, &["execution_profile", "scan_pruning_report_count"])
+    else {
+        return false;
+    };
+    let Some(reports) = value_path(probe, &["execution_profile", "scan_pruning_reports"])
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    report_count == reports.len() as u64
+        && u64_path(probe, &["execution_profile", "pruned_scan_count"]).is_some()
+        && reports.iter().all(query_runtime_scan_pruning_report_ready)
+}
+
+fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
+    value_path(report, &["strategy"]).is_some_and(serde_json::Value::is_object)
+        && bool_path(report, &["pruned"]).is_some()
+        && bool_path(report, &["exact_empty"]).is_some()
+        && u64_path(report, &["candidate_count_before_filter"]).is_some()
+        && u64_path(report, &["output_count"]).is_some()
+        && u64_path(report, &["filtered_out_count"]).is_some()
 }
 
 fn dual_engine_u64_path(value: &serde_json::Value, path: &[&str], field: &str) -> Option<u64> {
@@ -1337,6 +1376,12 @@ fn empty_array_path(value: &serde_json::Value, path: &[&str]) -> bool {
     value_path(value, path)
         .and_then(serde_json::Value::as_array)
         .is_some_and(Vec::is_empty)
+}
+
+fn json_object_path_is_non_empty(value: &serde_json::Value, path: &[&str]) -> bool {
+    value_path(value, path)
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|object| !object.is_empty())
 }
 
 fn blocker_codes(value: &serde_json::Value, paths: &[&[&str]]) -> Vec<String> {
@@ -1969,6 +2014,28 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_rejects_weak_query_runtime_probe_profile() {
+        let mut inputs = ready_inputs();
+        let preflight = inputs.query_runtime_preflight.as_mut().unwrap();
+        preflight["probes"][0]["execution_profile"]
+            .as_object_mut()
+            .unwrap()
+            .remove("scan_pruning_reports");
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        assert_eq!(
+            check_by_name(&report, "query_runtime_preflight")["failed_evidence_fields"],
+            serde_json::json!(["query_runtime_preflight.probes"])
+        );
+    }
+
+    #[test]
     fn preflight_check_requires_replacement_dual_engine_consistency() {
         let mut inputs = ready_inputs();
         let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
@@ -2206,9 +2273,41 @@ mod tests {
                     "success": true,
                     "output_row_count": 1,
                     "selected_plan_fingerprint": "ProjectExec(IndexNodeSeek)",
+                    "selected_plan_operator_counts": {
+                        "IndexNodeSeek": 1,
+                        "ProjectExec": 1
+                    },
+                    "selected_plan_class_counts": {
+                        "access": 1,
+                        "relational": 1
+                    },
+                    "optimizer_decision_count": 2,
+                    "plan_cache_lookup": "miss",
+                    "plan_cache": {
+                        "lookup": "miss",
+                        "bypass_reason": null,
+                        "cacheable": true,
+                        "hit": false,
+                        "miss": true,
+                        "bypassed": false
+                    },
                     "execution_profile": {
                         "scan_pruning_report_count": 1,
-                        "pruned_scan_count": 1
+                        "pruned_scan_count": 1,
+                        "scan_pruning_reports": [
+                            {
+                                "label_id": 1,
+                                "strategy": {
+                                    "kind": "property_eq",
+                                    "property": "id"
+                                },
+                                "pruned": true,
+                                "exact_empty": false,
+                                "candidate_count_before_filter": 1,
+                                "output_count": 1,
+                                "filtered_out_count": 0
+                            }
+                        ]
                     },
                     "blocker_codes": []
                 }
