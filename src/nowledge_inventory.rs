@@ -91,6 +91,7 @@ pub const REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES: &[&str] = &[
     "memory_lookup",
     "graph_traversal",
     "projected_graph",
+    "label_stats_read",
     "search_projection",
 ];
 
@@ -2825,6 +2826,7 @@ mod tests {
                 "memory_lookup".to_string(),
                 "graph_traversal".to_string(),
                 "projected_graph".to_string(),
+                "label_stats_read".to_string(),
                 "search_projection".to_string()
             ]
         );
@@ -2832,7 +2834,7 @@ mod tests {
             health.blockers,
             vec![
                 "replacement readiness is incomplete for query families: mutation".to_string(),
-                "replacement readiness is missing required query families: memory_lookup, graph_traversal, projected_graph, search_projection".to_string()
+                "replacement readiness is missing required query families: memory_lookup, graph_traversal, projected_graph, label_stats_read, search_projection".to_string()
             ]
         );
     }
@@ -2869,6 +2871,7 @@ mod tests {
                 "memory_lookup".to_string(),
                 "graph_traversal".to_string(),
                 "projected_graph".to_string(),
+                "label_stats_read".to_string(),
                 "search_projection".to_string()
             ]
         );
@@ -2876,7 +2879,7 @@ mod tests {
             health.blockers,
             vec![
                 "replacement readiness family report has invalid entries".to_string(),
-                "replacement readiness is missing required query families: memory_lookup, graph_traversal, projected_graph, search_projection".to_string()
+                "replacement readiness is missing required query families: memory_lookup, graph_traversal, projected_graph, label_stats_read, search_projection".to_string()
             ]
         );
     }
@@ -2893,6 +2896,10 @@ mod tests {
             },
             {
                 "query_family": "projected_graph",
+                "replacement_readiness_per_million": 1_000_000
+            },
+            {
+                "query_family": "label_stats_read",
                 "replacement_readiness_per_million": 1_000_000
             },
             {

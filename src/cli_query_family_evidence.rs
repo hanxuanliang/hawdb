@@ -96,6 +96,7 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::run_nowledge_query_family_evidence;
+    use skein::REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -128,7 +129,7 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            4
+            REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.len()
         );
         std::fs::remove_file(path).unwrap();
     }
@@ -164,6 +165,7 @@ mod tests {
                 "memory_lookup",
                 "graph_traversal",
                 "projected_graph",
+                "label_stats_read",
                 "search_projection"
             ])
         );
@@ -184,6 +186,10 @@ mod tests {
             },
             {
                 "query_family": "projected_graph",
+                "replacement_readiness_per_million": 1000000
+            },
+            {
+                "query_family": "label_stats_read",
                 "replacement_readiness_per_million": 1000000
             },
             {
@@ -237,6 +243,10 @@ mod tests {
                 },
                 {
                     "query_family": "projected_graph",
+                    "replacement_readiness_per_million": 1000000
+                },
+                {
+                    "query_family": "label_stats_read",
                     "replacement_readiness_per_million": 1000000
                 },
                 {

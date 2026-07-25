@@ -1010,6 +1010,7 @@ mod tests {
                     "memory_lookup",
                     "graph_traversal",
                     "projected_graph",
+                    "label_stats_read",
                     "search_projection"
                 ],
                 "missing_required_query_families": []

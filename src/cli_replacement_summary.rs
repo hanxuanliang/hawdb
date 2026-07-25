@@ -1682,7 +1682,8 @@ mod tests {
     use super::{
         nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
         nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
-        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING,
     };
@@ -1938,6 +1939,7 @@ mod tests {
                 "memory_lookup",
                 "graph_traversal",
                 "projected_graph",
+                "label_stats_read",
                 "search_projection"
             ])
         );
@@ -2817,15 +2819,15 @@ mod tests {
         );
         assert_eq!(
             summary["replacement_readiness_family_summary"]["total_count"],
-            4
+            REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.len()
         );
         assert_eq!(
             summary["replacement_readiness_family_summary"]["ready_count"],
-            4
+            REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.len()
         );
         assert_eq!(
             summary["replacement_readiness_family_summary"]["omitted_count"],
-            4
+            REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.len()
         );
         assert_eq!(summary["production_cutover_ready"], true);
     }
@@ -3394,6 +3396,10 @@ mod tests {
                 },
                 {
                     "query_family": "projected_graph",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
+                    "query_family": "label_stats_read",
                     "replacement_readiness_per_million": 1_000_000
                 },
                 {

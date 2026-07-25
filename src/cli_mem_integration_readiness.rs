@@ -4283,8 +4283,8 @@ mod tests {
                     "consistent": true
                 },
                 "replacement_readiness_family_summary": {
-                    "total_count": 4,
-                    "ready_count": 4,
+                    "total_count": 5,
+                    "ready_count": 5,
                     "blocked_count": 0,
                     "omitted_count": 0,
                     "min_replacement_readiness_per_million": 1_000_000,
@@ -4293,6 +4293,7 @@ mod tests {
                         "memory_lookup",
                         "graph_traversal",
                         "projected_graph",
+                        "label_stats_read",
                         "search_projection"
                     ],
                     "missing_required_query_families": []

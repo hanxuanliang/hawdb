@@ -451,6 +451,10 @@ mod tests {
                     "replacement_readiness_per_million": 1_000_000
                 },
                 {
+                    "query_family": "label_stats_read",
+                    "replacement_readiness_per_million": 1_000_000
+                },
+                {
                     "query_family": "search_projection",
                     "replacement_readiness_per_million": 1_000_000
                 }
