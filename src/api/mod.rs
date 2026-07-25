@@ -7982,14 +7982,20 @@ impl Database {
         &self,
         request: &KnowledgeGraphMetaRequest,
     ) -> Result<KnowledgeGraphMetaOutput> {
-        knowledge_graph_meta_for(&self.catalog, &self.store, request)
+        match knowledge_graph_meta_via_query_runtime(self, request) {
+            Ok(output) => Ok(output),
+            Err(_) => knowledge_graph_meta_for(&self.catalog, &self.store, request),
+        }
     }
 
     pub fn knowledge_graph_meta_projected(
         &self,
         request: &KnowledgeGraphMetaProjectedRequest,
     ) -> Result<KnowledgeGraphMetaProjectedOutput> {
-        knowledge_graph_meta_projected_for(&self.catalog, &self.store, request)
+        match knowledge_graph_meta_projected_via_query_runtime(self, request) {
+            Ok(output) => Ok(output),
+            Err(_) => knowledge_graph_meta_projected_for(&self.catalog, &self.store, request),
+        }
     }
 
     pub fn delete_knowledge_graph_meta(
@@ -27555,6 +27561,21 @@ fn knowledge_graph_meta_for(
     })
 }
 
+fn knowledge_graph_meta_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeGraphMetaRequest,
+) -> Result<KnowledgeGraphMetaOutput> {
+    validate_graph_meta_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let meta = knowledge_graph_meta_entity_via_query_runtime(db, &request.meta_id)?
+        .map(knowledge_graph_meta_from_entity);
+    Ok(KnowledgeGraphMetaOutput {
+        graph_commit_epoch,
+        found: meta.is_some(),
+        meta,
+    })
+}
+
 fn knowledge_graph_meta_projected_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -27575,6 +27596,37 @@ fn knowledge_graph_meta_projected_for(
         found: meta.is_some(),
         meta,
     })
+}
+
+fn knowledge_graph_meta_projected_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeGraphMetaProjectedRequest,
+) -> Result<KnowledgeGraphMetaProjectedOutput> {
+    validate_graph_meta_projected_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let meta = knowledge_graph_meta_entity_via_query_runtime(db, &request.meta.meta_id)?
+        .map(|entity| knowledge_graph_meta_projected_from_entity(&entity, &request.property_names));
+    Ok(KnowledgeGraphMetaProjectedOutput {
+        graph_commit_epoch,
+        found: meta.is_some(),
+        meta,
+    })
+}
+
+fn knowledge_graph_meta_entity_via_query_runtime(
+    db: &Database,
+    meta_id: &str,
+) -> Result<Option<KnowledgeEntity>> {
+    let parameters = BTreeMap::from([("meta_id".to_string(), Value::String(meta_id.to_string()))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (m:GraphMeta) WHERE m.meta_id = $meta_id RETURN m AS meta ORDER BY id(m) ASC LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    Ok(output
+        .rows
+        .first()
+        .and_then(|row| row.get("meta").and_then(knowledge_entity_from_value)))
 }
 
 fn delete_knowledge_graph_meta_for(
@@ -27648,6 +27700,14 @@ fn knowledge_graph_meta_from_node(node: &NodeRecord) -> KnowledgeGraphMeta {
     }
 }
 
+fn knowledge_graph_meta_from_entity(entity: KnowledgeEntity) -> KnowledgeGraphMeta {
+    KnowledgeGraphMeta {
+        meta_id: knowledge_entity_graph_meta_id(&entity),
+        node_id: entity.node_id,
+        properties: entity.properties,
+    }
+}
+
 fn knowledge_graph_meta_projected_from_node(
     node: &NodeRecord,
     property_names: &[String],
@@ -27661,6 +27721,25 @@ fn knowledge_graph_meta_projected_from_node(
         node_id: node.id.0,
         properties: projected_properties(&node.properties, property_names),
     }
+}
+
+fn knowledge_graph_meta_projected_from_entity(
+    entity: &KnowledgeEntity,
+    property_names: &[String],
+) -> KnowledgeGraphMetaProjected {
+    KnowledgeGraphMetaProjected {
+        meta_id: knowledge_entity_graph_meta_id(entity),
+        node_id: entity.node_id,
+        properties: projected_properties(&entity.properties, property_names),
+    }
+}
+
+fn knowledge_entity_graph_meta_id(entity: &KnowledgeEntity) -> Option<String> {
+    entity
+        .properties
+        .get("meta_id")
+        .map(value_to_external_id)
+        .filter(|meta_id| !meta_id.is_empty())
 }
 
 fn knowledge_graph_meta_delete_statement(

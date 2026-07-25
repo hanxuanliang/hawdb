@@ -21413,19 +21413,22 @@ fn typed_graph_meta_stamp_persists_as_one_wal_batch_and_replays() {
 
 #[test]
 fn reads_graph_meta_by_meta_id_for_nowledge_algorithm_state() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, community_detection_applied: false, pagerank_computed_at: 100})")
         .unwrap();
 
-    let output = db
-        .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
-            meta_id: "main".to_string(),
-        })
-        .unwrap();
+    let request = KnowledgeGraphMetaRequest {
+        meta_id: "main".to_string(),
+    };
+    let output = db.knowledge_graph_meta(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, 1);
     assert!(output.found);
-    let meta = output.meta.unwrap();
+    let meta = output.meta.as_ref().unwrap();
     assert_eq!(meta.meta_id.as_deref(), Some("main"));
     assert_eq!(
         meta.properties.get("pagerank_applied"),
@@ -21440,6 +21443,14 @@ fn reads_graph_meta_by_meta_id_for_nowledge_algorithm_state() {
         Some(&Value::Int(100))
     );
 
+    let stats = db.plan_cache_stats();
+    let repeated_output = db.knowledge_graph_meta(&request).unwrap();
+    assert_eq!(repeated_output, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
+
     let missing = db
         .knowledge_graph_meta(&KnowledgeGraphMetaRequest {
             meta_id: "missing".to_string(),
@@ -21452,7 +21463,11 @@ fn reads_graph_meta_by_meta_id_for_nowledge_algorithm_state() {
 
 #[test]
 fn projects_graph_meta_for_nowledge_state_growth() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:GraphMeta {meta_id: 'main', pagerank_applied: true, community_detection_applied: false, pagerank_computed_at: 100, future_state_field: 'future'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
@@ -21461,22 +21476,23 @@ fn projects_graph_meta_for_nowledge_state_growth() {
     db.query("MATCH (m:GraphMeta {meta_id: 'main'}) SET m.future_state_field = 'late', m.extra_field = 'extra'")
         .unwrap();
 
+    let projected_request = KnowledgeGraphMetaProjectedRequest {
+        meta: KnowledgeGraphMetaRequest {
+            meta_id: "main".to_string(),
+        },
+        property_names: vec![
+            "pagerank_applied".to_string(),
+            "future_state_field".to_string(),
+            "meta_id".to_string(),
+            "pagerank_applied".to_string(),
+        ],
+    };
     let projected = db
-        .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
-            meta: KnowledgeGraphMetaRequest {
-                meta_id: "main".to_string(),
-            },
-            property_names: vec![
-                "pagerank_applied".to_string(),
-                "future_state_field".to_string(),
-                "meta_id".to_string(),
-                "pagerank_applied".to_string(),
-            ],
-        })
+        .knowledge_graph_meta_projected(&projected_request)
         .unwrap();
     assert_eq!(projected.graph_commit_epoch, db.store.commit_epoch());
     assert!(projected.found);
-    let meta = projected.meta.unwrap();
+    let meta = projected.meta.as_ref().unwrap();
     assert_eq!(meta.meta_id.as_deref(), Some("main"));
     assert_eq!(
         meta.properties.get("pagerank_applied"),
@@ -21492,6 +21508,16 @@ fn projects_graph_meta_for_nowledge_state_growth() {
     );
     assert!(!meta.properties.contains_key("community_detection_applied"));
     assert!(!meta.properties.contains_key("extra_field"));
+
+    let stats = db.plan_cache_stats();
+    let repeated_projected = db
+        .knowledge_graph_meta_projected(&projected_request)
+        .unwrap();
+    assert_eq!(repeated_projected, projected);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 
     let snapshot_projected = snapshot
         .knowledge_graph_meta_projected(&KnowledgeGraphMetaProjectedRequest {
