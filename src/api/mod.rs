@@ -8276,10 +8276,7 @@ impl Database {
         &self,
         request: &KnowledgeInducedEdgeListRequest,
     ) -> Result<KnowledgeInducedEdgeListOutput> {
-        match knowledge_induced_edges_via_query_runtime(self, request) {
-            Ok(output) => Ok(output),
-            Err(_) => knowledge_induced_edges_for(&self.catalog, &self.store, request),
-        }
+        knowledge_induced_edges_via_query_runtime(self, request)
     }
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
@@ -35409,72 +35406,6 @@ fn node_by_label_property_external_id<'a>(
     })
 }
 
-fn knowledge_induced_edges_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeInducedEdgeListRequest,
-) -> Result<KnowledgeInducedEdgeListOutput> {
-    if request.external_ids.is_empty() || request.external_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge induced edge read requires non-empty external ids".to_string(),
-        ));
-    }
-
-    let graph_commit_epoch = store.commit_epoch();
-    let requested_ids = request
-        .external_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let mut matched_external_ids = BTreeSet::new();
-    let mut matched_node_ids = BTreeSet::new();
-    for node in store.scan_nodes(None) {
-        if let Some(external_id) = node_external_id(node) {
-            if requested_ids.contains(&external_id) {
-                matched_external_ids.insert(external_id);
-                matched_node_ids.insert(node.id);
-            }
-        }
-    }
-    let mut missing_external_ids = Vec::new();
-    let mut seen_missing = BTreeSet::new();
-    for external_id in &request.external_ids {
-        if !matched_external_ids.contains(external_id) && seen_missing.insert(external_id.clone()) {
-            missing_external_ids.push(external_id.clone());
-        }
-    }
-
-    let mut rows = store
-        .scan_relationships(None)
-        .filter(|relationship| {
-            matched_node_ids.contains(&relationship.source)
-                && matched_node_ids.contains(&relationship.target)
-        })
-        .filter_map(|relationship| induced_edge_row(catalog, store, relationship))
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.source_id
-            .cmp(&right.source_id)
-            .then_with(|| left.target_id.cmp(&right.target_id))
-            .then_with(|| left.relationship_type.cmp(&right.relationship_type))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
-    let matched_count = rows.len();
-    if request.limit > 0 {
-        rows.truncate(request.limit);
-    }
-    let returned_count = rows.len();
-
-    Ok(KnowledgeInducedEdgeListOutput {
-        graph_commit_epoch,
-        rows,
-        matched_node_count: matched_node_ids.len(),
-        missing_external_ids,
-        matched_count,
-        returned_count,
-    })
-}
-
 fn knowledge_induced_edges_via_query_runtime(
     db: &Database,
     request: &KnowledgeInducedEdgeListRequest,
@@ -35649,36 +35580,6 @@ fn knowledge_induced_edge_row_from_query_row(row: &Row) -> Result<KnowledgeInduc
             .cloned()
             .unwrap_or(Value::Float(0.5)),
     })
-}
-
-fn induced_edge_row(
-    catalog: &Catalog,
-    store: &GraphStore,
-    relationship: &RelRecord,
-) -> Option<KnowledgeInducedEdgeRow> {
-    let source = store.node(relationship.source)?;
-    let target = store.node(relationship.target)?;
-    Some(KnowledgeInducedEdgeRow {
-        source_id: node_external_id(source),
-        source_node_id: source.id.0,
-        target_id: node_external_id(target),
-        target_node_id: target.id.0,
-        relationship_id: relationship.id.0,
-        relationship_type: catalog
-            .rel_type_name(relationship.rel_type)
-            .unwrap_or("<unknown>")
-            .to_string(),
-        strength: relationship_strength_value(relationship),
-    })
-}
-
-fn relationship_strength_value(relationship: &RelRecord) -> Value {
-    relationship
-        .properties
-        .get("strength")
-        .or_else(|| relationship.properties.get("confidence"))
-        .cloned()
-        .unwrap_or(Value::Float(0.5))
 }
 
 fn context_path_for_relationship(
