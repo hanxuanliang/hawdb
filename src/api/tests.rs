@@ -17797,6 +17797,60 @@ fn thread_source_read_rejects_empty_sid() {
 }
 
 #[test]
+fn thread_title_and_source_reads_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Thread {id: 'thread-cache-a', thread_id: 'logical-cache-a', title: 'Alpha Thread', source: 'codex', created_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread-cache-b', thread_id: 'logical-cache-b', title: 'Beta Thread', source: 'slack', created_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread-cache-c', thread_id: 'logical-cache-a', title: 'Later Duplicate', source: 'email', created_at: 30})")
+        .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'logical-cache-a', title: 'Ignored Memory', source: 'ignored'})",
+    )
+    .unwrap();
+    let title_request = KnowledgeThreadTitleLookupRequest {
+        id: "logical-cache-a".to_string(),
+    };
+    let source_request = KnowledgeThreadSourceLookupRequest {
+        sid: "logical-cache-a".to_string(),
+    };
+
+    let first_title = db.knowledge_thread_title(&title_request).unwrap();
+    let first_source = db.knowledge_thread_source(&source_request).unwrap();
+    let second_title = db.knowledge_thread_title(&title_request).unwrap();
+    let second_source = db.knowledge_thread_source(&source_request).unwrap();
+
+    assert_eq!(first_title, second_title);
+    assert_eq!(first_source, second_source);
+    assert!(first_title.found_thread);
+    assert_eq!(first_title.title.as_deref(), Some("Alpha Thread"));
+    assert_eq!(first_title.matched_count, 2);
+    assert!(first_source.found_thread);
+    assert_eq!(first_source.thread_id.as_deref(), Some("logical-cache-a"));
+    assert_eq!(first_source.title.as_deref(), Some("Alpha Thread"));
+    assert_eq!(first_source.source.as_deref(), Some("codex"));
+    assert_eq!(first_source.created_at, Some(Value::Int(10)));
+    assert_eq!(first_source.matched_count, 2);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+
+    let by_physical = db
+        .knowledge_thread_title(&KnowledgeThreadTitleLookupRequest {
+            id: "thread-cache-b".to_string(),
+        })
+        .unwrap();
+    assert_eq!(by_physical.title.as_deref(), Some("Beta Thread"));
+    assert_eq!(by_physical.matched_count, 1);
+}
+
+#[test]
 fn reads_thread_message_lookup_for_rest_fs_shape() {
     let mut db = Database::new();
     db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', source: 'codex', message_count: 3, space_id: 'team'})")

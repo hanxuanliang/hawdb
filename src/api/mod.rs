@@ -7690,14 +7690,14 @@ impl Database {
         &self,
         request: &KnowledgeThreadTitleLookupRequest,
     ) -> Result<KnowledgeThreadTitleLookupOutput> {
-        knowledge_thread_title_for(&self.catalog, &self.store, request)
+        knowledge_thread_title_via_query_runtime(self, request)
     }
 
     pub fn knowledge_thread_source(
         &self,
         request: &KnowledgeThreadSourceLookupRequest,
     ) -> Result<KnowledgeThreadSourceLookupOutput> {
-        knowledge_thread_source_for(&self.catalog, &self.store, request)
+        knowledge_thread_source_via_query_runtime(self, request)
     }
 
     pub fn knowledge_thread_message_lookup(
@@ -22663,6 +22663,34 @@ fn knowledge_thread_title_for(
     })
 }
 
+fn knowledge_thread_title_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadTitleLookupRequest,
+) -> Result<KnowledgeThreadTitleLookupOutput> {
+    validate_knowledge_thread_title_request(request)?;
+    let parameters = BTreeMap::from([("id".to_string(), Value::String(request.id.clone()))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread) \
+         WHERE t.id = $id OR t.thread_id = $id \
+         RETURN id(t) AS thread_node_id, t.title AS title \
+         ORDER BY thread_node_id ASC",
+        &parameters,
+        None,
+    )?;
+    let matched_count = output.rows.len();
+    let first = output.rows.first();
+    Ok(KnowledgeThreadTitleLookupOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        id: request.id.clone(),
+        thread_node_id: first
+            .and_then(|row| row.get("thread_node_id"))
+            .and_then(value_to_non_negative_u64),
+        found_thread: first.is_some(),
+        title: first.and_then(|row| optional_string_cell(row, "title")),
+        matched_count,
+    })
+}
+
 fn validate_knowledge_thread_title_request(
     request: &KnowledgeThreadTitleLookupRequest,
 ) -> Result<()> {
@@ -22708,6 +22736,40 @@ fn knowledge_thread_source_for(
         title: first.and_then(|node| string_property(node, "title")),
         source: first.and_then(|node| string_property(node, "source")),
         created_at: first.and_then(|node| node.properties.get("created_at").cloned()),
+        matched_count,
+    })
+}
+
+fn knowledge_thread_source_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadSourceLookupRequest,
+) -> Result<KnowledgeThreadSourceLookupOutput> {
+    validate_knowledge_thread_source_request(request)?;
+    let parameters = BTreeMap::from([("sid".to_string(), Value::String(request.sid.clone()))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread) \
+         WHERE t.id = $sid OR t.thread_id = $sid \
+         RETURN id(t) AS thread_node_id, t.thread_id AS thread_id, \
+         t.title AS title, t.source AS source, t.created_at AS created_at \
+         ORDER BY thread_node_id ASC",
+        &parameters,
+        None,
+    )?;
+    let matched_count = output.rows.len();
+    let first = output.rows.first();
+    Ok(KnowledgeThreadSourceLookupOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        sid: request.sid.clone(),
+        thread_node_id: first
+            .and_then(|row| row.get("thread_node_id"))
+            .and_then(value_to_non_negative_u64),
+        found_thread: first.is_some(),
+        thread_id: first.and_then(|row| optional_string_cell(row, "thread_id")),
+        title: first.and_then(|row| optional_string_cell(row, "title")),
+        source: first.and_then(|row| optional_string_cell(row, "source")),
+        created_at: first
+            .and_then(|row| row.get("created_at"))
+            .and_then(optional_non_null_value),
         matched_count,
     })
 }
