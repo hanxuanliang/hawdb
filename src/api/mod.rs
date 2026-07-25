@@ -7233,7 +7233,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
     ) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
-        knowledge_memory_evolves_projected_successors_for(&self.catalog, &self.store, request)
+        knowledge_memory_evolves_projected_successors_via_query_runtime(self, request)
     }
 
     pub fn knowledge_source_reference_entities(
@@ -13867,6 +13867,119 @@ fn knowledge_memory_evolves_projected_successors_for(
     })
 }
 
+fn knowledge_memory_evolves_projected_successors_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+) -> Result<KnowledgeMemoryEvolvesProjectedSuccessorOutput> {
+    validate_knowledge_memory_evolves_projected_successor_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    if request.old_memory_ids.is_empty() {
+        return Ok(empty_memory_evolves_projected_successor_output(
+            graph_commit_epoch,
+            request,
+        ));
+    }
+
+    let entity_requests = request
+        .old_memory_ids
+        .iter()
+        .map(|old_memory_id| KnowledgeEntityRequest {
+            label: "Memory".to_string(),
+            external_id: old_memory_id.clone(),
+        })
+        .collect::<Vec<_>>();
+    let (_, found_memories) = lookup_entities_via_query_runtime(db, &entity_requests);
+    let requested_ids = request
+        .old_memory_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let parameters = BTreeMap::from([(
+        "old_memory_ids".to_string(),
+        Value::List(requested_ids.into_iter().map(Value::String).collect()),
+    )]);
+    let successor_output = db.query_read_only_with_params_bounded(
+        "MATCH (old:Memory)-[r:EVOLVES]->(new:Memory) \
+         WHERE old.id IN $old_memory_ids \
+         RETURN old.id AS old_memory_id, new AS new_memory, \
+         r AS relationship, id(r) AS relationship_id",
+        &parameters,
+        None,
+    )?;
+    let mut rows_by_old_memory =
+        BTreeMap::<String, Vec<MemoryEvolvesProjectedSuccessorQueryRow>>::new();
+    for row in &successor_output.rows {
+        let (old_memory_id, successor_row) =
+            knowledge_memory_evolves_projected_successor_row_from_query(row, request)?;
+        rows_by_old_memory
+            .entry(old_memory_id)
+            .or_default()
+            .push(successor_row);
+    }
+
+    let page_cursors = knowledge_memory_evolves_projected_successor_page_cursor_map(request);
+    let mut groups = Vec::with_capacity(request.old_memory_ids.len());
+    let mut found_old_memory_count = 0;
+    let mut missing_old_memory_count = 0;
+    let mut matched_relationship_count = 0;
+    let mut returned_count = 0;
+
+    for old_memory_id in &request.old_memory_ids {
+        let Some(old_memory) = found_memories.get(&("Memory".to_string(), old_memory_id.clone()))
+        else {
+            missing_old_memory_count += 1;
+            groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
+                old_memory_id: old_memory_id.clone(),
+                old_node_id: None,
+                found_old_memory: false,
+                rows: Vec::new(),
+                matched_relationship_count: 0,
+                returned_count: 0,
+            });
+            continue;
+        };
+
+        found_old_memory_count += 1;
+        let mut rows = rows_by_old_memory
+            .get(old_memory_id)
+            .cloned()
+            .unwrap_or_default();
+        rows.sort_by(|left, right| {
+            compare_memory_evolves_projected_successor_rows(left, right, request.order)
+        });
+        let group_matched_relationship_count = rows.len();
+        if let Some(page_cursor) = page_cursors.get(old_memory_id).copied() {
+            rows.retain(|row| {
+                memory_evolves_projected_successor_is_after_cursor(row, page_cursor, request.order)
+            });
+        }
+        let mut rows = rows.into_iter().map(|(row, _)| row).collect::<Vec<_>>();
+        if request.limit_per_old_memory > 0 {
+            rows.truncate(request.limit_per_old_memory);
+        }
+        let group_returned_count = rows.len();
+        matched_relationship_count += group_matched_relationship_count;
+        returned_count += group_returned_count;
+        groups.push(KnowledgeMemoryEvolvesProjectedSuccessorGroup {
+            old_memory_id: old_memory_id.clone(),
+            old_node_id: Some(old_memory.node_id),
+            found_old_memory: true,
+            rows,
+            matched_relationship_count: group_matched_relationship_count,
+            returned_count: group_returned_count,
+        });
+    }
+
+    Ok(KnowledgeMemoryEvolvesProjectedSuccessorOutput {
+        graph_commit_epoch,
+        groups,
+        found_old_memory_count,
+        missing_old_memory_count,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
 fn validate_knowledge_memory_evolves_neighbor_request(
     request: &KnowledgeMemoryEvolvesNeighborRequest,
 ) -> Result<()> {
@@ -13954,6 +14067,9 @@ struct MemoryEvolvesProjectedSuccessorReadSpec<'a> {
     relationship_property_names: &'a [String],
 }
 
+type MemoryEvolvesProjectedSuccessorQueryRow =
+    (KnowledgeMemoryEvolvesProjectedSuccessorRow, Option<Value>);
+
 fn knowledge_memory_evolves_neighbor_row(
     anchor: &NodeRecord,
     relationship: &RelRecord,
@@ -14033,6 +14149,72 @@ fn knowledge_memory_evolves_neighbor_row_from_query(
             &request.relationship_property_names,
         ),
     })
+}
+
+fn knowledge_memory_evolves_projected_successor_row_from_query(
+    row: &Row,
+    request: &KnowledgeMemoryEvolvesProjectedSuccessorRequest,
+) -> Result<(String, MemoryEvolvesProjectedSuccessorQueryRow)> {
+    let old_memory_id = optional_string_cell(row, "old_memory_id").ok_or_else(|| {
+        SkeinError::Execution(
+            "knowledge memory evolves projected successor row is missing old_memory_id".to_string(),
+        )
+    })?;
+    let new_memory = row
+        .get("new_memory")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves projected successor row is missing new_memory map"
+                    .to_string(),
+            )
+        })?;
+    let relationship_id = row
+        .get("relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves projected successor row is missing relationship_id"
+                    .to_string(),
+            )
+        })?;
+    let relationship = row
+        .get("relationship")
+        .and_then(value_to_map)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves projected successor row is missing relationship map"
+                    .to_string(),
+            )
+        })?;
+    let mut relationship_properties = relationship.clone();
+    relationship_properties.remove("_id");
+    relationship_properties.remove("source_id");
+    relationship_properties.remove("target_id");
+    relationship_properties.remove("type");
+
+    let updated_at = new_memory.properties.get("updated_at").cloned();
+    let successor_row = KnowledgeMemoryEvolvesProjectedSuccessorRow {
+        new_memory_id: new_memory.external_id.clone(),
+        new_node_id: new_memory.node_id,
+        relationship_id,
+        page_cursor: KnowledgeMemoryEvolvesProjectedSuccessorCursor {
+            new_memory_id: new_memory.external_id.clone(),
+            new_node_id: new_memory.node_id,
+            relationship_id,
+            updated_at: updated_at.clone(),
+        },
+        new_memory_properties: projected_properties(
+            &new_memory.properties,
+            &request.new_memory_property_names,
+        ),
+        relationship_properties: projected_properties(
+            &relationship_properties,
+            &request.relationship_property_names,
+        ),
+    };
+
+    Ok((old_memory_id, (successor_row, updated_at)))
 }
 
 fn empty_memory_evolves_projected_successor_output(

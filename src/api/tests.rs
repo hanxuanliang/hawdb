@@ -7114,6 +7114,79 @@ fn pages_memory_evolves_successors_per_old_memory_with_returned_cursors() {
 }
 
 #[test]
+fn memory_evolves_projected_successors_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'evolves-project-cache-old-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves-project-cache-old-b'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves-project-cache-new-a', title: 'A', updated_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'evolves-project-cache-new-b', title: 'B', updated_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'evolves-project-cache-source'})")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves-project-cache-old-a'}), (new:Memory {id: 'evolves-project-cache-new-a'}) CREATE (old)-[:EVOLVES {content_relation: 'replaces'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves-project-cache-old-a'}), (new:Memory {id: 'evolves-project-cache-new-b'}) CREATE (old)-[:EVOLVES {content_relation: 'supersedes'}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'evolves-project-cache-old-b'}), (source:Source {id: 'evolves-project-cache-source'}) CREATE (old)-[:EVOLVES {content_relation: 'ignored'}]->(source)")
+        .unwrap();
+    let request = KnowledgeMemoryEvolvesProjectedSuccessorRequest {
+        old_memory_ids: vec![
+            "evolves-project-cache-old-a".to_string(),
+            "missing-evolves-project-cache".to_string(),
+            "evolves-project-cache-old-b".to_string(),
+            "evolves-project-cache-old-a".to_string(),
+        ],
+        limit_per_old_memory: 1,
+        order: KnowledgeMemoryEvolvesProjectedSuccessorOrder::UpdatedAtDesc,
+        page_cursors: Vec::new(),
+        new_memory_property_names: vec!["title".to_string(), "updated_at".to_string()],
+        relationship_property_names: vec!["content_relation".to_string()],
+    };
+
+    let first = db
+        .knowledge_memory_evolves_projected_successors(&request)
+        .unwrap();
+    let second = db
+        .knowledge_memory_evolves_projected_successors(&request)
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.found_old_memory_count, 3);
+    assert_eq!(first.missing_old_memory_count, 1);
+    assert_eq!(first.matched_relationship_count, 4);
+    assert_eq!(first.returned_count, 2);
+    assert_eq!(first.groups[0].matched_relationship_count, 2);
+    assert_eq!(
+        first.groups[0].rows[0].new_memory_id.as_deref(),
+        Some("evolves-project-cache-new-b")
+    );
+    assert_eq!(
+        first.groups[0].rows[0].new_memory_properties.get("title"),
+        Some(&Value::String("B".to_string()))
+    );
+    assert_eq!(
+        first.groups[0].rows[0]
+            .relationship_properties
+            .get("content_relation"),
+        Some(&Value::String("supersedes".to_string()))
+    );
+    assert!(!first.groups[1].found_old_memory);
+    assert_eq!(first.groups[2].matched_relationship_count, 0);
+    assert_eq!(first.groups[3].matched_relationship_count, 2);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn memory_evolves_projected_successors_rejects_empty_fields_without_wal() {
     let path = unique_test_dir("memory_evolves_projected_successors_empty_without_wal");
     let mut db = Database::open(&path).unwrap();
