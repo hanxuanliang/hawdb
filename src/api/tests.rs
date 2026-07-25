@@ -18890,7 +18890,11 @@ fn scans_labels_missing_canonical_name_for_nowledge_backfill() {
 
 #[test]
 fn reads_label_usage_rows_for_nowledge_label_apis() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Label {id: 'alpha', name: 'Alpha', canonical_name: 'alpha', color: '#fff', description: 'Alpha label', created_at: 10, updated_at: 20})")
         .unwrap();
     db.query("CREATE (:Label {id: 'beta', name: 'Beta', canonical_name: 'beta'})")
@@ -18906,14 +18910,13 @@ fn reads_label_usage_rows_for_nowledge_label_apis() {
     )
     .unwrap();
 
-    let row = db
-        .knowledge_label_usage(&KnowledgeLabelUsageRequest {
-            label_id: "alpha".to_string(),
-        })
-        .unwrap();
+    let usage_request = KnowledgeLabelUsageRequest {
+        label_id: "alpha".to_string(),
+    };
+    let row = db.knowledge_label_usage(&usage_request).unwrap();
     assert_eq!(row.graph_commit_epoch, 6);
     assert!(row.found);
-    let alpha = row.row.unwrap();
+    let alpha = row.row.as_ref().unwrap();
     assert_eq!(alpha.label_id.as_deref(), Some("alpha"));
     assert_eq!(alpha.name.as_deref(), Some("Alpha"));
     assert_eq!(alpha.canonical_name.as_deref(), Some("alpha"));
@@ -18926,16 +18929,32 @@ fn reads_label_usage_rows_for_nowledge_label_apis() {
     assert_eq!(alpha.updated_at, Some(Value::Int(20)));
     assert_eq!(alpha.usage_count, 2);
 
-    let list = db.knowledge_label_canonical_usage(&KnowledgeLabelUsageListRequest {
+    let canonical_request = KnowledgeLabelUsageListRequest {
         canonical_only: true,
         limit: 10,
-    });
+    };
+    let list = db.knowledge_label_canonical_usage(&canonical_request);
     assert_eq!(list.matched_count, 2);
     assert_eq!(list.returned_count, 2);
     assert_eq!(list.rows[0].label_id.as_deref(), Some("alpha"));
     assert_eq!(list.rows[0].usage_count, 2);
     assert_eq!(list.rows[1].label_id.as_deref(), Some("beta"));
     assert_eq!(list.rows[1].usage_count, 0);
+
+    let stats = db.plan_cache_stats();
+    let repeated_usage = db.knowledge_label_usage(&usage_request).unwrap();
+    assert_eq!(repeated_usage, row);
+    let usage_stats = db.plan_cache_stats();
+    assert_eq!(usage_stats.entries, stats.entries);
+    assert_eq!(usage_stats.misses, stats.misses);
+    assert_eq!(usage_stats.hits, stats.hits + 1);
+
+    let repeated_list = db.knowledge_label_canonical_usage(&canonical_request);
+    assert_eq!(repeated_list, list);
+    let list_stats = db.plan_cache_stats();
+    assert_eq!(list_stats.entries, usage_stats.entries);
+    assert_eq!(list_stats.misses, usage_stats.misses);
+    assert_eq!(list_stats.hits, usage_stats.hits + 1);
 }
 
 #[test]

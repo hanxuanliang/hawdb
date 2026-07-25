@@ -7824,14 +7824,16 @@ impl Database {
         &self,
         request: &KnowledgeLabelUsageRequest,
     ) -> Result<KnowledgeLabelUsageOutput> {
-        knowledge_label_usage_for(&self.catalog, &self.store, request)
+        knowledge_label_usage_via_query_runtime(self, request)
     }
 
     pub fn knowledge_label_canonical_usage(
         &self,
         request: &KnowledgeLabelUsageListRequest,
     ) -> KnowledgeLabelUsageListOutput {
-        knowledge_label_canonical_usage_for(&self.catalog, &self.store, request)
+        knowledge_label_canonical_usage_via_query_runtime(self, request).unwrap_or_else(|_| {
+            knowledge_label_canonical_usage_for(&self.catalog, &self.store, request)
+        })
     }
 
     pub fn knowledge_label_memory_distribution(
@@ -24828,9 +24830,8 @@ fn scan_knowledge_labels_missing_canonical_name_for(
     ))
 }
 
-fn knowledge_label_usage_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_label_usage_via_query_runtime(
+    db: &Database,
     request: &KnowledgeLabelUsageRequest,
 ) -> Result<KnowledgeLabelUsageOutput> {
     if request.label_id.is_empty() {
@@ -24838,11 +24839,29 @@ fn knowledge_label_usage_for(
             "knowledge label usage requires a non-empty label id".to_string(),
         ));
     }
-    let graph_commit_epoch = store.commit_epoch();
-    let row = seed_node_by_label_and_external_id(catalog, store, "Label", &request.label_id)
-        .map(|node| label_usage_row(catalog, store, node));
+    let parameters = BTreeMap::from([(
+        "label_id".to_string(),
+        Value::String(request.label_id.clone()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (l:Label {id: $label_id}) \
+         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
+         WITH l, count(r) AS usage_count \
+         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
+         l.canonical_name AS canonical_name, l.color AS color, \
+         l.description AS description, l.created_at AS created_at, \
+         l.updated_at AS updated_at, usage_count \
+         LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let row = output
+        .rows
+        .first()
+        .map(knowledge_label_usage_row_from_query)
+        .transpose()?;
     Ok(KnowledgeLabelUsageOutput {
-        graph_commit_epoch,
+        graph_commit_epoch: db.store.commit_epoch(),
         found: row.is_some(),
         row,
     })
@@ -24865,6 +24884,69 @@ fn knowledge_label_canonical_usage_for(
         })
         .collect::<Vec<_>>();
     label_usage_list_output(catalog, store, graph_commit_epoch, rows, request.limit)
+}
+
+fn knowledge_label_canonical_usage_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeLabelUsageListRequest,
+) -> Result<KnowledgeLabelUsageListOutput> {
+    let predicate = if request.canonical_only {
+        " WHERE l.canonical_name IS NOT NULL"
+    } else {
+        ""
+    };
+    let query = format!(
+        "MATCH (l:Label){predicate} \
+         OPTIONAL MATCH (l)<-[r:HAS_LABEL]-(n) \
+         WITH l, count(r) AS usage_count \
+         RETURN l.id AS label_id, id(l) AS node_id, l.name AS name, \
+         l.canonical_name AS canonical_name, l.color AS color, \
+         l.description AS description, l.created_at AS created_at, \
+         l.updated_at AS updated_at, usage_count \
+         ORDER BY node_id ASC"
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &BTreeMap::new(), None)?;
+    let matched_count = output.rows.len();
+    let mut rows = output
+        .rows
+        .iter()
+        .map(knowledge_label_usage_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    } else {
+        rows.clear();
+    }
+    let returned_count = rows.len();
+    Ok(KnowledgeLabelUsageListOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
+fn knowledge_label_usage_row_from_query(row: &Row) -> Result<KnowledgeLabelUsageRow> {
+    let node_id = row
+        .get("node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution("knowledge label usage row is missing node_id".to_string())
+        })?;
+    Ok(KnowledgeLabelUsageRow {
+        label_id: optional_string_cell(row, "label_id"),
+        node_id,
+        name: optional_string_cell(row, "name"),
+        canonical_name: optional_string_cell(row, "canonical_name"),
+        color: optional_value_cell(row, "color"),
+        description: optional_value_cell(row, "description"),
+        created_at: optional_value_cell(row, "created_at"),
+        updated_at: optional_value_cell(row, "updated_at"),
+        usage_count: row
+            .get("usage_count")
+            .and_then(value_to_non_negative_usize)
+            .unwrap_or_default(),
+    })
 }
 
 fn knowledge_label_memory_distribution_for(
