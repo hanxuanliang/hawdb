@@ -476,3 +476,9 @@ cargo run --quiet --bin skein -- \
 read evidence, missing route readiness, weak query runtime preflight, missing
 library readiness, or unsafe legacy coexistence is rejected before Mem cutover
 automation consumes the bundle.
+Integration readiness also revalidates
+`graph_route_readiness.routes[].query_reports[]`: every required graph read
+route must include a ready query report with elapsed time, physical operator
+counts, optimizer decision count, scan-pruning profile presence, and plan-cache
+state. A hand-authored summary with only `route_query_runtime_ready=true` is not
+release-ready evidence.

@@ -2,6 +2,7 @@ use skein::{
     Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
+use std::collections::BTreeSet;
 use std::path::Path;
 
 const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
@@ -18,6 +19,7 @@ const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
+const SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
@@ -564,6 +566,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 graph_route_primary_ready_count_matches(bundle),
                 string_array_path(bundle, &["graph_route_readiness", "route_primary_blocker_codes"])
                     .is_empty(),
+                graph_route_query_profiles_ready(bundle),
             ],
             [
                 "graph_route_readiness.protocol",
@@ -577,6 +580,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count",
                 "graph_route_readiness.route_primary_blocker_codes",
+                "graph_route_readiness.routes",
             ],
             blocker_codes(
                 bundle,
@@ -1246,6 +1250,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "graph_route_readiness.route_primary_ready",
                 "graph_route_readiness.primary_ready_route_count",
                 "graph_route_readiness.route_primary_blocker_codes",
+                "graph_route_readiness.routes",
             ],
         ));
     }
@@ -1627,6 +1632,7 @@ fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
             &["graph_route_readiness", "route_primary_blocker_codes"],
         )
         .is_empty()
+        && graph_route_query_profiles_ready(bundle)
 }
 
 fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
@@ -1636,6 +1642,86 @@ fn graph_route_primary_ready_count_matches(bundle: &serde_json::Value) -> bool {
         &["graph_route_readiness", "primary_ready_route_count"],
     );
     route_count.is_some_and(|value| value > 0) && route_count == primary_ready_route_count
+}
+
+fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
+    let Some(routes) = json_get_path(bundle, &["graph_route_readiness", "routes"])
+        .and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    if routes.len() != REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() {
+        return false;
+    }
+
+    let mut observed_routes = BTreeSet::new();
+    for route in routes {
+        let Some(route_name) = str_path(route, &["route"]) else {
+            return false;
+        };
+        if !REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.contains(&route_name) {
+            return false;
+        }
+        if !observed_routes.insert(route_name) {
+            return false;
+        }
+        if bool_path(route, &["primary_ready"]) != Some(true)
+            || bool_path(route, &["query_runtime_ready"]) != Some(true)
+            || u64_path(route, &["query_report_count"]).is_none_or(|value| value == 0)
+        {
+            return false;
+        }
+        let Some(query_reports) =
+            json_get_path(route, &["query_reports"]).and_then(serde_json::Value::as_array)
+        else {
+            return false;
+        };
+        if query_reports.is_empty()
+            || u64_path(route, &["query_report_count"]) != Some(query_reports.len() as u64)
+            || !query_reports.iter().all(graph_route_query_report_ready)
+        {
+            return false;
+        }
+    }
+
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .all(|route| observed_routes.contains(route))
+}
+
+fn graph_route_query_report_ready(report: &serde_json::Value) -> bool {
+    str_path(report, &["protocol"]) == Some(SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL)
+        && bool_path(report, &["ready"]) == Some(true)
+        && string_array_path(report, &["blocker_codes"]).is_empty()
+        && non_empty_str_path(report, &["statement_kind"])
+        && matches!(
+            str_path(report, &["execution_path"]),
+            Some("fast_path" | "optimized_path")
+        )
+        && bool_path(report, &["fast_path_selected"]).is_some()
+        && bool_path(report, &["slow_log_candidate"]).is_some()
+        && bool_path(report, &["physical_plan_captured"]).is_some()
+        && u64_path(report, &["elapsed_micros"]).is_some()
+        && graph_route_query_report_physical_operators_present(report)
+        && u64_path(report, &["optimizer_decision_count"]).is_some()
+        && u64_path(report, &["scan_pruning_report_count"]).is_some()
+        && graph_route_query_report_scan_pruning_present(report)
+        && non_empty_str_path(report, &["plan_cache", "lookup"])
+        && bool_path(report, &["plan_cache", "cacheable"]).is_some()
+        && bool_path(report, &["plan_cache", "hit"]).is_some()
+        && bool_path(report, &["plan_cache", "miss"]).is_some()
+        && bool_path(report, &["plan_cache", "bypassed"]) == Some(false)
+}
+
+fn graph_route_query_report_physical_operators_present(report: &serde_json::Value) -> bool {
+    bool_path(report, &["physical_operator_counts_present"]) == Some(true)
+        || json_get_path(report, &["physical_operator_counts"])
+            .is_some_and(serde_json::Value::is_object)
+}
+
+fn graph_route_query_report_scan_pruning_present(report: &serde_json::Value) -> bool {
+    bool_path(report, &["scan_pruning_reports_present"]) == Some(true)
+        || json_get_path(report, &["scan_pruning_reports"]).is_some_and(serde_json::Value::is_array)
 }
 
 fn graph_route_readiness_alignment_ready(bundle: &serde_json::Value) -> bool {
@@ -1947,6 +2033,7 @@ fn json_get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a 
 #[cfg(test)]
 mod tests {
     use super::nowledge_mem_integration_readiness_json;
+    use skein::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
 
     #[test]
     fn reports_ready_when_mem_integration_evidence_is_complete() {
@@ -2588,7 +2675,8 @@ mod tests {
                 "graph_route_readiness.missing_query_runtime_routes",
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
-                "graph_route_readiness.primary_ready_route_count"
+                "graph_route_readiness.primary_ready_route_count",
+                "graph_route_readiness.routes"
             ])
         );
         assert!(report["next_actions"]
@@ -2663,6 +2751,38 @@ mod tests {
             check["failed_evidence_fields"],
             serde_json::json!(["query_runtime_preflight.probes"])
         );
+    }
+
+    #[test]
+    fn rejects_weak_graph_route_query_profiles_even_if_summary_is_ready() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("scan_pruning_reports_present");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "attach_graph_route_readiness_evidence"));
     }
 
     #[test]
@@ -3259,46 +3379,18 @@ mod tests {
         });
         bundle["graph_route_readiness"] = serde_json::json!({
             "protocol": "nmem-graph-route-readiness-v1",
-            "route_count": 15,
-            "required_route_count": 15,
+            "route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "missing_required_routes": [],
-            "shadow_compare_route_count": 15,
-            "primary_ready_route_count": 15,
-            "query_runtime_route_count": 15,
-            "query_runtime_report_count": 15,
+            "shadow_compare_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "primary_ready_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "query_runtime_report_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "missing_query_runtime_routes": [],
             "route_query_runtime_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
-            "routes": [
-                {
-                    "route": "/graph/overview",
-                    "shadow_compare_ready": true,
-                    "primary_ready": true,
-                    "query_runtime_ready": true,
-                    "query_report_count": 1,
-                    "query_reports": [
-                        {
-                            "protocol": "skein-nowledge-mem-query-report-v1",
-                            "statement_kind": "match_return",
-                            "execution_path": "fast_path",
-                            "fast_path_selected": true,
-                            "slow_log_candidate": false,
-                            "physical_plan_captured": false,
-                            "plan_cache": {
-                                "lookup": "miss",
-                                "cacheable": true,
-                                "hit": false,
-                                "miss": true,
-                                "bypassed": false
-                            },
-                            "ready": true,
-                            "blocker_codes": []
-                        }
-                    ],
-                    "blocker_codes": []
-                }
-            ]
+            "routes": ready_graph_route_profile_routes()
         });
         bundle["graph_route_parity_alignment"] = serde_json::json!({
             "ready": true,
@@ -3367,6 +3459,49 @@ mod tests {
         });
         bundle["library_readiness"] = ready_library_readiness();
         bundle
+    }
+
+    fn ready_graph_route_profile_routes() -> Vec<serde_json::Value> {
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| {
+                serde_json::json!({
+                    "route": route,
+                    "shadow_compare_ready": true,
+                    "primary_ready": true,
+                    "query_runtime_ready": true,
+                    "query_report_count": 1,
+                    "query_reports": [ready_graph_route_query_report()],
+                    "blocker_codes": []
+                })
+            })
+            .collect()
+    }
+
+    fn ready_graph_route_query_report() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-mem-query-report-v1",
+            "statement_kind": "match_return",
+            "execution_path": "fast_path",
+            "fast_path_selected": true,
+            "slow_log_candidate": false,
+            "physical_plan_captured": false,
+            "elapsed_micros": 12,
+            "physical_operator_counts_present": true,
+            "optimizer_decision_count": 2,
+            "scan_pruning_report_count": 1,
+            "scan_pruning_reports_present": true,
+            "plan_cache_lookup": "miss",
+            "plan_cache": {
+                "lookup": "miss",
+                "cacheable": true,
+                "hit": false,
+                "miss": true,
+                "bypassed": false
+            },
+            "ready": true,
+            "blocker_codes": []
+        })
     }
 
     fn ready_library_readiness() -> serde_json::Value {

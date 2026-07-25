@@ -710,12 +710,41 @@ mod tests {
                 .map(|route| {
                     serde_json::json!({
                         "route": route,
+                        "shadow_compare_ready": true,
                         "primary_ready": true,
                         "query_runtime_ready": true,
+                        "query_report_count": 1,
+                        "query_reports": [ready_graph_route_query_report()],
                         "blocker_codes": []
                     })
                 })
                 .collect::<Vec<_>>()
+        })
+    }
+
+    fn ready_graph_route_query_report() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-mem-query-report-v1",
+            "statement_kind": "match_return",
+            "execution_path": "fast_path",
+            "fast_path_selected": true,
+            "slow_log_candidate": false,
+            "physical_plan_captured": false,
+            "elapsed_micros": 12,
+            "physical_operator_counts_present": true,
+            "optimizer_decision_count": 2,
+            "scan_pruning_report_count": 1,
+            "scan_pruning_reports_present": true,
+            "plan_cache_lookup": "miss",
+            "plan_cache": {
+                "lookup": "miss",
+                "cacheable": true,
+                "hit": false,
+                "miss": true,
+                "bypassed": false
+            },
+            "ready": true,
+            "blocker_codes": []
         })
     }
 
