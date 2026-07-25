@@ -7913,22 +7913,14 @@ impl Database {
         &self,
         request: &KnowledgeEntityLabelListRequest,
     ) -> Result<KnowledgeEntityLabelListOutput> {
-        match knowledge_entity_labels_via_query_runtime(self, request) {
-            Ok(output) => Ok(output),
-            Err(_) => knowledge_entity_labels_for(&self.catalog, &self.store, request),
-        }
+        knowledge_entity_labels_via_query_runtime(self, request)
     }
 
     pub fn knowledge_entity_label_projected_list(
         &self,
         request: &KnowledgeEntityLabelProjectedListRequest,
     ) -> Result<KnowledgeEntityLabelProjectedListOutput> {
-        match knowledge_entity_label_projected_list_via_query_runtime(self, request) {
-            Ok(output) => Ok(output),
-            Err(_) => {
-                knowledge_entity_label_projected_list_for(&self.catalog, &self.store, request)
-            }
-        }
+        knowledge_entity_label_projected_list_via_query_runtime(self, request)
     }
 
     pub fn update_knowledge_pagerank_scores_batch(
@@ -27440,53 +27432,6 @@ fn sort_label_regex_memory_connection_rows(rows: &mut [KnowledgeLabelRegexMemory
     });
 }
 
-fn knowledge_entity_labels_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeEntityLabelListRequest,
-) -> Result<KnowledgeEntityLabelListOutput> {
-    validate_knowledge_entity_label_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let mut groups = Vec::with_capacity(request.external_ids.len());
-    let mut found_entity_count = 0;
-    let mut missing_entity_count = 0;
-    let mut label_count = 0;
-
-    for external_id in &request.external_ids {
-        let Some(entity) =
-            seed_node_by_label_and_external_id(catalog, store, &request.entity_label, external_id)
-        else {
-            missing_entity_count += 1;
-            groups.push(KnowledgeEntityLabelGroup {
-                external_id: external_id.clone(),
-                node_id: None,
-                found: false,
-                labels: Vec::new(),
-                returned_count: 0,
-            });
-            continue;
-        };
-        found_entity_count += 1;
-        let labels = entity_label_rows(catalog, store, entity, request.limit_per_entity);
-        label_count += labels.len();
-        groups.push(KnowledgeEntityLabelGroup {
-            external_id: external_id.clone(),
-            node_id: Some(entity.id.0),
-            found: true,
-            returned_count: labels.len(),
-            labels,
-        });
-    }
-
-    Ok(KnowledgeEntityLabelListOutput {
-        graph_commit_epoch,
-        groups,
-        found_entity_count,
-        missing_entity_count,
-        label_count,
-    })
-}
-
 fn knowledge_entity_labels_via_query_runtime(
     db: &Database,
     request: &KnowledgeEntityLabelListRequest,
@@ -27751,36 +27696,6 @@ fn label_usage_count(catalog: &Catalog, store: &GraphStore, label_node_id: NodeI
         .count()
 }
 
-fn entity_label_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    entity: &NodeRecord,
-    limit: usize,
-) -> Vec<KnowledgeEntityLabelRow> {
-    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Vec::new();
-    };
-    let Some(label_label_id) = catalog.label_id("Label") else {
-        return Vec::new();
-    };
-    let mut rows = store
-        .outgoing_relationships(entity.id, rel_type_id)
-        .filter_map(|relationship| store.node(relationship.target))
-        .filter(|node| node.labels.contains(&label_label_id))
-        .map(entity_label_row)
-        .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.name
-            .cmp(&right.name)
-            .then_with(|| left.label_id.cmp(&right.label_id))
-            .then_with(|| left.node_id.cmp(&right.node_id))
-    });
-    if limit > 0 {
-        rows.truncate(limit);
-    }
-    rows
-}
-
 fn knowledge_entity_label_entities_via_query_runtime(
     db: &Database,
     entity_label: &str,
@@ -27967,17 +27882,6 @@ fn entity_label_query_output_via_query_runtime(
          WHERE id(entity) = $entity_node_id \
          RETURN label AS label, relationship AS relationship, id(relationship) AS relationship_id";
     db.query_read_only_with_params_bounded(query, &parameters, None)
-}
-
-fn entity_label_row(node: &NodeRecord) -> KnowledgeEntityLabelRow {
-    KnowledgeEntityLabelRow {
-        label_id: node_external_id(node),
-        node_id: node.id.0,
-        name: node_string_property(node, "name"),
-        canonical_name: node_string_property(node, "canonical_name"),
-        color: node.properties.get("color").cloned(),
-        description: node.properties.get("description").cloned(),
-    }
 }
 
 fn entity_label_row_from_query_row(row: &Row) -> Result<KnowledgeEntityLabelRow> {
