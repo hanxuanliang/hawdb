@@ -18314,11 +18314,16 @@ fn typed_thread_identity_delete_persists_as_one_wal_batch_and_replays() {
 
 #[test]
 fn reads_thread_sync_metadata_for_nowledge_repo_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'thread_a', title: 'Alpha', source: 'codex', project: 'graph', workspace: 'local', space_id: ''})")
         .unwrap();
     db.query("CREATE (:Thread {id: 'thread_b'})").unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
+    let cache_before_lookup = db.plan_cache_stats();
 
     let output = db
         .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
@@ -18334,6 +18339,16 @@ fn reads_thread_sync_metadata_for_nowledge_repo_shape() {
     assert_eq!(output.project, "graph");
     assert_eq!(output.workspace, "local");
     assert_eq!(output.space_id, "");
+    let repeated = db
+        .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {
+            id: "thread_a".to_string(),
+        })
+        .unwrap();
+    assert_eq!(output, repeated);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
     let defaults = db
         .knowledge_thread_sync_metadata(&KnowledgeThreadSyncMetadataRequest {

@@ -7732,7 +7732,7 @@ impl Database {
         &self,
         request: &KnowledgeThreadSyncMetadataRequest,
     ) -> Result<KnowledgeThreadSyncMetadataOutput> {
-        knowledge_thread_sync_metadata_for(&self.catalog, &self.store, request)
+        knowledge_thread_sync_metadata_via_query_runtime(self, request)
     }
 
     pub fn knowledge_thread_distillation_candidates(
@@ -23182,6 +23182,51 @@ fn knowledge_thread_sync_metadata_for(
         project: coalesced_string_property(thread, "project", ""),
         workspace: coalesced_string_property(thread, "workspace", ""),
         space_id: coalesced_string_property(thread, "space_id", "default"),
+    })
+}
+
+fn knowledge_thread_sync_metadata_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadSyncMetadataRequest,
+) -> Result<KnowledgeThreadSyncMetadataOutput> {
+    validate_knowledge_thread_sync_metadata_request(request)?;
+    let parameters = BTreeMap::from([("id".to_string(), Value::String(request.id.clone()))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread {id: $id}) \
+         RETURN id(t) AS thread_node_id, \
+         COALESCE(t.title, '') AS title, \
+         COALESCE(t.source, '') AS source, \
+         COALESCE(t.project, '') AS project, \
+         COALESCE(t.workspace, '') AS workspace, \
+         COALESCE(t.space_id, 'default') AS space_id \
+         LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let first = output.rows.first();
+    Ok(KnowledgeThreadSyncMetadataOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        id: request.id.clone(),
+        thread_node_id: first
+            .and_then(|row| row.get("thread_node_id"))
+            .and_then(value_to_non_negative_u64),
+        found_thread: first.is_some(),
+        title: first
+            .and_then(|row| optional_string_cell(row, "title"))
+            .unwrap_or_default(),
+        source: first
+            .and_then(|row| optional_string_cell(row, "source"))
+            .unwrap_or_default(),
+        project: first
+            .and_then(|row| optional_string_cell(row, "project"))
+            .unwrap_or_default(),
+        workspace: first
+            .and_then(|row| optional_string_cell(row, "workspace"))
+            .unwrap_or_default(),
+        space_id: first
+            .and_then(|row| row.get("space_id"))
+            .map(value_to_external_id)
+            .unwrap_or_else(|| "default".to_string()),
     })
 }
 
