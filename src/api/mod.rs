@@ -7149,7 +7149,7 @@ impl Database {
         &self,
         request: &KnowledgeRelatedEntityNameListRequest,
     ) -> Result<KnowledgeRelatedEntityNameListOutput> {
-        knowledge_related_entity_names_for(&self.catalog, &self.store, request)
+        knowledge_related_entity_names_via_query_runtime(self, request)
     }
 
     pub fn knowledge_context_memory_preview(
@@ -10921,6 +10921,165 @@ fn knowledge_related_entity_names_for(
         thread_node_id,
         found_thread,
     })
+}
+
+fn knowledge_related_entity_names_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeRelatedEntityNameListRequest,
+) -> Result<KnowledgeRelatedEntityNameListOutput> {
+    validate_related_entity_name_request(request)?;
+    match &request.scope {
+        KnowledgeRelatedEntityNameScope::MemoryIds(memory_ids) => {
+            knowledge_related_entity_names_for_memory_ids_via_query_runtime(db, memory_ids, request)
+        }
+        KnowledgeRelatedEntityNameScope::Thread {
+            thread_id,
+            identity_property,
+        } => knowledge_related_entity_names_for_thread_via_query_runtime(
+            db,
+            thread_id,
+            identity_property,
+            request,
+        ),
+    }
+}
+
+fn knowledge_related_entity_names_for_memory_ids_via_query_runtime(
+    db: &Database,
+    memory_ids: &[String],
+    request: &KnowledgeRelatedEntityNameListRequest,
+) -> Result<KnowledgeRelatedEntityNameListOutput> {
+    let graph_commit_epoch = db.store.commit_epoch();
+    let requested_ids = memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let parameters = BTreeMap::from([(
+        "memory_ids".to_string(),
+        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
+    )]);
+    let memory_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory) WHERE m.id IN $memory_ids RETURN m.id AS memory_id",
+        &parameters,
+        None,
+    )?;
+    let matched_ids = memory_output
+        .rows
+        .iter()
+        .filter_map(|row| optional_string_cell(row, "memory_id"))
+        .collect::<BTreeSet<_>>();
+    let mut matched_memory_count = 0;
+    let mut missing_memory_ids = Vec::new();
+    for memory_id in memory_ids {
+        if matched_ids.contains(memory_id) {
+            matched_memory_count += 1;
+        } else {
+            missing_memory_ids.push(memory_id.clone());
+        }
+    }
+
+    let name_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory)-[:MENTIONS]->(e:Entity) \
+         WHERE m.id IN $memory_ids \
+         RETURN DISTINCT e.name AS name",
+        &parameters,
+        None,
+    )?;
+    let mut entity_names = entity_names_from_query_rows(&name_output.rows);
+    if request.limit > 0 {
+        entity_names.truncate(request.limit);
+    }
+    let returned_count = entity_names.len();
+
+    Ok(KnowledgeRelatedEntityNameListOutput {
+        graph_commit_epoch,
+        entity_names,
+        matched_memory_count,
+        returned_count,
+        missing_memory_ids,
+        thread_node_id: None,
+        found_thread: None,
+    })
+}
+
+fn knowledge_related_entity_names_for_thread_via_query_runtime(
+    db: &Database,
+    thread_id: &str,
+    identity_property: &str,
+    request: &KnowledgeRelatedEntityNameListRequest,
+) -> Result<KnowledgeRelatedEntityNameListOutput> {
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::from([(
+        "thread_id".to_string(),
+        Value::String(thread_id.to_string()),
+    )]);
+    let thread_query = format!(
+        "MATCH (t:Thread) WHERE t.{identity_property} = $thread_id RETURN id(t) AS thread_node_id"
+    );
+    let thread_output =
+        db.query_read_only_with_params_bounded(&thread_query, &parameters, Some(1))?;
+    let Some(thread_node_id) = thread_output
+        .rows
+        .first()
+        .and_then(|row| row.get("thread_node_id"))
+        .and_then(value_to_non_negative_u64)
+    else {
+        return Ok(KnowledgeRelatedEntityNameListOutput {
+            graph_commit_epoch,
+            entity_names: Vec::new(),
+            matched_memory_count: 0,
+            returned_count: 0,
+            missing_memory_ids: Vec::new(),
+            thread_node_id: None,
+            found_thread: Some(false),
+        });
+    };
+    let thread_node_id_value = i64::try_from(thread_node_id).map_err(|_| {
+        SkeinError::Execution("knowledge related entity name thread node id overflow".to_string())
+    })?;
+    parameters.insert(
+        "thread_node_id".to_string(),
+        Value::Int(thread_node_id_value),
+    );
+
+    let memory_count_query = "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory) \
+         WHERE id(t) = $thread_node_id \
+         RETURN count(m) AS matched_memory_count";
+    let memory_count_output =
+        db.query_read_only_with_params_bounded(memory_count_query, &parameters, Some(1))?;
+    let matched_memory_count = memory_count_output
+        .rows
+        .first()
+        .and_then(|row| row.get("matched_memory_count"))
+        .and_then(value_to_non_negative_usize)
+        .unwrap_or(0);
+    let name_query = "MATCH (t:Thread)-[:COMPACTS_TO]->(m:Memory)-[:MENTIONS]->(e:Entity) \
+         WHERE id(t) = $thread_node_id \
+         RETURN DISTINCT e.name AS name";
+    let name_output = db.query_read_only_with_params_bounded(name_query, &parameters, None)?;
+    let mut entity_names = entity_names_from_query_rows(&name_output.rows);
+    if request.limit > 0 {
+        entity_names.truncate(request.limit);
+    }
+    let returned_count = entity_names.len();
+
+    Ok(KnowledgeRelatedEntityNameListOutput {
+        graph_commit_epoch,
+        entity_names,
+        matched_memory_count,
+        returned_count,
+        missing_memory_ids: Vec::new(),
+        thread_node_id: Some(thread_node_id),
+        found_thread: Some(true),
+    })
+}
+
+fn entity_names_from_query_rows(rows: &[Row]) -> Vec<String> {
+    let mut entity_names = rows
+        .iter()
+        .filter_map(|row| optional_string_cell(row, "name"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    entity_names.sort();
+    entity_names
 }
 
 fn validate_related_entity_name_request(

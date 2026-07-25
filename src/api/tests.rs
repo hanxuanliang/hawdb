@@ -5084,6 +5084,61 @@ fn reads_related_entity_names_for_memory_and_thread_shapes() {
 }
 
 #[test]
+fn related_entity_names_use_query_runtime_plan_cache_for_memory_ids() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'related-cache-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'related-cache-b'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'related-cache-alpha', name: 'Alpha'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'related-cache-beta', name: 'Beta'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'related-cache-empty', name: ''})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'related-cache-a'}), (e:Entity {id: 'related-cache-beta'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'related-cache-a'}), (e:Entity {id: 'related-cache-alpha'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'related-cache-b'}), (e:Entity {id: 'related-cache-empty'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    let request = KnowledgeRelatedEntityNameListRequest {
+        scope: KnowledgeRelatedEntityNameScope::MemoryIds(vec![
+            "related-cache-a".to_string(),
+            "missing-related-cache".to_string(),
+            "related-cache-b".to_string(),
+            "missing-related-cache".to_string(),
+        ]),
+        limit: 1,
+    };
+
+    let first = db.knowledge_related_entity_names(&request).unwrap();
+    let second = db.knowledge_related_entity_names(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.entity_names, vec!["Alpha".to_string()]);
+    assert_eq!(first.matched_memory_count, 2);
+    assert_eq!(
+        first.missing_memory_ids,
+        vec![
+            "missing-related-cache".to_string(),
+            "missing-related-cache".to_string()
+        ]
+    );
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.thread_node_id, None);
+    assert_eq!(first.found_thread, None);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn related_entity_name_read_rejects_invalid_scopes() {
     let db = Database::new();
 
