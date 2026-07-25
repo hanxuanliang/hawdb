@@ -1,4 +1,4 @@
-use crate::search::CompressedVectorSearchMode;
+use crate::search::{CompressedVectorSearchMode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS};
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
 };
@@ -346,7 +346,20 @@ pub struct NowledgeMemSearchCandidateShadowEvidence {
     pub primary_candidate_identity_checksum: Option<u64>,
     pub shadow_candidate_identity_checksum: Option<u64>,
     pub matched_candidate_identity_checksum: Option<u64>,
+    pub filter_pushdown: Option<NowledgeMemSearchCandidateFilterPushdownEvidence>,
     pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSearchCandidateFilterPushdownEvidence {
+    pub pushed_predicate_count: u64,
+    pub shadow_scan_present: bool,
+    pub field_summaries: Vec<NowledgeMemSearchCandidateFieldSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSearchCandidateFieldSummary {
+    pub field: String,
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -359,6 +372,7 @@ pub struct NowledgeMemSearchCandidateShadowAccumulator {
     primary_candidate_identity_checksum: Option<u64>,
     shadow_candidate_identity_checksum: Option<u64>,
     matched_candidate_identity_checksum: Option<u64>,
+    filter_pushdown: Option<NowledgeMemSearchCandidateFilterPushdownEvidence>,
     blocker_codes: BTreeSet<String>,
 }
 
@@ -396,6 +410,23 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
 
     pub fn add_blocker_code(&mut self, code: impl Into<String>) {
         self.blocker_codes.insert(code.into());
+    }
+
+    pub fn record_filter_pushdown_fields<I, S>(&mut self, pushed_predicate_count: u64, fields: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.filter_pushdown = Some(NowledgeMemSearchCandidateFilterPushdownEvidence {
+            pushed_predicate_count,
+            shadow_scan_present: true,
+            field_summaries: fields
+                .into_iter()
+                .map(|field| NowledgeMemSearchCandidateFieldSummary {
+                    field: field.as_ref().to_string(),
+                })
+                .collect(),
+        });
     }
 
     pub fn record_compare_candidate_ids(
@@ -444,6 +475,7 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
             primary_candidate_identity_checksum: self.primary_candidate_identity_checksum,
             shadow_candidate_identity_checksum: self.shadow_candidate_identity_checksum,
             matched_candidate_identity_checksum: self.matched_candidate_identity_checksum,
+            filter_pushdown: self.filter_pushdown.clone(),
             blocker_codes: self.blocker_codes.iter().cloned().collect(),
         }
     }
@@ -469,6 +501,7 @@ impl NowledgeMemSearchCandidateShadowEvidence {
             primary_candidate_identity_checksum: None,
             shadow_candidate_identity_checksum: None,
             matched_candidate_identity_checksum: None,
+            filter_pushdown: None,
             blocker_codes: Vec::new(),
         }
     }
@@ -483,6 +516,7 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
 ) -> serde_json::Value {
     let blocker_codes = nowledge_mem_search_candidate_shadow_blocker_codes(evidence);
     let candidate_identity = nowledge_mem_search_candidate_shadow_identity_json(evidence);
+    let filter_pushdown = nowledge_mem_search_candidate_filter_pushdown_json(evidence);
     let ready = blocker_codes.is_empty();
     serde_json::json!({
         "protocol": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
@@ -497,6 +531,11 @@ pub fn nowledge_mem_search_candidate_shadow_evidence_json(
         "matched_candidate_count": evidence.matched_candidate_count,
         "primary_only_candidate_count": evidence.primary_only_candidate_count,
         "candidate_identity": candidate_identity,
+        "filter_pushdown_ready": filter_pushdown
+            .get("ready")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+        "filter_pushdown": filter_pushdown,
         "blocker_codes": blocker_codes,
     })
 }
@@ -553,7 +592,89 @@ fn nowledge_mem_search_candidate_shadow_blocker_codes(
     } else if !identity_ready {
         blockers.insert("search_candidate_identity_mismatch".to_string());
     }
+    blockers.extend(nowledge_mem_search_candidate_filter_pushdown_blockers(
+        evidence,
+    ));
     blockers.into_iter().collect()
+}
+
+fn nowledge_mem_search_candidate_filter_pushdown_json(
+    evidence: &NowledgeMemSearchCandidateShadowEvidence,
+) -> serde_json::Value {
+    let blocker_codes = nowledge_mem_search_candidate_filter_pushdown_blockers(evidence);
+    let missing_required_fields =
+        nowledge_mem_search_candidate_missing_filter_fields(evidence.filter_pushdown.as_ref());
+    let field_summaries = evidence
+        .filter_pushdown
+        .as_ref()
+        .map(|filter| {
+            filter
+                .field_summaries
+                .iter()
+                .map(|summary| {
+                    serde_json::json!({
+                        "field": summary.field,
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    serde_json::json!({
+        "ready": blocker_codes.is_empty(),
+        "pushed_predicate_count": evidence
+            .filter_pushdown
+            .as_ref()
+            .map(|filter| filter.pushed_predicate_count),
+        "shadow_scan_present": evidence
+            .filter_pushdown
+            .as_ref()
+            .map(|filter| filter.shadow_scan_present),
+        "required_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        "missing_required_fields": missing_required_fields,
+        "field_summary_count": field_summaries.len(),
+        "field_summaries": field_summaries,
+        "blocker_codes": blocker_codes,
+    })
+}
+
+fn nowledge_mem_search_candidate_filter_pushdown_blockers(
+    evidence: &NowledgeMemSearchCandidateShadowEvidence,
+) -> Vec<String> {
+    let mut blockers = BTreeSet::new();
+    let Some(filter_pushdown) = evidence.filter_pushdown.as_ref() else {
+        return vec!["search_candidate_filter_pushdown_missing".to_string()];
+    };
+    if filter_pushdown.pushed_predicate_count == 0 {
+        blockers.insert("search_candidate_filter_pushdown_no_predicates".to_string());
+    }
+    if !filter_pushdown.shadow_scan_present {
+        blockers.insert("search_candidate_shadow_scan_missing".to_string());
+    }
+    let missing_required_fields =
+        nowledge_mem_search_candidate_missing_filter_fields(Some(filter_pushdown));
+    if !missing_required_fields.is_empty() {
+        blockers.insert("search_candidate_field_pruning_missing".to_string());
+    }
+    blockers.into_iter().collect()
+}
+
+fn nowledge_mem_search_candidate_missing_filter_fields(
+    filter_pushdown: Option<&NowledgeMemSearchCandidateFilterPushdownEvidence>,
+) -> Vec<&'static str> {
+    let observed_fields = filter_pushdown
+        .map(|filter| {
+            filter
+                .field_summaries
+                .iter()
+                .map(|summary| summary.field.as_str())
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_default();
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+        .iter()
+        .copied()
+        .filter(|field| !observed_fields.contains(field))
+        .collect()
 }
 
 fn update_search_candidate_identity_checksum(
@@ -1977,7 +2098,8 @@ mod tests {
         NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -2375,6 +2497,12 @@ mod tests {
             &["mem_3", "mem_4", "mem_5"],
             &["mem_3", "mem_4", "mem_5"],
         );
+        accumulator.record_filter_pushdown_fields(
+            2,
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+                .iter()
+                .copied(),
+        );
         let evidence = accumulator.json();
 
         assert_eq!(
@@ -2397,6 +2525,13 @@ mod tests {
         assert_eq!(evidence["primary_only_candidate_count"], 0);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["candidate_identity"]["parity"], true);
+        assert_eq!(evidence["filter_pushdown_ready"], true);
+        assert_eq!(evidence["filter_pushdown"]["ready"], true);
+        assert_eq!(evidence["filter_pushdown"]["pushed_predicate_count"], 2);
+        assert_eq!(
+            evidence["filter_pushdown"]["field_summary_count"],
+            serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len())
+        );
         assert!(evidence["candidate_identity"]
             .get("candidate_ids")
             .is_none());
@@ -2415,6 +2550,7 @@ mod tests {
                 primary_candidate_identity_checksum: None,
                 shadow_candidate_identity_checksum: None,
                 matched_candidate_identity_checksum: None,
+                filter_pushdown: None,
                 blocker_codes: vec!["bridge_timeout".to_string()],
             },
         );
@@ -2424,6 +2560,7 @@ mod tests {
             evidence["blocker_codes"],
             serde_json::json!([
                 "bridge_timeout",
+                "search_candidate_filter_pushdown_missing",
                 "search_candidate_identity_missing",
                 "search_candidate_mismatch",
                 "search_candidate_primary_only",
@@ -2437,6 +2574,12 @@ mod tests {
         let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
         accumulator.record_compare_candidate_ids(&["mem_1", "mem_2"], &["mem_1", "mem_2"]);
         accumulator.record_compare_candidate_ids(&["mem_3"], &["mem_3"]);
+        accumulator.record_filter_pushdown_fields(
+            1,
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+                .iter()
+                .copied(),
+        );
 
         let evidence = accumulator.json();
 
@@ -2447,6 +2590,7 @@ mod tests {
         assert_eq!(evidence["matched_candidate_count"], 3);
         assert_eq!(evidence["primary_only_candidate_count"], 0);
         assert_eq!(evidence["candidate_identity"]["ready"], true);
+        assert_eq!(evidence["filter_pushdown_ready"], true);
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }
 
@@ -2454,6 +2598,12 @@ mod tests {
     fn search_candidate_shadow_accumulator_preserves_request_blockers() {
         let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
         accumulator.record_compare_candidate_ids(&["mem_1", "mem_2"], &["mem_1"]);
+        accumulator.record_filter_pushdown_fields(
+            1,
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+                .iter()
+                .copied(),
+        );
         accumulator.add_blocker_code("bridge_error");
 
         let evidence = accumulator.json();
@@ -2473,6 +2623,36 @@ mod tests {
                 "search_candidate_primary_only"
             ])
         );
+    }
+
+    #[test]
+    fn search_candidate_shadow_evidence_requires_filter_pushdown_fields() {
+        let mut accumulator = NowledgeMemSearchCandidateShadowAccumulator::new();
+        accumulator.record_compare_candidate_ids(&["mem_1"], &["mem_1"]);
+
+        let missing = accumulator.json();
+
+        assert_eq!(missing["ready"], false);
+        assert_eq!(missing["filter_pushdown_ready"], false);
+        assert!(missing["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "search_candidate_filter_pushdown_missing"));
+
+        accumulator.record_filter_pushdown_fields(1, ["unit_type"]);
+        let partial = accumulator.json();
+
+        assert_eq!(partial["ready"], false);
+        assert!(!partial["filter_pushdown"]["missing_required_fields"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert!(partial["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "search_candidate_field_pruning_missing"));
     }
 
     #[test]

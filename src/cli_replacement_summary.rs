@@ -254,6 +254,9 @@ pub fn nowledge_replacement_summary_json_with_options(
             "candidate_counts_ready": search_candidate_shadow_evidence.candidate_counts_ready,
             "candidate_identity_ready": search_candidate_shadow_evidence.candidate_identity_ready,
             "candidate_identity_parity": search_candidate_shadow_evidence.candidate_identity_parity,
+            "filter_pushdown_ready": search_candidate_shadow_evidence.filter_pushdown_ready,
+            "filter_pushdown_field_summary_count": search_candidate_shadow_evidence.filter_pushdown_field_summary_count,
+            "filter_pushdown_missing_required_fields": search_candidate_shadow_evidence.filter_pushdown_missing_required_fields,
             "blocker_codes": search_candidate_shadow_evidence.blocker_codes,
         },
         "bounded_read_evidence": {
@@ -586,6 +589,9 @@ struct SearchCandidateShadowEvidenceSummary {
     candidate_counts_ready: bool,
     candidate_identity_ready: Option<bool>,
     candidate_identity_parity: Option<bool>,
+    filter_pushdown_ready: Option<bool>,
+    filter_pushdown_field_summary_count: Option<u64>,
+    filter_pushdown_missing_required_fields: Vec<String>,
     blocker_codes: serde_json::Value,
 }
 
@@ -905,6 +911,39 @@ fn search_candidate_shadow_evidence_summary(
             .chain(["candidate_identity", "parity"])
             .collect::<Vec<_>>(),
     );
+    let filter_pushdown_ready = json_get_bool_path(
+        bundle,
+        &path
+            .iter()
+            .copied()
+            .chain(["filter_pushdown", "ready"])
+            .collect::<Vec<_>>(),
+    );
+    let filter_pushdown_field_summary_count = json_get_u64_path(
+        bundle,
+        &path
+            .iter()
+            .copied()
+            .chain(["filter_pushdown", "field_summary_count"])
+            .collect::<Vec<_>>(),
+    );
+    let filter_pushdown_missing_required_fields = json_get_string_array_path(
+        bundle,
+        &path
+            .iter()
+            .copied()
+            .chain(["filter_pushdown", "missing_required_fields"])
+            .collect::<Vec<_>>(),
+    );
+    let filter_pushdown_missing_required_fields_present = json_get_path(
+        bundle,
+        &path
+            .iter()
+            .copied()
+            .chain(["filter_pushdown", "missing_required_fields"])
+            .collect::<Vec<_>>(),
+    )
+    .is_some_and(serde_json::Value::is_array);
     let ready = present
         && protocol.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
         && evidence_source.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
@@ -913,7 +952,11 @@ fn search_candidate_shadow_evidence_summary(
             == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE)
         && candidate_counts_ready
         && candidate_identity_ready == Some(true)
-        && candidate_identity_parity == Some(true);
+        && candidate_identity_parity == Some(true)
+        && filter_pushdown_ready == Some(true)
+        && filter_pushdown_field_summary_count.is_some_and(|count| count > 0)
+        && filter_pushdown_missing_required_fields_present
+        && filter_pushdown_missing_required_fields.is_empty();
     SearchCandidateShadowEvidenceSummary {
         protocol,
         evidence_source,
@@ -929,6 +972,9 @@ fn search_candidate_shadow_evidence_summary(
         candidate_counts_ready,
         candidate_identity_ready,
         candidate_identity_parity,
+        filter_pushdown_ready,
+        filter_pushdown_field_summary_count,
+        filter_pushdown_missing_required_fields,
         blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
     }
 }
@@ -1585,6 +1631,9 @@ fn nowledge_replacement_next_actions(
                 "search_candidate_shadow_evidence.matched_candidate_count",
                 "search_candidate_shadow_evidence.primary_only_candidate_count",
                 "search_candidate_shadow_evidence.candidate_identity.ready",
+                "search_candidate_shadow_evidence.filter_pushdown.ready",
+                "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
+                "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields",
                 "search_candidate_shadow_evidence.blocker_codes",
             ],
         ));
@@ -2707,6 +2756,52 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_search_candidate_filter_pushdown() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["filter_pushdown"]["ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["filter_pushdown"]["field_summary_count"] =
+            serde_json::json!(0);
+        bundle["search_candidate_shadow_evidence"]["filter_pushdown"]["missing_required_fields"] =
+            serde_json::json!(["unit_type"]);
+        bundle["search_candidate_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["search_candidate_field_pruning_missing"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["filter_pushdown_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["filter_pushdown_field_summary_count"],
+            0
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence_ready"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "run_search_candidate_shadow_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| {
+                            field == "search_candidate_shadow_evidence.filter_pushdown.ready"
+                        })
+            }));
+    }
+
+    #[test]
     fn replacement_summary_blocks_production_without_bounded_read_evidence() {
         let mut bundle = production_ready_bundle();
         bundle
@@ -3619,6 +3714,9 @@ mod tests {
                         "search_candidate_shadow_evidence.matched_candidate_count",
                         "search_candidate_shadow_evidence.primary_only_candidate_count",
                         "search_candidate_shadow_evidence.candidate_identity.ready",
+                        "search_candidate_shadow_evidence.filter_pushdown.ready",
+                        "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
+                        "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields",
                         "search_candidate_shadow_evidence.blocker_codes"
                     ]
                 },
@@ -3840,6 +3938,17 @@ mod tests {
                     "shadow_checksum": 123,
                     "matched_checksum": 123,
                     "parity": true
+                },
+                "filter_pushdown_ready": true,
+                "filter_pushdown": {
+                    "ready": true,
+                    "pushed_predicate_count": 1,
+                    "shadow_scan_present": true,
+                    "required_fields": scan_filter_fields_json(),
+                    "missing_required_fields": [],
+                    "field_summary_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+                    "field_summaries": scan_filter_field_summaries_json(),
+                    "blocker_codes": []
                 },
                 "blocker_codes": []
             },

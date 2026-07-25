@@ -1289,6 +1289,12 @@ mod tests {
             &["mem_1", "mem_2", "mem_3"],
             &["mem_1", "mem_2", "mem_3"],
         );
+        accumulator.record_filter_pushdown_fields(
+            1,
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+                .iter()
+                .copied(),
+        );
         nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence())
     }
 
