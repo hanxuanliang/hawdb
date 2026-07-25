@@ -248,6 +248,14 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     &[
                         "replacement_summary",
                         "search_projection_evidence",
+                        "document_identity_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_evidence",
                         "incremental_update_ready",
                     ],
                 ) == Some(true),
@@ -313,6 +321,14 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                         "replacement_summary",
                         "search_projection_shadow_evidence",
                         "document_count_parity",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "document_identity_parity",
                     ],
                 ) == Some(true),
                 bool_path(
@@ -390,6 +406,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary.search_projection_evidence.protocol",
                 "replacement_summary.search_projection_evidence.fts_ready",
                 "replacement_summary.search_projection_evidence.vector_ready",
+                "replacement_summary.search_projection_evidence.document_identity_ready",
                 "replacement_summary.search_projection_evidence.incremental_update_ready",
                 "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
@@ -399,6 +416,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary.search_projection_shadow_evidence.evidence_source",
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.document_count_parity",
+                "replacement_summary.search_projection_shadow_evidence.document_identity_parity",
                 "replacement_summary.search_projection_shadow_evidence.table_parity_ready",
                 "replacement_summary.search_projection_shadow_evidence.embedding_identity_parity",
                 "replacement_summary.search_projection_shadow_evidence.incremental_watermark_parity",
@@ -1400,6 +1418,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "replacement_summary.search_projection_evidence.protocol",
                 "replacement_summary.search_projection_evidence.fts_ready",
                 "replacement_summary.search_projection_evidence.vector_ready",
+                "replacement_summary.search_projection_evidence.document_identity_ready",
                 "replacement_summary.search_projection_evidence.incremental_update_ready",
                 "replacement_summary.search_projection_evidence.predicate_pushdown_ready",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
@@ -1407,6 +1426,8 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "replacement_summary.search_projection_shadow_evidence.protocol",
                 "replacement_summary.search_projection_shadow_evidence.evidence_source",
                 "replacement_summary.search_projection_shadow_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.document_count_parity",
+                "replacement_summary.search_projection_shadow_evidence.document_identity_parity",
                 "replacement_summary.search_projection_shadow_evidence.blocker_codes",
             ],
         ));
@@ -2717,6 +2738,78 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_search_projection_replacement_evidence"));
+    }
+
+    #[test]
+    fn requires_search_projection_document_identity() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_evidence"]["ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_evidence"]["document_identity_ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_evidence"]["blocker_codes"] =
+            serde_json::json!(["document_identity_not_ready"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["document_identity_not_ready"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_evidence.ready",
+                "replacement_summary.search_projection_evidence.document_identity_ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn requires_search_projection_shadow_document_identity_parity() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]
+            ["document_identity_parity"] = serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["document_identity_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["document_identity_mismatch"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_shadow_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.document_identity_parity"
+            ])
+        );
     }
 
     #[test]
@@ -4493,6 +4586,7 @@ mod tests {
                     "ready": true,
                     "fts_ready": true,
                     "vector_ready": true,
+                    "document_identity_ready": true,
                     "incremental_update_ready": true,
                     "predicate_pushdown_ready": true,
                     "compressed_vector_projection_required": true,
@@ -4505,6 +4599,7 @@ mod tests {
                     "present": true,
                     "ready": true,
                     "document_count_parity": true,
+                    "document_identity_parity": true,
                     "table_parity_ready": true,
                     "embedding_identity_parity": true,
                     "incremental_watermark_parity": true,
