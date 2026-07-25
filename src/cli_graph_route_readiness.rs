@@ -141,6 +141,8 @@ impl RouteEvidence {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct QueryRuntimeReport {
+    query_name: Option<String>,
+    query_index: Option<u64>,
     protocol: Option<String>,
     statement_kind: Option<String>,
     execution_path: Option<String>,
@@ -174,6 +176,8 @@ impl QueryRuntimeReport {
         let plan_cache_bypassed = bool_path(value, &["plan_cache", "bypassed"])
             .or_else(|| bool_path(value, &["plan_cache_bypassed"]));
         let mut report = Self {
+            query_name: str_path(value, &["query_name"]).map(str::to_string),
+            query_index: u64_path(value, &["query_index"]),
             protocol: str_path(value, &["protocol"]).map(str::to_string),
             statement_kind: str_path(value, &["statement_kind"]).map(str::to_string),
             execution_path: str_path(value, &["execution_path"]).map(str::to_string),
@@ -206,6 +210,8 @@ impl QueryRuntimeReport {
 
     fn json(self) -> serde_json::Value {
         serde_json::json!({
+            "query_name": self.query_name,
+            "query_index": self.query_index,
             "protocol": self.protocol,
             "statement_kind": self.statement_kind,
             "execution_path": self.execution_path,
@@ -233,6 +239,14 @@ impl QueryRuntimeReport {
 
     fn computed_blocker_codes(&self) -> Vec<String> {
         let mut blockers = BTreeSet::new();
+        if !self
+            .query_name
+            .as_deref()
+            .is_some_and(|name| !name.trim().is_empty())
+            || self.query_index.is_none()
+        {
+            blockers.insert("query_report_identity_missing".to_string());
+        }
         if self.protocol.as_deref() != Some(NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL) {
             blockers.insert("query_report_protocol_mismatch".to_string());
         }
@@ -540,6 +554,25 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_fails_closed_without_query_report_identity() {
+        let mut routes = ready_routes();
+        routes[0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("query_name");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_report_identity_missing"));
+    }
+
+    #[test]
     fn route_readiness_fails_closed_for_non_graph_query_report() {
         let mut routes = ready_routes();
         routes[0]["query_reports"][0]["statement_kind"] = serde_json::json!("set_system_variable");
@@ -654,6 +687,8 @@ mod tests {
 
     fn ready_query_report() -> serde_json::Value {
         serde_json::json!({
+            "query_name": "overview-memory-lookup",
+            "query_index": 0,
             "protocol": "skein-nowledge-mem-query-report-v1",
             "statement_kind": "match_return",
             "execution_path": "fast_path",

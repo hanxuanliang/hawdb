@@ -1895,7 +1895,9 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
 }
 
 fn graph_route_query_report_ready(report: &serde_json::Value) -> bool {
-    str_path(report, &["protocol"]) == Some(SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL)
+    non_empty_str_path(report, &["query_name"])
+        && u64_path(report, &["query_index"]).is_some()
+        && str_path(report, &["protocol"]) == Some(SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL)
         && bool_path(report, &["ready"]) == Some(true)
         && string_array_path(report, &["blocker_codes"]).is_empty()
         && non_empty_str_path(report, &["statement_kind"])
@@ -3388,6 +3390,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_graph_route_query_profiles_without_query_identity() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("query_name");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
+    }
+
+    #[test]
     fn rejects_graph_route_readiness_without_primary_route_coverage() {
         let mut bundle = ready_bundle();
         bundle["graph_route_readiness"]["route_primary_ready"] = serde_json::json!(false);
@@ -4277,6 +4306,8 @@ mod tests {
 
     fn ready_graph_route_query_report() -> serde_json::Value {
         serde_json::json!({
+            "query_name": "overview-memory-lookup",
+            "query_index": 0,
             "protocol": "skein-nowledge-mem-query-report-v1",
             "statement_kind": "match_return",
             "execution_path": "fast_path",

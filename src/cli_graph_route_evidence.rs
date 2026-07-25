@@ -136,16 +136,23 @@ impl RouteQuery {
         if self.queries.is_empty() {
             blocker_codes.push("missing_route_queries".to_string());
         }
-        for query in &self.queries {
+        for (query_index, query) in self.queries.iter().enumerate() {
             match graph.query_with_params_with_report_options(
                 &query.cypher,
                 &query.parameters,
                 options,
             ) {
-                Ok(output) => query_reports.push(output.report.json()),
+                Ok(output) => {
+                    let report =
+                        query_report_with_route_context(query, query_index, output.report.json());
+                    blocker_codes.extend(query_requirement_blockers(query, &report));
+                    query_reports.push(report);
+                }
                 Err(error) => {
                     blocker_codes.push("query_runtime_execution_failed".to_string());
                     query_errors.push(serde_json::json!({
+                        "query_name": query.name,
+                        "query_index": query_index as u64,
                         "error_class": error_class(&error),
                     }));
                 }
@@ -162,7 +169,8 @@ impl RouteQuery {
             "shadow_compare_ready": self.shadow_compare_ready,
             "primary_read_routing_enabled": self.primary_read_routing_enabled,
             "primary_ready": (self.primary_ready || self.primary_read_routing_enabled)
-                && query_runtime_succeeded,
+                && query_runtime_succeeded
+                && blocker_codes.is_empty(),
             "query_reports": query_reports,
             "query_errors": query_errors,
             "blocker_codes": blocker_codes,
@@ -172,6 +180,9 @@ impl RouteQuery {
 
 #[derive(Debug, Clone, PartialEq)]
 struct RouteCypherQuery {
+    name: String,
+    require_scan_pruning: bool,
+    require_pruned: bool,
     cypher: String,
     parameters: BTreeMap<String, Value>,
 }
@@ -202,7 +213,8 @@ fn parse_route_query(value: &serde_json::Value) -> Result<RouteQuery> {
             SkeinError::Semantic("graph route query field 'queries' must be an array".to_string())
         })?
         .iter()
-        .map(parse_route_cypher_query)
+        .enumerate()
+        .map(|(query_index, query)| parse_route_cypher_query(query, query_index))
         .collect::<Result<Vec<_>>>()?;
     Ok(RouteQuery {
         route,
@@ -214,11 +226,20 @@ fn parse_route_query(value: &serde_json::Value) -> Result<RouteQuery> {
     })
 }
 
-fn parse_route_cypher_query(value: &serde_json::Value) -> Result<RouteCypherQuery> {
+fn parse_route_cypher_query(
+    value: &serde_json::Value,
+    query_index: usize,
+) -> Result<RouteCypherQuery> {
     let cypher = required_string(value, "cypher")?.to_string();
     if cypher.trim().is_empty() {
         return Err(SkeinError::Semantic(
             "graph route query field 'cypher' must be non-empty".to_string(),
+        ));
+    }
+    let name = optional_query_name(value).unwrap_or_else(|| format!("query-{}", query_index + 1));
+    if name.trim().is_empty() {
+        return Err(SkeinError::Semantic(
+            "graph route query name must be non-empty when provided".to_string(),
         ));
     }
     let parameters = value
@@ -226,7 +247,79 @@ fn parse_route_cypher_query(value: &serde_json::Value) -> Result<RouteCypherQuer
         .map(parse_parameters_json)
         .transpose()?
         .unwrap_or_default();
-    Ok(RouteCypherQuery { cypher, parameters })
+    Ok(RouteCypherQuery {
+        name,
+        require_scan_pruning: bool_field(value, "require_scan_pruning"),
+        require_pruned: bool_field(value, "require_pruned"),
+        cypher,
+        parameters,
+    })
+}
+
+fn optional_query_name(value: &serde_json::Value) -> Option<String> {
+    ["name", "query_id", "id"]
+        .iter()
+        .find_map(|field| value.get(*field).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+}
+
+fn query_report_with_route_context(
+    query: &RouteCypherQuery,
+    query_index: usize,
+    mut report: serde_json::Value,
+) -> serde_json::Value {
+    if let Some(object) = report.as_object_mut() {
+        object.insert(
+            "query_name".to_string(),
+            serde_json::Value::String(query.name.clone()),
+        );
+        object.insert(
+            "query_index".to_string(),
+            serde_json::json!(query_index as u64),
+        );
+        object.insert(
+            "require_scan_pruning".to_string(),
+            serde_json::json!(query.require_scan_pruning),
+        );
+        object.insert(
+            "require_pruned".to_string(),
+            serde_json::json!(query.require_pruned),
+        );
+    }
+    report
+}
+
+fn query_requirement_blockers(query: &RouteCypherQuery, report: &serde_json::Value) -> Vec<String> {
+    let mut blockers = Vec::new();
+    let scan_pruning_reports = report
+        .get("scan_pruning_reports")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    let scan_pruning_report_count = report
+        .get("scan_pruning_report_count")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if query.require_scan_pruning
+        && (scan_pruning_report_count == 0 || scan_pruning_reports.is_empty())
+    {
+        blockers.push("query_scan_pruning_required_but_missing".to_string());
+    }
+    if query.require_pruned && !scan_pruning_reports.iter().any(scan_report_pruned_rows) {
+        blockers.push("query_pruned_scan_required_but_missing".to_string());
+    }
+    blockers
+}
+
+fn scan_report_pruned_rows(report: &serde_json::Value) -> bool {
+    report
+        .get("pruned")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        && report
+            .get("pruned_candidate_count")
+            .and_then(serde_json::Value::as_u64)
+            .is_some_and(|count| count > 0)
 }
 
 fn parse_parameters_json(value: &serde_json::Value) -> Result<BTreeMap<String, Value>> {
@@ -348,6 +441,8 @@ mod tests {
         let mut db = Database::new();
         db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
             .unwrap();
+        db.query("CREATE (:Memory {id: 'mem-other', title: 'Other Evidence'})")
+            .unwrap();
         let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
         let route_queries = parse_route_query_inventory(&serde_json::json!({
             "routes": [
@@ -357,10 +452,13 @@ mod tests {
                     "primary_ready": true,
                     "queries": [
                         {
+                            "name": "overview-memory-lookup",
                             "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
                             "parameters": {
                                 "id": "mem-route"
-                            }
+                            },
+                            "require_scan_pruning": true,
+                            "require_pruned": true
                         }
                     ],
                     "blocker_codes": []
@@ -386,6 +484,19 @@ mod tests {
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["protocol"],
             "skein-nowledge-mem-query-report-v1"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_name"],
+            "overview-memory-lookup"
+        );
+        assert_eq!(evidence["routes"][0]["query_reports"][0]["query_index"], 0);
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["require_scan_pruning"],
+            true
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["require_pruned"],
+            true
         );
         assert_eq!(
             evidence["routes"][0]["query_reports"][0]["statement_kind"],
@@ -444,6 +555,7 @@ mod tests {
                     "primary_ready": true,
                     "queries": [
                         {
+                            "name": "broken-overview-query",
                             "cypher": "MATCH (m:Memory) RETURN unknown.property AS value"
                         }
                     ]
@@ -473,5 +585,51 @@ mod tests {
             evidence["routes"][0]["query_errors"][0]["error_class"],
             "semantic"
         );
+        assert_eq!(
+            evidence["routes"][0]["query_errors"][0]["query_name"],
+            "broken-overview-query"
+        );
+        assert_eq!(evidence["routes"][0]["query_errors"][0]["query_index"], 0);
+    }
+
+    #[test]
+    fn route_evidence_fails_closed_when_required_pruning_is_not_reduced() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = parse_route_query_inventory(&serde_json::json!({
+            "routes": [
+                {
+                    "route": "/graph/overview",
+                    "shadow_compare_ready": true,
+                    "primary_ready": true,
+                    "queries": [
+                        {
+                            "name": "overview-full-scan",
+                            "cypher": "MATCH (m:Memory) RETURN m.title AS title",
+                            "require_pruned": true
+                        }
+                    ],
+                    "blocker_codes": []
+                }
+            ]
+        }))
+        .unwrap();
+
+        let evidence =
+            nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["routes"][0]["primary_ready"], false);
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_name"],
+            "overview-full-scan"
+        );
+        assert!(evidence["routes"][0]["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "query_pruned_scan_required_but_missing"));
     }
 }

@@ -1111,6 +1111,8 @@ mod tests {
 
     fn ready_graph_route_query_report() -> serde_json::Value {
         serde_json::json!({
+            "query_name": "overview-memory-lookup",
+            "query_index": 0,
             "protocol": "skein-nowledge-mem-query-report-v1",
             "statement_kind": "match_return",
             "execution_path": "fast_path",
