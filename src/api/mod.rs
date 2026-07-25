@@ -7163,7 +7163,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryListRequest,
     ) -> Result<KnowledgeMemoryListOutput> {
-        knowledge_memories_for(&self.catalog, &self.store, request)
+        knowledge_memories_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_projected_list(
@@ -10908,44 +10908,29 @@ fn context_memory_preview_row(
     }
 }
 
-fn knowledge_memories_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_memories_via_query_runtime(
+    db: &Database,
     request: &KnowledgeMemoryListRequest,
 ) -> Result<KnowledgeMemoryListOutput> {
     validate_knowledge_memory_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_external_ids: request.external_ids.clone(),
-        });
-    };
-
-    let requested_ids = request
-        .external_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::new();
+    let predicate = knowledge_memory_list_query_predicate(request, &mut parameters);
+    let query = format!("MATCH (m:Memory){predicate} RETURN m AS memory");
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
     let mut matched_external_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            if requested_ids.is_empty() {
-                true
-            } else {
-                node_external_id(memory).is_some_and(|memory_id| requested_ids.contains(&memory_id))
-            }
-        })
-        .filter(|memory| memory_matches_memory_list(memory, request))
-        .map(|memory| {
-            if let Some(memory_id) = node_external_id(memory) {
-                matched_external_ids.insert(memory_id);
-            }
-            knowledge_memory_list_row(memory)
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(|row| {
+            row.get("memory")
+                .and_then(knowledge_entity_from_value)
+                .map(|memory| {
+                    if let Some(memory_id) = &memory.external_id {
+                        matched_external_ids.insert(memory_id.clone());
+                    }
+                    knowledge_memory_list_row_from_entity(&memory)
+                })
         })
         .collect::<Vec<_>>();
     sort_memory_list_rows(&mut rows, request.order);
@@ -11533,31 +11518,6 @@ fn validate_knowledge_memory_list_request(request: &KnowledgeMemoryListRequest) 
     Ok(())
 }
 
-fn memory_matches_memory_list(memory: &NodeRecord, request: &KnowledgeMemoryListRequest) -> bool {
-    request
-        .normalized_space_id
-        .as_ref()
-        .is_none_or(|space_id| normalized_node_space_id(memory) == *space_id)
-        && request
-            .exclude_normalized_space_id
-            .as_ref()
-            .is_none_or(|space_id| normalized_node_space_id(memory) != *space_id)
-        && request.unit_type.as_ref().is_none_or(|unit_type| {
-            memory
-                .properties
-                .get("unit_type")
-                .map(value_to_external_id)
-                .as_ref()
-                == Some(unit_type)
-        })
-        && request.is_latest.is_none_or(|is_latest| {
-            memory.properties.get("is_latest") == Some(&Value::Bool(is_latest))
-        })
-        && request.is_crystal.is_none_or(|is_crystal| {
-            memory.properties.get("is_crystal") == Some(&Value::Bool(is_crystal))
-        })
-}
-
 fn knowledge_memory_projected_row(
     memory: &NodeRecord,
     property_names: &[String],
@@ -11582,25 +11542,25 @@ fn knowledge_memory_projected_row_from_entity(
     }
 }
 
-fn knowledge_memory_list_row(memory: &NodeRecord) -> KnowledgeMemoryListRow {
+fn knowledge_memory_list_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeMemoryListRow {
     KnowledgeMemoryListRow {
-        memory_id: node_external_id(memory),
-        node_id: memory.id.0,
-        title: string_property(memory, "title"),
-        content: string_property(memory, "content"),
+        memory_id: memory.external_id.clone(),
+        node_id: memory.node_id,
+        title: string_property_value(&memory.properties, "title"),
+        content: string_property_value(&memory.properties, "content"),
         metadata: memory.properties.get("metadata").cloned(),
-        is_latest: boolean_property(memory, "is_latest"),
-        lifecycle_state: string_property(memory, "lifecycle_state"),
-        review_status: string_property(memory, "review_status"),
-        unit_type: string_property(memory, "unit_type"),
+        is_latest: boolean_property_value(&memory.properties, "is_latest"),
+        lifecycle_state: string_property_value(&memory.properties, "lifecycle_state"),
+        review_status: string_property_value(&memory.properties, "review_status"),
+        unit_type: string_property_value(&memory.properties, "unit_type"),
         raw_space_id: memory.properties.get("space_id").map(value_to_external_id),
-        normalized_space_id: normalized_node_space_id(memory),
+        normalized_space_id: knowledge_entity_normalized_space_id(memory),
         created_at: memory.properties.get("created_at").cloned(),
         updated_at: memory.properties.get("updated_at").cloned(),
         importance: memory.properties.get("importance").cloned(),
         pagerank_score: memory.properties.get("pagerank_score").cloned(),
         community_id: memory.properties.get("community_id").cloned(),
-        source: string_property(memory, "source"),
+        source: string_property_value(&memory.properties, "source"),
         event_start: memory.properties.get("event_start").cloned(),
         event_end: memory.properties.get("event_end").cloned(),
     }

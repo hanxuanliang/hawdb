@@ -5327,6 +5327,56 @@ fn lists_memories_for_learning_latest_and_ranked_overview_shapes() {
 }
 
 #[test]
+fn memory_list_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'memory-list-cache-a', title: 'Cache A', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: '', created_at: 10, importance: 0.4})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-list-cache-b', title: 'Cache B', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: 'default', created_at: 20, pagerank_score: 0.9})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-list-cache-team', title: 'Team', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: 'team', created_at: 30})")
+        .unwrap();
+    let request = KnowledgeMemoryListRequest {
+        external_ids: vec![
+            "memory-list-cache-a".to_string(),
+            "memory-list-cache-b".to_string(),
+            "memory-list-cache-missing".to_string(),
+        ],
+        normalized_space_id: Some("default".to_string()),
+        exclude_normalized_space_id: None,
+        unit_type: Some("fact".to_string()),
+        is_latest: Some(true),
+        is_crystal: Some(false),
+        limit: 1,
+        order: KnowledgeMemoryListOrder::ScoreDesc,
+    };
+
+    let first = db.knowledge_memories(&request).unwrap();
+    let second = db.knowledge_memories(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(
+        first.rows[0].memory_id.as_deref(),
+        Some("memory-list-cache-b")
+    );
+    assert_eq!(first.rows[0].title.as_deref(), Some("Cache B"));
+    assert_eq!(first.rows[0].normalized_space_id, "default");
+    assert_eq!(
+        first.missing_external_ids,
+        vec!["memory-list-cache-missing".to_string()]
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn projects_memory_list_fields_for_nowledge_growth() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'memory_projected_a', title: 'Projected A', content: 'body a', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: '', created_at: 10, importance: 0.4, metadata: '{\"rank\":1}', future_field: 'future-a'})")
