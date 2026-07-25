@@ -7,6 +7,7 @@ use std::path::Path;
 
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
+const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 
 pub fn nowledge_graph_route_readiness_usage() -> String {
     "nowledge-graph-route-readiness requires [--require-ready] <route-evidence-json>".to_string()
@@ -109,6 +110,7 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
 struct RouteEvidence {
     route: String,
     shadow_compare_ready: bool,
+    shadow_compare_evidence_source: Option<String>,
     primary_ready: bool,
     blocker_codes: Vec<String>,
     query_reports: Vec<QueryRuntimeReport>,
@@ -130,6 +132,7 @@ impl RouteEvidence {
         serde_json::json!({
             "route": self.route,
             "shadow_compare_ready": self.shadow_compare_ready,
+            "shadow_compare_evidence_source": self.shadow_compare_evidence_source,
             "primary_ready": self.primary_ready,
             "query_runtime_ready": query_runtime_ready,
             "query_report_count": query_report_count,
@@ -366,6 +369,8 @@ fn parse_route(value: &serde_json::Value) -> Result<RouteEvidence> {
     Ok(RouteEvidence {
         route,
         shadow_compare_ready: bool_path(value, &["shadow_compare_ready"]) == Some(true),
+        shadow_compare_evidence_source: str_path(value, &["shadow_compare_evidence_source"])
+            .map(str::to_string),
         primary_ready: bool_path(value, &["primary_ready"]) == Some(true),
         blocker_codes: string_array_path(value, &["blocker_codes"]),
         query_reports: value_path(value, &["query_reports"])
@@ -396,6 +401,9 @@ fn route_primary_blocker_codes(
     for route in routes {
         if !route.shadow_compare_ready {
             blockers.insert("route_shadow_compare_not_ready".to_string());
+        }
+        if route.shadow_compare_evidence_source.as_deref() != Some(ROUTE_PARITY_EVIDENCE_SOURCE) {
+            blockers.insert("route_shadow_compare_evidence_missing".to_string());
         }
         if !route.primary_ready {
             blockers.insert("route_primary_not_ready".to_string());
@@ -538,6 +546,24 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_fails_closed_without_route_parity_evidence_source() {
+        let mut routes = ready_routes();
+        routes[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("shadow_compare_evidence_source");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_shadow_compare_evidence_missing"));
+    }
+
+    #[test]
     fn route_readiness_fails_closed_without_query_runtime_reports() {
         let mut routes = ready_routes();
         routes[0]["query_reports"] = serde_json::json!([]);
@@ -677,6 +703,7 @@ mod tests {
                 serde_json::json!({
                     "route": route,
                     "shadow_compare_ready": true,
+                    "shadow_compare_evidence_source": "route_parity_evidence",
                     "primary_ready": true,
                     "query_reports": [ready_query_report()],
                     "blocker_codes": []

@@ -7,6 +7,7 @@ const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
+const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
     "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
@@ -277,7 +278,10 @@ fn graph_route_parity_alignment_json(
             continue;
         };
         observed_routes.insert(route_name.to_string());
-        if bool_path(route, &["shadow_compare_ready"]) == Some(true) {
+        if bool_path(route, &["shadow_compare_ready"]) == Some(true)
+            && str_path(route, &["shadow_compare_evidence_source"])
+                == Some(ROUTE_PARITY_EVIDENCE_SOURCE)
+        {
             ready_routes.insert(route_name.to_string());
         } else {
             not_ready_routes.insert(route_name.to_string());
@@ -1098,6 +1102,7 @@ mod tests {
                     serde_json::json!({
                         "route": route,
                         "shadow_compare_ready": true,
+                        "shadow_compare_evidence_source": "route_parity_evidence",
                         "primary_ready": true,
                         "query_runtime_ready": true,
                         "query_report_count": 1,

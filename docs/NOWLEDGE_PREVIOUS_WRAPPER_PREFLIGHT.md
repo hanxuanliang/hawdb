@@ -376,11 +376,32 @@ the Cypher statements each route executes:
 }
 ```
 
+Mem also supplies route-level parity evidence from the Kuzu/Ladybug shadow
+comparison. The graph route evidence command treats `shadow_compare_ready` in
+the query inventory as local debugging input only; production readiness requires
+an explicit parity artifact:
+
+```json
+{
+  "protocol": "nmem-graph-route-parity-evidence-v1",
+  "routes": [
+    {
+      "route": "/graph/overview",
+      "ready": true,
+      "matched_per_million": 1000000,
+      "primary_engine": "kuzu",
+      "shadow_engine": "skein"
+    }
+  ]
+}
+```
+
 Generate query-runtime-backed route evidence with:
 
 ```bash
 cargo run --quiet --bin skein -- \
   nowledge-graph-route-evidence \
+  --route-parity-json "$NMEM_PREFLIGHT_ROOT/graph-route-parity.json" \
   "$NMEM_PREFLIGHT_ROOT/skein-demo" \
   "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
   > "$NMEM_PREFLIGHT_ROOT/graph-route-evidence.json"
@@ -409,6 +430,9 @@ Route query inventory can require scan pruning with `require_scan_pruning` and
 actual row reduction with `require_pruned`; missing or weak runtime evidence
 adds route blocker codes and keeps primary readiness fail-closed. Raw Cypher and
 parameters are not copied into readiness reports by default.
+Readiness also requires `shadow_compare_evidence_source` to be
+`route_parity_evidence`, so a hand-authored route inventory cannot become
+production shadow parity evidence by setting `shadow_compare_ready` alone.
 
 ## 10. Run Query Runtime Preflight
 

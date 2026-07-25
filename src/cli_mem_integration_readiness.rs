@@ -1872,6 +1872,8 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
         }
         if bool_path(route, &["primary_ready"]) != Some(true)
             || bool_path(route, &["query_runtime_ready"]) != Some(true)
+            || bool_path(route, &["shadow_compare_ready"]) != Some(true)
+            || str_path(route, &["shadow_compare_evidence_source"]) != Some("route_parity_evidence")
             || u64_path(route, &["query_report_count"]).is_none_or(|value| value == 0)
         {
             return false;
@@ -3417,6 +3419,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_graph_route_profiles_without_route_parity_source() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["routes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("shadow_compare_evidence_source");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
+    }
+
+    #[test]
     fn rejects_graph_route_readiness_without_primary_route_coverage() {
         let mut bundle = ready_bundle();
         bundle["graph_route_readiness"]["route_primary_ready"] = serde_json::json!(false);
@@ -4217,6 +4246,7 @@ mod tests {
                 serde_json::json!({
                     "route": route,
                     "shadow_compare_ready": true,
+                    "shadow_compare_evidence_source": "route_parity_evidence",
                     "primary_ready": true,
                     "query_runtime_ready": true,
                     "query_report_count": 1,

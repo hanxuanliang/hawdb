@@ -6,9 +6,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
+const NMEM_GRAPH_ROUTE_PARITY_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-parity-evidence-v1";
+const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
+const ROUTE_QUERY_INVENTORY_EVIDENCE_SOURCE: &str = "route_query_inventory";
 
 pub fn nowledge_graph_route_evidence_usage() -> String {
-    "nowledge-graph-route-evidence requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--capture-physical-plan] [--slow-log-threshold-micros <n>] <graph-db> <route-query-json>".to_string()
+    "nowledge-graph-route-evidence requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--capture-physical-plan] [--slow-log-threshold-micros <n>] [--route-parity-json <path>] <graph-db> <route-query-json>".to_string()
 }
 
 pub fn run_nowledge_graph_route_evidence(
@@ -17,6 +20,7 @@ pub fn run_nowledge_graph_route_evidence(
     let mut require_ready = false;
     let mut mode = NowledgeMemGraphMode::ShadowReadOnly;
     let mut options = NowledgeMemQueryReportOptions::default();
+    let mut route_parity = None;
     let mut graph_path = None;
     let mut route_query_path = None;
 
@@ -44,6 +48,13 @@ pub fn run_nowledge_graph_route_evidence(
                     )
                 })?);
             }
+            "--route-parity-json" => {
+                route_parity = Some(parse_route_parity_evidence(&read_json_file(Path::new(
+                    &args.next().ok_or_else(|| {
+                        SkeinError::Semantic(nowledge_graph_route_evidence_usage())
+                    })?,
+                ))?)?);
+            }
             value if value.starts_with("--") => {
                 return Err(SkeinError::Semantic(nowledge_graph_route_evidence_usage()));
             }
@@ -68,7 +79,12 @@ pub fn run_nowledge_graph_route_evidence(
     let route_queries =
         parse_route_query_inventory(&read_json_file(Path::new(&route_query_path))?)?;
     Ok((
-        nowledge_graph_route_evidence_json(&mut graph, &route_queries, options),
+        nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            options,
+            route_parity.as_ref(),
+        ),
         require_ready,
     ))
 }
@@ -77,10 +93,11 @@ fn nowledge_graph_route_evidence_json(
     graph: &mut NowledgeMemGraph,
     route_queries: &[RouteQuery],
     options: NowledgeMemQueryReportOptions,
+    route_parity: Option<&RouteParityEvidence>,
 ) -> serde_json::Value {
     let routes = route_queries
         .iter()
-        .map(|route| route.query_runtime_evidence(graph, options))
+        .map(|route| route.query_runtime_evidence(graph, options, route_parity))
         .collect::<Vec<_>>();
     let ready = routes.iter().all(route_evidence_ready);
     serde_json::json!({
@@ -129,12 +146,20 @@ impl RouteQuery {
         &self,
         graph: &mut NowledgeMemGraph,
         options: NowledgeMemQueryReportOptions,
+        route_parity: Option<&RouteParityEvidence>,
     ) -> serde_json::Value {
         let mut query_reports = Vec::with_capacity(self.queries.len());
         let mut query_errors = Vec::new();
         let mut blocker_codes = self.blocker_codes.clone();
+        let shadow_compare = self.shadow_compare_evidence(route_parity);
         if self.queries.is_empty() {
             blocker_codes.push("missing_route_queries".to_string());
+        }
+        if !shadow_compare.ready {
+            blocker_codes.push("shadow_compare_evidence_not_ready".to_string());
+        }
+        if shadow_compare.source != ROUTE_PARITY_EVIDENCE_SOURCE {
+            blocker_codes.push("shadow_compare_evidence_missing".to_string());
         }
         for (query_index, query) in self.queries.iter().enumerate() {
             match graph.query_with_params_with_report_options(
@@ -166,7 +191,9 @@ impl RouteQuery {
         blocker_codes.dedup();
         serde_json::json!({
             "route": self.route,
-            "shadow_compare_ready": self.shadow_compare_ready,
+            "shadow_compare_ready": shadow_compare.ready,
+            "shadow_compare_evidence_source": shadow_compare.source,
+            "shadow_compare": shadow_compare.json(),
             "primary_read_routing_enabled": self.primary_read_routing_enabled,
             "primary_ready": (self.primary_ready || self.primary_read_routing_enabled)
                 && query_runtime_succeeded
@@ -176,6 +203,89 @@ impl RouteQuery {
             "blocker_codes": blocker_codes,
         })
     }
+
+    fn shadow_compare_evidence<'a>(
+        &self,
+        route_parity: Option<&'a RouteParityEvidence>,
+    ) -> RouteShadowCompareEvidence<'a> {
+        let Some(route_parity) = route_parity else {
+            return RouteShadowCompareEvidence::from_inventory(self.shadow_compare_ready);
+        };
+        let Some(route) = route_parity.route(&self.route) else {
+            return RouteShadowCompareEvidence::missing_parity();
+        };
+        RouteShadowCompareEvidence::from_parity_route(route)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RouteShadowCompareEvidence<'a> {
+    source: &'static str,
+    ready: bool,
+    matched_per_million: Option<u64>,
+    primary_engine: Option<&'a str>,
+    shadow_engine: Option<&'a str>,
+}
+
+impl<'a> RouteShadowCompareEvidence<'a> {
+    fn from_inventory(ready: bool) -> Self {
+        Self {
+            source: ROUTE_QUERY_INVENTORY_EVIDENCE_SOURCE,
+            ready,
+            matched_per_million: None,
+            primary_engine: None,
+            shadow_engine: None,
+        }
+    }
+
+    fn missing_parity() -> Self {
+        Self {
+            source: ROUTE_PARITY_EVIDENCE_SOURCE,
+            ready: false,
+            matched_per_million: None,
+            primary_engine: None,
+            shadow_engine: None,
+        }
+    }
+
+    fn from_parity_route(route: &'a RouteParityEvidenceRoute) -> Self {
+        Self {
+            source: ROUTE_PARITY_EVIDENCE_SOURCE,
+            ready: route.ready,
+            matched_per_million: route.matched_per_million,
+            primary_engine: route.primary_engine.as_deref(),
+            shadow_engine: route.shadow_engine.as_deref(),
+        }
+    }
+
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({
+            "source": self.source,
+            "ready": self.ready,
+            "matched_per_million": self.matched_per_million,
+            "primary_engine": self.primary_engine,
+            "shadow_engine": self.shadow_engine,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteParityEvidence {
+    routes: BTreeMap<String, RouteParityEvidenceRoute>,
+}
+
+impl RouteParityEvidence {
+    fn route(&self, route: &str) -> Option<&RouteParityEvidenceRoute> {
+        self.routes.get(route)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteParityEvidenceRoute {
+    ready: bool,
+    matched_per_million: Option<u64>,
+    primary_engine: Option<String>,
+    shadow_engine: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -197,6 +307,56 @@ fn parse_route_query_inventory(value: &serde_json::Value) -> Result<Vec<RouteQue
         SkeinError::Semantic("graph route query JSON must contain a routes array".to_string())
     })?;
     routes.iter().map(parse_route_query).collect()
+}
+
+fn parse_route_parity_evidence(value: &serde_json::Value) -> Result<RouteParityEvidence> {
+    if value.get("protocol").and_then(serde_json::Value::as_str)
+        != Some(NMEM_GRAPH_ROUTE_PARITY_EVIDENCE_PROTOCOL)
+    {
+        return Err(SkeinError::Semantic(
+            "graph route parity evidence protocol mismatch".to_string(),
+        ));
+    }
+    let routes = value
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SkeinError::Semantic(
+                "graph route parity evidence must contain a routes array".to_string(),
+            )
+        })?
+        .iter()
+        .map(parse_route_parity_evidence_route)
+        .collect::<Result<Vec<_>>>()?;
+    let mut route_map = BTreeMap::new();
+    for (route, evidence) in routes {
+        if route_map.insert(route.clone(), evidence).is_some() {
+            return Err(SkeinError::Semantic(format!(
+                "duplicate graph route parity evidence route: {route}"
+            )));
+        }
+    }
+    Ok(RouteParityEvidence { routes: route_map })
+}
+
+fn parse_route_parity_evidence_route(
+    value: &serde_json::Value,
+) -> Result<(String, RouteParityEvidenceRoute)> {
+    let route = required_string(value, "route")?.to_string();
+    if route.trim().is_empty() {
+        return Err(SkeinError::Semantic(
+            "graph route parity evidence route is required".to_string(),
+        ));
+    }
+    Ok((
+        route,
+        RouteParityEvidenceRoute {
+            ready: bool_field(value, "ready"),
+            matched_per_million: optional_u64_field(value, "matched_per_million")?,
+            primary_engine: optional_string_field(value, "primary_engine")?,
+            shadow_engine: optional_string_field(value, "shadow_engine")?,
+        },
+    ))
 }
 
 fn parse_route_query(value: &serde_json::Value) -> Result<RouteQuery> {
@@ -401,6 +561,32 @@ fn bool_field(value: &serde_json::Value, field: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn optional_u64_field(value: &serde_json::Value, field: &str) -> Result<Option<u64>> {
+    value
+        .get(field)
+        .map(|value| {
+            value.as_u64().ok_or_else(|| {
+                SkeinError::Semantic(format!(
+                    "graph route query field '{field}' must be a non-negative integer"
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn optional_string_field(value: &serde_json::Value, field: &str) -> Result<Option<String>> {
+    value
+        .get(field)
+        .map(|value| {
+            value.as_str().map(str::to_string).ok_or_else(|| {
+                SkeinError::Semantic(format!(
+                    "graph route query field '{field}' must be a string"
+                ))
+            })
+        })
+        .transpose()
+}
+
 fn string_array_field(value: &serde_json::Value, field: &str) -> Result<Vec<String>> {
     let Some(items) = value.get(field) else {
         return Ok(Vec::new());
@@ -433,7 +619,10 @@ fn error_class(error: &SkeinError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{nowledge_graph_route_evidence_json, parse_route_query_inventory};
+    use super::{
+        nowledge_graph_route_evidence_json, parse_route_parity_evidence,
+        parse_route_query_inventory,
+    };
     use skein::{Database, NowledgeMemGraph, NowledgeMemGraphMode};
 
     #[test]
@@ -467,12 +656,22 @@ mod tests {
         }))
         .unwrap();
 
-        let evidence =
-            nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
+        let route_parity = ready_route_parity();
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
 
         assert_eq!(evidence["protocol"], "nmem-graph-route-evidence-v1");
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["routes"][0]["route"], "/graph/overview");
+        assert_eq!(evidence["routes"][0]["shadow_compare_ready"], true);
+        assert_eq!(
+            evidence["routes"][0]["shadow_compare_evidence_source"],
+            "route_parity_evidence"
+        );
         assert_eq!(evidence["routes"][0]["primary_ready"], true);
         assert_eq!(
             evidence["routes"][0]["query_reports"]
@@ -531,8 +730,13 @@ mod tests {
         }))
         .unwrap();
 
-        let evidence =
-            nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
+        let route_parity = ready_route_parity();
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
 
         assert_eq!(evidence["routes"][0]["primary_read_routing_enabled"], true);
         assert_eq!(evidence["routes"][0]["primary_ready"], true);
@@ -564,8 +768,13 @@ mod tests {
         }))
         .unwrap();
 
-        let evidence =
-            nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
+        let route_parity = ready_route_parity();
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
 
         assert_eq!(evidence["ready"], false);
         assert_eq!(evidence["routes"][0]["primary_ready"], false);
@@ -617,8 +826,13 @@ mod tests {
         }))
         .unwrap();
 
-        let evidence =
-            nowledge_graph_route_evidence_json(&mut graph, &route_queries, Default::default());
+        let route_parity = ready_route_parity();
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
 
         assert_eq!(evidence["ready"], false);
         assert_eq!(evidence["routes"][0]["primary_ready"], false);
@@ -631,5 +845,67 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "query_pruned_scan_required_but_missing"));
+    }
+
+    #[test]
+    fn route_evidence_fails_closed_without_route_parity_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = parse_route_query_inventory(&serde_json::json!({
+            "routes": [
+                {
+                    "route": "/graph/overview",
+                    "shadow_compare_ready": true,
+                    "primary_ready": true,
+                    "queries": [
+                        {
+                            "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
+                            "parameters": {
+                                "id": "mem-route"
+                            }
+                        }
+                    ],
+                    "blocker_codes": []
+                }
+            ]
+        }))
+        .unwrap();
+
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            None,
+        );
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["routes"][0]["primary_ready"], false);
+        assert_eq!(
+            evidence["routes"][0]["shadow_compare_evidence_source"],
+            "route_query_inventory"
+        );
+        assert!(evidence["routes"][0]["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "shadow_compare_evidence_missing"));
+    }
+
+    fn ready_route_parity() -> super::RouteParityEvidence {
+        parse_route_parity_evidence(&serde_json::json!({
+            "protocol": "nmem-graph-route-parity-evidence-v1",
+            "routes": [
+                {
+                    "route": "/graph/overview",
+                    "ready": true,
+                    "matched_per_million": 1000000,
+                    "primary_engine": "kuzu",
+                    "shadow_engine": "skein"
+                }
+            ]
+        }))
+        .unwrap()
     }
 }
