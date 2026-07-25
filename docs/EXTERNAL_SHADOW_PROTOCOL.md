@@ -649,6 +649,15 @@ cutover evidence and fails closed unless the graph store, search projection,
 query families, bounded reads, storage recovery, and background maintenance are
 all ready through the Rust embedded library surface.
 
+Nightly bundles must also include top-level
+`search_candidate_shadow_evidence` for LanceDB candidate-read replacement.
+The evidence must use route `/search-index/skein-shadow/candidate-evidence`,
+source `nmem-rust-bridge`, `candidate_primary_engine: "skein"`, and a
+non-zero `request_count`. Candidate parity is fail-closed unless
+`primary_candidate_count == shadow_candidate_count`,
+`matched_candidate_count == shadow_candidate_count`, and
+`primary_only_candidate_count == 0`.
+
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover
 automation that must reject self-shadow smoke runs, missing shadow parity

@@ -456,6 +456,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &["search_candidate_shadow_evidence", "candidate_primary_engine"],
                 ) == Some("skein"),
+                search_candidate_shadow_counts_ready(bundle),
             ],
             [
                 "search_candidate_shadow_evidence.protocol",
@@ -463,6 +464,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "search_candidate_shadow_evidence.route",
                 "search_candidate_shadow_evidence.ready",
                 "search_candidate_shadow_evidence.candidate_primary_engine",
+                "search_candidate_shadow_evidence.candidate_counts",
             ],
             blocker_codes(
                 bundle,
@@ -1442,6 +1444,11 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "search_candidate_shadow_evidence.route",
                 "search_candidate_shadow_evidence.ready",
                 "search_candidate_shadow_evidence.candidate_primary_engine",
+                "search_candidate_shadow_evidence.request_count",
+                "search_candidate_shadow_evidence.primary_candidate_count",
+                "search_candidate_shadow_evidence.shadow_candidate_count",
+                "search_candidate_shadow_evidence.matched_candidate_count",
+                "search_candidate_shadow_evidence.primary_only_candidate_count",
                 "search_candidate_shadow_evidence.blocker_codes",
             ],
         ));
@@ -1762,6 +1769,44 @@ fn search_candidate_primary_evidence_ready(bundle: &serde_json::Value) -> bool {
                 "candidate_primary_engine",
             ],
         ) == Some("skein")
+        && search_candidate_shadow_counts_ready(bundle)
+}
+
+fn search_candidate_shadow_counts_ready(bundle: &serde_json::Value) -> bool {
+    let request_count = u64_path(
+        bundle,
+        &["search_candidate_shadow_evidence", "request_count"],
+    );
+    let primary_candidate_count = u64_path(
+        bundle,
+        &[
+            "search_candidate_shadow_evidence",
+            "primary_candidate_count",
+        ],
+    );
+    let shadow_candidate_count = u64_path(
+        bundle,
+        &["search_candidate_shadow_evidence", "shadow_candidate_count"],
+    );
+    let matched_candidate_count = u64_path(
+        bundle,
+        &[
+            "search_candidate_shadow_evidence",
+            "matched_candidate_count",
+        ],
+    );
+    let primary_only_candidate_count = u64_path(
+        bundle,
+        &[
+            "search_candidate_shadow_evidence",
+            "primary_only_candidate_count",
+        ],
+    );
+    request_count.is_some_and(|count| count > 0)
+        && primary_candidate_count.is_some()
+        && primary_candidate_count == shadow_candidate_count
+        && matched_candidate_count == shadow_candidate_count
+        && primary_only_candidate_count == Some(0)
 }
 
 fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
@@ -2843,6 +2888,43 @@ mod tests {
     }
 
     #[test]
+    fn requires_search_candidate_shadow_count_parity() {
+        let mut bundle = ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["primary_candidate_count"] =
+            serde_json::json!(3);
+        bundle["search_candidate_shadow_evidence"]["shadow_candidate_count"] = serde_json::json!(3);
+        bundle["search_candidate_shadow_evidence"]["matched_candidate_count"] =
+            serde_json::json!(2);
+        bundle["search_candidate_shadow_evidence"]["primary_only_candidate_count"] =
+            serde_json::json!(1);
+        bundle["search_candidate_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["search_candidate_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_candidate_primary_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["search_candidate_mismatch"])
+        );
+        let candidate_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_candidate_primary_evidence")
+            .unwrap();
+        assert_eq!(
+            candidate_check["failed_evidence_fields"],
+            serde_json::json!(["search_candidate_shadow_evidence.candidate_counts"])
+        );
+    }
+
+    #[test]
     fn requires_search_candidate_shadow_evidence_presence() {
         let mut bundle = ready_bundle();
         bundle
@@ -2870,7 +2952,8 @@ mod tests {
                 "search_candidate_shadow_evidence.evidence_source",
                 "search_candidate_shadow_evidence.route",
                 "search_candidate_shadow_evidence.ready",
-                "search_candidate_shadow_evidence.candidate_primary_engine"
+                "search_candidate_shadow_evidence.candidate_primary_engine",
+                "search_candidate_shadow_evidence.candidate_counts"
             ])
         );
     }
@@ -4790,6 +4873,11 @@ mod tests {
             "engine": "skein-shadow",
             "ready": true,
             "candidate_primary_engine": "skein",
+            "request_count": 1,
+            "primary_candidate_count": 3,
+            "shadow_candidate_count": 3,
+            "matched_candidate_count": 3,
+            "primary_only_candidate_count": 0,
             "blocker_codes": []
         });
         bundle["library_readiness"] = ready_library_readiness();

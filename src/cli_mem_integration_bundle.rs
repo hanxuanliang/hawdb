@@ -1279,6 +1279,11 @@ mod tests {
             "engine": "skein-shadow",
             "ready": true,
             "candidate_primary_engine": "skein",
+            "request_count": 1,
+            "primary_candidate_count": 3,
+            "shadow_candidate_count": 3,
+            "matched_candidate_count": 3,
+            "primary_only_candidate_count": 0,
             "blocker_codes": []
         })
     }
