@@ -6,6 +6,7 @@ const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
+const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
     "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
@@ -191,6 +192,9 @@ fn graph_route_alignment_json(
         .unwrap_or(&serde_json::Value::Null);
     let evidence_present = !graph_route_readiness.is_null();
     let summary_present = !summary.is_null();
+    let evidence_protocol_matches = str_path(graph_route_readiness, &["evidence_protocol"])
+        == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL);
+    let evidence_ready = bool_path(graph_route_readiness, &["evidence_ready"]) == Some(true);
     let evidence_route_primary_ready =
         bool_path(graph_route_readiness, &["route_primary_ready"]) == Some(true);
     let summary_route_primary_ready = bool_path(summary, &["route_primary_ready"]) == Some(true);
@@ -211,6 +215,8 @@ fn graph_route_alignment_json(
     let alignment = GraphRouteAlignment {
         evidence_present,
         summary_present,
+        evidence_protocol_matches,
+        evidence_ready,
         evidence_route_primary_ready,
         summary_route_primary_ready,
         route_primary_ready_matches,
@@ -223,6 +229,8 @@ fn graph_route_alignment_json(
         "ready": alignment.ready(),
         "evidence_present": evidence_present,
         "summary_present": summary_present,
+        "evidence_protocol_matches": evidence_protocol_matches,
+        "evidence_ready": evidence_ready,
         "evidence_route_primary_ready": evidence_route_primary_ready,
         "summary_route_primary_ready": summary_route_primary_ready,
         "route_primary_ready_matches": route_primary_ready_matches,
@@ -333,6 +341,8 @@ fn graph_route_parity_blocker_codes(ready: bool) -> Vec<&'static str> {
 struct GraphRouteAlignment {
     evidence_present: bool,
     summary_present: bool,
+    evidence_protocol_matches: bool,
+    evidence_ready: bool,
     evidence_route_primary_ready: bool,
     summary_route_primary_ready: bool,
     route_primary_ready_matches: bool,
@@ -345,6 +355,8 @@ impl GraphRouteAlignment {
     fn ready(&self) -> bool {
         self.evidence_present
             && self.summary_present
+            && self.evidence_protocol_matches
+            && self.evidence_ready
             && self.evidence_route_primary_ready
             && self.summary_route_primary_ready
             && self.route_primary_ready_matches
@@ -360,6 +372,12 @@ impl GraphRouteAlignment {
         }
         if !self.summary_present {
             blockers.push("replacement_summary_bounded_read_evidence_missing");
+        }
+        if !self.evidence_protocol_matches {
+            blockers.push("graph_route_evidence_protocol_mismatch");
+        }
+        if !self.evidence_ready {
+            blockers.push("graph_route_evidence_not_ready");
         }
         if !self.evidence_route_primary_ready {
             blockers.push("graph_route_readiness_not_primary_ready");
@@ -816,6 +834,14 @@ mod tests {
             bundle["replacement_summary_query_runtime_alignment"]["ready"],
             true
         );
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]["evidence_protocol_matches"],
+            true
+        );
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]["evidence_ready"],
+            true
+        );
         assert_eq!(readiness["ready"], true);
         assert_eq!(readiness["failed_checks"], serde_json::json!([]));
     }
@@ -883,6 +909,25 @@ mod tests {
                 "query_runtime_preflight",
                 "query_runtime_preflight_alignment"
             ])
+        );
+    }
+
+    #[test]
+    fn generated_bundle_detects_unready_graph_route_evidence_envelope() {
+        let mut inputs = ready_inputs();
+        inputs.graph_route_readiness.as_mut().unwrap()["evidence_ready"] = serde_json::json!(false);
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]["blocker_codes"],
+            serde_json::json!(["graph_route_evidence_not_ready"])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(
+            readiness["failed_checks"],
+            serde_json::json!(["graph_route_readiness", "graph_route_readiness_alignment"])
         );
     }
 

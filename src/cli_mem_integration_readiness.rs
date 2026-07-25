@@ -607,6 +607,17 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &[
                         "replacement_summary_graph_route_alignment",
+                        "evidence_protocol_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_graph_route_alignment", "evidence_ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_graph_route_alignment",
                         "evidence_route_primary_ready",
                     ],
                 ) == Some(true),
@@ -648,6 +659,8 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ],
             [
                 "replacement_summary_graph_route_alignment.ready",
+                "replacement_summary_graph_route_alignment.evidence_protocol_matches",
+                "replacement_summary_graph_route_alignment.evidence_ready",
                 "replacement_summary_graph_route_alignment.evidence_route_primary_ready",
                 "replacement_summary_graph_route_alignment.summary_route_primary_ready",
                 "replacement_summary_graph_route_alignment.route_primary_ready_matches",
@@ -1395,6 +1408,8 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             "live graph route primary-read readiness must match the replacement summary before Mem cutover",
             [
                 "replacement_summary_graph_route_alignment.ready",
+                "replacement_summary_graph_route_alignment.evidence_protocol_matches",
+                "replacement_summary_graph_route_alignment.evidence_ready",
                 "replacement_summary_graph_route_alignment.evidence_route_primary_ready",
                 "replacement_summary_graph_route_alignment.summary_route_primary_ready",
                 "replacement_summary_graph_route_alignment.route_primary_ready_matches",
@@ -1881,6 +1896,14 @@ fn graph_route_query_report_scan_pruning_present(report: &serde_json::Value) -> 
 fn graph_route_readiness_alignment_ready(bundle: &serde_json::Value) -> bool {
     [
         &["replacement_summary_graph_route_alignment", "ready"][..],
+        &[
+            "replacement_summary_graph_route_alignment",
+            "evidence_protocol_matches",
+        ][..],
+        &[
+            "replacement_summary_graph_route_alignment",
+            "evidence_ready",
+        ][..],
         &[
             "replacement_summary_graph_route_alignment",
             "evidence_route_primary_ready",
@@ -3373,6 +3396,49 @@ mod tests {
     }
 
     #[test]
+    fn rejects_graph_route_alignment_without_route_evidence_envelope() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_graph_route_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_graph_route_alignment"]["evidence_ready"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_graph_route_alignment"]["evidence_protocol_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_graph_route_alignment"]["blocker_codes"] = serde_json::json!([
+            "graph_route_evidence_not_ready",
+            "graph_route_evidence_protocol_mismatch"
+        ]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness_alignment"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!([
+                "graph_route_evidence_not_ready",
+                "graph_route_evidence_protocol_mismatch"
+            ])
+        );
+        let alignment_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness_alignment")
+            .unwrap();
+        assert_eq!(
+            alignment_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary_graph_route_alignment.ready",
+                "replacement_summary_graph_route_alignment.evidence_protocol_matches",
+                "replacement_summary_graph_route_alignment.evidence_ready"
+            ])
+        );
+    }
+
+    #[test]
     fn requires_graph_route_parity_alignment() {
         let mut bundle = ready_bundle();
         bundle["graph_route_parity_alignment"]["ready"] = serde_json::json!(false);
@@ -3852,6 +3918,8 @@ mod tests {
             "evidence_present": true,
             "summary_present": true,
             "protocol_matches": true,
+            "evidence_protocol_matches": true,
+            "evidence_ready": true,
             "evidence_route_primary_ready": true,
             "summary_route_primary_ready": true,
             "route_primary_ready_matches": true,
