@@ -8206,7 +8206,8 @@ impl Database {
         &self,
         request: &KnowledgeRelationshipsRequest,
     ) -> KnowledgeRelationshipsOutput {
-        knowledge_relationships_for(&self.catalog, &self.store, request)
+        knowledge_relationships_via_query_runtime(self, request)
+            .unwrap_or_else(|| knowledge_relationships_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_scoped_relationships(
@@ -30838,6 +30839,331 @@ fn knowledge_relationships_for(
             metadata_filters: BTreeMap::new(),
         },
     )
+}
+
+fn knowledge_relationships_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeRelationshipsRequest,
+) -> Option<KnowledgeRelationshipsOutput> {
+    let output = knowledge_scoped_relationships_via_query_runtime(
+        db,
+        &KnowledgeScopedRelationshipsRequest {
+            relationships: request.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
+    .ok()?;
+    Some(output)
+}
+
+fn knowledge_scoped_relationships_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeScopedRelationshipsRequest,
+) -> Result<KnowledgeRelationshipsOutput> {
+    let relationship_type_name = match request.relationships.relationship_type.as_deref() {
+        Some(name) => match db.catalog.rel_type_id(name) {
+            Some(_) => {
+                validate_cypher_identifier(name, "relationship type")?;
+                Some(name.to_string())
+            }
+            None => {
+                return Ok(knowledge_empty_relationship_groups_for_missing_type(
+                    &db.store, request,
+                ));
+            }
+        },
+        None => None,
+    };
+
+    let mut groups = Vec::with_capacity(request.relationships.seeds.len());
+    let mut found_seed_count = 0;
+    let mut missing_seed_count = 0;
+    let mut filtered_out_seed_count = 0;
+    let mut relationship_count = 0;
+    for (index, seed_request) in request.relationships.seeds.iter().enumerate() {
+        let seed = knowledge_relationship_seed_via_query_runtime(db, seed_request)?;
+        let Some(seed) = seed else {
+            missing_seed_count += 1;
+            groups.push(knowledge_empty_relationship_group(
+                seed_request,
+                None,
+                false,
+            ));
+            continue;
+        };
+        if !request.metadata_filters.is_empty()
+            && !knowledge_entity_matches_filters(&seed, &request.metadata_filters)
+        {
+            filtered_out_seed_count += 1;
+            groups.push(knowledge_empty_relationship_group(
+                seed_request,
+                Some(seed.node_id),
+                true,
+            ));
+            continue;
+        }
+
+        found_seed_count += 1;
+        let seed_hit_id = format!("seed_{index}");
+        let (relationships, fanout_reason_details) = knowledge_relationship_rows_via_query_runtime(
+            db,
+            &seed_hit_id,
+            seed.node_id,
+            relationship_type_name.as_deref(),
+            request.relationships.direction,
+            request.relationships.limit_per_seed,
+        )?;
+        relationship_count += relationships.len();
+        groups.push(KnowledgeRelationshipGroup {
+            seed: seed_request.clone(),
+            seed_node_id: Some(seed.node_id),
+            filtered_out: false,
+            relationships,
+            fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
+            fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
+            fanout_reason_details,
+        });
+    }
+
+    Ok(KnowledgeRelationshipsOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        groups,
+        relationship_type_found: true,
+        found_seed_count,
+        missing_seed_count,
+        filtered_out_seed_count,
+        relationship_count,
+    })
+}
+
+fn knowledge_relationship_seed_via_query_runtime(
+    db: &Database,
+    seed: &KnowledgeEntityRequest,
+) -> Result<Option<KnowledgeEntity>> {
+    validate_cypher_identifier(&seed.label, "seed label")?;
+    if db.catalog.label_id(&seed.label).is_none() {
+        return Ok(None);
+    }
+    let query = format!(
+        "MATCH (s:{}) RETURN s AS seed ORDER BY id(s) ASC",
+        seed.label
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &BTreeMap::new(), None)?;
+    Ok(output
+        .rows
+        .iter()
+        .filter_map(|row| row.get("seed").and_then(knowledge_entity_from_value))
+        .find(|entity| entity.external_id.as_deref() == Some(seed.external_id.as_str())))
+}
+
+fn knowledge_empty_relationship_group(
+    seed: &KnowledgeEntityRequest,
+    seed_node_id: Option<u64>,
+    filtered_out: bool,
+) -> KnowledgeRelationshipGroup {
+    KnowledgeRelationshipGroup {
+        seed: seed.clone(),
+        seed_node_id,
+        filtered_out,
+        relationships: Vec::new(),
+        fanout_reason_codes: Vec::new(),
+        fanout_reason_details: Vec::new(),
+        fanout_reasons: Vec::new(),
+    }
+}
+
+fn knowledge_relationship_rows_via_query_runtime(
+    db: &Database,
+    seed_hit_id: &str,
+    seed_node_id: u64,
+    relationship_type_name: Option<&str>,
+    direction: KnowledgeNeighborDirection,
+    limit: usize,
+) -> Result<(
+    Vec<KnowledgeGraphContextPath>,
+    Vec<KnowledgeFanoutReasonDetail>,
+)> {
+    let mut fanout_reason_details = Vec::new();
+    let relationship_type = relationship_type_name.and_then(|name| db.catalog.rel_type_id(name));
+    record_dense_adjacency_diagnostics(
+        DenseAdjacencyDiagnosticContext {
+            catalog: &db.catalog,
+            store: &db.store,
+            operation: "knowledge_neighbors",
+            relationship_type,
+            requested_direction: direction,
+        },
+        NodeId(seed_node_id),
+        &mut BTreeSet::new(),
+        &mut fanout_reason_details,
+    );
+
+    let mut paths = Vec::new();
+    let mut seen_relationships = BTreeSet::new();
+    let rel_pattern = relationship_type_name
+        .map(|name| format!(":{name}"))
+        .unwrap_or_default();
+    let parameters = BTreeMap::from([(
+        "seed_node_id".to_string(),
+        Value::Int(i64::try_from(seed_node_id).map_err(|_| {
+            SkeinError::Execution("knowledge relationship seed node id exceeds i64".to_string())
+        })?),
+    )]);
+
+    if matches!(
+        direction,
+        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
+    ) {
+        let query = format!(
+            "MATCH (source)-[r{rel_pattern}]->(target) \
+             WHERE id(source) = $seed_node_id \
+             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
+             ORDER BY relationship_id ASC"
+        );
+        knowledge_relationship_rows_for_direction_via_query_runtime(
+            KnowledgeRelationshipDirectionQuery {
+                db,
+                query: &query,
+                parameters: &parameters,
+                seed_hit_id,
+                direction: KnowledgeGraphPathDirection::Outgoing,
+                limit,
+                seen_relationships: &mut seen_relationships,
+                paths: &mut paths,
+                fanout_reason_details: &mut fanout_reason_details,
+            },
+        )?;
+    }
+    if matches!(
+        direction,
+        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
+    ) {
+        let query = format!(
+            "MATCH (source)-[r{rel_pattern}]->(target) \
+             WHERE id(target) = $seed_node_id \
+             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
+             ORDER BY relationship_id ASC"
+        );
+        knowledge_relationship_rows_for_direction_via_query_runtime(
+            KnowledgeRelationshipDirectionQuery {
+                db,
+                query: &query,
+                parameters: &parameters,
+                seed_hit_id,
+                direction: KnowledgeGraphPathDirection::Incoming,
+                limit,
+                seen_relationships: &mut seen_relationships,
+                paths: &mut paths,
+                fanout_reason_details: &mut fanout_reason_details,
+            },
+        )?;
+    }
+
+    Ok((paths, fanout_reason_details))
+}
+
+struct KnowledgeRelationshipDirectionQuery<'a> {
+    db: &'a Database,
+    query: &'a str,
+    parameters: &'a BTreeMap<String, Value>,
+    seed_hit_id: &'a str,
+    direction: KnowledgeGraphPathDirection,
+    limit: usize,
+    seen_relationships: &'a mut BTreeSet<u64>,
+    paths: &'a mut Vec<KnowledgeGraphContextPath>,
+    fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
+}
+
+fn knowledge_relationship_rows_for_direction_via_query_runtime(
+    context: KnowledgeRelationshipDirectionQuery<'_>,
+) -> Result<()> {
+    let output =
+        context
+            .db
+            .query_read_only_with_params_bounded(context.query, context.parameters, None)?;
+    for row in &output.rows {
+        let relationship_id = row
+            .get("relationship_id")
+            .and_then(value_to_non_negative_u64)
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "knowledge relationship row is missing relationship_id".to_string(),
+                )
+            })?;
+        if !context.seen_relationships.insert(relationship_id) {
+            continue;
+        }
+        if context.paths.len() >= context.limit {
+            context
+                .fanout_reason_details
+                .push(KnowledgeFanoutReasonDetail::path_limit(
+                    "knowledge_neighbors",
+                    context.limit,
+                    context.seed_hit_id,
+                ));
+            return Ok(());
+        }
+        context.paths.push(knowledge_context_path_from_query_row(
+            row,
+            context.seed_hit_id,
+            context.direction,
+            relationship_id,
+        )?);
+    }
+    Ok(())
+}
+
+fn knowledge_context_path_from_query_row(
+    row: &Row,
+    seed_hit_id: &str,
+    direction: KnowledgeGraphPathDirection,
+    relationship_id: u64,
+) -> Result<KnowledgeGraphContextPath> {
+    let source = row
+        .get("source")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution("knowledge relationship row is missing source map".to_string())
+        })?;
+    let target = row
+        .get("target")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution("knowledge relationship row is missing target map".to_string())
+        })?;
+    let relationship = row
+        .get("relationship")
+        .and_then(value_to_map)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge relationship row is missing relationship map".to_string(),
+            )
+        })?;
+    let relationship_type = relationship
+        .get("type")
+        .map(value_to_external_id)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "<unknown>".to_string());
+    let mut relationship_properties = relationship.clone();
+    relationship_properties.remove("_id");
+    relationship_properties.remove("source_id");
+    relationship_properties.remove("target_id");
+    relationship_properties.remove("type");
+
+    Ok(KnowledgeGraphContextPath {
+        seed_hit_id: seed_hit_id.to_string(),
+        hop: 1,
+        direction,
+        relationship_id,
+        relationship_type,
+        relationship_properties,
+        source_node_id: source.node_id,
+        source_labels: source.labels,
+        source_external_id: source.external_id,
+        target_node_id: target.node_id,
+        target_labels: target.labels,
+        target_external_id: target.external_id,
+    })
 }
 
 fn knowledge_scoped_relationships_for(

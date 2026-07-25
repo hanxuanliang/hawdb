@@ -25820,7 +25820,11 @@ fn induced_edge_read_rejects_empty_external_ids() {
 
 #[test]
 fn retrieves_knowledge_relationships_grouped_by_seed() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query(
         "CREATE (:Memory {id: 'memory_1', title: 'First'})-[:HAS_LABEL {weight: 3}]->(:Label {id: 'label_1', name: 'Database'})",
     )
@@ -25830,7 +25834,7 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
     )
     .unwrap();
 
-    let output = db.knowledge_relationships(&KnowledgeRelationshipsRequest {
+    let request = KnowledgeRelationshipsRequest {
         seeds: vec![
             KnowledgeEntityRequest {
                 label: "Memory".to_string(),
@@ -25848,7 +25852,8 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
         relationship_type: Some("HAS_LABEL".to_string()),
         direction: KnowledgeNeighborDirection::Outgoing,
         limit_per_seed: 4,
-    });
+    };
+    let output = db.knowledge_relationships(&request);
 
     assert_eq!(output.graph_commit_epoch, 2);
     assert!(output.relationship_type_found);
@@ -25874,6 +25879,14 @@ fn retrieves_knowledge_relationships_grouped_by_seed() {
             .get("weight"),
         Some(&Value::Int(3))
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated_output = db.knowledge_relationships(&request);
+    assert_eq!(repeated_output, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 }
 
 #[test]
