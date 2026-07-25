@@ -7205,7 +7205,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryEvolvesLatestRequest,
     ) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
-        knowledge_memory_evolves_latest_for(&self.catalog, &self.store, request)
+        knowledge_memory_evolves_latest_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_evolves_relation_counts(
@@ -12200,6 +12200,117 @@ fn knowledge_memory_evolves_latest_for(
         missing_old_memory_ids,
         matched_relationship_count,
         returned_count,
+    })
+}
+
+fn knowledge_memory_evolves_latest_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryEvolvesLatestRequest,
+) -> Result<KnowledgeMemoryEvolvesLatestOutput> {
+    validate_knowledge_memory_evolves_latest_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    if request.old_memory_ids.is_empty() {
+        return Ok(KnowledgeMemoryEvolvesLatestOutput {
+            graph_commit_epoch,
+            rows: Vec::new(),
+            matched_old_memory_count: 0,
+            missing_old_memory_ids: Vec::new(),
+            matched_relationship_count: 0,
+            returned_count: 0,
+        });
+    }
+
+    let requested_ids = request
+        .old_memory_ids
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let parameters = BTreeMap::from([(
+        "old_memory_ids".to_string(),
+        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
+    )]);
+    let old_memory_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory) WHERE m.id IN $old_memory_ids RETURN m.id AS memory_id",
+        &parameters,
+        None,
+    )?;
+    let matched_old_ids = old_memory_output
+        .rows
+        .iter()
+        .filter_map(|row| optional_string_cell(row, "memory_id"))
+        .collect::<BTreeSet<_>>();
+    let mut seen_missing = BTreeSet::new();
+    let missing_old_memory_ids = request
+        .old_memory_ids
+        .iter()
+        .filter(|memory_id| !matched_old_ids.contains(*memory_id))
+        .filter(|memory_id| seen_missing.insert((*memory_id).clone()))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let relationship_count_output = db.query_read_only_with_params_bounded(
+        "MATCH (old:Memory)-[r:EVOLVES]->(new:Memory) \
+         WHERE old.id IN $old_memory_ids \
+         RETURN count(r) AS matched_relationship_count",
+        &parameters,
+        Some(1),
+    )?;
+    let matched_relationship_count = relationship_count_output
+        .rows
+        .first()
+        .and_then(|row| row.get("matched_relationship_count"))
+        .and_then(value_to_non_negative_usize)
+        .unwrap_or(0);
+    let rows_output = db.query_read_only_with_params_bounded(
+        "MATCH (old:Memory)-[:EVOLVES]->(new:Memory) \
+         WHERE old.id IN $old_memory_ids \
+         RETURN DISTINCT new.id AS new_memory_id, id(new) AS new_node_id, \
+         new.is_latest AS new_is_latest",
+        &parameters,
+        None,
+    )?;
+    let mut rows = rows_output
+        .rows
+        .iter()
+        .map(knowledge_memory_evolves_latest_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    rows.sort_by(|left, right| {
+        left.new_memory_id
+            .cmp(&right.new_memory_id)
+            .then_with(|| left.new_is_latest.cmp(&right.new_is_latest))
+            .then_with(|| left.new_node_id.cmp(&right.new_node_id))
+    });
+    let returned_count = rows.len();
+
+    Ok(KnowledgeMemoryEvolvesLatestOutput {
+        graph_commit_epoch,
+        rows,
+        matched_old_memory_count: matched_old_ids.len(),
+        missing_old_memory_ids,
+        matched_relationship_count,
+        returned_count,
+    })
+}
+
+fn knowledge_memory_evolves_latest_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeMemoryEvolvesLatestRow> {
+    let new_node_id = row
+        .get("new_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory evolves latest row is missing new_node_id".to_string(),
+            )
+        })?;
+    Ok(KnowledgeMemoryEvolvesLatestRow {
+        new_memory_id: optional_string_cell(row, "new_memory_id"),
+        new_node_id,
+        new_is_latest: match row.get("new_is_latest") {
+            Some(Value::Bool(value)) => Some(*value),
+            Some(Value::Null) | None => None,
+            _ => None,
+        },
     })
 }
 

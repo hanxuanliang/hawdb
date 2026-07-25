@@ -6160,6 +6160,67 @@ fn reads_memory_evolves_latest_for_rest_skills_shape() {
 }
 
 #[test]
+fn memory_evolves_latest_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'latest-cache-old-a', is_latest: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'latest-cache-old-b', is_latest: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'latest-cache-new-a', is_latest: false})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'latest-cache-new-b', is_latest: true})")
+        .unwrap();
+    db.query("CREATE (:Source {id: 'latest-cache-not-memory'})")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'latest-cache-old-a'}), (new:Memory {id: 'latest-cache-new-b'}) CREATE (old)-[:EVOLVES]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'latest-cache-old-a'}), (new:Memory {id: 'latest-cache-new-b'}) CREATE (old)-[:EVOLVES {duplicate: true}]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'latest-cache-old-b'}), (new:Memory {id: 'latest-cache-new-a'}) CREATE (old)-[:EVOLVES]->(new)")
+        .unwrap();
+    db.query("MATCH (old:Memory {id: 'latest-cache-old-a'}), (source:Source {id: 'latest-cache-not-memory'}) CREATE (old)-[:EVOLVES]->(source)")
+        .unwrap();
+    let request = KnowledgeMemoryEvolvesLatestRequest {
+        old_memory_ids: vec![
+            "latest-cache-old-a".to_string(),
+            "missing-latest-cache".to_string(),
+            "latest-cache-old-b".to_string(),
+            "latest-cache-old-a".to_string(),
+        ],
+    };
+
+    let first = db.knowledge_memory_evolves_latest(&request).unwrap();
+    let second = db.knowledge_memory_evolves_latest(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_old_memory_count, 2);
+    assert_eq!(
+        first.missing_old_memory_ids,
+        vec!["missing-latest-cache".to_string()]
+    );
+    assert_eq!(first.matched_relationship_count, 3);
+    assert_eq!(first.returned_count, 2);
+    assert_eq!(
+        first.rows[0].new_memory_id.as_deref(),
+        Some("latest-cache-new-a")
+    );
+    assert_eq!(first.rows[0].new_is_latest, Some(false));
+    assert_eq!(
+        first.rows[1].new_memory_id.as_deref(),
+        Some("latest-cache-new-b")
+    );
+    assert_eq!(first.rows[1].new_is_latest, Some(true));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 3);
+    assert_eq!(stats.misses, 3);
+    assert_eq!(stats.hits, 3);
+}
+
+#[test]
 fn memory_evolves_latest_handles_empty_input_and_rejects_empty_ids() {
     let db = Database::new();
     let empty = db
