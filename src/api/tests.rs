@@ -4402,6 +4402,57 @@ fn reads_memory_entities_for_nowledge_mentions_shapes() {
 }
 
 #[test]
+fn memory_entities_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'memory-entity-cache-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-entity-cache-b'})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity-cache-b', name: 'Beta', entity_type: 'concept', confidence: 0.7})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'entity-cache-a', name: 'Alpha', entity_type: 'person', confidence: 0.9})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-entity-cache-a'}), (e:Entity {id: 'entity-cache-b'}) CREATE (m)-[:MENTIONS {confidence: 0.42, mention_count: 2}]->(e)")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'memory-entity-cache-a'}), (e:Entity {id: 'entity-cache-a'}) CREATE (m)-[:MENTIONS {confidence: 0.84, mention_count: 3}]->(e)")
+        .unwrap();
+    let request = KnowledgeMemoryEntityListRequest {
+        memory_ids: vec![
+            "memory-entity-cache-a".to_string(),
+            "memory-entity-cache-b".to_string(),
+            "memory-entity-cache-missing".to_string(),
+        ],
+        limit_per_memory: 1,
+        distinct_name_limit: 10,
+    };
+
+    let first = db.knowledge_memory_entities(&request).unwrap();
+    let second = db.knowledge_memory_entities(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.found_memory_count, 2);
+    assert_eq!(first.missing_memory_count, 1);
+    assert_eq!(first.entity_count, 1);
+    assert_eq!(first.groups[0].matched_count, 2);
+    assert_eq!(first.groups[0].returned_count, 1);
+    assert_eq!(
+        first.groups[0].entities[0].entity_id.as_deref(),
+        Some("entity-cache-a")
+    );
+    assert!(first.groups[1].found);
+    assert_eq!(first.groups[1].matched_count, 0);
+    assert!(!first.groups[2].found);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn memory_entity_read_rejects_empty_memory_ids() {
     let db = Database::new();
 

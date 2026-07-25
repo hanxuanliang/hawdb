@@ -7114,7 +7114,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryEntityListRequest,
     ) -> Result<KnowledgeMemoryEntityListOutput> {
-        knowledge_memory_entities_for(&self.catalog, &self.store, request)
+        knowledge_memory_entities_via_query_runtime(self, request)
     }
 
     pub fn knowledge_entity_mention_counts(
@@ -9808,11 +9808,7 @@ fn knowledge_memory_entities_for(
     store: &GraphStore,
     request: &KnowledgeMemoryEntityListRequest,
 ) -> Result<KnowledgeMemoryEntityListOutput> {
-    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
-        return Err(SkeinError::Semantic(
-            "knowledge memory entity read requires non-empty memory ids".to_string(),
-        ));
-    }
+    validate_knowledge_memory_entity_list_request(request)?;
 
     let mut groups = Vec::with_capacity(request.memory_ids.len());
     let mut distinct_entity_names = BTreeSet::new();
@@ -9874,6 +9870,123 @@ fn knowledge_memory_entities_for(
     })
 }
 
+fn knowledge_memory_entities_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryEntityListRequest,
+) -> Result<KnowledgeMemoryEntityListOutput> {
+    validate_knowledge_memory_entity_list_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let requested_ids = request.memory_ids.iter().cloned().collect::<BTreeSet<_>>();
+    let parameters = BTreeMap::from([(
+        "memory_ids".to_string(),
+        Value::List(requested_ids.iter().cloned().map(Value::String).collect()),
+    )]);
+    let memory_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory) WHERE m.id IN $memory_ids \
+         RETURN m.id AS memory_id, id(m) AS memory_node_id",
+        &parameters,
+        None,
+    )?;
+    let found_memories = memory_output
+        .rows
+        .iter()
+        .filter_map(|row| {
+            let memory_id = optional_string_cell(row, "memory_id")?;
+            let memory_node_id = row
+                .get("memory_node_id")
+                .and_then(value_to_non_negative_u64)?;
+            Some((memory_id, memory_node_id))
+        })
+        .collect::<BTreeMap<_, _>>();
+
+    let entity_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) WHERE m.id IN $memory_ids \
+         RETURN m.id AS memory_id, e AS entity, r AS relationship, id(r) AS relationship_id",
+        &parameters,
+        None,
+    )?;
+    let mut rows_by_memory = BTreeMap::<String, Vec<KnowledgeMemoryEntityRow>>::new();
+    for row in &entity_output.rows {
+        let (memory_id, entity_row) = knowledge_memory_entity_row_from_query(row)?;
+        rows_by_memory
+            .entry(memory_id)
+            .or_default()
+            .push(entity_row);
+    }
+    for rows in rows_by_memory.values_mut() {
+        sort_memory_entity_rows(rows);
+    }
+
+    let mut groups = Vec::with_capacity(request.memory_ids.len());
+    let mut distinct_entity_names = BTreeSet::new();
+    let mut found_memory_count = 0;
+    let mut missing_memory_count = 0;
+    let mut entity_count = 0;
+    for memory_id in &request.memory_ids {
+        let Some(memory_node_id) = found_memories.get(memory_id).copied() else {
+            missing_memory_count += 1;
+            groups.push(KnowledgeMemoryEntityGroup {
+                memory_id: memory_id.clone(),
+                memory_node_id: None,
+                found: false,
+                entities: Vec::new(),
+                matched_count: 0,
+                returned_count: 0,
+            });
+            continue;
+        };
+
+        found_memory_count += 1;
+        let mut rows = rows_by_memory.get(memory_id).cloned().unwrap_or_default();
+        let matched_count = rows.len();
+        for name in rows
+            .iter()
+            .filter_map(|row| row.name.as_ref())
+            .filter(|name| !name.is_empty())
+        {
+            distinct_entity_names.insert(name.clone());
+        }
+        if request.limit_per_memory > 0 {
+            rows.truncate(request.limit_per_memory);
+        }
+        let returned_count = rows.len();
+        entity_count += returned_count;
+        groups.push(KnowledgeMemoryEntityGroup {
+            memory_id: memory_id.clone(),
+            memory_node_id: Some(memory_node_id),
+            found: true,
+            entities: rows,
+            matched_count,
+            returned_count,
+        });
+    }
+
+    let mut distinct_entity_names = distinct_entity_names.into_iter().collect::<Vec<_>>();
+    if request.distinct_name_limit > 0 {
+        distinct_entity_names.truncate(request.distinct_name_limit);
+    }
+
+    Ok(KnowledgeMemoryEntityListOutput {
+        graph_commit_epoch,
+        groups,
+        distinct_entity_names,
+        found_memory_count,
+        missing_memory_count,
+        entity_count,
+    })
+}
+
+fn validate_knowledge_memory_entity_list_request(
+    request: &KnowledgeMemoryEntityListRequest,
+) -> Result<()> {
+    if request.memory_ids.is_empty() || request.memory_ids.iter().any(String::is_empty) {
+        return Err(SkeinError::Semantic(
+            "knowledge memory entity read requires non-empty memory ids".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 fn memory_entity_rows(
     catalog: &Catalog,
     store: &GraphStore,
@@ -9894,13 +10007,17 @@ fn memory_entity_rows(
                 .map(|entity| memory_entity_row(entity, relationship))
         })
         .collect::<Vec<_>>();
+    sort_memory_entity_rows(&mut rows);
+    rows
+}
+
+fn sort_memory_entity_rows(rows: &mut [KnowledgeMemoryEntityRow]) {
     rows.sort_by(|left, right| {
         left.name
             .cmp(&right.name)
             .then_with(|| left.entity_id.cmp(&right.entity_id))
             .then_with(|| left.relationship_id.cmp(&right.relationship_id))
     });
-    rows
 }
 
 fn memory_entity_row(entity: &NodeRecord, relationship: &RelRecord) -> KnowledgeMemoryEntityRow {
@@ -9914,6 +10031,50 @@ fn memory_entity_row(entity: &NodeRecord, relationship: &RelRecord) -> Knowledge
         relationship_confidence: relationship.properties.get("confidence").cloned(),
         mention_count: relationship_integer_property(relationship, "mention_count"),
     }
+}
+
+fn knowledge_memory_entity_row_from_query(row: &Row) -> Result<(String, KnowledgeMemoryEntityRow)> {
+    let memory_id = optional_string_cell(row, "memory_id").ok_or_else(|| {
+        SkeinError::Execution("knowledge memory entity row is missing memory_id".to_string())
+    })?;
+    let relationship_id = row
+        .get("relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory entity row is missing relationship_id".to_string(),
+            )
+        })?;
+    let entity = row
+        .get("entity")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution("knowledge memory entity row is missing entity map".to_string())
+        })?;
+    let relationship_properties =
+        row.get("relationship")
+            .and_then(value_to_map)
+            .ok_or_else(|| {
+                SkeinError::Execution(
+                    "knowledge memory entity row is missing relationship map".to_string(),
+                )
+            })?;
+    Ok((
+        memory_id,
+        KnowledgeMemoryEntityRow {
+            entity_id: entity.external_id.clone(),
+            node_id: entity.node_id,
+            relationship_id,
+            name: string_property_value(&entity.properties, "name"),
+            entity_type: string_property_value(&entity.properties, "entity_type"),
+            confidence: entity.properties.get("confidence").cloned(),
+            relationship_confidence: relationship_properties.get("confidence").cloned(),
+            mention_count: match relationship_properties.get("mention_count") {
+                Some(Value::Int(value)) => Some(*value),
+                _ => None,
+            },
+        },
+    ))
 }
 
 fn knowledge_entity_mention_counts_for(
