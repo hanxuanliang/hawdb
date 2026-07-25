@@ -22176,6 +22176,17 @@ fn reads_entity_delete_guard_counts_for_nowledge_rest_write() {
     assert_eq!(output.distinct_relationship_count, 8);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
 
+    let cached_output = db
+        .knowledge_entity_delete_guard(&KnowledgeEntityDeleteGuardRequest {
+            entity_id: "entity".to_string(),
+            excluded_memory_id: "excluded_memory".to_string(),
+        })
+        .unwrap();
+    assert_eq!(cached_output, output);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.misses, 5);
+    assert_eq!(stats.hits, 5);
+
     let snapshot = db.begin_read_transaction();
     db.query("CREATE (:Memory {id: 'later_memory'})").unwrap();
     db.query("MATCH (m:Memory {id: 'later_memory'}), (e:Entity {id: 'entity'}) CREATE (m)-[:MENTIONS]->(e)")

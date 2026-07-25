@@ -7135,7 +7135,7 @@ impl Database {
         &self,
         request: &KnowledgeEntityDeleteGuardRequest,
     ) -> Result<KnowledgeEntityDeleteGuardOutput> {
-        knowledge_entity_delete_guard_for(&self.catalog, &self.store, request)
+        knowledge_entity_delete_guard_via_query_runtime(self, request)
     }
 
     pub fn knowledge_community_memories(
@@ -10222,6 +10222,126 @@ fn knowledge_entity_delete_guard_for(
             store, entity.id,
         ),
     })
+}
+
+fn knowledge_entity_delete_guard_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeEntityDeleteGuardRequest,
+) -> Result<KnowledgeEntityDeleteGuardOutput> {
+    if request.entity_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity delete guard requires a non-empty entity id".to_string(),
+        ));
+    }
+    if request.excluded_memory_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge entity delete guard requires a non-empty excluded memory id".to_string(),
+        ));
+    }
+
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::from([(
+        "entity_id".to_string(),
+        Value::String(request.entity_id.clone()),
+    )]);
+    let entity_output = db.query_read_only_with_params_bounded(
+        "MATCH (e:Entity) \
+         WHERE e.id = $entity_id \
+         RETURN id(e) AS entity_node_id",
+        &parameters,
+        Some(1),
+    )?;
+    let Some(entity_node_id) = entity_output
+        .rows
+        .first()
+        .and_then(|row| row.get("entity_node_id"))
+        .and_then(value_to_non_negative_u64)
+    else {
+        return Ok(KnowledgeEntityDeleteGuardOutput {
+            graph_commit_epoch,
+            entity_id: request.entity_id.clone(),
+            entity_node_id: None,
+            found_entity: false,
+            other_memory_mention_count: 0,
+            label_relationship_count: 0,
+            distinct_relationship_count: 0,
+        });
+    };
+
+    parameters.insert(
+        "entity_node_id".to_string(),
+        Value::Int(i64::try_from(entity_node_id).map_err(|_| {
+            SkeinError::Execution(format!(
+                "entity node id {entity_node_id} exceeds query parameter range"
+            ))
+        })?),
+    );
+    parameters.insert(
+        "excluded_memory_id".to_string(),
+        Value::String(request.excluded_memory_id.clone()),
+    );
+
+    let other_memory_mention_count = knowledge_entity_delete_guard_count_via_query_runtime(
+        db,
+        "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) \
+         WHERE id(e) = $entity_node_id AND m.id <> $excluded_memory_id \
+         RETURN count(r) AS other_memory_mention_count",
+        &parameters,
+        "other_memory_mention_count",
+    )?;
+    let label_relationship_count = knowledge_entity_delete_guard_count_via_query_runtime(
+        db,
+        "MATCH (e:Entity)-[r:HAS_LABEL]-() \
+         WHERE id(e) = $entity_node_id \
+         RETURN count(r) AS label_relationship_count",
+        &parameters,
+        "label_relationship_count",
+    )?;
+    let incident_relationship_count = knowledge_entity_delete_guard_count_via_query_runtime(
+        db,
+        "MATCH (e:Entity)-[r]-() \
+         WHERE id(e) = $entity_node_id \
+         RETURN count(r) AS incident_relationship_count",
+        &parameters,
+        "incident_relationship_count",
+    )?;
+    let incoming_relationship_count = knowledge_entity_delete_guard_count_via_query_runtime(
+        db,
+        "MATCH ()-[r]->(e:Entity) \
+         WHERE id(e) = $entity_node_id \
+         RETURN count(r) AS incoming_relationship_count",
+        &parameters,
+        "incoming_relationship_count",
+    )?;
+
+    Ok(KnowledgeEntityDeleteGuardOutput {
+        graph_commit_epoch,
+        entity_id: request.entity_id.clone(),
+        entity_node_id: Some(entity_node_id),
+        found_entity: true,
+        other_memory_mention_count,
+        label_relationship_count,
+        distinct_relationship_count: incident_relationship_count + incoming_relationship_count,
+    })
+}
+
+fn knowledge_entity_delete_guard_count_via_query_runtime(
+    db: &Database,
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
+    column: &str,
+) -> Result<usize> {
+    let output = db.query_read_only_with_params_bounded(query, parameters, Some(1))?;
+    output
+        .rows
+        .first()
+        .and_then(|row| row.get(column))
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "knowledge entity delete guard query is missing {column}"
+            ))
+        })
 }
 
 fn entity_delete_guard_other_memory_mentions(
