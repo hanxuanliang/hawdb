@@ -46,13 +46,23 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
     let parsed_evidence = parse_route_evidence(evidence)?;
     let evidence_protocol = parsed_evidence.protocol.clone();
     let evidence_ready = parsed_evidence.ready;
+    let evidence_route_coverage = parsed_evidence.route_coverage;
     let routes = parsed_evidence.routes;
     let route_coverage = route_coverage(&routes);
+    let evidence_route_coverage_present = evidence_route_coverage.is_some();
+    let evidence_route_coverage_matches = evidence_route_coverage
+        .as_ref()
+        .is_some_and(|evidence| evidence.matches(&route_coverage));
+    let evidence_route_coverage_blocker_codes = evidence_route_coverage_blocker_codes(
+        evidence_route_coverage_present,
+        evidence_route_coverage_matches,
+    );
     let route_primary_blocker_codes = route_primary_blocker_codes(
         evidence_protocol.as_deref(),
         evidence_ready,
         &routes,
         &route_coverage,
+        &evidence_route_coverage_blocker_codes,
     );
     let shadow_compare_route_count = routes
         .iter()
@@ -92,6 +102,9 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
         "duplicate_routes": route_coverage.duplicate_routes,
         "route_coverage_ready": route_coverage.ready,
         "route_coverage_blocker_codes": route_coverage.blocker_codes,
+        "evidence_route_coverage_present": evidence_route_coverage_present,
+        "evidence_route_coverage_matches": evidence_route_coverage_matches,
+        "evidence_route_coverage_blocker_codes": evidence_route_coverage_blocker_codes,
         "shadow_compare_route_count": shadow_compare_route_count,
         "primary_ready_route_count": primary_ready_route_count,
         "query_runtime_route_count": query_runtime_route_count,
@@ -105,6 +118,79 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct EvidenceRouteCoverage {
+    required_route_count: Option<u64>,
+    covered_route_count: Option<u64>,
+    covered_routes: Vec<String>,
+    missing_required_routes: Vec<String>,
+    required_routes_covered: Option<bool>,
+    unknown_routes: Vec<String>,
+    duplicate_routes: Vec<String>,
+    ready: Option<bool>,
+    blocker_codes: Vec<String>,
+}
+
+impl EvidenceRouteCoverage {
+    fn parse(value: &serde_json::Value) -> Option<Self> {
+        if value.is_array() {
+            return None;
+        }
+        let has_route_coverage_field = [
+            "required_route_count",
+            "covered_route_count",
+            "covered_routes",
+            "missing_required_routes",
+            "required_routes_covered",
+            "unknown_routes",
+            "duplicate_routes",
+            "route_coverage_ready",
+            "route_coverage_blocker_codes",
+        ]
+        .iter()
+        .any(|field| value.get(*field).is_some());
+        if !has_route_coverage_field {
+            return None;
+        }
+        Some(Self {
+            required_route_count: u64_path(value, &["required_route_count"]),
+            covered_route_count: u64_path(value, &["covered_route_count"]),
+            covered_routes: string_array_path(value, &["covered_routes"]),
+            missing_required_routes: string_array_path(value, &["missing_required_routes"]),
+            required_routes_covered: bool_path(value, &["required_routes_covered"]),
+            unknown_routes: string_array_path(value, &["unknown_routes"]),
+            duplicate_routes: string_array_path(value, &["duplicate_routes"]),
+            ready: bool_path(value, &["route_coverage_ready"]),
+            blocker_codes: string_array_path(value, &["route_coverage_blocker_codes"]),
+        })
+    }
+
+    fn matches(&self, recomputed: &RouteCoverage) -> bool {
+        self.required_route_count == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+            && self.covered_route_count == Some(recomputed.covered_routes.len() as u64)
+            && self.covered_routes == recomputed.covered_routes
+            && self.missing_required_routes == recomputed.missing_required_route_strings()
+            && self.required_routes_covered == Some(recomputed.required_routes_covered)
+            && self.unknown_routes == recomputed.unknown_routes
+            && self.duplicate_routes == recomputed.duplicate_routes
+            && self.ready == Some(recomputed.ready)
+            && self.blocker_codes == recomputed.blocker_code_strings()
+    }
+}
+
+fn evidence_route_coverage_blocker_codes(
+    present: bool,
+    matches_recomputed: bool,
+) -> Vec<&'static str> {
+    if !present {
+        return vec!["route_coverage_evidence_missing"];
+    }
+    if !matches_recomputed {
+        return vec!["route_coverage_evidence_mismatch"];
+    }
+    Vec::new()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct RouteCoverage {
     covered_routes: Vec<String>,
     missing_required_routes: Vec<&'static str>,
@@ -113,6 +199,22 @@ struct RouteCoverage {
     duplicate_routes: Vec<String>,
     ready: bool,
     blocker_codes: Vec<&'static str>,
+}
+
+impl RouteCoverage {
+    fn missing_required_route_strings(&self) -> Vec<String> {
+        self.missing_required_routes
+            .iter()
+            .map(|route| (*route).to_string())
+            .collect()
+    }
+
+    fn blocker_code_strings(&self) -> Vec<String> {
+        self.blocker_codes
+            .iter()
+            .map(|code| (*code).to_string())
+            .collect()
+    }
 }
 
 fn route_coverage(routes: &[RouteEvidence]) -> RouteCoverage {
@@ -394,6 +496,7 @@ fn scan_pruning_report_ready(report: &serde_json::Value) -> bool {
 struct ParsedRouteEvidence {
     protocol: Option<String>,
     ready: Option<bool>,
+    route_coverage: Option<EvidenceRouteCoverage>,
     routes: Vec<RouteEvidence>,
 }
 
@@ -419,6 +522,7 @@ fn parse_route_evidence(evidence: &serde_json::Value) -> Result<ParsedRouteEvide
     Ok(ParsedRouteEvidence {
         protocol,
         ready,
+        route_coverage: EvidenceRouteCoverage::parse(evidence),
         routes: routes.iter().map(parse_route).collect::<Result<Vec<_>>>()?,
     })
 }
@@ -449,6 +553,7 @@ fn route_primary_blocker_codes(
     evidence_ready: Option<bool>,
     routes: &[RouteEvidence],
     route_coverage: &RouteCoverage,
+    evidence_route_coverage_blocker_codes: &[&str],
 ) -> Vec<String> {
     let mut blockers = BTreeSet::new();
     if evidence_protocol != Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL) {
@@ -461,6 +566,9 @@ fn route_primary_blocker_codes(
         blockers.insert("missing_required_routes".to_string());
     }
     for blocker in &route_coverage.blocker_codes {
+        blockers.insert((*blocker).to_string());
+    }
+    for blocker in evidence_route_coverage_blocker_codes {
         blockers.insert((*blocker).to_string());
     }
     for route in routes {
@@ -591,6 +699,12 @@ mod tests {
             readiness["route_coverage_blocker_codes"],
             serde_json::json!([])
         );
+        assert_eq!(readiness["evidence_route_coverage_present"], true);
+        assert_eq!(readiness["evidence_route_coverage_matches"], true);
+        assert_eq!(
+            readiness["evidence_route_coverage_blocker_codes"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
@@ -665,6 +779,29 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "duplicate_routes"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_when_evidence_route_coverage_is_stale() {
+        let mut evidence = ready_evidence(ready_routes());
+        evidence["covered_routes"] = serde_json::json!(["/graph/overview"]);
+        evidence["covered_route_count"] = serde_json::json!(1);
+
+        let readiness = nowledge_graph_route_readiness_json(&evidence).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_coverage_ready"], true);
+        assert_eq!(readiness["evidence_route_coverage_present"], true);
+        assert_eq!(readiness["evidence_route_coverage_matches"], false);
+        assert_eq!(
+            readiness["evidence_route_coverage_blocker_codes"],
+            serde_json::json!(["route_coverage_evidence_mismatch"])
+        );
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_coverage_evidence_mismatch"));
     }
 
     #[test]
@@ -823,14 +960,112 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "graph_route_evidence_protocol_mismatch"));
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_coverage_evidence_missing"));
     }
 
     fn ready_evidence(routes: Vec<serde_json::Value>) -> serde_json::Value {
-        serde_json::json!({
+        let route_coverage = test_route_coverage(&routes);
+        let mut evidence = serde_json::json!({
             "protocol": "nmem-graph-route-evidence-v1",
             "ready": true,
             "routes": routes
-        })
+        });
+        let object = evidence.as_object_mut().unwrap();
+        for (key, value) in route_coverage {
+            object.insert(key, value);
+        }
+        evidence
+    }
+
+    fn test_route_coverage(routes: &[serde_json::Value]) -> Vec<(String, serde_json::Value)> {
+        let mut route_counts = std::collections::BTreeMap::<String, usize>::new();
+        for route in routes
+            .iter()
+            .filter_map(|route| route.get("route").and_then(serde_json::Value::as_str))
+        {
+            *route_counts.entry(route.to_string()).or_default() += 1;
+        }
+        let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>();
+        let route_names = route_counts
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .filter(|route| route_names.contains(**route))
+            .copied()
+            .collect::<Vec<_>>();
+        let missing_required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .filter(|route| !route_names.contains(**route))
+            .copied()
+            .collect::<Vec<_>>();
+        let unknown_routes = route_names
+            .iter()
+            .filter(|route| !required_routes.contains(**route))
+            .copied()
+            .collect::<Vec<_>>();
+        let duplicate_routes = route_counts
+            .iter()
+            .filter(|(_, count)| **count > 1)
+            .map(|(route, _)| route.as_str())
+            .collect::<Vec<_>>();
+        let required_routes_covered = missing_required_routes.is_empty();
+        let mut blocker_codes = Vec::new();
+        if !required_routes_covered {
+            blocker_codes.push("missing_required_routes");
+        }
+        if !unknown_routes.is_empty() {
+            blocker_codes.push("unknown_routes");
+        }
+        if !duplicate_routes.is_empty() {
+            blocker_codes.push("duplicate_routes");
+        }
+        vec![
+            (
+                "required_route_count".to_string(),
+                serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()),
+            ),
+            (
+                "covered_route_count".to_string(),
+                serde_json::json!(covered_routes.len()),
+            ),
+            (
+                "covered_routes".to_string(),
+                serde_json::json!(covered_routes),
+            ),
+            (
+                "missing_required_routes".to_string(),
+                serde_json::json!(missing_required_routes),
+            ),
+            (
+                "required_routes_covered".to_string(),
+                serde_json::json!(required_routes_covered),
+            ),
+            (
+                "unknown_routes".to_string(),
+                serde_json::json!(unknown_routes),
+            ),
+            (
+                "duplicate_routes".to_string(),
+                serde_json::json!(duplicate_routes),
+            ),
+            (
+                "route_coverage_ready".to_string(),
+                serde_json::json!(blocker_codes.is_empty()),
+            ),
+            (
+                "route_coverage_blocker_codes".to_string(),
+                serde_json::json!(blocker_codes),
+            ),
+        ]
     }
 
     fn ready_routes() -> Vec<serde_json::Value> {

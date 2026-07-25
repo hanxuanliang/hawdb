@@ -514,4 +514,8 @@ before/after counts, and plan-cache state. A hand-authored summary with only
 `nowledge-graph-route-readiness` also independently reports route coverage
 diagnostics (`covered_routes`, `unknown_routes`, `duplicate_routes`, and
 `route_coverage_blocker_codes`), so direct or legacy evidence inputs remain
-fail-closed even if they bypass the evidence generator.
+fail-closed even if they bypass the evidence generator. When an evidence
+envelope carries route coverage fields, readiness compares them with the
+recomputed route set and emits `route_coverage_evidence_mismatch` if they have
+drifted; if the coverage fields are absent, it emits
+`route_coverage_evidence_missing`.
