@@ -26360,13 +26360,17 @@ fn retrieves_bounded_knowledge_paths_without_search_projection() {
 
 #[test]
 fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query(
         "CREATE (:Memory {id: 'root', title: 'Root', source_id: 'thread_1'})-[:LINKS]->(:Entity {id: 'leaf', name: 'Leaf', space_id: 'default'})",
     )
     .unwrap();
 
-    let scoped = db.knowledge_scoped_paths(&KnowledgeScopedPathRequest {
+    let scoped_request = KnowledgeScopedPathRequest {
         navigation: KnowledgePathRequest {
             source_label: "Memory".to_string(),
             source_external_id: "root".to_string(),
@@ -26382,7 +26386,8 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
             "thread_1".to_string(),
         )]),
         target_metadata_filters: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
-    });
+    };
+    let scoped = db.knowledge_scoped_paths(&scoped_request);
 
     assert_eq!(scoped.paths.len(), 1);
     assert!(scoped.diagnostics.seed_found);
@@ -26406,6 +26411,14 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
             .map(String::as_str),
         Some("default")
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated_scoped = db.knowledge_scoped_paths(&scoped_request);
+    assert_eq!(repeated_scoped, scoped);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 
     let filtered = db.knowledge_scoped_paths(&KnowledgeScopedPathRequest {
         navigation: KnowledgePathRequest {
@@ -26448,7 +26461,11 @@ fn scoped_knowledge_paths_filter_source_and_target_by_metadata() {
 
 #[test]
 fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'root', title: 'Root'})-[:LINKS]->(:Entity {id: 'left', name: 'Left'})")
             .unwrap();
     let right = db
@@ -26512,7 +26529,7 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         vec![KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound]
     );
 
-    let limited = db.knowledge_paths(&KnowledgePathRequest {
+    let limited_request = KnowledgePathRequest {
         source_label: "Memory".to_string(),
         source_external_id: "root".to_string(),
         target_label: "Entity".to_string(),
@@ -26521,7 +26538,8 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         direction: KnowledgeNeighborDirection::Outgoing,
         max_hops: 1,
         limit: 1,
-    });
+    };
+    let limited = db.knowledge_paths(&limited_request);
     assert_eq!(limited.paths.len(), 1);
     assert_eq!(limited.diagnostics.path_count, 1);
     assert_eq!(limited.diagnostics.node_count, 2);
@@ -26540,6 +26558,14 @@ fn knowledge_paths_respects_direction_type_limit_and_missing_endpoint() {
         limited.fanout_reason_codes
     );
     assert_eq!(limited.diagnostics.fanout_reasons, limited.fanout_reasons);
+
+    let stats = db.plan_cache_stats();
+    let repeated_limited = db.knowledge_paths(&limited_request);
+    assert_eq!(repeated_limited, limited);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 
     let disabled = db.knowledge_paths(&KnowledgePathRequest {
         source_label: "Memory".to_string(),

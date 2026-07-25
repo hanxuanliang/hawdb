@@ -8229,14 +8229,16 @@ impl Database {
     }
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
-        knowledge_paths_for(&self.catalog, &self.store, request)
+        knowledge_paths_via_query_runtime(self, request)
+            .unwrap_or_else(|| knowledge_paths_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_scoped_paths(
         &self,
         request: &KnowledgeScopedPathRequest,
     ) -> KnowledgePathOutput {
-        knowledge_scoped_paths_for(&self.catalog, &self.store, request)
+        knowledge_scoped_paths_via_query_runtime(self, request)
+            .unwrap_or_else(|| knowledge_scoped_paths_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_subgraph(
@@ -31467,6 +31469,392 @@ fn knowledge_paths_for(
             target_metadata_filters: BTreeMap::new(),
         },
     )
+}
+
+fn knowledge_paths_via_query_runtime(
+    db: &Database,
+    request: &KnowledgePathRequest,
+) -> Option<KnowledgePathOutput> {
+    knowledge_scoped_paths_via_query_runtime(
+        db,
+        &KnowledgeScopedPathRequest {
+            navigation: request.clone(),
+            source_metadata_filters: BTreeMap::new(),
+            target_metadata_filters: BTreeMap::new(),
+        },
+    )
+}
+
+fn knowledge_scoped_paths_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeScopedPathRequest,
+) -> Option<KnowledgePathOutput> {
+    let navigation = &request.navigation;
+    if navigation.max_hops != 1 {
+        return None;
+    }
+
+    let graph_commit_epoch = db.store.commit_epoch();
+    let source_request = KnowledgeEntityRequest {
+        label: navigation.source_label.clone(),
+        external_id: navigation.source_external_id.clone(),
+    };
+    let target_request = KnowledgeEntityRequest {
+        label: navigation.target_label.clone(),
+        external_id: navigation.target_external_id.clone(),
+    };
+    let source = knowledge_relationship_seed_via_query_runtime(db, &source_request).ok()?;
+    let target = knowledge_relationship_seed_via_query_runtime(db, &target_request).ok()?;
+    let source_node_id = source.as_ref().map(|entity| entity.node_id);
+    let target_node_id = target.as_ref().map(|entity| entity.node_id);
+
+    let Some(source) = source else {
+        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch,
+            seed_found: false,
+            target_found: Some(target_node_id.is_some()),
+            path_count: 0,
+            node_count: 0,
+            relationship_count: 0,
+            fanout_reason_details: Vec::new(),
+            missing_seed_identity: Some(knowledge_identity_description(
+                navigation.source_label.as_str(),
+                navigation.source_external_id.as_str(),
+            )),
+            missing_target_identity: target_node_id.is_none().then(|| {
+                knowledge_identity_description(
+                    navigation.target_label.as_str(),
+                    navigation.target_external_id.as_str(),
+                )
+            }),
+            missing_relationship_type: None,
+            max_hops: navigation.max_hops,
+            path_limit: Some(navigation.limit),
+            node_limit: None,
+            relationship_limit: None,
+        });
+        attach_path_endpoint_metadata_filters(
+            &mut diagnostics,
+            &request.source_metadata_filters,
+            &request.target_metadata_filters,
+            0,
+        );
+        return Some(KnowledgePathOutput {
+            graph_commit_epoch,
+            source_node_id,
+            target_node_id,
+            paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
+            fanout_reasons: Vec::new(),
+            diagnostics,
+        });
+    };
+    let Some(target) = target else {
+        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch,
+            seed_found: true,
+            target_found: Some(false),
+            path_count: 0,
+            node_count: 0,
+            relationship_count: 0,
+            fanout_reason_details: Vec::new(),
+            missing_seed_identity: None,
+            missing_target_identity: Some(knowledge_identity_description(
+                navigation.target_label.as_str(),
+                navigation.target_external_id.as_str(),
+            )),
+            missing_relationship_type: None,
+            max_hops: navigation.max_hops,
+            path_limit: Some(navigation.limit),
+            node_limit: None,
+            relationship_limit: None,
+        });
+        attach_path_endpoint_metadata_filters(
+            &mut diagnostics,
+            &request.source_metadata_filters,
+            &request.target_metadata_filters,
+            0,
+        );
+        return Some(KnowledgePathOutput {
+            graph_commit_epoch,
+            source_node_id: Some(source.node_id),
+            target_node_id,
+            paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
+            fanout_reasons: Vec::new(),
+            diagnostics,
+        });
+    };
+
+    let source_filtered = !request.source_metadata_filters.is_empty()
+        && !knowledge_entity_matches_filters(&source, &request.source_metadata_filters);
+    let target_filtered = !request.target_metadata_filters.is_empty()
+        && !knowledge_entity_matches_filters(&target, &request.target_metadata_filters);
+    if source_filtered || target_filtered {
+        let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+            graph_commit_epoch,
+            seed_found: !source_filtered,
+            target_found: Some(!target_filtered),
+            path_count: 0,
+            node_count: 0,
+            relationship_count: 0,
+            fanout_reason_details: Vec::new(),
+            missing_seed_identity: None,
+            missing_target_identity: None,
+            missing_relationship_type: None,
+            max_hops: navigation.max_hops,
+            path_limit: Some(navigation.limit),
+            node_limit: None,
+            relationship_limit: None,
+        });
+        attach_path_endpoint_metadata_filters(
+            &mut diagnostics,
+            &request.source_metadata_filters,
+            &request.target_metadata_filters,
+            usize::from(source_filtered) + usize::from(target_filtered),
+        );
+        return Some(KnowledgePathOutput {
+            graph_commit_epoch,
+            source_node_id: Some(source.node_id),
+            target_node_id: Some(target.node_id),
+            paths: Vec::new(),
+            fanout_reason_codes: Vec::new(),
+            fanout_reason_details: Vec::new(),
+            fanout_reasons: Vec::new(),
+            diagnostics,
+        });
+    }
+
+    let relationship_type_name = match navigation.relationship_type.as_deref() {
+        Some(name) => match db.catalog.rel_type_id(name) {
+            Some(_) => {
+                validate_cypher_identifier(name, "relationship type").ok()?;
+                Some(name.to_string())
+            }
+            None => {
+                let mut diagnostics =
+                    knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+                        graph_commit_epoch,
+                        seed_found: true,
+                        target_found: Some(true),
+                        path_count: 0,
+                        node_count: 0,
+                        relationship_count: 0,
+                        fanout_reason_details: Vec::new(),
+                        missing_seed_identity: None,
+                        missing_target_identity: None,
+                        missing_relationship_type: Some(name.to_string()),
+                        max_hops: navigation.max_hops,
+                        path_limit: Some(navigation.limit),
+                        node_limit: None,
+                        relationship_limit: None,
+                    });
+                attach_path_endpoint_metadata_filters(
+                    &mut diagnostics,
+                    &request.source_metadata_filters,
+                    &request.target_metadata_filters,
+                    0,
+                );
+                return Some(KnowledgePathOutput {
+                    graph_commit_epoch,
+                    source_node_id: Some(source.node_id),
+                    target_node_id: Some(target.node_id),
+                    paths: Vec::new(),
+                    fanout_reason_codes: Vec::new(),
+                    fanout_reason_details: Vec::new(),
+                    fanout_reasons: Vec::new(),
+                    diagnostics,
+                });
+            }
+        },
+        None => None,
+    };
+    let (paths, fanout_reason_details) = knowledge_one_hop_paths_via_query_runtime(
+        db,
+        source.node_id,
+        target.node_id,
+        relationship_type_name.as_deref(),
+        navigation.direction,
+        navigation.limit,
+    )
+    .ok()?;
+    let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+        graph_commit_epoch,
+        seed_found: true,
+        target_found: Some(true),
+        path_count: paths.len(),
+        node_count: knowledge_graph_path_node_count(&paths),
+        relationship_count: paths.iter().map(|path| path.segments.len()).sum::<usize>(),
+        fanout_reason_details: fanout_reason_details.clone(),
+        missing_seed_identity: None,
+        missing_target_identity: None,
+        missing_relationship_type: None,
+        max_hops: navigation.max_hops,
+        path_limit: Some(navigation.limit),
+        node_limit: None,
+        relationship_limit: None,
+    });
+    attach_path_endpoint_metadata_filters(
+        &mut diagnostics,
+        &request.source_metadata_filters,
+        &request.target_metadata_filters,
+        0,
+    );
+    Some(KnowledgePathOutput {
+        graph_commit_epoch,
+        source_node_id: Some(source.node_id),
+        target_node_id: Some(target.node_id),
+        diagnostics,
+        paths,
+        fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
+        fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
+        fanout_reason_details,
+    })
+}
+
+fn knowledge_one_hop_paths_via_query_runtime(
+    db: &Database,
+    source_node_id: u64,
+    target_node_id: u64,
+    relationship_type_name: Option<&str>,
+    direction: KnowledgeNeighborDirection,
+    limit: usize,
+) -> Result<(Vec<KnowledgeGraphPath>, Vec<KnowledgeFanoutReasonDetail>)> {
+    let relationship_type = relationship_type_name.and_then(|name| db.catalog.rel_type_id(name));
+    let mut fanout_reason_details = Vec::new();
+    record_dense_adjacency_diagnostics(
+        DenseAdjacencyDiagnosticContext {
+            catalog: &db.catalog,
+            store: &db.store,
+            operation: "knowledge_paths",
+            relationship_type,
+            requested_direction: direction,
+        },
+        NodeId(source_node_id),
+        &mut BTreeSet::new(),
+        &mut fanout_reason_details,
+    );
+
+    let rel_pattern = relationship_type_name
+        .map(|name| format!(":{name}"))
+        .unwrap_or_default();
+    let parameters = BTreeMap::from([
+        (
+            "source_node_id".to_string(),
+            Value::Int(i64::try_from(source_node_id).map_err(|_| {
+                SkeinError::Execution("knowledge path source node id exceeds i64".to_string())
+            })?),
+        ),
+        (
+            "target_node_id".to_string(),
+            Value::Int(i64::try_from(target_node_id).map_err(|_| {
+                SkeinError::Execution("knowledge path target node id exceeds i64".to_string())
+            })?),
+        ),
+    ]);
+    let mut paths = Vec::new();
+    let mut seen_relationships = BTreeSet::new();
+
+    if matches!(
+        direction,
+        KnowledgeNeighborDirection::Outgoing | KnowledgeNeighborDirection::Both
+    ) {
+        let query = format!(
+            "MATCH (source)-[r{rel_pattern}]->(target) \
+             WHERE id(source) = $source_node_id AND id(target) = $target_node_id \
+             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
+             ORDER BY relationship_id ASC"
+        );
+        knowledge_one_hop_paths_for_direction_via_query_runtime(
+            KnowledgeOneHopPathDirectionQuery {
+                db,
+                query: &query,
+                parameters: &parameters,
+                direction: KnowledgeGraphPathDirection::Outgoing,
+                limit,
+                seen_relationships: &mut seen_relationships,
+                paths: &mut paths,
+                fanout_reason_details: &mut fanout_reason_details,
+            },
+        )?;
+    }
+    if matches!(
+        direction,
+        KnowledgeNeighborDirection::Incoming | KnowledgeNeighborDirection::Both
+    ) {
+        let query = format!(
+            "MATCH (source)-[r{rel_pattern}]->(target) \
+             WHERE id(source) = $target_node_id AND id(target) = $source_node_id \
+             RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
+             ORDER BY relationship_id ASC"
+        );
+        knowledge_one_hop_paths_for_direction_via_query_runtime(
+            KnowledgeOneHopPathDirectionQuery {
+                db,
+                query: &query,
+                parameters: &parameters,
+                direction: KnowledgeGraphPathDirection::Incoming,
+                limit,
+                seen_relationships: &mut seen_relationships,
+                paths: &mut paths,
+                fanout_reason_details: &mut fanout_reason_details,
+            },
+        )?;
+    }
+
+    Ok((paths, fanout_reason_details))
+}
+
+struct KnowledgeOneHopPathDirectionQuery<'a> {
+    db: &'a Database,
+    query: &'a str,
+    parameters: &'a BTreeMap<String, Value>,
+    direction: KnowledgeGraphPathDirection,
+    limit: usize,
+    seen_relationships: &'a mut BTreeSet<u64>,
+    paths: &'a mut Vec<KnowledgeGraphPath>,
+    fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
+}
+
+fn knowledge_one_hop_paths_for_direction_via_query_runtime(
+    context: KnowledgeOneHopPathDirectionQuery<'_>,
+) -> Result<()> {
+    let output =
+        context
+            .db
+            .query_read_only_with_params_bounded(context.query, context.parameters, None)?;
+    for row in &output.rows {
+        let relationship_id = row
+            .get("relationship_id")
+            .and_then(value_to_non_negative_u64)
+            .ok_or_else(|| {
+                SkeinError::Execution("knowledge path row is missing relationship_id".to_string())
+            })?;
+        if !context.seen_relationships.insert(relationship_id) {
+            continue;
+        }
+        if context.paths.len() >= context.limit {
+            context
+                .fanout_reason_details
+                .push(KnowledgeFanoutReasonDetail::path_limit(
+                    "knowledge_paths",
+                    context.limit,
+                    "path",
+                ));
+            return Ok(());
+        }
+        context.paths.push(KnowledgeGraphPath {
+            segments: vec![knowledge_context_path_from_query_row(
+                row,
+                "path",
+                context.direction,
+                relationship_id,
+            )?],
+        });
+    }
+    Ok(())
 }
 
 fn knowledge_scoped_paths_for(
