@@ -7240,14 +7240,14 @@ impl Database {
         &self,
         request: &KnowledgeSourceReferenceEntityListRequest,
     ) -> Result<KnowledgeSourceReferenceEntityListOutput> {
-        knowledge_source_reference_entities_for(&self.catalog, &self.store, request)
+        knowledge_source_reference_entities_via_query_runtime(self, request)
     }
 
     pub fn knowledge_source_reference_relationship_count(
         &self,
         request: &KnowledgeSourceReferenceRelationshipCountRequest,
     ) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
-        knowledge_source_reference_relationship_count_for(&self.catalog, &self.store, request)
+        knowledge_source_reference_relationship_count_via_query_runtime(self, request)
     }
 
     pub fn knowledge_crystals(
@@ -26715,6 +26715,80 @@ fn knowledge_source_reference_entities_for(
     })
 }
 
+fn knowledge_source_reference_entities_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSourceReferenceEntityListRequest,
+) -> Result<KnowledgeSourceReferenceEntityListOutput> {
+    validate_source_reference(&request.source_reference, "source-reference entity read")?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "source_reference".to_string(),
+        Value::String(request.source_reference.clone()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (source:Entity)-[r:RELATES_TO]->(target:Entity) \
+         WHERE r.source_reference = $source_reference \
+         RETURN id(r) AS relationship_id, \
+         source.id AS source_entity_id, id(source) AS source_node_id, \
+         target.id AS target_entity_id, id(target) AS target_node_id \
+         ORDER BY relationship_id ASC",
+        &parameters,
+        None,
+    )?;
+
+    let mut matched_relationship_ids = BTreeSet::new();
+    let mut entity_rows = BTreeMap::new();
+    for row in &output.rows {
+        if let Some(relationship_id) = row
+            .get("relationship_id")
+            .and_then(value_to_non_negative_u64)
+        {
+            matched_relationship_ids.insert(relationship_id);
+        }
+        insert_source_reference_entity_row(
+            &mut entity_rows,
+            row,
+            "source_entity_id",
+            "source_node_id",
+        );
+        insert_source_reference_entity_row(
+            &mut entity_rows,
+            row,
+            "target_entity_id",
+            "target_node_id",
+        );
+    }
+
+    let mut rows = entity_rows.into_values().collect::<Vec<_>>();
+    sort_source_reference_entity_rows(&mut rows);
+    let returned_count = rows.len();
+
+    Ok(KnowledgeSourceReferenceEntityListOutput {
+        graph_commit_epoch,
+        source_reference: request.source_reference.clone(),
+        rows,
+        matched_relationship_count: matched_relationship_ids.len(),
+        returned_count,
+    })
+}
+
+fn insert_source_reference_entity_row(
+    entity_rows: &mut BTreeMap<u64, KnowledgeSourceReferenceEntityRow>,
+    row: &Row,
+    entity_id_column: &str,
+    node_id_column: &str,
+) {
+    let Some(node_id) = row.get(node_id_column).and_then(value_to_non_negative_u64) else {
+        return;
+    };
+    entity_rows
+        .entry(node_id)
+        .or_insert_with(|| KnowledgeSourceReferenceEntityRow {
+            entity_id: optional_string_cell(row, entity_id_column),
+            node_id,
+        });
+}
+
 fn knowledge_source_reference_relationship_count_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -26779,6 +26853,92 @@ fn knowledge_source_reference_relationship_count_for(
         found_entity: true,
         relationship_count: incident_count + incoming_count,
     })
+}
+
+fn knowledge_source_reference_relationship_count_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSourceReferenceRelationshipCountRequest,
+) -> Result<KnowledgeSourceReferenceRelationshipCountOutput> {
+    if request.entity_id.is_empty() {
+        return Err(SkeinError::Semantic(
+            "knowledge source-reference relationship count requires a non-empty entity id"
+                .to_string(),
+        ));
+    }
+    validate_source_reference(
+        &request.excluded_source_reference,
+        "source-reference relationship count",
+    )?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([
+        (
+            "entity_id".to_string(),
+            Value::String(request.entity_id.clone()),
+        ),
+        (
+            "excluded_source_reference".to_string(),
+            Value::String(request.excluded_source_reference.clone()),
+        ),
+    ]);
+    let entity = db.query_read_only_with_params_bounded(
+        "MATCH (e:Entity {id: $entity_id}) RETURN id(e) AS entity_node_id LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let Some(entity_node_id) = entity
+        .rows
+        .first()
+        .and_then(|row| row.get("entity_node_id"))
+        .and_then(value_to_non_negative_u64)
+    else {
+        return Ok(KnowledgeSourceReferenceRelationshipCountOutput {
+            graph_commit_epoch,
+            entity_id: request.entity_id.clone(),
+            entity_node_id: None,
+            found_entity: false,
+            relationship_count: 0,
+        });
+    };
+
+    let counted_source_reference_predicate =
+        "(r.source_reference IS NULL OR r.source_reference = '' \
+         OR r.source_reference <> $excluded_source_reference)";
+    let incident_query = format!(
+        "MATCH (e:Entity {{id: $entity_id}})-[r:RELATES_TO]-(other:Entity) \
+         WHERE {counted_source_reference_predicate} \
+         RETURN count(r) AS relationship_count"
+    );
+    let incoming_query = format!(
+        "MATCH (other:Entity)-[r:RELATES_TO]->(e:Entity {{id: $entity_id}}) \
+         WHERE {counted_source_reference_predicate} \
+         RETURN count(r) AS relationship_count"
+    );
+    let incident_count =
+        source_reference_relationship_count_from_query(db, &incident_query, &parameters)?;
+    let incoming_count =
+        source_reference_relationship_count_from_query(db, &incoming_query, &parameters)?;
+
+    Ok(KnowledgeSourceReferenceRelationshipCountOutput {
+        graph_commit_epoch,
+        entity_id: request.entity_id.clone(),
+        entity_node_id: Some(entity_node_id),
+        found_entity: true,
+        relationship_count: incident_count + incoming_count,
+    })
+}
+
+fn source_reference_relationship_count_from_query(
+    db: &Database,
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
+) -> Result<usize> {
+    Ok(db
+        .query_read_only_with_params_bounded(query, parameters, Some(1))?
+        .rows
+        .first()
+        .and_then(|row| row.get("relationship_count"))
+        .and_then(value_to_non_negative_usize)
+        .unwrap_or(0))
 }
 
 fn validate_source_reference(source_reference: &str, operation: &str) -> Result<()> {

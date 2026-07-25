@@ -23708,6 +23708,76 @@ fn counts_source_reference_relationships_for_nowledge_delete_guard() {
 }
 
 #[test]
+fn source_reference_entities_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Entity {id: 'entity_a'})").unwrap();
+    db.query("CREATE (:Entity {id: 'entity_b'})").unwrap();
+    db.query("MATCH (a:Entity {id: 'entity_a'}), (b:Entity {id: 'entity_b'}) CREATE (a)-[:RELATES_TO {source_reference: 'source_1'}]->(b)")
+        .unwrap();
+    let request = KnowledgeSourceReferenceEntityListRequest {
+        source_reference: "source_1".to_string(),
+    };
+
+    let first = db.knowledge_source_reference_entities(&request).unwrap();
+    let second = db.knowledge_source_reference_entities(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_relationship_count, 1);
+    assert_eq!(first.returned_count, 2);
+    assert_eq!(
+        first
+            .rows
+            .iter()
+            .map(|row| row.entity_id.as_deref().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["entity_a", "entity_b"]
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
+fn source_reference_relationship_count_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Entity {id: 'entity'})").unwrap();
+    db.query("CREATE (:Entity {id: 'out'})").unwrap();
+    db.query("CREATE (:Entity {id: 'in-empty'})").unwrap();
+    db.query("MATCH (e:Entity {id: 'entity'}), (out:Entity {id: 'out'}) CREATE (e)-[:RELATES_TO {source_reference: 'other-source'}]->(out)")
+        .unwrap();
+    db.query("MATCH (incoming:Entity {id: 'in-empty'}), (e:Entity {id: 'entity'}) CREATE (incoming)-[:RELATES_TO {source_reference: ''}]->(e)")
+        .unwrap();
+    let request = KnowledgeSourceReferenceRelationshipCountRequest {
+        entity_id: "entity".to_string(),
+        excluded_source_reference: "excluded-source".to_string(),
+    };
+
+    let first = db
+        .knowledge_source_reference_relationship_count(&request)
+        .unwrap();
+    let second = db
+        .knowledge_source_reference_relationship_count(&request)
+        .unwrap();
+
+    assert_eq!(first, second);
+    assert!(first.found_entity);
+    assert_eq!(first.relationship_count, 3);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 3);
+    assert_eq!(stats.misses, 3);
+    assert_eq!(stats.hits, 3);
+}
+
+#[test]
 fn source_reference_delete_reads_reject_empty_inputs_without_wal() {
     let path = unique_test_dir("source_reference_delete_reads_empty_inputs");
     let mut db = Database::open(&path).unwrap();
