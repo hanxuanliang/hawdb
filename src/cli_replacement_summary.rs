@@ -1,5 +1,8 @@
 use skein::{
     replacement_readiness_family_evidence_health_from_bundle,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -21,7 +24,7 @@ const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING: &str =
 const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
     "skein_search_projection_segment_descriptor_fields_missing";
 pub fn nowledge_replacement_summary_usage() -> String {
-    "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-runtime-preflight-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
+    "nowledge-replacement-summary requires [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--search-candidate-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-runtime-preflight-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>"
         .to_string()
 }
 
@@ -81,6 +84,8 @@ pub fn nowledge_replacement_summary_json_with_options(
     let search_projection_evidence_ready = search_projection_evidence.ready;
     let search_projection_shadow_evidence = search_projection_shadow_evidence_summary(bundle);
     let search_projection_shadow_evidence_ready = search_projection_shadow_evidence.ready;
+    let search_candidate_shadow_evidence = search_candidate_shadow_evidence_summary(bundle);
+    let search_candidate_shadow_evidence_ready = search_candidate_shadow_evidence.ready;
     let bounded_read_evidence = bounded_read_evidence_summary(bundle);
     let bounded_read_evidence_ready = bounded_read_evidence.ready;
     let query_runtime_preflight = query_runtime_preflight_summary(bundle);
@@ -100,6 +105,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         && dual_engine_evidence_consistent
         && search_projection_evidence_ready
         && search_projection_shadow_evidence_ready
+        && search_candidate_shadow_evidence_ready
         && bounded_read_evidence_ready
         && query_runtime_preflight_ready
         && !background_graph_delta_evidence_missing
@@ -127,6 +133,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_consistent,
             search_projection_evidence_ready,
             search_projection_shadow_evidence_ready,
+            search_candidate_shadow_evidence_ready,
             bounded_read_evidence_ready,
             query_runtime_preflight_ready,
             background_graph_delta_evidence_missing,
@@ -155,6 +162,7 @@ pub fn nowledge_replacement_summary_json_with_options(
             dual_engine_evidence_consistent,
             search_projection_evidence_ready,
             search_projection_shadow_evidence_ready,
+            search_candidate_shadow_evidence_ready,
             bounded_read_evidence_ready,
             query_runtime_preflight_ready,
             background_graph_delta_evidence_missing,
@@ -230,6 +238,23 @@ pub fn nowledge_replacement_summary_json_with_options(
             "primary_engine": search_projection_shadow_evidence.primary_engine,
             "shadow_engine": search_projection_shadow_evidence.shadow_engine,
             "blocker_codes": search_projection_shadow_evidence.blocker_codes,
+        },
+        "search_candidate_shadow_evidence": {
+            "protocol": search_candidate_shadow_evidence.protocol,
+            "evidence_source": search_candidate_shadow_evidence.evidence_source,
+            "route": search_candidate_shadow_evidence.route,
+            "present": search_candidate_shadow_evidence.present,
+            "ready": search_candidate_shadow_evidence.ready,
+            "candidate_primary_engine": search_candidate_shadow_evidence.candidate_primary_engine,
+            "request_count": search_candidate_shadow_evidence.request_count,
+            "primary_candidate_count": search_candidate_shadow_evidence.primary_candidate_count,
+            "shadow_candidate_count": search_candidate_shadow_evidence.shadow_candidate_count,
+            "matched_candidate_count": search_candidate_shadow_evidence.matched_candidate_count,
+            "primary_only_candidate_count": search_candidate_shadow_evidence.primary_only_candidate_count,
+            "candidate_counts_ready": search_candidate_shadow_evidence.candidate_counts_ready,
+            "candidate_identity_ready": search_candidate_shadow_evidence.candidate_identity_ready,
+            "candidate_identity_parity": search_candidate_shadow_evidence.candidate_identity_parity,
+            "blocker_codes": search_candidate_shadow_evidence.blocker_codes,
         },
         "bounded_read_evidence": {
             "protocol": bounded_read_evidence.protocol,
@@ -451,6 +476,7 @@ struct ReplacementReadinessInputs<'a> {
     dual_engine_evidence_consistent: bool,
     search_projection_evidence_ready: bool,
     search_projection_shadow_evidence_ready: bool,
+    search_candidate_shadow_evidence_ready: bool,
     bounded_read_evidence_ready: bool,
     query_runtime_preflight_ready: bool,
     background_graph_delta_evidence_missing: bool,
@@ -472,6 +498,7 @@ struct NextActionInputs<'a> {
     dual_engine_evidence_consistent: bool,
     search_projection_evidence_ready: bool,
     search_projection_shadow_evidence_ready: bool,
+    search_candidate_shadow_evidence_ready: bool,
     bounded_read_evidence_ready: bool,
     query_runtime_preflight_ready: bool,
     background_graph_delta_evidence_missing: bool,
@@ -541,6 +568,24 @@ struct SearchProjectionShadowEvidenceSummary<'a> {
     pushdown_evidence: serde_json::Value,
     primary_engine: Option<&'a str>,
     shadow_engine: Option<&'a str>,
+    blocker_codes: serde_json::Value,
+}
+
+struct SearchCandidateShadowEvidenceSummary {
+    protocol: Option<String>,
+    evidence_source: Option<String>,
+    route: Option<String>,
+    present: bool,
+    ready: bool,
+    candidate_primary_engine: Option<String>,
+    request_count: Option<u64>,
+    primary_candidate_count: Option<u64>,
+    shadow_candidate_count: Option<u64>,
+    matched_candidate_count: Option<u64>,
+    primary_only_candidate_count: Option<u64>,
+    candidate_counts_ready: bool,
+    candidate_identity_ready: Option<bool>,
+    candidate_identity_parity: Option<bool>,
     blocker_codes: serde_json::Value,
 }
 
@@ -812,6 +857,79 @@ fn search_projection_shadow_evidence_summary(
         primary_engine: json_get_str_path_from_dynamic(bundle, path, "primary_engine"),
         shadow_engine: json_get_str_path_from_dynamic(bundle, path, "shadow_engine"),
         blocker_codes,
+    }
+}
+
+fn search_candidate_shadow_evidence_summary(
+    bundle: &serde_json::Value,
+) -> SearchCandidateShadowEvidenceSummary {
+    let path = if json_get_path(bundle, &["search_candidate_shadow_evidence"]).is_some() {
+        &["search_candidate_shadow_evidence"][..]
+    } else {
+        &["cutover_evidence", "search_candidate_shadow_evidence"][..]
+    };
+    let present = json_get_path(bundle, path).is_some();
+    let protocol = json_get_str_path_from_dynamic(bundle, path, "protocol").map(str::to_string);
+    let evidence_source =
+        json_get_str_path_from_dynamic(bundle, path, "evidence_source").map(str::to_string);
+    let route = json_get_str_path_from_dynamic(bundle, path, "route").map(str::to_string);
+    let candidate_primary_engine =
+        json_get_str_path_from_dynamic(bundle, path, "candidate_primary_engine")
+            .map(str::to_string);
+    let request_count = json_get_u64_path_from_dynamic(bundle, path, "request_count");
+    let primary_candidate_count =
+        json_get_u64_path_from_dynamic(bundle, path, "primary_candidate_count");
+    let shadow_candidate_count =
+        json_get_u64_path_from_dynamic(bundle, path, "shadow_candidate_count");
+    let matched_candidate_count =
+        json_get_u64_path_from_dynamic(bundle, path, "matched_candidate_count");
+    let primary_only_candidate_count =
+        json_get_u64_path_from_dynamic(bundle, path, "primary_only_candidate_count");
+    let candidate_counts_ready = request_count.is_some_and(|count| count > 0)
+        && primary_candidate_count == shadow_candidate_count
+        && matched_candidate_count == shadow_candidate_count
+        && primary_only_candidate_count == Some(0);
+    let candidate_identity_ready = json_get_bool_path(
+        bundle,
+        &path
+            .iter()
+            .copied()
+            .chain(["candidate_identity", "ready"])
+            .collect::<Vec<_>>(),
+    );
+    let candidate_identity_parity = json_get_bool_path(
+        bundle,
+        &path
+            .iter()
+            .copied()
+            .chain(["candidate_identity", "parity"])
+            .collect::<Vec<_>>(),
+    );
+    let ready = present
+        && protocol.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
+        && evidence_source.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
+        && route.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE)
+        && candidate_primary_engine.as_deref()
+            == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE)
+        && candidate_counts_ready
+        && candidate_identity_ready == Some(true)
+        && candidate_identity_parity == Some(true);
+    SearchCandidateShadowEvidenceSummary {
+        protocol,
+        evidence_source,
+        route,
+        present,
+        ready,
+        candidate_primary_engine,
+        request_count,
+        primary_candidate_count,
+        shadow_candidate_count,
+        matched_candidate_count,
+        primary_only_candidate_count,
+        candidate_counts_ready,
+        candidate_identity_ready,
+        candidate_identity_parity,
+        blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
     }
 }
 
@@ -1263,6 +1381,9 @@ fn nowledge_replacement_blocking_categories(
     if !inputs.search_projection_shadow_evidence_ready {
         categories.insert("search_projection_shadow_evidence".to_string());
     }
+    if !inputs.search_candidate_shadow_evidence_ready {
+        categories.insert("search_candidate_shadow_evidence".to_string());
+    }
     if !inputs.bounded_read_evidence_ready {
         categories.insert("bounded_read_evidence".to_string());
     }
@@ -1447,6 +1568,27 @@ fn nowledge_replacement_next_actions(
             ],
         ));
     }
+    if !inputs.search_candidate_shadow_evidence_ready {
+        actions.push(next_action(
+            "run_search_candidate_shadow_evidence",
+            "LanceDB/Skein search candidate side-by-side evidence is missing or not ready",
+            [
+                "search_candidate_shadow_evidence.protocol",
+                "search_candidate_shadow_evidence.evidence_source",
+                "search_candidate_shadow_evidence.route",
+                "search_candidate_shadow_evidence.present",
+                "search_candidate_shadow_evidence.ready",
+                "search_candidate_shadow_evidence.candidate_primary_engine",
+                "search_candidate_shadow_evidence.request_count",
+                "search_candidate_shadow_evidence.primary_candidate_count",
+                "search_candidate_shadow_evidence.shadow_candidate_count",
+                "search_candidate_shadow_evidence.matched_candidate_count",
+                "search_candidate_shadow_evidence.primary_only_candidate_count",
+                "search_candidate_shadow_evidence.candidate_identity.ready",
+                "search_candidate_shadow_evidence.blocker_codes",
+            ],
+        ));
+    }
     if !inputs.bounded_read_evidence_ready {
         actions.push(next_action(
             "attach_bounded_read_profile",
@@ -1599,6 +1741,17 @@ fn nowledge_replacement_missing_evidence(bundle: &serde_json::Value) -> Vec<Stri
     } else if !search_projection_shadow_evidence_summary(bundle).ready {
         missing.push("search_projection_shadow_evidence_ready".to_string());
     }
+    if bundle.get("search_candidate_shadow_evidence").is_none()
+        && json_get_path(
+            bundle,
+            &["cutover_evidence", "search_candidate_shadow_evidence"],
+        )
+        .is_none()
+    {
+        missing.push("search_candidate_shadow_evidence".to_string());
+    } else if !search_candidate_shadow_evidence_summary(bundle).ready {
+        missing.push("search_candidate_shadow_evidence_ready".to_string());
+    }
     if bundle.get("bounded_read_evidence").is_none()
         && json_get_path(bundle, &["cutover_evidence", "bounded_read_evidence"]).is_none()
     {
@@ -1667,6 +1820,12 @@ fn nowledge_replacement_blockers(bundle: &serde_json::Value) -> Vec<String> {
         &[
             "cutover_evidence",
             "search_projection_shadow_evidence",
+            "blocker_codes",
+        ][..],
+        &["search_candidate_shadow_evidence", "blocker_codes"][..],
+        &[
+            "cutover_evidence",
+            "search_candidate_shadow_evidence",
             "blocker_codes",
         ][..],
         &["bounded_read_evidence", "blocker_codes"][..],
@@ -1812,6 +1971,7 @@ mod tests {
                 "previous_wrapper_contract",
                 "query_family_readiness",
                 "query_runtime_preflight",
+                "search_candidate_shadow_evidence",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
                 "shadow_parity"
@@ -1987,6 +2147,16 @@ mod tests {
         assert_eq!(
             summary["search_projection_shadow_evidence"]["pushdown_evidence"]
                 ["shadow_segment_descriptor_scan_filter_fields_ready"],
+            true
+        );
+        assert_eq!(summary["search_candidate_shadow_evidence"]["present"], true);
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], true);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["candidate_counts_ready"],
+            true
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["candidate_identity_ready"],
             true
         );
         assert_eq!(
@@ -2460,6 +2630,80 @@ mod tests {
                         .iter()
                         .any(|field| field == "search_projection_shadow_evidence.evidence_source")
             }));
+    }
+
+    #[test]
+    fn replacement_summary_blocks_production_without_search_candidate_shadow_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("search_candidate_shadow_evidence");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["present"],
+            false
+        );
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "run_search_candidate_shadow_evidence"));
+    }
+
+    #[test]
+    fn replacement_summary_requires_search_candidate_identity_parity() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_candidate_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_candidate_shadow_evidence"]["candidate_identity"]["ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["candidate_identity"]["parity"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["search_candidate_identity_mismatch"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["candidate_identity_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["candidate_identity_parity"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["blocker_codes"],
+            serde_json::json!(["search_candidate_identity_mismatch"])
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence_ready"));
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence"));
     }
 
     #[test]
@@ -3213,6 +3457,7 @@ mod tests {
                 "previous_wrapper_contract",
                 "query_family_readiness",
                 "query_runtime_preflight",
+                "search_candidate_shadow_evidence",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
                 "shadow_parity",
@@ -3230,6 +3475,7 @@ mod tests {
                 "dual_engine_evidence",
                 "search_projection_evidence",
                 "search_projection_shadow_evidence",
+                "search_candidate_shadow_evidence",
                 "bounded_read_evidence",
                 "query_runtime_preflight",
                 "shadow_run",
@@ -3358,6 +3604,25 @@ mod tests {
                     ]
                 },
                 {
+                    "action": "run_search_candidate_shadow_evidence",
+                    "reason": "LanceDB/Skein search candidate side-by-side evidence is missing or not ready",
+                    "evidence_fields": [
+                        "search_candidate_shadow_evidence.protocol",
+                        "search_candidate_shadow_evidence.evidence_source",
+                        "search_candidate_shadow_evidence.route",
+                        "search_candidate_shadow_evidence.present",
+                        "search_candidate_shadow_evidence.ready",
+                        "search_candidate_shadow_evidence.candidate_primary_engine",
+                        "search_candidate_shadow_evidence.request_count",
+                        "search_candidate_shadow_evidence.primary_candidate_count",
+                        "search_candidate_shadow_evidence.shadow_candidate_count",
+                        "search_candidate_shadow_evidence.matched_candidate_count",
+                        "search_candidate_shadow_evidence.primary_only_candidate_count",
+                        "search_candidate_shadow_evidence.candidate_identity.ready",
+                        "search_candidate_shadow_evidence.blocker_codes"
+                    ]
+                },
+                {
                     "action": "attach_bounded_read_profile",
                     "reason": "bounded read execution profile is missing or not ready",
                     "evidence_fields": [
@@ -3427,6 +3692,8 @@ mod tests {
         assert!(nowledge_replacement_summary_usage().contains("--search-projection-evidence-json"));
         assert!(nowledge_replacement_summary_usage()
             .contains("--search-projection-shadow-evidence-json"));
+        assert!(nowledge_replacement_summary_usage()
+            .contains("--search-candidate-shadow-evidence-json"));
         assert!(nowledge_replacement_summary_usage().contains("--bounded-read-evidence-json"));
         assert!(nowledge_replacement_summary_usage().contains("--query-runtime-preflight-json"));
         assert!(nowledge_replacement_summary_usage().contains("--query-family-evidence-json"));
@@ -3551,6 +3818,28 @@ mod tests {
                     "primary_scan_filter_fields": scan_filter_fields_json(),
                     "shadow_scan_filter_fields": scan_filter_fields_json(),
                     "shadow_segment_descriptor_field_summaries": scan_filter_field_summaries_json()
+                },
+                "blocker_codes": []
+            },
+            "search_candidate_shadow_evidence": {
+                "protocol": "skein-nowledge-search-candidate-shadow-evidence",
+                "route": "/search-index/skein-shadow/candidate-evidence",
+                "evidence_source": "nmem-rust-bridge",
+                "ready": true,
+                "candidate_primary_engine": "skein",
+                "request_count": 2,
+                "primary_candidate_count": 3,
+                "shadow_candidate_count": 3,
+                "matched_candidate_count": 3,
+                "primary_only_candidate_count": 0,
+                "candidate_identity": {
+                    "ready": true,
+                    "id_space": "search_candidate_id",
+                    "representation": "per_request_sorted_candidate_ids",
+                    "primary_checksum": 123,
+                    "shadow_checksum": 123,
+                    "matched_checksum": 123,
+                    "parity": true
                 },
                 "blocker_codes": []
             },

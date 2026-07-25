@@ -727,7 +727,7 @@ For dashboards and release notes that need one conservative replacement number,
 use:
 
 ```text
-skein nowledge-replacement-summary [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] <migration-gate-json>
+skein nowledge-replacement-summary [--require-production-ready] [--compact] [--max-family-items <n>] [--max-blockers <n>] [--search-projection-evidence-json <path>] [--search-projection-shadow-evidence-json <path>] [--search-candidate-shadow-evidence-json <path>] [--bounded-read-evidence-json <path>] [--query-runtime-preflight-json <path>] [--query-family-evidence-json <path>] <migration-gate-json>
 ```
 
 The command reads an existing migration-gate bundle and prints
@@ -737,7 +737,10 @@ bundle lacks eligible `cutover_evidence`, `production_replacement_per_million`
 is `0` even when scanner coverage and shadow matched ratios are complete. If
 the bundle includes `dual_engine_evidence`, the summary copies it into the
 release-facing output and also requires `dual_engine_evidence.ready == true`
-for production readiness. The summary also preserves cutover storage/background
+for production readiness. It also requires ready
+`search_candidate_shadow_evidence` for the LanceDB/Skein candidate-read path,
+including count parity and redacted candidate identity parity. The summary also
+preserves cutover storage/background
 evidence, including background search-projection graph-delta aggregate counts,
 operation totals, and max complete-through graph commit epoch, so release notes
 do not need to parse raw ranked maintenance items. With
