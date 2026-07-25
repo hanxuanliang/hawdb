@@ -321,6 +321,24 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                         "incremental_watermark_parity",
                     ],
                 ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "shadow_segment_descriptor_scan_filter_fields_ready",
+                    ],
+                ) == Some(true),
             ],
             [
                 "replacement_summary.search_projection_evidence.ready",
@@ -338,6 +356,8 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary.search_projection_shadow_evidence.table_parity_ready",
                 "replacement_summary.search_projection_shadow_evidence.embedding_identity_parity",
                 "replacement_summary.search_projection_shadow_evidence.incremental_watermark_parity",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
             ],
             blocker_codes(
                 bundle,
@@ -2135,6 +2155,42 @@ mod tests {
     }
 
     #[test]
+    fn requires_search_projection_shadow_descriptor_field_coverage() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["ready"] = serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_scan_filter_fields_ready"] = serde_json::json!(false);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["skein_search_projection_segment_descriptor_fields_missing"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["skein_search_projection_segment_descriptor_fields_missing"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready"
+            ])
+        );
+    }
+
+    #[test]
     fn requires_compressed_vector_projection_readiness() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["search_projection_evidence"]
@@ -3126,6 +3182,10 @@ mod tests {
                     "table_parity_ready": true,
                     "embedding_identity_parity": true,
                     "incremental_watermark_parity": true,
+                    "pushdown_evidence": {
+                        "ready": true,
+                        "shadow_segment_descriptor_scan_filter_fields_ready": true
+                    },
                     "blocker_codes": []
                 },
                 "bounded_read_evidence": {
