@@ -25746,7 +25746,11 @@ fn scoped_knowledge_neighbors_filters_seed_by_metadata() {
 
 #[test]
 fn reads_induced_edges_for_nowledge_overview_and_subgraph_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
     db.query("CREATE (:Entity {id: 'entity_1'})").unwrap();
     db.query("CREATE (:Entity {id: 'entity_2'})").unwrap();
@@ -25792,18 +25796,25 @@ fn reads_induced_edges_for_nowledge_overview_and_subgraph_shapes() {
     assert_eq!(output.rows[2].relationship_type, "RELATES_TO");
     assert_eq!(output.rows[2].strength, Value::Float(0.5));
 
-    let limited = db
-        .knowledge_induced_edges(&KnowledgeInducedEdgeListRequest {
-            external_ids: vec![
-                "memory_1".to_string(),
-                "entity_1".to_string(),
-                "entity_2".to_string(),
-            ],
-            limit: 2,
-        })
-        .unwrap();
+    let limited_request = KnowledgeInducedEdgeListRequest {
+        external_ids: vec![
+            "memory_1".to_string(),
+            "entity_1".to_string(),
+            "entity_2".to_string(),
+        ],
+        limit: 2,
+    };
+    let limited = db.knowledge_induced_edges(&limited_request).unwrap();
     assert_eq!(limited.matched_count, 3);
     assert_eq!(limited.returned_count, 2);
+
+    let stats = db.plan_cache_stats();
+    let repeated_limited = db.knowledge_induced_edges(&limited_request).unwrap();
+    assert_eq!(repeated_limited, limited);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert!(repeated_stats.hits > stats.hits);
 }
 
 #[test]
