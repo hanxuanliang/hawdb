@@ -8229,7 +8229,6 @@ impl Database {
 
     pub fn knowledge_paths(&self, request: &KnowledgePathRequest) -> KnowledgePathOutput {
         knowledge_paths_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_paths_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_scoped_paths(
@@ -8237,7 +8236,6 @@ impl Database {
         request: &KnowledgeScopedPathRequest,
     ) -> KnowledgePathOutput {
         knowledge_scoped_paths_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_scoped_paths_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_subgraph(
@@ -32908,7 +32906,7 @@ fn knowledge_paths_for(
 fn knowledge_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgePathRequest,
-) -> Option<KnowledgePathOutput> {
+) -> KnowledgePathOutput {
     knowledge_scoped_paths_via_query_runtime(
         db,
         &KnowledgeScopedPathRequest {
@@ -32952,11 +32950,8 @@ fn knowledge_query_runtime_failed_path_output(
 fn knowledge_scoped_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedPathRequest,
-) -> Option<KnowledgePathOutput> {
+) -> KnowledgePathOutput {
     let navigation = &request.navigation;
-    if navigation.max_hops != 1 {
-        return None;
-    }
 
     let graph_commit_epoch = db.store.commit_epoch();
     let source_request = KnowledgeEntityRequest {
@@ -32970,19 +32965,13 @@ fn knowledge_scoped_paths_via_query_runtime(
     let source = match knowledge_relationship_seed_via_query_runtime(db, &source_request) {
         Ok(source) => source,
         Err(_) => {
-            return Some(knowledge_query_runtime_failed_path_output(
-                graph_commit_epoch,
-                request,
-            ));
+            return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
         }
     };
     let target = match knowledge_relationship_seed_via_query_runtime(db, &target_request) {
         Ok(target) => target,
         Err(_) => {
-            return Some(knowledge_query_runtime_failed_path_output(
-                graph_commit_epoch,
-                request,
-            ));
+            return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
         }
     };
     let source_node_id = source.as_ref().map(|entity| entity.node_id);
@@ -33019,7 +33008,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             &request.target_metadata_filters,
             0,
         );
-        return Some(KnowledgePathOutput {
+        return KnowledgePathOutput {
             graph_commit_epoch,
             source_node_id,
             target_node_id,
@@ -33028,7 +33017,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        });
+        };
     };
     let Some(target) = target else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
@@ -33056,7 +33045,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             &request.target_metadata_filters,
             0,
         );
-        return Some(KnowledgePathOutput {
+        return KnowledgePathOutput {
             graph_commit_epoch,
             source_node_id: Some(source.node_id),
             target_node_id,
@@ -33065,7 +33054,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        });
+        };
     };
 
     let source_filtered = !request.source_metadata_filters.is_empty()
@@ -33095,7 +33084,7 @@ fn knowledge_scoped_paths_via_query_runtime(
             &request.target_metadata_filters,
             usize::from(source_filtered) + usize::from(target_filtered),
         );
-        return Some(KnowledgePathOutput {
+        return KnowledgePathOutput {
             graph_commit_epoch,
             source_node_id: Some(source.node_id),
             target_node_id: Some(target.node_id),
@@ -33104,17 +33093,14 @@ fn knowledge_scoped_paths_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        });
+        };
     }
 
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
                 if validate_cypher_identifier(name, "relationship type").is_err() {
-                    return Some(knowledge_query_runtime_failed_path_output(
-                        graph_commit_epoch,
-                        request,
-                    ));
+                    return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
                 }
                 Some(name.to_string())
             }
@@ -33142,7 +33128,7 @@ fn knowledge_scoped_paths_via_query_runtime(
                     &request.target_metadata_filters,
                     0,
                 );
-                return Some(KnowledgePathOutput {
+                return KnowledgePathOutput {
                     graph_commit_epoch,
                     source_node_id: Some(source.node_id),
                     target_node_id: Some(target.node_id),
@@ -33151,25 +33137,23 @@ fn knowledge_scoped_paths_via_query_runtime(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                });
+                };
             }
         },
         None => None,
     };
-    let (paths, fanout_reason_details) = match knowledge_one_hop_paths_via_query_runtime(
+    let (paths, fanout_reason_details) = match expand_knowledge_paths_via_query_runtime(
         db,
         source.node_id,
         target.node_id,
         relationship_type_name.as_deref(),
         navigation.direction,
+        navigation.max_hops,
         navigation.limit,
     ) {
         Ok(paths) => paths,
         Err(_) => {
-            return Some(knowledge_query_runtime_failed_path_output(
-                graph_commit_epoch,
-                request,
-            ));
+            return knowledge_query_runtime_failed_path_output(graph_commit_epoch, request);
         }
     };
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
@@ -33194,7 +33178,7 @@ fn knowledge_scoped_paths_via_query_runtime(
         &request.target_metadata_filters,
         0,
     );
-    Some(KnowledgePathOutput {
+    KnowledgePathOutput {
         graph_commit_epoch,
         source_node_id: Some(source.node_id),
         target_node_id: Some(target.node_id),
@@ -33203,50 +33187,99 @@ fn knowledge_scoped_paths_via_query_runtime(
         fanout_reason_codes: knowledge_fanout_reason_codes(&fanout_reason_details),
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
-    })
+    }
 }
 
-fn knowledge_one_hop_paths_via_query_runtime(
+fn expand_knowledge_paths_via_query_runtime(
     db: &Database,
     source_node_id: u64,
     target_node_id: u64,
     relationship_type_name: Option<&str>,
     direction: KnowledgeNeighborDirection,
+    max_hops: usize,
     limit: usize,
 ) -> Result<(Vec<KnowledgeGraphPath>, Vec<KnowledgeFanoutReasonDetail>)> {
     let relationship_type = relationship_type_name.and_then(|name| db.catalog.rel_type_id(name));
+    let mut paths = Vec::new();
     let mut fanout_reason_details = Vec::new();
-    record_dense_adjacency_diagnostics(
-        DenseAdjacencyDiagnosticContext {
-            catalog: &db.catalog,
-            store: &db.store,
-            operation: "knowledge_paths",
-            relationship_type,
-            requested_direction: direction,
-        },
+    let mut reported_dense_groups = BTreeSet::new();
+    let mut frontier = VecDeque::from([(
         NodeId(source_node_id),
-        &mut BTreeSet::new(),
-        &mut fanout_reason_details,
-    );
+        Vec::<KnowledgeGraphContextPath>::new(),
+        BTreeSet::from([source_node_id]),
+    )]);
 
+    while let Some((current_node, current_path, visited_nodes)) = frontier.pop_front() {
+        if current_path.len() >= max_hops {
+            continue;
+        }
+        record_dense_adjacency_diagnostics(
+            DenseAdjacencyDiagnosticContext {
+                catalog: &db.catalog,
+                store: &db.store,
+                operation: "knowledge_paths",
+                relationship_type,
+                requested_direction: direction,
+            },
+            current_node,
+            &mut reported_dense_groups,
+            &mut fanout_reason_details,
+        );
+        for mut segment in knowledge_path_segments_from_node_via_query_runtime(
+            db,
+            current_node.0,
+            relationship_type_name,
+            direction,
+        )? {
+            let next_node_id = match segment.direction {
+                KnowledgeGraphPathDirection::Outgoing => segment.target_node_id,
+                KnowledgeGraphPathDirection::Incoming => segment.source_node_id,
+            };
+            if visited_nodes.contains(&next_node_id) && next_node_id != target_node_id {
+                continue;
+            }
+            segment.hop = current_path.len() + 1;
+            let mut next_path = current_path.clone();
+            next_path.push(segment);
+            if next_node_id == target_node_id {
+                if paths.len() >= limit {
+                    fanout_reason_details.push(KnowledgeFanoutReasonDetail::path_limit(
+                        "knowledge_paths",
+                        limit,
+                        "path",
+                    ));
+                    return Ok((paths, fanout_reason_details));
+                }
+                paths.push(KnowledgeGraphPath {
+                    segments: next_path,
+                });
+                continue;
+            }
+            let mut next_visited = visited_nodes.clone();
+            next_visited.insert(next_node_id);
+            frontier.push_back((NodeId(next_node_id), next_path, next_visited));
+        }
+    }
+
+    Ok((paths, fanout_reason_details))
+}
+
+fn knowledge_path_segments_from_node_via_query_runtime(
+    db: &Database,
+    current_node_id: u64,
+    relationship_type_name: Option<&str>,
+    direction: KnowledgeNeighborDirection,
+) -> Result<Vec<KnowledgeGraphContextPath>> {
     let rel_pattern = relationship_type_name
         .map(|name| format!(":{name}"))
         .unwrap_or_default();
-    let parameters = BTreeMap::from([
-        (
-            "source_node_id".to_string(),
-            Value::Int(i64::try_from(source_node_id).map_err(|_| {
-                SkeinError::Execution("knowledge path source node id exceeds i64".to_string())
-            })?),
-        ),
-        (
-            "target_node_id".to_string(),
-            Value::Int(i64::try_from(target_node_id).map_err(|_| {
-                SkeinError::Execution("knowledge path target node id exceeds i64".to_string())
-            })?),
-        ),
-    ]);
-    let mut paths = Vec::new();
+    let parameters = BTreeMap::from([(
+        "current_node_id".to_string(),
+        Value::Int(i64::try_from(current_node_id).map_err(|_| {
+            SkeinError::Execution("knowledge path frontier node id exceeds i64".to_string())
+        })?),
+    )]);
+    let mut segments = Vec::new();
     let mut seen_relationships = BTreeSet::new();
 
     if matches!(
@@ -33255,21 +33288,17 @@ fn knowledge_one_hop_paths_via_query_runtime(
     ) {
         let query = format!(
             "MATCH (source)-[r{rel_pattern}]->(target) \
-             WHERE id(source) = $source_node_id AND id(target) = $target_node_id \
+             WHERE id(source) = $current_node_id \
              RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
              ORDER BY relationship_id ASC"
         );
-        knowledge_one_hop_paths_for_direction_via_query_runtime(
-            KnowledgeOneHopPathDirectionQuery {
-                db,
-                query: &query,
-                parameters: &parameters,
-                direction: KnowledgeGraphPathDirection::Outgoing,
-                limit,
-                seen_relationships: &mut seen_relationships,
-                paths: &mut paths,
-                fanout_reason_details: &mut fanout_reason_details,
-            },
+        knowledge_path_segments_for_direction_via_query_runtime(
+            db,
+            &query,
+            &parameters,
+            KnowledgeGraphPathDirection::Outgoing,
+            &mut seen_relationships,
+            &mut segments,
         )?;
     }
     if matches!(
@@ -33278,45 +33307,32 @@ fn knowledge_one_hop_paths_via_query_runtime(
     ) {
         let query = format!(
             "MATCH (source)-[r{rel_pattern}]->(target) \
-             WHERE id(source) = $target_node_id AND id(target) = $source_node_id \
+             WHERE id(target) = $current_node_id \
              RETURN source AS source, target AS target, r AS relationship, id(r) AS relationship_id \
              ORDER BY relationship_id ASC"
         );
-        knowledge_one_hop_paths_for_direction_via_query_runtime(
-            KnowledgeOneHopPathDirectionQuery {
-                db,
-                query: &query,
-                parameters: &parameters,
-                direction: KnowledgeGraphPathDirection::Incoming,
-                limit,
-                seen_relationships: &mut seen_relationships,
-                paths: &mut paths,
-                fanout_reason_details: &mut fanout_reason_details,
-            },
+        knowledge_path_segments_for_direction_via_query_runtime(
+            db,
+            &query,
+            &parameters,
+            KnowledgeGraphPathDirection::Incoming,
+            &mut seen_relationships,
+            &mut segments,
         )?;
     }
 
-    Ok((paths, fanout_reason_details))
+    Ok(segments)
 }
 
-struct KnowledgeOneHopPathDirectionQuery<'a> {
-    db: &'a Database,
-    query: &'a str,
-    parameters: &'a BTreeMap<String, Value>,
+fn knowledge_path_segments_for_direction_via_query_runtime(
+    db: &Database,
+    query: &str,
+    parameters: &BTreeMap<String, Value>,
     direction: KnowledgeGraphPathDirection,
-    limit: usize,
-    seen_relationships: &'a mut BTreeSet<u64>,
-    paths: &'a mut Vec<KnowledgeGraphPath>,
-    fanout_reason_details: &'a mut Vec<KnowledgeFanoutReasonDetail>,
-}
-
-fn knowledge_one_hop_paths_for_direction_via_query_runtime(
-    context: KnowledgeOneHopPathDirectionQuery<'_>,
+    seen_relationships: &mut BTreeSet<u64>,
+    segments: &mut Vec<KnowledgeGraphContextPath>,
 ) -> Result<()> {
-    let output =
-        context
-            .db
-            .query_read_only_with_params_bounded(context.query, context.parameters, None)?;
+    let output = db.query_read_only_with_params_bounded(query, parameters, None)?;
     for row in &output.rows {
         let relationship_id = row
             .get("relationship_id")
@@ -33324,27 +33340,15 @@ fn knowledge_one_hop_paths_for_direction_via_query_runtime(
             .ok_or_else(|| {
                 SkeinError::Execution("knowledge path row is missing relationship_id".to_string())
             })?;
-        if !context.seen_relationships.insert(relationship_id) {
+        if !seen_relationships.insert(relationship_id) {
             continue;
         }
-        if context.paths.len() >= context.limit {
-            context
-                .fanout_reason_details
-                .push(KnowledgeFanoutReasonDetail::path_limit(
-                    "knowledge_paths",
-                    context.limit,
-                    "path",
-                ));
-            return Ok(());
-        }
-        context.paths.push(KnowledgeGraphPath {
-            segments: vec![knowledge_context_path_from_query_row(
-                row,
-                "path",
-                context.direction,
-                relationship_id,
-            )?],
-        });
+        segments.push(knowledge_context_path_from_query_row(
+            row,
+            "path",
+            direction,
+            relationship_id,
+        )?);
     }
     Ok(())
 }
