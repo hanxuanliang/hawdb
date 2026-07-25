@@ -1523,6 +1523,7 @@ pub enum KnowledgeTraversalFallbackReasonCode {
     NodeLimitZero,
     RelationshipLimitZero,
     RelationshipTypeNotFound,
+    QueryRuntimeFailed,
 }
 
 impl KnowledgeTraversalFallbackReasonCode {
@@ -1535,6 +1536,7 @@ impl KnowledgeTraversalFallbackReasonCode {
             Self::NodeLimitZero => "node_limit_zero",
             Self::RelationshipLimitZero => "relationship_limit_zero",
             Self::RelationshipTypeNotFound => "relationship_type_not_found",
+            Self::QueryRuntimeFailed => "query_runtime_failed",
         }
     }
 }
@@ -1551,6 +1553,7 @@ impl FromStr for KnowledgeTraversalFallbackReasonCode {
             "node_limit_zero" => Ok(Self::NodeLimitZero),
             "relationship_limit_zero" => Ok(Self::RelationshipLimitZero),
             "relationship_type_not_found" => Ok(Self::RelationshipTypeNotFound),
+            "query_runtime_failed" => Ok(Self::QueryRuntimeFailed),
             _ => Err("unknown knowledge traversal fallback reason code"),
         }
     }
@@ -32095,6 +32098,63 @@ fn knowledge_neighbors_via_query_runtime(
     )
 }
 
+fn knowledge_query_runtime_failed_traversal_diagnostics(
+    graph_commit_epoch: u64,
+    max_hops: usize,
+    path_limit: Option<usize>,
+    node_limit: Option<usize>,
+    relationship_limit: Option<usize>,
+    target_found: Option<bool>,
+) -> KnowledgeTraversalDiagnostics {
+    let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
+        graph_commit_epoch,
+        seed_found: true,
+        target_found,
+        path_count: 0,
+        node_count: 0,
+        relationship_count: 0,
+        fanout_reason_details: Vec::new(),
+        missing_seed_identity: None,
+        missing_target_identity: None,
+        missing_relationship_type: None,
+        max_hops,
+        path_limit,
+        node_limit,
+        relationship_limit,
+    });
+    diagnostics
+        .fallback_reason_codes
+        .push(KnowledgeTraversalFallbackReasonCode::QueryRuntimeFailed);
+    diagnostics
+        .fallback_reasons
+        .push("query runtime failed".to_string());
+    diagnostics
+}
+
+fn knowledge_query_runtime_failed_neighbors_output(
+    graph_commit_epoch: u64,
+    request: &KnowledgeScopedNeighborsRequest,
+) -> KnowledgeNeighborsOutput {
+    let mut diagnostics = knowledge_query_runtime_failed_traversal_diagnostics(
+        graph_commit_epoch,
+        request.navigation.max_hops,
+        Some(request.navigation.limit),
+        None,
+        None,
+        None,
+    );
+    attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
+    KnowledgeNeighborsOutput {
+        graph_commit_epoch,
+        seed_node_id: None,
+        paths: Vec::new(),
+        fanout_reason_codes: Vec::new(),
+        fanout_reason_details: Vec::new(),
+        fanout_reasons: Vec::new(),
+        diagnostics,
+    }
+}
+
 fn knowledge_scoped_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedNeighborsRequest,
@@ -32108,7 +32168,15 @@ fn knowledge_scoped_neighbors_via_query_runtime(
         label: navigation.label.clone(),
         external_id: navigation.external_id.clone(),
     };
-    let seed = knowledge_relationship_seed_via_query_runtime(db, &seed_request).ok()?;
+    let seed = match knowledge_relationship_seed_via_query_runtime(db, &seed_request) {
+        Ok(seed) => seed,
+        Err(_) => {
+            return Some(knowledge_query_runtime_failed_neighbors_output(
+                graph_commit_epoch,
+                request,
+            ));
+        }
+    };
     let Some(seed) = seed else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch,
@@ -32174,7 +32242,12 @@ fn knowledge_scoped_neighbors_via_query_runtime(
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
-                validate_cypher_identifier(name, "relationship type").ok()?;
+                if validate_cypher_identifier(name, "relationship type").is_err() {
+                    return Some(knowledge_query_runtime_failed_neighbors_output(
+                        graph_commit_epoch,
+                        request,
+                    ));
+                }
                 Some(name.to_string())
             }
             None => {
@@ -32210,15 +32283,22 @@ fn knowledge_scoped_neighbors_via_query_runtime(
         None => None,
     };
 
-    let (paths, fanout_reason_details) = knowledge_relationship_rows_via_query_runtime(
+    let (paths, fanout_reason_details) = match knowledge_relationship_rows_via_query_runtime(
         db,
         "seed",
         seed.node_id,
         relationship_type_name.as_deref(),
         navigation.direction,
         navigation.limit,
-    )
-    .ok()?;
+    ) {
+        Ok(rows) => rows,
+        Err(_) => {
+            return Some(knowledge_query_runtime_failed_neighbors_output(
+                graph_commit_epoch,
+                request,
+            ));
+        }
+    };
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch,
         seed_found: true,
@@ -32883,6 +32963,36 @@ fn knowledge_paths_via_query_runtime(
     )
 }
 
+fn knowledge_query_runtime_failed_path_output(
+    graph_commit_epoch: u64,
+    request: &KnowledgeScopedPathRequest,
+) -> KnowledgePathOutput {
+    let mut diagnostics = knowledge_query_runtime_failed_traversal_diagnostics(
+        graph_commit_epoch,
+        request.navigation.max_hops,
+        Some(request.navigation.limit),
+        None,
+        None,
+        Some(true),
+    );
+    attach_path_endpoint_metadata_filters(
+        &mut diagnostics,
+        &request.source_metadata_filters,
+        &request.target_metadata_filters,
+        0,
+    );
+    KnowledgePathOutput {
+        graph_commit_epoch,
+        source_node_id: None,
+        target_node_id: None,
+        paths: Vec::new(),
+        fanout_reason_codes: Vec::new(),
+        fanout_reason_details: Vec::new(),
+        fanout_reasons: Vec::new(),
+        diagnostics,
+    }
+}
+
 fn knowledge_scoped_paths_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedPathRequest,
@@ -32901,8 +33011,24 @@ fn knowledge_scoped_paths_via_query_runtime(
         label: navigation.target_label.clone(),
         external_id: navigation.target_external_id.clone(),
     };
-    let source = knowledge_relationship_seed_via_query_runtime(db, &source_request).ok()?;
-    let target = knowledge_relationship_seed_via_query_runtime(db, &target_request).ok()?;
+    let source = match knowledge_relationship_seed_via_query_runtime(db, &source_request) {
+        Ok(source) => source,
+        Err(_) => {
+            return Some(knowledge_query_runtime_failed_path_output(
+                graph_commit_epoch,
+                request,
+            ));
+        }
+    };
+    let target = match knowledge_relationship_seed_via_query_runtime(db, &target_request) {
+        Ok(target) => target,
+        Err(_) => {
+            return Some(knowledge_query_runtime_failed_path_output(
+                graph_commit_epoch,
+                request,
+            ));
+        }
+    };
     let source_node_id = source.as_ref().map(|entity| entity.node_id);
     let target_node_id = target.as_ref().map(|entity| entity.node_id);
 
@@ -33028,7 +33154,12 @@ fn knowledge_scoped_paths_via_query_runtime(
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
-                validate_cypher_identifier(name, "relationship type").ok()?;
+                if validate_cypher_identifier(name, "relationship type").is_err() {
+                    return Some(knowledge_query_runtime_failed_path_output(
+                        graph_commit_epoch,
+                        request,
+                    ));
+                }
                 Some(name.to_string())
             }
             None => {
@@ -33069,15 +33200,22 @@ fn knowledge_scoped_paths_via_query_runtime(
         },
         None => None,
     };
-    let (paths, fanout_reason_details) = knowledge_one_hop_paths_via_query_runtime(
+    let (paths, fanout_reason_details) = match knowledge_one_hop_paths_via_query_runtime(
         db,
         source.node_id,
         target.node_id,
         relationship_type_name.as_deref(),
         navigation.direction,
         navigation.limit,
-    )
-    .ok()?;
+    ) {
+        Ok(paths) => paths,
+        Err(_) => {
+            return Some(knowledge_query_runtime_failed_path_output(
+                graph_commit_epoch,
+                request,
+            ));
+        }
+    };
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch,
         seed_found: true,
@@ -33509,6 +33647,31 @@ fn knowledge_subgraph_via_query_runtime(
     )
 }
 
+fn knowledge_query_runtime_failed_subgraph_output(
+    graph_commit_epoch: u64,
+    request: &KnowledgeScopedSubgraphRequest,
+) -> KnowledgeSubgraphOutput {
+    let mut diagnostics = knowledge_query_runtime_failed_traversal_diagnostics(
+        graph_commit_epoch,
+        request.navigation.max_hops,
+        None,
+        Some(request.navigation.node_limit),
+        Some(request.navigation.relationship_limit),
+        None,
+    );
+    attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
+    KnowledgeSubgraphOutput {
+        graph_commit_epoch,
+        seed_node_id: None,
+        nodes: Vec::new(),
+        relationships: Vec::new(),
+        fanout_reason_codes: Vec::new(),
+        fanout_reason_details: Vec::new(),
+        fanout_reasons: Vec::new(),
+        diagnostics,
+    }
+}
+
 fn knowledge_scoped_subgraph_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedSubgraphRequest,
@@ -33523,7 +33686,15 @@ fn knowledge_scoped_subgraph_via_query_runtime(
         label: navigation.label.clone(),
         external_id: navigation.external_id.clone(),
     };
-    let seed = knowledge_relationship_seed_via_query_runtime(db, &seed_request).ok()?;
+    let seed = match knowledge_relationship_seed_via_query_runtime(db, &seed_request) {
+        Ok(seed) => seed,
+        Err(_) => {
+            return Some(knowledge_query_runtime_failed_subgraph_output(
+                graph_commit_epoch,
+                request,
+            ));
+        }
+    };
     let Some(seed) = seed else {
         let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
             graph_commit_epoch,
@@ -33591,7 +33762,12 @@ fn knowledge_scoped_subgraph_via_query_runtime(
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
-                validate_cypher_identifier(name, "relationship type").ok()?;
+                if validate_cypher_identifier(name, "relationship type").is_err() {
+                    return Some(knowledge_query_runtime_failed_subgraph_output(
+                        graph_commit_epoch,
+                        request,
+                    ));
+                }
                 Some(name.to_string())
             }
             None => {
@@ -33629,15 +33805,22 @@ fn knowledge_scoped_subgraph_via_query_runtime(
     };
 
     let (nodes, relationships, fanout_reason_details) =
-        knowledge_one_hop_subgraph_via_query_runtime(
+        match knowledge_one_hop_subgraph_via_query_runtime(
             db,
             &seed,
             relationship_type_name.as_deref(),
             navigation.direction,
             navigation.node_limit,
             navigation.relationship_limit,
-        )
-        .ok()?;
+        ) {
+            Ok(output) => output,
+            Err(_) => {
+                return Some(knowledge_query_runtime_failed_subgraph_output(
+                    graph_commit_epoch,
+                    request,
+                ));
+            }
+        };
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
         graph_commit_epoch,
         seed_found: true,

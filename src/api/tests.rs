@@ -238,6 +238,10 @@ fn knowledge_traversal_fallback_reason_codes_have_stable_string_encodings() {
             KnowledgeTraversalFallbackReasonCode::RelationshipTypeNotFound,
             "relationship_type_not_found",
         ),
+        (
+            KnowledgeTraversalFallbackReasonCode::QueryRuntimeFailed,
+            "query_runtime_failed",
+        ),
     ];
 
     for (code, name) in cases {
