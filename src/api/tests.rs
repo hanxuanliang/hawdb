@@ -17467,7 +17467,11 @@ fn memory_compacting_thread_read_rejects_empty_memory_ids() {
 
 #[test]
 fn reads_thread_messages_for_nowledge_ordered_transcript_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'thread_1'})").unwrap();
     db.query("CREATE (:Message {id: 'msg_1', role: 'user', content: 'first', order_index: 2, timestamp: 20, token_count: 3, created_at: 21, updated_at: 22, metadata: '{\"a\":1}'})")
         .unwrap();
@@ -17481,12 +17485,11 @@ fn reads_thread_messages_for_nowledge_ordered_transcript_shapes() {
     .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let output = db
-        .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
-            thread_id: "thread_1".to_string(),
-            limit: 0,
-        })
-        .unwrap();
+    let request = KnowledgeThreadMessageListRequest {
+        thread_id: "thread_1".to_string(),
+        limit: 0,
+    };
+    let output = db.knowledge_thread_messages(&request).unwrap();
 
     assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
@@ -17513,6 +17516,14 @@ fn reads_thread_messages_for_nowledge_ordered_transcript_shapes() {
     assert_eq!(output.rows[1].order_index, Some(1));
     assert_eq!(output.rows[1].relationship_order_index, None);
     assert_eq!(output.rows[1].message_order_index, Some(1));
+
+    let stats = db.plan_cache_stats();
+    let repeated = db.knowledge_thread_messages(&request).unwrap();
+    assert_eq!(repeated, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 2);
 
     let limited = db
         .knowledge_thread_messages(&KnowledgeThreadMessageListRequest {
