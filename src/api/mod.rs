@@ -7170,7 +7170,7 @@ impl Database {
         &self,
         request: &KnowledgeMemoryProjectedListRequest,
     ) -> Result<KnowledgeMemoryProjectedListOutput> {
-        knowledge_memory_projected_list_for(&self.catalog, &self.store, request)
+        knowledge_memory_projected_list_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_cleanup_fingerprints(
@@ -10972,49 +10972,36 @@ fn knowledge_memories_for(
     })
 }
 
-fn knowledge_memory_projected_list_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_memory_projected_list_via_query_runtime(
+    db: &Database,
     request: &KnowledgeMemoryProjectedListRequest,
 ) -> Result<KnowledgeMemoryProjectedListOutput> {
     validate_knowledge_memory_projected_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeMemoryProjectedListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_external_ids: request.list.external_ids.clone(),
-        });
-    };
-
-    let requested_ids = request
-        .list
-        .external_ids
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::new();
+    let predicate = knowledge_memory_list_query_predicate(&request.list, &mut parameters);
+    let query = format!("MATCH (m:Memory){predicate} RETURN m AS memory");
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
     let mut matched_external_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| {
-            if requested_ids.is_empty() {
-                true
-            } else {
-                node_external_id(memory).is_some_and(|memory_id| requested_ids.contains(&memory_id))
-            }
-        })
-        .filter(|memory| memory_matches_memory_list(memory, &request.list))
-        .map(|memory| {
-            if let Some(memory_id) = node_external_id(memory) {
-                matched_external_ids.insert(memory_id);
-            }
-            (
-                knowledge_memory_projected_row(memory, &request.property_names),
-                memory.properties.get("created_at").cloned(),
-                memory_score_from_node(memory),
-            )
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(|row| {
+            row.get("memory")
+                .and_then(knowledge_entity_from_value)
+                .map(|memory| {
+                    if let Some(memory_id) = &memory.external_id {
+                        matched_external_ids.insert(memory_id.clone());
+                    }
+                    (
+                        knowledge_memory_projected_row_from_entity(
+                            &memory,
+                            &request.property_names,
+                        ),
+                        memory.properties.get("created_at").cloned(),
+                        memory_score_from_entity(&memory),
+                    )
+                })
         })
         .collect::<Vec<_>>();
     sort_memory_projected_rows(&mut rows, request.list.order);
@@ -11055,6 +11042,73 @@ fn validate_knowledge_memory_projected_list_request(
         ));
     }
     Ok(())
+}
+
+fn knowledge_memory_list_query_predicate(
+    request: &KnowledgeMemoryListRequest,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    let mut predicates = Vec::new();
+    if !request.external_ids.is_empty() {
+        parameters.insert(
+            "external_ids".to_string(),
+            Value::List(
+                request
+                    .external_ids
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        predicates.push("m.id IN $external_ids");
+    }
+    if let Some(normalized_space_id) = &request.normalized_space_id {
+        parameters.insert(
+            "normalized_space_id".to_string(),
+            Value::String(normalized_space_id.clone()),
+        );
+        if normalized_space_id == "default" {
+            predicates.push(
+                "(m.space_id IS NULL OR m.space_id = '' OR m.space_id = $normalized_space_id)",
+            );
+        } else {
+            predicates.push("m.space_id = $normalized_space_id");
+        }
+    }
+    if let Some(exclude_normalized_space_id) = &request.exclude_normalized_space_id {
+        parameters.insert(
+            "exclude_normalized_space_id".to_string(),
+            Value::String(exclude_normalized_space_id.clone()),
+        );
+        if exclude_normalized_space_id == "default" {
+            predicates.push(
+                "m.space_id IS NOT NULL AND m.space_id <> '' AND m.space_id <> $exclude_normalized_space_id",
+            );
+        } else {
+            predicates.push(
+                "(m.space_id IS NULL OR m.space_id = '' OR m.space_id <> $exclude_normalized_space_id)",
+            );
+        }
+    }
+    if let Some(unit_type) = &request.unit_type {
+        parameters.insert("unit_type".to_string(), Value::String(unit_type.clone()));
+        predicates.push("m.unit_type = $unit_type");
+    }
+    if let Some(is_latest) = request.is_latest {
+        parameters.insert("is_latest".to_string(), Value::Bool(is_latest));
+        predicates.push("m.is_latest = $is_latest");
+    }
+    if let Some(is_crystal) = request.is_crystal {
+        parameters.insert("is_crystal".to_string(), Value::Bool(is_crystal));
+        predicates.push("m.is_crystal = $is_crystal");
+    }
+
+    if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    }
 }
 
 const KNOWLEDGE_MEMORY_CLEANUP_FINGERPRINT_DEFAULT_PROPERTIES: &[&str] = &[
@@ -12781,7 +12835,7 @@ fn memory_score(row: &KnowledgeMemoryListRow) -> Value {
         .unwrap_or(Value::Float(0.5))
 }
 
-fn memory_score_from_node(memory: &NodeRecord) -> Value {
+fn memory_score_from_entity(memory: &KnowledgeEntity) -> Value {
     memory
         .properties
         .get("pagerank_score")

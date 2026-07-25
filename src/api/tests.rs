@@ -5415,6 +5415,58 @@ fn projects_memory_list_fields_for_nowledge_growth() {
 }
 
 #[test]
+fn memory_projected_list_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'memory-cache-a', title: 'Cache A', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: '', created_at: 10, importance: 0.4, future_field: 'future-a'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-cache-b', title: 'Cache B', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: 'default', created_at: 20, pagerank_score: 0.9, future_field: 'future-b'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'memory-cache-team', title: 'Team', unit_type: 'fact', is_latest: true, is_crystal: false, space_id: 'team', created_at: 30, future_field: 'wrong-space'})")
+        .unwrap();
+    let request = KnowledgeMemoryProjectedListRequest {
+        list: KnowledgeMemoryListRequest {
+            external_ids: vec![
+                "memory-cache-a".to_string(),
+                "memory-cache-b".to_string(),
+                "memory-cache-missing".to_string(),
+            ],
+            normalized_space_id: Some("default".to_string()),
+            exclude_normalized_space_id: None,
+            unit_type: Some("fact".to_string()),
+            is_latest: Some(true),
+            is_crystal: Some(false),
+            limit: 1,
+            order: KnowledgeMemoryListOrder::ScoreDesc,
+        },
+        property_names: vec!["title".to_string(), "future_field".to_string()],
+    };
+
+    let first = db.knowledge_memory_projected_list(&request).unwrap();
+    let second = db.knowledge_memory_projected_list(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(first.rows[0].memory_id.as_deref(), Some("memory-cache-b"));
+    assert_eq!(
+        first.rows[0].properties.get("future_field"),
+        Some(&Value::String("future-b".to_string()))
+    );
+    assert_eq!(
+        first.missing_external_ids,
+        vec!["memory-cache-missing".to_string()]
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn projected_memory_list_rejects_empty_property_names_without_wal() {
     let path = unique_test_dir("projected_memory_list_empty_property_without_wal");
     let mut db = Database::open(&path).unwrap();
