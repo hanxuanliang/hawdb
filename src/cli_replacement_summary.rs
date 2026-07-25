@@ -3,6 +3,9 @@ use skein::{
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -246,6 +249,8 @@ pub fn nowledge_replacement_summary_json_with_options(
             "present": search_candidate_shadow_evidence.present,
             "ready": search_candidate_shadow_evidence.ready,
             "candidate_primary_engine": search_candidate_shadow_evidence.candidate_primary_engine,
+            "primary_engine": search_candidate_shadow_evidence.primary_engine,
+            "shadow_engine": search_candidate_shadow_evidence.shadow_engine,
             "request_count": search_candidate_shadow_evidence.request_count,
             "primary_candidate_count": search_candidate_shadow_evidence.primary_candidate_count,
             "shadow_candidate_count": search_candidate_shadow_evidence.shadow_candidate_count,
@@ -254,6 +259,12 @@ pub fn nowledge_replacement_summary_json_with_options(
             "candidate_counts_ready": search_candidate_shadow_evidence.candidate_counts_ready,
             "candidate_identity_ready": search_candidate_shadow_evidence.candidate_identity_ready,
             "candidate_identity_parity": search_candidate_shadow_evidence.candidate_identity_parity,
+            "row_count_parity": search_candidate_shadow_evidence.row_count_parity,
+            "vector_top_k_overlap_ready": search_candidate_shadow_evidence.vector_top_k_overlap_ready,
+            "fts_top_k_overlap_ready": search_candidate_shadow_evidence.fts_top_k_overlap_ready,
+            "shadow_scan_filter_pushdown_ready": search_candidate_shadow_evidence.shadow_scan_filter_pushdown_ready,
+            "shadow_scan_field_pruning_ready": search_candidate_shadow_evidence.shadow_scan_field_pruning_ready,
+            "shadow_scan_field_summary_count": search_candidate_shadow_evidence.shadow_scan_field_summary_count,
             "filter_pushdown_ready": search_candidate_shadow_evidence.filter_pushdown_ready,
             "filter_pushdown_field_summary_count": search_candidate_shadow_evidence.filter_pushdown_field_summary_count,
             "filter_pushdown_missing_required_fields": search_candidate_shadow_evidence.filter_pushdown_missing_required_fields,
@@ -581,6 +592,8 @@ struct SearchCandidateShadowEvidenceSummary {
     present: bool,
     ready: bool,
     candidate_primary_engine: Option<String>,
+    primary_engine: Option<String>,
+    shadow_engine: Option<String>,
     request_count: Option<u64>,
     primary_candidate_count: Option<u64>,
     shadow_candidate_count: Option<u64>,
@@ -589,6 +602,12 @@ struct SearchCandidateShadowEvidenceSummary {
     candidate_counts_ready: bool,
     candidate_identity_ready: Option<bool>,
     candidate_identity_parity: Option<bool>,
+    row_count_parity: Option<bool>,
+    vector_top_k_overlap_ready: Option<bool>,
+    fts_top_k_overlap_ready: Option<bool>,
+    shadow_scan_filter_pushdown_ready: Option<bool>,
+    shadow_scan_field_pruning_ready: Option<bool>,
+    shadow_scan_field_summary_count: Option<u64>,
     filter_pushdown_ready: Option<bool>,
     filter_pushdown_field_summary_count: Option<u64>,
     filter_pushdown_missing_required_fields: Vec<String>,
@@ -882,6 +901,10 @@ fn search_candidate_shadow_evidence_summary(
     let candidate_primary_engine =
         json_get_str_path_from_dynamic(bundle, path, "candidate_primary_engine")
             .map(str::to_string);
+    let primary_engine =
+        json_get_str_path_from_dynamic(bundle, path, "primary_engine").map(str::to_string);
+    let shadow_engine =
+        json_get_str_path_from_dynamic(bundle, path, "shadow_engine").map(str::to_string);
     let request_count = json_get_u64_path_from_dynamic(bundle, path, "request_count");
     let primary_candidate_count =
         json_get_u64_path_from_dynamic(bundle, path, "primary_candidate_count");
@@ -944,10 +967,23 @@ fn search_candidate_shadow_evidence_summary(
             .collect::<Vec<_>>(),
     )
     .is_some_and(serde_json::Value::is_array);
-    let ready = present
-        && protocol.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
-        && evidence_source.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
-        && route.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE)
+
+    let row_count_parity = json_get_bool_path_from_dynamic(bundle, path, "row_count_parity");
+    let vector_top_k_overlap_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "vector_top_k_overlap_ready");
+    let fts_top_k_overlap_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "fts_top_k_overlap_ready");
+    let shadow_scan_filter_pushdown_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "shadow_scan_filter_pushdown_ready");
+    let shadow_scan_field_pruning_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "shadow_scan_field_pruning_ready");
+    let shadow_scan_field_summary_count =
+        json_get_u64_path_from_dynamic(bundle, path, "shadow_scan_field_summary_count");
+    let blocker_codes = json_get_array_path_from_dynamic(bundle, path, "blocker_codes");
+    let blocker_codes_empty = blocker_codes.as_array().is_some_and(Vec::is_empty);
+
+    let bridge_ready = evidence_source.as_deref()
+        == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
         && candidate_primary_engine.as_deref()
             == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE)
         && candidate_counts_ready
@@ -957,6 +993,22 @@ fn search_candidate_shadow_evidence_summary(
         && filter_pushdown_field_summary_count.is_some_and(|count| count > 0)
         && filter_pushdown_missing_required_fields_present
         && filter_pushdown_missing_required_fields.is_empty();
+    let trace_ready = evidence_source.as_deref()
+        == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE)
+        && primary_engine.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE)
+        && shadow_engine.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE)
+        && json_get_bool_path_from_dynamic(bundle, path, "ready") == Some(true)
+        && row_count_parity == Some(true)
+        && vector_top_k_overlap_ready == Some(true)
+        && fts_top_k_overlap_ready == Some(true)
+        && shadow_scan_filter_pushdown_ready == Some(true)
+        && shadow_scan_field_pruning_ready == Some(true)
+        && shadow_scan_field_summary_count.is_some_and(|count| count > 0)
+        && blocker_codes_empty;
+    let ready = present
+        && protocol.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
+        && route.as_deref() == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE)
+        && (bridge_ready || trace_ready);
     SearchCandidateShadowEvidenceSummary {
         protocol,
         evidence_source,
@@ -964,6 +1016,8 @@ fn search_candidate_shadow_evidence_summary(
         present,
         ready,
         candidate_primary_engine,
+        primary_engine,
+        shadow_engine,
         request_count,
         primary_candidate_count,
         shadow_candidate_count,
@@ -972,10 +1026,16 @@ fn search_candidate_shadow_evidence_summary(
         candidate_counts_ready,
         candidate_identity_ready,
         candidate_identity_parity,
+        row_count_parity,
+        vector_top_k_overlap_ready,
+        fts_top_k_overlap_ready,
+        shadow_scan_filter_pushdown_ready,
+        shadow_scan_field_pruning_ready,
+        shadow_scan_field_summary_count,
         filter_pushdown_ready,
         filter_pushdown_field_summary_count,
         filter_pushdown_missing_required_fields,
-        blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
+        blocker_codes,
     }
 }
 
@@ -1976,6 +2036,11 @@ mod tests {
     use super::{
         nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
         nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
         REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES, SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
@@ -2212,6 +2277,66 @@ mod tests {
             summary["replacement_readiness_by_query_family"][0]["query_family"],
             "memory_lookup"
         );
+    }
+
+    #[test]
+    fn replacement_summary_accepts_search_candidate_trace_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_candidate_shadow_evidence"] = ready_search_candidate_trace_evidence();
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], true);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["evidence_source"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["primary_engine"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["shadow_engine"],
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["row_count_parity"],
+            true
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["shadow_scan_field_pruning_ready"],
+            true
+        );
+    }
+
+    #[test]
+    fn replacement_summary_rejects_weak_search_candidate_trace_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_candidate_shadow_evidence"] = ready_search_candidate_trace_evidence();
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_field_pruning_ready"] =
+            serde_json::json!(false);
+        bundle["search_candidate_shadow_evidence"]["shadow_scan_field_summary_count"] =
+            serde_json::json!(0);
+        bundle["search_candidate_shadow_evidence"]["blocker_codes"] =
+            serde_json::json!(["search_candidate_field_pruning_missing"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_candidate_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["shadow_scan_field_pruning_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_candidate_shadow_evidence"]["shadow_scan_field_summary_count"],
+            0
+        );
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "search_candidate_shadow_evidence_ready"));
     }
 
     #[test]
@@ -4018,6 +4143,36 @@ mod tests {
 
     fn scan_filter_fields_json() -> serde_json::Value {
         serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS)
+    }
+
+    fn ready_search_candidate_trace_evidence() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
+            "route": NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+            "evidence_source": NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
+            "present": true,
+            "ready": true,
+            "reported_ready": true,
+            "engine": skein::NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
+            "primary_engine": NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
+            "shadow_engine": NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
+            "row_count_parity": true,
+            "vector_top_k_overlap_ready": true,
+            "fts_top_k_overlap_ready": true,
+            "shadow_scan_present": true,
+            "shadow_scan_filter_pushdown_ready": true,
+            "shadow_scan_field_pruning_ready": true,
+            "shadow_scan_field_summary_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+            "shadow_scan_input_predicate_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+            "shadow_scan_pushed_predicate_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
+            "shadow_scan_residual_predicate_count": 0,
+            "shadow_scan_filtered_out_count": 4,
+            "shadow_scan_pruned_document_count": 2,
+            "shadow_scan_scanned_document_count": 2,
+            "shadow_scan_parse_error": null,
+            "shadow_scan_unsatisfiable": false,
+            "blocker_codes": []
+        })
     }
 
     fn scan_filter_field_summaries_json() -> serde_json::Value {
