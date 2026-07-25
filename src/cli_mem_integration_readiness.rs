@@ -26,6 +26,8 @@ const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 const SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
+const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
+const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
@@ -1965,8 +1967,7 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
         }
         if bool_path(route, &["primary_ready"]) != Some(true)
             || bool_path(route, &["query_runtime_ready"]) != Some(true)
-            || bool_path(route, &["shadow_compare_ready"]) != Some(true)
-            || str_path(route, &["shadow_compare_evidence_source"]) != Some("route_parity_evidence")
+            || !graph_route_shadow_compare_ready(route)
             || u64_path(route, &["query_report_count"]).is_none_or(|value| value == 0)
         {
             return false;
@@ -1987,6 +1988,25 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
         .iter()
         .all(|route| observed_routes.contains(route))
+}
+
+fn graph_route_shadow_compare_ready(route: &serde_json::Value) -> bool {
+    bool_path(route, &["shadow_compare_ready"]) == Some(true)
+        && str_path(route, &["shadow_compare_evidence_source"])
+            == Some(ROUTE_PARITY_EVIDENCE_SOURCE)
+        && str_path(route, &["shadow_compare", "source"]) == Some(ROUTE_PARITY_EVIDENCE_SOURCE)
+        && bool_path(route, &["shadow_compare", "ready"]) == Some(true)
+        && u64_path(route, &["shadow_compare", "matched_per_million"])
+            == Some(ROUTE_PARITY_FULL_MATCH_PER_MILLION)
+        && str_path(route, &["shadow_compare", "primary_engine"])
+            .is_some_and(is_legacy_graph_engine)
+        && str_path(route, &["shadow_compare", "shadow_engine"]) == Some("skein")
+        && string_array_path(route, &["shadow_compare", "blocker_codes"]).is_empty()
+        && string_array_path(route, &["shadow_compare", "computed_blocker_codes"]).is_empty()
+}
+
+fn is_legacy_graph_engine(engine: &str) -> bool {
+    matches!(engine, "kuzu" | "ladybug" | "kuzu/ladybug")
 }
 
 fn graph_route_query_report_ready(report: &serde_json::Value) -> bool {
@@ -3802,6 +3822,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_graph_route_profiles_with_weak_route_parity_detail() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["routes"][0]["shadow_compare"]["matched_per_million"] =
+            serde_json::json!(999999);
+        bundle["graph_route_readiness"]["routes"][0]["shadow_compare"]["primary_engine"] =
+            serde_json::json!("skein");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
+    }
+
+    #[test]
     fn rejects_graph_route_readiness_without_primary_route_coverage() {
         let mut bundle = ready_bundle();
         bundle["graph_route_readiness"]["route_primary_ready"] = serde_json::json!(false);
@@ -4632,6 +4679,15 @@ mod tests {
                     "route": route,
                     "shadow_compare_ready": true,
                     "shadow_compare_evidence_source": "route_parity_evidence",
+                    "shadow_compare": {
+                        "source": "route_parity_evidence",
+                        "ready": true,
+                        "matched_per_million": 1000000,
+                        "primary_engine": "kuzu",
+                        "shadow_engine": "skein",
+                        "blocker_codes": [],
+                        "computed_blocker_codes": []
+                    },
                     "primary_ready": true,
                     "query_runtime_ready": true,
                     "query_report_count": 1,

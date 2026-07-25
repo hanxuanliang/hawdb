@@ -8,6 +8,7 @@ const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
+const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
     "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
@@ -278,10 +279,7 @@ fn graph_route_parity_alignment_json(
             continue;
         };
         observed_routes.insert(route_name.to_string());
-        if bool_path(route, &["shadow_compare_ready"]) == Some(true)
-            && str_path(route, &["shadow_compare_evidence_source"])
-                == Some(ROUTE_PARITY_EVIDENCE_SOURCE)
-        {
+        if graph_route_shadow_compare_ready(route) {
             ready_routes.insert(route_name.to_string());
         } else {
             not_ready_routes.insert(route_name.to_string());
@@ -331,6 +329,25 @@ fn graph_route_parity_alignment_json(
         "observed_blocker_codes": string_set_path(graph_route_readiness, &["blocker_codes"]),
         "blocker_codes": graph_route_parity_blocker_codes(ready)
     })
+}
+
+fn graph_route_shadow_compare_ready(route: &serde_json::Value) -> bool {
+    bool_path(route, &["shadow_compare_ready"]) == Some(true)
+        && str_path(route, &["shadow_compare_evidence_source"])
+            == Some(ROUTE_PARITY_EVIDENCE_SOURCE)
+        && str_path(route, &["shadow_compare", "source"]) == Some(ROUTE_PARITY_EVIDENCE_SOURCE)
+        && bool_path(route, &["shadow_compare", "ready"]) == Some(true)
+        && u64_path(route, &["shadow_compare", "matched_per_million"])
+            == Some(ROUTE_PARITY_FULL_MATCH_PER_MILLION)
+        && str_path(route, &["shadow_compare", "primary_engine"])
+            .is_some_and(is_legacy_graph_engine)
+        && str_path(route, &["shadow_compare", "shadow_engine"]) == Some("skein")
+        && string_set_path(route, &["shadow_compare", "blocker_codes"]).is_empty()
+        && string_set_path(route, &["shadow_compare", "computed_blocker_codes"]).is_empty()
+}
+
+fn is_legacy_graph_engine(engine: &str) -> bool {
+    matches!(engine, "kuzu" | "ladybug" | "kuzu/ladybug")
 }
 
 fn graph_route_parity_blocker_codes(ready: bool) -> Vec<&'static str> {
@@ -965,6 +982,33 @@ mod tests {
         );
     }
 
+    #[test]
+    fn generated_bundle_recomputes_graph_route_parity_identity() {
+        let mut inputs = ready_inputs();
+        inputs.graph_route_readiness.as_mut().unwrap()["routes"][0]["shadow_compare"]
+            ["matched_per_million"] = serde_json::json!(999999);
+        inputs.graph_route_readiness.as_mut().unwrap()["routes"][0]["shadow_compare"]
+            ["primary_engine"] = serde_json::json!("skein");
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["graph_route_parity_alignment"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            bundle["graph_route_parity_alignment"]["not_ready_routes"],
+            serde_json::json!(["/graph/overview"])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert!(readiness["failed_checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|check| check == "graph_route_parity_alignment"));
+    }
+
     fn ready_inputs() -> IntegrationBundleInputs {
         IntegrationBundleInputs {
             require_ready: false,
@@ -1161,6 +1205,15 @@ mod tests {
                         "route": route,
                         "shadow_compare_ready": true,
                         "shadow_compare_evidence_source": "route_parity_evidence",
+                        "shadow_compare": {
+                            "source": "route_parity_evidence",
+                            "ready": true,
+                            "matched_per_million": 1000000,
+                            "primary_engine": "kuzu",
+                            "shadow_engine": "skein",
+                            "blocker_codes": [],
+                            "computed_blocker_codes": []
+                        },
                         "primary_ready": true,
                         "query_runtime_ready": true,
                         "query_report_count": 1,
