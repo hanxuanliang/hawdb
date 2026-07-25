@@ -1,4 +1,8 @@
-use skein::{Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL};
+use skein::{
+    Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+};
+use std::collections::BTreeSet;
 use std::path::Path;
 
 const NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str = "skein-nowledge-query-runtime-preflight-v1";
@@ -562,6 +566,7 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 u64_path(&query_runtime_preflight, &["probe_count"]).is_some_and(|value| value > 0),
                 query_runtime_preflight_counts_match(&query_runtime_preflight),
                 u64_path(&query_runtime_preflight, &["failed_probe_count"]) == Some(0),
+                query_runtime_preflight_route_coverage_ready(&query_runtime_preflight),
                 query_runtime_preflight_probe_details_ready(&query_runtime_preflight),
             ],
             [
@@ -571,6 +576,7 @@ fn nowledge_previous_wrapper_preflight_check_json(
                 "query_runtime_preflight.probe_count",
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
+                "query_runtime_preflight.required_routes_covered",
                 "query_runtime_preflight.probes",
             ],
             blocker_codes(
@@ -1317,6 +1323,29 @@ fn query_runtime_preflight_probe_details_ready(value: &serde_json::Value) -> boo
     probes.iter().all(query_runtime_preflight_probe_ready)
 }
 
+fn query_runtime_preflight_route_coverage_ready(value: &serde_json::Value) -> bool {
+    let Some(probes) = value
+        .get("probes")
+        .and_then(serde_json::Value::as_array)
+        .filter(|probes| !probes.is_empty())
+    else {
+        return false;
+    };
+    let observed_routes = probes
+        .iter()
+        .filter_map(|probe| str_path(probe, &["route"]))
+        .collect::<BTreeSet<_>>();
+    u64_path(value, &["required_route_count"])
+        == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && u64_path(value, &["covered_route_count"])
+            == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+        && bool_path(value, &["required_routes_covered"]) == Some(true)
+        && empty_array_path(value, &["missing_required_routes"])
+        && REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .all(|route| observed_routes.contains(route))
+}
+
 fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
     bool_path(probe, &["ready"]) == Some(true)
         && bool_path(probe, &["success"]) == Some(true)
@@ -1419,6 +1448,7 @@ mod tests {
         check_by_name, nowledge_previous_wrapper_preflight_check_json,
         run_nowledge_previous_wrapper_preflight_check, PreviousWrapperPreflightCheckInputs,
     };
+    use skein::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -1536,8 +1566,16 @@ mod tests {
         );
         assert_release_summary_field(summary, "query_runtime_preflight_ready", true);
         assert_release_summary_field(summary, "query_runtime_preflight_database_opened", true);
-        assert_release_summary_field(summary, "query_runtime_preflight_probe_count", 1);
-        assert_release_summary_field(summary, "query_runtime_preflight_passed_probe_count", 1);
+        assert_release_summary_field(
+            summary,
+            "query_runtime_preflight_probe_count",
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        );
+        assert_release_summary_field(
+            summary,
+            "query_runtime_preflight_passed_probe_count",
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        );
         assert_release_summary_field(summary, "query_runtime_preflight_failed_probe_count", 0);
         assert_release_summary_field(summary, "library_readiness_ready", true);
         assert_release_summary_field(summary, "library_readiness_ready_area_count", 7);
@@ -2036,6 +2074,25 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_rejects_query_runtime_preflight_without_route_coverage() {
+        let mut inputs = ready_inputs();
+        let preflight = inputs.query_runtime_preflight.as_mut().unwrap();
+        preflight["probes"].as_array_mut().unwrap().pop();
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        assert_eq!(
+            check_by_name(&report, "query_runtime_preflight")["failed_evidence_fields"],
+            serde_json::json!(["query_runtime_preflight.required_routes_covered"])
+        );
+    }
+
+    #[test]
     fn preflight_check_requires_replacement_dual_engine_consistency() {
         let mut inputs = ready_inputs();
         let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
@@ -2256,62 +2313,74 @@ mod tests {
     }
 
     fn ready_query_runtime_preflight() -> serde_json::Value {
+        let probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| ready_query_runtime_preflight_probe(route))
+            .collect::<Vec<_>>();
         serde_json::json!({
             "protocol": "skein-nowledge-query-runtime-preflight-v1",
             "ready": true,
             "database_opened": true,
-            "probe_count": 1,
-            "passed_probe_count": 1,
+            "probe_count": probes.len(),
+            "passed_probe_count": probes.len(),
             "failed_probe_count": 0,
+            "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "missing_required_routes": [],
+            "required_routes_covered": true,
             "blocker_codes": [],
             "failed_checks": [],
-            "probes": [
-                {
-                    "name": "memory_lookup",
-                    "query_family": "memory_lookup",
-                    "ready": true,
-                    "success": true,
-                    "output_row_count": 1,
-                    "selected_plan_fingerprint": "ProjectExec(IndexNodeSeek)",
-                    "selected_plan_operator_counts": {
-                        "IndexNodeSeek": 1,
-                        "ProjectExec": 1
-                    },
-                    "selected_plan_class_counts": {
-                        "access": 1,
-                        "relational": 1
-                    },
-                    "optimizer_decision_count": 2,
-                    "plan_cache_lookup": "miss",
-                    "plan_cache": {
-                        "lookup": "miss",
-                        "bypass_reason": null,
-                        "cacheable": true,
-                        "hit": false,
-                        "miss": true,
-                        "bypassed": false
-                    },
-                    "execution_profile": {
-                        "scan_pruning_report_count": 1,
-                        "pruned_scan_count": 1,
-                        "scan_pruning_reports": [
-                            {
-                                "label_id": 1,
-                                "strategy": {
-                                    "kind": "property_eq",
-                                    "property": "id"
-                                },
-                                "pruned": true,
-                                "exact_empty": false,
-                                "candidate_count_before_filter": 1,
-                                "output_count": 1,
-                                "filtered_out_count": 0
-                            }
-                        ]
-                    },
-                    "blocker_codes": []
-                }
-            ]
+            "probes": probes
+        })
+    }
+
+    fn ready_query_runtime_preflight_probe(route: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": format!("probe:{route}"),
+            "route": route,
+            "query_family": "memory_lookup",
+            "ready": true,
+            "success": true,
+            "output_row_count": 1,
+            "selected_plan_fingerprint": "ProjectExec(IndexNodeSeek)",
+            "selected_plan_operator_counts": {
+                "IndexNodeSeek": 1,
+                "ProjectExec": 1
+            },
+            "selected_plan_class_counts": {
+                "access": 1,
+                "relational": 1
+            },
+            "optimizer_decision_count": 2,
+            "plan_cache_lookup": "miss",
+            "plan_cache": {
+                "lookup": "miss",
+                "bypass_reason": null,
+                "cacheable": true,
+                "hit": false,
+                "miss": true,
+                "bypassed": false
+            },
+            "execution_profile": {
+                "scan_pruning_report_count": 1,
+                "pruned_scan_count": 1,
+                "scan_pruning_reports": [
+                    {
+                        "label_id": 1,
+                        "strategy": {
+                            "kind": "property_eq",
+                            "property": "id"
+                        },
+                        "pruned": true,
+                        "exact_empty": false,
+                        "candidate_count_before_filter": 1,
+                        "output_count": 1,
+                        "filtered_out_count": 0
+                    }
+                ]
+            },
+            "blocker_codes": []
         })
     }
 

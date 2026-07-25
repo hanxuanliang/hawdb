@@ -1,5 +1,7 @@
-use skein::{Database, DatabaseConfig, Result, SkeinError, Value};
-use std::collections::BTreeMap;
+use skein::{
+    Database, DatabaseConfig, Result, SkeinError, Value, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str = "skein-nowledge-query-runtime-preflight-v1";
@@ -65,6 +67,7 @@ fn query_runtime_preflight_json(
     database_path: &str,
     probes: &[QueryRuntimeProbe],
 ) -> serde_json::Value {
+    let route_coverage = query_runtime_route_coverage(probes);
     let mut db = match Database::open_with_config(
         database_path,
         DatabaseConfig {
@@ -81,7 +84,16 @@ fn query_runtime_preflight_json(
                 "probe_count": probes.len(),
                 "passed_probe_count": 0,
                 "failed_probe_count": probes.len(),
-                "blocker_codes": ["database_open_failed"],
+                "required_route_count": route_coverage.required_route_count,
+                "covered_route_count": route_coverage.covered_route_count,
+                "covered_routes": route_coverage.covered_routes,
+                "missing_required_routes": route_coverage.missing_required_routes,
+                "required_routes_covered": route_coverage.required_routes_covered,
+                "blocker_codes": database_open_blocker_codes(
+                    probes.len(),
+                    probes.len(),
+                    route_coverage.required_routes_covered,
+                ),
                 "error_class": error_class(&error),
                 "probes": [],
             });
@@ -97,7 +109,11 @@ fn query_runtime_preflight_json(
         .filter(|probe| probe.get("ready").and_then(serde_json::Value::as_bool) == Some(true))
         .count();
     let failed_probe_count = probe_reports.len().saturating_sub(passed_probe_count);
-    let blocker_codes = preflight_blocker_codes(probes.len(), failed_probe_count);
+    let blocker_codes = preflight_blocker_codes(
+        probes.len(),
+        failed_probe_count,
+        route_coverage.required_routes_covered,
+    );
 
     serde_json::json!({
         "protocol": QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
@@ -106,9 +122,47 @@ fn query_runtime_preflight_json(
         "probe_count": probes.len(),
         "passed_probe_count": passed_probe_count,
         "failed_probe_count": failed_probe_count,
+        "required_route_count": route_coverage.required_route_count,
+        "covered_route_count": route_coverage.covered_route_count,
+        "covered_routes": route_coverage.covered_routes,
+        "missing_required_routes": route_coverage.missing_required_routes,
+        "required_routes_covered": route_coverage.required_routes_covered,
         "blocker_codes": blocker_codes,
         "probes": probe_reports,
     })
+}
+
+#[derive(Debug)]
+struct QueryRuntimeRouteCoverage {
+    required_route_count: usize,
+    covered_route_count: usize,
+    covered_routes: Vec<&'static str>,
+    missing_required_routes: Vec<&'static str>,
+    required_routes_covered: bool,
+}
+
+fn query_runtime_route_coverage(probes: &[QueryRuntimeProbe]) -> QueryRuntimeRouteCoverage {
+    let observed_routes = probes
+        .iter()
+        .filter_map(|probe| probe.route.as_deref())
+        .collect::<BTreeSet<_>>();
+    let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| observed_routes.contains(route))
+        .collect::<Vec<_>>();
+    let missing_required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !observed_routes.contains(route))
+        .collect::<Vec<_>>();
+    QueryRuntimeRouteCoverage {
+        required_route_count: REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        covered_route_count: covered_routes.len(),
+        covered_routes,
+        required_routes_covered: missing_required_routes.is_empty(),
+        missing_required_routes,
+    }
 }
 
 fn run_probe(db: &mut Database, probe: &QueryRuntimeProbe) -> serde_json::Value {
@@ -182,7 +236,11 @@ fn run_probe(db: &mut Database, probe: &QueryRuntimeProbe) -> serde_json::Value 
     }
 }
 
-fn preflight_blocker_codes(probe_count: usize, failed_probe_count: usize) -> Vec<&'static str> {
+fn preflight_blocker_codes(
+    probe_count: usize,
+    failed_probe_count: usize,
+    required_routes_covered: bool,
+) -> Vec<&'static str> {
     let mut blockers = Vec::new();
     if probe_count == 0 {
         blockers.push("query_runtime_probes_missing");
@@ -190,6 +248,23 @@ fn preflight_blocker_codes(probe_count: usize, failed_probe_count: usize) -> Vec
     if failed_probe_count > 0 {
         blockers.push("query_runtime_probe_failed");
     }
+    if !required_routes_covered {
+        blockers.push("query_runtime_route_coverage_missing");
+    }
+    blockers
+}
+
+fn database_open_blocker_codes(
+    probe_count: usize,
+    failed_probe_count: usize,
+    required_routes_covered: bool,
+) -> Vec<&'static str> {
+    let mut blockers = vec!["database_open_failed"];
+    blockers.extend(preflight_blocker_codes(
+        probe_count,
+        failed_probe_count,
+        required_routes_covered,
+    ));
     blockers
 }
 
@@ -420,7 +495,7 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use super::run_nowledge_query_runtime_preflight;
-    use skein::Database;
+    use skein::{Database, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES};
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -436,23 +511,24 @@ mod tests {
         db.query("CREATE (:Memory {id: 'mem-b', kind: 'task', title: 'B'})")
             .unwrap();
         drop(db);
+        let probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| {
+                serde_json::json!({
+                    "name": format!("memory-by-kind:{route}"),
+                    "route": route,
+                    "query_family": "memory_lookup",
+                    "cypher": "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.title AS title",
+                    "parameters": {"kind": "note"},
+                    "require_scan_pruning": true,
+                    "require_pruned": true,
+                    "max_output_rows": 1
+                })
+            })
+            .collect::<Vec<_>>();
         std::fs::write(
             &probe_path,
-            serde_json::json!({
-                "probes": [
-                    {
-                        "name": "memory-by-kind",
-                        "route": "node_details",
-                        "query_family": "memory_lookup",
-                        "cypher": "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.title AS title",
-                        "parameters": {"kind": "note"},
-                        "require_scan_pruning": true,
-                        "require_pruned": true,
-                        "max_output_rows": 1
-                    }
-                ]
-            })
-            .to_string(),
+            serde_json::json!({ "probes": probes }).to_string(),
         )
         .unwrap();
 
@@ -474,8 +550,24 @@ mod tests {
             "skein-nowledge-query-runtime-preflight-v1"
         );
         assert_eq!(report["ready"], true);
-        assert_eq!(report["probe_count"], 1);
-        assert_eq!(report["passed_probe_count"], 1);
+        assert_eq!(
+            report["probe_count"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(
+            report["passed_probe_count"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(
+            report["required_route_count"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(
+            report["covered_route_count"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(report["required_routes_covered"], true);
+        assert_eq!(report["missing_required_routes"], serde_json::json!([]));
         assert_eq!(report["probes"][0]["ready"], true);
         assert_eq!(report["probes"][0]["output_row_count"], 1);
         assert_eq!(
@@ -538,7 +630,10 @@ mod tests {
         assert_eq!(report["ready"], false);
         assert_eq!(
             report["blocker_codes"],
-            serde_json::json!(["query_runtime_probes_missing"])
+            serde_json::json!([
+                "query_runtime_probes_missing",
+                "query_runtime_route_coverage_missing"
+            ])
         );
         std::fs::remove_dir_all(root).unwrap();
     }

@@ -760,62 +760,73 @@ mod tests {
     }
 
     fn ready_query_runtime_preflight() -> serde_json::Value {
+        let probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| ready_query_runtime_preflight_probe(route))
+            .collect::<Vec<_>>();
         serde_json::json!({
             "protocol": "skein-nowledge-query-runtime-preflight-v1",
             "ready": true,
             "database_opened": true,
-            "probe_count": 1,
-            "passed_probe_count": 1,
+            "probe_count": probes.len(),
+            "passed_probe_count": probes.len(),
             "failed_probe_count": 0,
+            "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "missing_required_routes": [],
+            "required_routes_covered": true,
             "blocker_codes": [],
-            "probes": [
-                {
-                    "name": "memory-lookup",
-                    "route": "/graph/node-details/{node_id}",
-                    "query_family": "memory_lookup",
-                    "ready": true,
-                    "success": true,
-                    "output_row_count": 1,
-                    "selected_plan_fingerprint": "IndexNodeSeek(1:m:6:Memory)",
-                    "selected_plan_operator_counts": {
-                        "IndexNodeSeek": 1,
-                        "ProjectExec": 1
-                    },
-                    "selected_plan_class_counts": {
-                        "access": 1,
-                        "relational": 1
-                    },
-                    "optimizer_decision_count": 2,
-                    "plan_cache_lookup": "miss",
-                    "plan_cache": {
-                        "lookup": "miss",
-                        "bypass_reason": null,
-                        "cacheable": true,
-                        "hit": false,
-                        "miss": true,
-                        "bypassed": false
-                    },
-                    "execution_profile": {
-                        "scan_pruning_report_count": 1,
-                        "pruned_scan_count": 1,
-                        "scan_pruning_reports": [
-                            {
-                                "label_id": 1,
-                                "strategy": {
-                                    "kind": "property_eq",
-                                    "property": "id"
-                                },
-                                "pruned": true,
-                                "exact_empty": false,
-                                "candidate_count_before_filter": 1,
-                                "output_count": 1,
-                                "filtered_out_count": 0
-                            }
-                        ]
-                    },
-                    "blocker_codes": []
-                }
-            ]
+            "probes": probes
+        })
+    }
+
+    fn ready_query_runtime_preflight_probe(route: &str) -> serde_json::Value {
+        serde_json::json!({
+            "name": format!("probe:{route}"),
+            "route": route,
+            "query_family": "memory_lookup",
+            "ready": true,
+            "success": true,
+            "output_row_count": 1,
+            "selected_plan_fingerprint": "IndexNodeSeek(1:m:6:Memory)",
+            "selected_plan_operator_counts": {
+                "IndexNodeSeek": 1,
+                "ProjectExec": 1
+            },
+            "selected_plan_class_counts": {
+                "access": 1,
+                "relational": 1
+            },
+            "optimizer_decision_count": 2,
+            "plan_cache_lookup": "miss",
+            "plan_cache": {
+                "lookup": "miss",
+                "bypass_reason": null,
+                "cacheable": true,
+                "hit": false,
+                "miss": true,
+                "bypassed": false
+            },
+            "execution_profile": {
+                "scan_pruning_report_count": 1,
+                "pruned_scan_count": 1,
+                "scan_pruning_reports": [
+                    {
+                        "label_id": 1,
+                        "strategy": {
+                            "kind": "property_eq",
+                            "property": "id"
+                        },
+                        "pruned": true,
+                        "exact_empty": false,
+                        "candidate_count_before_filter": 1,
+                        "output_count": 1,
+                        "filtered_out_count": 0
+                    }
+                ]
+            },
+            "blocker_codes": []
         })
     }
 
