@@ -445,7 +445,10 @@ kind emits `query_scan_pruning_strategy_missing`. Raw Cypher and parameters are
 not copied into readiness reports by default.
 Readiness also requires `shadow_compare_evidence_source` to be
 `route_parity_evidence`, so a hand-authored route inventory cannot become
-production shadow parity evidence by setting `shadow_compare_ready` alone.
+production shadow parity evidence by setting `shadow_compare_ready` alone. The
+route readiness compiler also recomputes the nested `shadow_compare` identity
+fields and propagates its blocker codes, so stale or manually weakened route
+evidence remains fail-closed.
 
 ## 10. Run Query Runtime Preflight
 

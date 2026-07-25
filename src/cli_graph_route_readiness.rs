@@ -8,6 +8,7 @@ use std::path::Path;
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 const ROUTE_PARITY_EVIDENCE_SOURCE: &str = "route_parity_evidence";
+const ROUTE_PARITY_FULL_MATCH_PER_MILLION: u64 = 1_000_000;
 
 pub fn nowledge_graph_route_readiness_usage() -> String {
     "nowledge-graph-route-readiness requires [--require-ready] <route-evidence-json>".to_string()
@@ -275,6 +276,7 @@ struct RouteEvidence {
     route: String,
     shadow_compare_ready: bool,
     shadow_compare_evidence_source: Option<String>,
+    shadow_compare: RouteShadowCompareEvidence,
     primary_ready: bool,
     blocker_codes: Vec<String>,
     query_reports: Vec<QueryRuntimeReport>,
@@ -297,6 +299,7 @@ impl RouteEvidence {
             "route": self.route,
             "shadow_compare_ready": self.shadow_compare_ready,
             "shadow_compare_evidence_source": self.shadow_compare_evidence_source,
+            "shadow_compare": self.shadow_compare.json(),
             "primary_ready": self.primary_ready,
             "query_runtime_ready": query_runtime_ready,
             "query_report_count": query_report_count,
@@ -304,6 +307,93 @@ impl RouteEvidence {
             "blocker_codes": self.blocker_codes,
         })
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteShadowCompareEvidence {
+    present: bool,
+    source: Option<String>,
+    ready: Option<bool>,
+    matched_per_million: Option<u64>,
+    primary_engine: Option<String>,
+    shadow_engine: Option<String>,
+    blocker_codes: Vec<String>,
+    computed_blocker_codes: Vec<String>,
+}
+
+impl RouteShadowCompareEvidence {
+    fn parse(value: &serde_json::Value) -> Self {
+        let Some(shadow_compare) = value_path(value, &["shadow_compare"]) else {
+            return Self {
+                present: false,
+                source: None,
+                ready: None,
+                matched_per_million: None,
+                primary_engine: None,
+                shadow_engine: None,
+                blocker_codes: Vec::new(),
+                computed_blocker_codes: vec!["route_shadow_compare_detail_missing".to_string()],
+            };
+        };
+        let mut parsed = Self {
+            present: true,
+            source: str_path(shadow_compare, &["source"]).map(str::to_string),
+            ready: bool_path(shadow_compare, &["ready"]),
+            matched_per_million: u64_path(shadow_compare, &["matched_per_million"]),
+            primary_engine: str_path(shadow_compare, &["primary_engine"]).map(str::to_string),
+            shadow_engine: str_path(shadow_compare, &["shadow_engine"]).map(str::to_string),
+            blocker_codes: string_array_path(shadow_compare, &["blocker_codes"]),
+            computed_blocker_codes: Vec::new(),
+        };
+        parsed.computed_blocker_codes = parsed.compute_blocker_codes();
+        parsed
+    }
+
+    fn ready(&self) -> bool {
+        self.computed_blocker_codes.is_empty()
+    }
+
+    fn compute_blocker_codes(&self) -> Vec<String> {
+        let mut blockers = BTreeSet::new();
+        if self.source.as_deref() != Some(ROUTE_PARITY_EVIDENCE_SOURCE) {
+            blockers.insert("route_shadow_compare_detail_source_mismatch".to_string());
+        }
+        if self.ready != Some(true) {
+            blockers.insert("route_shadow_compare_detail_not_ready".to_string());
+        }
+        if self.matched_per_million != Some(ROUTE_PARITY_FULL_MATCH_PER_MILLION) {
+            blockers.insert("route_parity_matched_per_million_not_full".to_string());
+        }
+        if !self
+            .primary_engine
+            .as_deref()
+            .is_some_and(is_legacy_graph_engine)
+        {
+            blockers.insert("route_parity_primary_engine_mismatch".to_string());
+        }
+        if self.shadow_engine.as_deref() != Some("skein") {
+            blockers.insert("route_parity_shadow_engine_mismatch".to_string());
+        }
+        blockers.extend(self.blocker_codes.iter().cloned());
+        blockers.into_iter().collect()
+    }
+
+    fn json(self) -> serde_json::Value {
+        serde_json::json!({
+            "present": self.present,
+            "source": self.source,
+            "ready": self.ready,
+            "matched_per_million": self.matched_per_million,
+            "primary_engine": self.primary_engine,
+            "shadow_engine": self.shadow_engine,
+            "blocker_codes": self.blocker_codes,
+            "computed_blocker_codes": self.computed_blocker_codes,
+        })
+    }
+}
+
+fn is_legacy_graph_engine(engine: &str) -> bool {
+    matches!(engine, "kuzu" | "ladybug" | "kuzu/ladybug")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -537,6 +627,7 @@ fn parse_route(value: &serde_json::Value) -> Result<RouteEvidence> {
         shadow_compare_ready: bool_path(value, &["shadow_compare_ready"]) == Some(true),
         shadow_compare_evidence_source: str_path(value, &["shadow_compare_evidence_source"])
             .map(str::to_string),
+        shadow_compare: RouteShadowCompareEvidence::parse(value),
         primary_ready: bool_path(value, &["primary_ready"]) == Some(true),
         blocker_codes: string_array_path(value, &["blocker_codes"]),
         query_reports: value_path(value, &["query_reports"])
@@ -578,6 +669,10 @@ fn route_primary_blocker_codes(
         if route.shadow_compare_evidence_source.as_deref() != Some(ROUTE_PARITY_EVIDENCE_SOURCE) {
             blockers.insert("route_shadow_compare_evidence_missing".to_string());
         }
+        if !route.shadow_compare.ready() {
+            blockers.insert("route_shadow_compare_detail_not_ready".to_string());
+        }
+        blockers.extend(route.shadow_compare.computed_blocker_codes.iter().cloned());
         if !route.primary_ready {
             blockers.insert("route_primary_not_ready".to_string());
         }
@@ -838,6 +933,41 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_recomputes_shadow_compare_detail_identity() {
+        let mut routes = ready_routes();
+        routes[0]["shadow_compare"] = serde_json::json!({
+            "source": "route_parity_evidence",
+            "ready": true,
+            "matched_per_million": 999999,
+            "primary_engine": "skein",
+            "shadow_engine": "kuzu",
+            "blocker_codes": []
+        });
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_parity_matched_per_million_not_full"));
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_parity_primary_engine_mismatch"));
+        assert_eq!(
+            readiness["routes"][0]["shadow_compare"]["computed_blocker_codes"],
+            serde_json::json!([
+                "route_parity_matched_per_million_not_full",
+                "route_parity_primary_engine_mismatch",
+                "route_parity_shadow_engine_mismatch"
+            ])
+        );
+    }
+
+    #[test]
     fn route_readiness_fails_closed_without_query_runtime_reports() {
         let mut routes = ready_routes();
         routes[0]["query_reports"] = serde_json::json!([]);
@@ -1080,6 +1210,14 @@ mod tests {
             "route": route,
             "shadow_compare_ready": true,
             "shadow_compare_evidence_source": "route_parity_evidence",
+            "shadow_compare": {
+                "source": "route_parity_evidence",
+                "ready": true,
+                "matched_per_million": 1000000,
+                "primary_engine": "kuzu",
+                "shadow_engine": "skein",
+                "blocker_codes": []
+            },
             "primary_ready": true,
             "query_reports": [ready_query_report()],
             "blocker_codes": []
