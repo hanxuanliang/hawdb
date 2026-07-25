@@ -7100,14 +7100,14 @@ impl Database {
     }
 
     pub fn knowledge_entity(&self, request: &KnowledgeEntityRequest) -> KnowledgeEntityOutput {
-        knowledge_entity_for(&self.catalog, &self.store, request)
+        knowledge_entity_via_query_runtime(self, request)
     }
 
     pub fn knowledge_entity_batch(
         &self,
         request: &KnowledgeEntityBatchRequest,
     ) -> KnowledgeEntityBatchOutput {
-        knowledge_entity_batch_for(&self.catalog, &self.store, request)
+        knowledge_entity_batch_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memory_entities(
@@ -7296,14 +7296,14 @@ impl Database {
         &self,
         request: &KnowledgeScopedEntityRequest,
     ) -> KnowledgeEntityOutput {
-        knowledge_scoped_entity_for(&self.catalog, &self.store, request)
+        knowledge_scoped_entity_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_entity_batch(
         &self,
         request: &KnowledgeScopedEntityBatchRequest,
     ) -> KnowledgeEntityBatchOutput {
-        knowledge_scoped_entity_batch_for(&self.catalog, &self.store, request)
+        knowledge_scoped_entity_batch_via_query_runtime(self, request)
     }
 
     pub fn create_knowledge_entity(
@@ -9580,6 +9580,25 @@ fn knowledge_entity_for(
     }
 }
 
+fn knowledge_entity_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeEntityRequest,
+) -> KnowledgeEntityOutput {
+    let output = knowledge_scoped_entity_batch_via_query_runtime(
+        db,
+        &KnowledgeScopedEntityBatchRequest {
+            entities: vec![request.clone()],
+            metadata_filters: BTreeMap::new(),
+        },
+    );
+    let graph_commit_epoch = output.graph_commit_epoch;
+    let entity = output.entities.into_iter().next().flatten();
+    KnowledgeEntityOutput {
+        graph_commit_epoch,
+        entity,
+    }
+}
+
 fn knowledge_scoped_entity_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -9598,6 +9617,38 @@ fn knowledge_scoped_entity_for(
         graph_commit_epoch: store.commit_epoch(),
         entity,
     }
+}
+
+fn knowledge_scoped_entity_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeScopedEntityRequest,
+) -> KnowledgeEntityOutput {
+    let output = knowledge_scoped_entity_batch_via_query_runtime(
+        db,
+        &KnowledgeScopedEntityBatchRequest {
+            entities: vec![request.entity.clone()],
+            metadata_filters: request.metadata_filters.clone(),
+        },
+    );
+    let graph_commit_epoch = output.graph_commit_epoch;
+    let entity = output.entities.into_iter().next().flatten();
+    KnowledgeEntityOutput {
+        graph_commit_epoch,
+        entity,
+    }
+}
+
+fn knowledge_entity_batch_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeEntityBatchRequest,
+) -> KnowledgeEntityBatchOutput {
+    knowledge_scoped_entity_batch_via_query_runtime(
+        db,
+        &KnowledgeScopedEntityBatchRequest {
+            entities: request.entities.clone(),
+            metadata_filters: BTreeMap::new(),
+        },
+    )
 }
 
 fn knowledge_entity_batch_for(
@@ -9647,6 +9698,95 @@ fn knowledge_scoped_entity_batch_for(
     }
     KnowledgeEntityBatchOutput {
         graph_commit_epoch: store.commit_epoch(),
+        entities,
+        found_count,
+        missing_count,
+        filtered_out_count,
+    }
+}
+
+fn knowledge_scoped_entity_batch_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeScopedEntityBatchRequest,
+) -> KnowledgeEntityBatchOutput {
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut entities_by_label = BTreeMap::<String, BTreeSet<String>>::new();
+    for entity in &request.entities {
+        if entity.external_id.is_empty()
+            || validate_cypher_identifier(&entity.label, "label").is_err()
+        {
+            continue;
+        }
+        entities_by_label
+            .entry(entity.label.clone())
+            .or_default()
+            .insert(entity.external_id.clone());
+    }
+
+    let mut found = BTreeMap::<(String, String), KnowledgeEntity>::new();
+    for (label, external_ids) in entities_by_label {
+        let node_ids = external_ids
+            .iter()
+            .filter_map(|external_id| external_id.parse::<i64>().ok())
+            .filter(|node_id| *node_id >= 0)
+            .map(Value::Int)
+            .collect::<Vec<_>>();
+        let query = format!(
+            "MATCH (n:{label}) WHERE n.id IN $external_ids OR id(n) IN $node_ids RETURN n AS entity"
+        );
+        let parameters = BTreeMap::from([
+            (
+                "external_ids".to_string(),
+                Value::List(external_ids.into_iter().map(Value::String).collect()),
+            ),
+            ("node_ids".to_string(), Value::List(node_ids)),
+        ]);
+        let Ok(output) = db.query_read_only_with_params_bounded(&query, &parameters, None) else {
+            continue;
+        };
+        for row in &output.rows {
+            let Some(entity) = row.get("entity").and_then(knowledge_entity_from_value) else {
+                continue;
+            };
+            let Some(external_id) = entity.external_id.clone() else {
+                continue;
+            };
+            found.insert((label.clone(), external_id), entity);
+        }
+    }
+
+    let mut entities = Vec::with_capacity(request.entities.len());
+    let mut found_count = 0;
+    let mut missing_count = 0;
+    let mut filtered_out_count = 0;
+    for entity_request in &request.entities {
+        if let Some(entity) = found
+            .get(&(
+                entity_request.label.clone(),
+                entity_request.external_id.clone(),
+            ))
+            .filter(|entity| {
+                request.metadata_filters.is_empty()
+                    || knowledge_entity_matches_filters(entity, &request.metadata_filters)
+            })
+            .cloned()
+        {
+            found_count += 1;
+            entities.push(Some(entity));
+        } else if found.contains_key(&(
+            entity_request.label.clone(),
+            entity_request.external_id.clone(),
+        )) {
+            filtered_out_count += 1;
+            entities.push(None);
+        } else {
+            missing_count += 1;
+            entities.push(None);
+        }
+    }
+
+    KnowledgeEntityBatchOutput {
+        graph_commit_epoch,
         entities,
         found_count,
         missing_count,
@@ -28848,6 +28988,70 @@ fn knowledge_entity_from_node(catalog: &Catalog, node: &NodeRecord) -> Knowledge
         external_id: Some(projected_node_external_id(node)),
         properties: node.properties.clone(),
     }
+}
+
+fn knowledge_entity_from_value(value: &Value) -> Option<KnowledgeEntity> {
+    let Value::Map(values) = value else {
+        return None;
+    };
+    let node_id = values.get("_id").and_then(value_to_non_negative_u64)?;
+    let labels = values
+        .get("labels")
+        .and_then(value_to_string_list)
+        .unwrap_or_default();
+    let mut properties = values.clone();
+    properties.remove("_id");
+    properties.remove("labels");
+    let external_id = properties
+        .get("id")
+        .map(value_to_external_id)
+        .filter(|external_id| !external_id.is_empty())
+        .or_else(|| Some(node_id.to_string()));
+    Some(KnowledgeEntity {
+        node_id,
+        labels,
+        external_id,
+        properties,
+    })
+}
+
+fn knowledge_entity_matches_filters(
+    entity: &KnowledgeEntity,
+    metadata_filters: &BTreeMap<String, String>,
+) -> bool {
+    metadata_filters
+        .iter()
+        .all(|(key, value)| knowledge_entity_matches_filter_value(entity, key, value))
+}
+
+fn knowledge_entity_matches_filter_value(entity: &KnowledgeEntity, key: &str, value: &str) -> bool {
+    match key {
+        "kind" => search_kind_to_label(value)
+            .is_some_and(|label| entity.labels.iter().any(|node_label| node_label == label)),
+        "external_id" => entity.external_id.as_deref() == Some(value),
+        "source_id" => knowledge_entity_projection_source_id(entity).as_deref() == Some(value),
+        "space_id" => knowledge_entity_normalized_space_id(entity) == value,
+        _ => entity
+            .properties
+            .get(key)
+            .is_some_and(|property| value_to_external_id(property) == value),
+    }
+}
+
+fn knowledge_entity_normalized_space_id(entity: &KnowledgeEntity) -> String {
+    entity
+        .properties
+        .get("space_id")
+        .map(value_to_external_id)
+        .filter(|space_id| !space_id.is_empty())
+        .unwrap_or_else(|| "default".to_string())
+}
+
+fn knowledge_entity_projection_source_id(entity: &KnowledgeEntity) -> Option<String> {
+    ["source_id", "thread_id", "source"]
+        .into_iter()
+        .filter_map(|key| entity.properties.get(key).map(value_to_external_id))
+        .find(|source_id| !source_id.is_empty())
 }
 
 fn export_canonical_graph_snapshot_for(

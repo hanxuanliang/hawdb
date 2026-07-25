@@ -4265,6 +4265,52 @@ fn retrieves_knowledge_entity_batch_in_request_order() {
 }
 
 #[test]
+fn knowledge_entity_batch_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'cache_memory_1', title: 'First'})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'cache_memory_2', title: 'Second'})")
+        .unwrap();
+    let request = KnowledgeEntityBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "cache_memory_2".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "cache_missing".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "cache_memory_1".to_string(),
+            },
+        ],
+    };
+
+    let first = db.knowledge_entity_batch(&request);
+    let second = db.knowledge_entity_batch(&request);
+
+    assert_eq!(first, second);
+    assert_eq!(first.found_count, 2);
+    assert_eq!(first.missing_count, 1);
+    assert_eq!(
+        first.entities[0]
+            .as_ref()
+            .and_then(|entity| entity.external_id.as_deref()),
+        Some("cache_memory_2")
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn reads_memory_entities_for_nowledge_mentions_shapes() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'memory_1'})").unwrap();
@@ -7459,6 +7505,51 @@ fn scoped_knowledge_entity_batch_reports_filtered_and_missing_items() {
     );
     assert!(output.entities[1].is_none());
     assert!(output.entities[2].is_none());
+}
+
+#[test]
+fn scoped_knowledge_entity_batch_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'scoped_cache_memory_1', source_id: 'thread_1', space_id: ''})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'scoped_cache_memory_2', source_id: 'thread_2', space_id: 'default'})")
+        .unwrap();
+    let request = KnowledgeScopedEntityBatchRequest {
+        entities: vec![
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "scoped_cache_memory_1".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "scoped_cache_memory_2".to_string(),
+            },
+            KnowledgeEntityRequest {
+                label: "Memory".to_string(),
+                external_id: "scoped_cache_missing".to_string(),
+            },
+        ],
+        metadata_filters: BTreeMap::from([
+            ("source_id".to_string(), "thread_1".to_string()),
+            ("space_id".to_string(), "default".to_string()),
+        ]),
+    };
+
+    let first = db.knowledge_scoped_entity_batch(&request);
+    let second = db.knowledge_scoped_entity_batch(&request);
+
+    assert_eq!(first, second);
+    assert_eq!(first.found_count, 1);
+    assert_eq!(first.filtered_out_count, 1);
+    assert_eq!(first.missing_count, 1);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
 }
 
 #[test]
