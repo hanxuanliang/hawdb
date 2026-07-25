@@ -12,6 +12,7 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
+const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
 const SKEIN_NOWLEDGE_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-candidate-shadow-evidence";
 const SKEIN_NOWLEDGE_SEARCH_CANDIDATE_EVIDENCE_SOURCE: &str = "nmem-rust-bridge";
@@ -287,6 +288,14 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                         "protocol",
                     ],
                 ) == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL),
+                str_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "evidence_source",
+                    ],
+                ) == Some(SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE),
                 bool_path(
                     bundle,
                     &[
@@ -357,6 +366,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
                 "replacement_summary.search_projection_shadow_evidence.present",
                 "replacement_summary.search_projection_shadow_evidence.protocol",
+                "replacement_summary.search_projection_shadow_evidence.evidence_source",
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.document_count_parity",
                 "replacement_summary.search_projection_shadow_evidence.table_parity_ready",
@@ -1340,6 +1350,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_required",
                 "replacement_summary.search_projection_evidence.compressed_vector_projection_ready",
                 "replacement_summary.search_projection_shadow_evidence.protocol",
+                "replacement_summary.search_projection_shadow_evidence.evidence_source",
                 "replacement_summary.search_projection_shadow_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.blocker_codes",
             ],
@@ -1601,6 +1612,14 @@ fn replacement_summary_search_projection_ready(bundle: &serde_json::Value) -> bo
                 "protocol",
             ],
         ) != Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL)
+        || str_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "search_projection_shadow_evidence",
+                "evidence_source",
+            ],
+        ) != Some(SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE)
     {
         return false;
     }
@@ -2650,6 +2669,33 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn requires_search_projection_shadow_evidence_source() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["evidence_source"] =
+            serde_json::json!("manual-json");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_shadow_evidence.evidence_source"
             ])
         );
     }
@@ -3912,6 +3958,7 @@ mod tests {
                 },
                 "search_projection_shadow_evidence": {
                     "protocol": "skein-nowledge-search-projection-shadow-evidence",
+                    "evidence_source": "skein-rust-cli",
                     "present": true,
                     "ready": true,
                     "document_count_parity": true,

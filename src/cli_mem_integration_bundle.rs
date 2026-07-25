@@ -995,6 +995,7 @@ mod tests {
             },
             "search_projection_shadow_evidence": {
                 "protocol": "skein-nowledge-search-projection-shadow-evidence",
+                "evidence_source": "skein-rust-cli",
                 "present": true,
                 "ready": true,
                 "document_count_parity": true,

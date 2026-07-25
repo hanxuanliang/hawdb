@@ -36,6 +36,7 @@ const SKEIN_REQUIRED_SCAN_FILTER_FIELDS: &[&str] = &[
 
 const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
     "skein_search_projection_segment_descriptor_fields_missing";
+const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
 
 pub fn nowledge_search_projection_evidence_usage() -> String {
     "nowledge-search-projection-evidence requires [--require-ready] <search-projection-probe-json>"
@@ -425,6 +426,7 @@ pub fn nowledge_search_projection_shadow_evidence_json(
     let ready = blocker_codes.is_empty();
     serde_json::json!({
         "protocol": "skein-nowledge-search-projection-shadow-evidence",
+        "evidence_source": SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE,
         "ready": ready,
         "primary_engine": str_path(primary_probe, &["engine"]).unwrap_or("lancedb"),
         "shadow_engine": str_path(shadow_probe, &["engine"]).unwrap_or("skein"),
@@ -1231,6 +1233,7 @@ mod tests {
         let report = nowledge_search_projection_shadow_evidence_json(&primary, &shadow);
 
         assert_eq!(report["ready"], true);
+        assert_eq!(report["evidence_source"], "skein-rust-cli");
         assert_eq!(report["primary_ready"], true);
         assert_eq!(report["shadow_ready"], true);
         assert_eq!(report["document_count_parity"], true);
@@ -1247,7 +1250,7 @@ mod tests {
     }
 
     #[test]
-    fn search_projection_shadow_evidence_ignores_descriptor_state_for_predicate_parity() {
+    fn search_projection_shadow_evidence_keeps_predicate_parity_separate_from_readiness() {
         let mut primary = ready_probe();
         primary["predicate_pushdown"]["persisted_segment_descriptor_ready"] =
             serde_json::json!(false);
@@ -1255,9 +1258,14 @@ mod tests {
 
         let report = nowledge_search_projection_shadow_evidence_json(&primary, &shadow);
 
-        assert_eq!(report["ready"], true);
+        assert_eq!(report["ready"], false);
         assert_eq!(report["predicate_pushdown_parity"], true);
         assert_eq!(report["pushdown_evidence"]["ready"], true);
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "primary_not_ready"));
     }
 
     #[test]

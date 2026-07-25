@@ -8,6 +8,7 @@ const SKEIN_NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
 const SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-shadow-evidence";
+const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
 const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
@@ -211,6 +212,7 @@ pub fn nowledge_replacement_summary_json_with_options(
         },
         "search_projection_shadow_evidence": {
             "protocol": search_projection_shadow_evidence.protocol,
+            "evidence_source": search_projection_shadow_evidence.evidence_source,
             "present": search_projection_shadow_evidence.present,
             "ready": search_projection_shadow_evidence.ready,
             "primary_ready": search_projection_shadow_evidence.primary_ready,
@@ -518,6 +520,7 @@ struct SearchProjectionEvidenceSummary {
 
 struct SearchProjectionShadowEvidenceSummary<'a> {
     protocol: Option<String>,
+    evidence_source: Option<String>,
     present: bool,
     ready: bool,
     primary_ready: Option<bool>,
@@ -740,6 +743,8 @@ fn search_projection_shadow_evidence_summary(
     };
     let present = json_get_path(bundle, path).is_some();
     let protocol = json_get_str_path_from_dynamic(bundle, path, "protocol").map(str::to_string);
+    let evidence_source =
+        json_get_str_path_from_dynamic(bundle, path, "evidence_source").map(str::to_string);
     let primary_ready = json_get_bool_path_from_dynamic(bundle, path, "primary_ready");
     let shadow_ready = json_get_bool_path_from_dynamic(bundle, path, "shadow_ready");
     let document_count_parity =
@@ -763,6 +768,7 @@ fn search_projection_shadow_evidence_summary(
         search_projection_shadow_blocker_codes_with_pushdown(bundle, path, &pushdown_evidence);
     let ready = present
         && protocol.as_deref() == Some(SKEIN_NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL)
+        && evidence_source.as_deref() == Some(SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE)
         && primary_ready == Some(true)
         && shadow_ready == Some(true)
         && document_count_parity == Some(true)
@@ -774,6 +780,7 @@ fn search_projection_shadow_evidence_summary(
         && pushdown_ready == Some(true);
     SearchProjectionShadowEvidenceSummary {
         protocol,
+        evidence_source,
         present,
         ready,
         primary_ready,
@@ -1305,6 +1312,7 @@ fn nowledge_replacement_next_actions(
             "LanceDB/Skein search projection side-by-side evidence is missing or not ready",
             [
                 "search_projection_shadow_evidence.protocol",
+                "search_projection_shadow_evidence.evidence_source",
                 "search_projection_shadow_evidence.present",
                 "search_projection_shadow_evidence.ready",
                 "search_projection_shadow_evidence.primary_ready",
@@ -1822,6 +1830,10 @@ mod tests {
         );
         assert_eq!(summary["search_projection_shadow_evidence"]["ready"], true);
         assert_eq!(
+            summary["search_projection_shadow_evidence"]["evidence_source"],
+            "skein-rust-cli"
+        );
+        assert_eq!(
             summary["search_projection_shadow_evidence"]["primary_engine"],
             "lancedb"
         );
@@ -2179,6 +2191,34 @@ mod tests {
                         .unwrap()
                         .iter()
                         .any(|field| field == "search_projection_shadow_evidence.protocol")
+            }));
+    }
+
+    #[test]
+    fn replacement_summary_requires_search_projection_shadow_evidence_source() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_shadow_evidence"]["evidence_source"] =
+            serde_json::json!("manual-json");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["evidence_source"],
+            "manual-json"
+        );
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "run_search_projection_shadow_evidence"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| field == "search_projection_shadow_evidence.evidence_source")
             }));
     }
 
@@ -3185,6 +3225,7 @@ mod tests {
             },
             "search_projection_shadow_evidence": {
                 "protocol": "skein-nowledge-search-projection-shadow-evidence",
+                "evidence_source": "skein-rust-cli",
                 "ready": true,
                 "primary_engine": "lancedb",
                 "shadow_engine": "skein",
