@@ -435,8 +435,12 @@ duplicated, or stale route inventories are rejected at evidence generation time
 before the integration readiness compiler consumes them.
 Route query inventory can require scan pruning with `require_scan_pruning` and
 actual row reduction with `require_pruned`; missing or weak runtime evidence
-adds route blocker codes and keeps primary readiness fail-closed. Raw Cypher and
-parameters are not copied into readiness reports by default.
+adds route blocker codes and keeps primary readiness fail-closed. When scan
+pruning is required, `scan_pruning_report_count` must match the number of
+`scan_pruning_reports`, and each report must include `strategy.kind`. A mismatch
+emits `query_scan_pruning_report_count_mismatch`; a report without a strategy
+kind emits `query_scan_pruning_strategy_missing`. Raw Cypher and parameters are
+not copied into readiness reports by default.
 Readiness also requires `shadow_compare_evidence_source` to be
 `route_parity_evidence`, so a hand-authored route inventory cannot become
 production shadow parity evidence by setting `shadow_compare_ready` alone.
