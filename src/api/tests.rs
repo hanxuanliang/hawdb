@@ -16565,7 +16565,11 @@ fn typed_thread_compaction_link_persists_as_one_wal_batch_and_replays() {
 
 #[test]
 fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Thread A'})")
         .unwrap();
     db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b'})")
@@ -16582,13 +16586,12 @@ fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let output = db
-        .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
-            thread_id: "thread_a".to_string(),
-            identity_property: "id".to_string(),
-            limit: 0,
-        })
-        .unwrap();
+    let request = KnowledgeThreadCompactedMemoryListRequest {
+        thread_id: "thread_a".to_string(),
+        identity_property: "id".to_string(),
+        limit: 0,
+    };
+    let output = db.knowledge_thread_compacted_memories(&request).unwrap();
     assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
     assert!(output.found);
     assert_eq!(output.thread_id, "thread_a");
@@ -16673,6 +16676,14 @@ fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
     assert_eq!(output.rows[1].version, 1);
     assert!(!output.rows[1].is_crystal);
     assert_eq!(output.rows[1].extraction_method, "manual");
+
+    let stats = db.plan_cache_stats();
+    let repeated = db.knowledge_thread_compacted_memories(&request).unwrap();
+    assert_eq!(repeated, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 2);
 
     let by_logical_thread = db
         .knowledge_thread_compacted_memories(&KnowledgeThreadCompactedMemoryListRequest {
