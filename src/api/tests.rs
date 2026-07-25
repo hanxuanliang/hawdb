@@ -20467,6 +20467,45 @@ fn reads_pagerank_plan_counts_for_nowledge_shapes() {
 }
 
 #[test]
+fn pagerank_plan_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(32),
+        statement_summary_capacity: 32,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'pagerank-cache-memory-one', created_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'pagerank-cache-memory-two', updated_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'pagerank-cache-entity-one', created_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'pagerank-cache-entity-two', updated_at: 40})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'pagerank-cache-memory-one'}), (e:Entity {id: 'pagerank-cache-entity-one'}) CREATE (m)-[:MENTIONS {created_at: 50}]->(e)")
+        .unwrap();
+    db.query("MATCH (a:Entity {id: 'pagerank-cache-entity-one'}), (b:Entity {id: 'pagerank-cache-entity-two'}) CREATE (a)-[:RELATES_TO {updated_at: 60}]->(b)")
+        .unwrap();
+    db.query("MATCH (a:Memory {id: 'pagerank-cache-memory-one'}), (b:Memory {id: 'pagerank-cache-memory-two'}) CREATE (a)-[:MEMORY_RELATES_TO {status: 'active', created_at: 70}]->(b)")
+        .unwrap();
+    let request = KnowledgePageRankPlanRequest {
+        changed_since_epoch_nanos: Some(25),
+    };
+
+    let first = db.knowledge_pagerank_plan(&request);
+    let second = db.knowledge_pagerank_plan(&request);
+
+    assert_eq!(first, second);
+    assert_eq!(first.memory_node_count, 2);
+    assert_eq!(first.entity_node_count, 2);
+    assert_eq!(first.mention_edge_count, 1);
+    assert_eq!(first.active_memory_relation_count, 1);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 10);
+    assert_eq!(stats.misses, 10);
+    assert_eq!(stats.hits, 10);
+}
+
+#[test]
 fn reads_pagerank_membership_visibility_and_central_entity() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 'm1', metadata: '{\"space\":\"default\"}', is_latest: false})")
@@ -20513,6 +20552,58 @@ fn reads_pagerank_membership_visibility_and_central_entity() {
     assert!(central.found);
     assert_eq!(central.name.as_deref(), Some("Central Entity"));
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+}
+
+#[test]
+fn pagerank_lookup_reads_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'pagerank-cache-memory', metadata: '{\"space\":\"default\"}', is_latest: false})")
+        .unwrap();
+    db.query("CREATE (:Entity {id: 'pagerank-cache-entity', name: 'Cache Entity'})")
+        .unwrap();
+
+    let membership_request = KnowledgePageRankMembershipRequest {
+        label: "Entity".to_string(),
+        external_ids: vec!["pagerank-cache-entity".to_string(), "missing".to_string()],
+    };
+    let visibility_request = KnowledgePageRankMemoryVisibilityRequest {
+        memory_ids: vec!["pagerank-cache-memory".to_string(), "missing".to_string()],
+    };
+    let central_request = KnowledgePageRankCentralEntityRequest {
+        entity_id: "pagerank-cache-entity".to_string(),
+    };
+
+    let membership = db
+        .knowledge_pagerank_membership(&membership_request)
+        .unwrap();
+    let visibility = db
+        .knowledge_pagerank_memory_visibility(&visibility_request)
+        .unwrap();
+    let central = db
+        .knowledge_pagerank_central_entity(&central_request)
+        .unwrap();
+    db.knowledge_pagerank_membership(&membership_request)
+        .unwrap();
+    db.knowledge_pagerank_memory_visibility(&visibility_request)
+        .unwrap();
+    db.knowledge_pagerank_central_entity(&central_request)
+        .unwrap();
+
+    assert_eq!(membership.matched_count, 1);
+    assert_eq!(membership.missing_count, 1);
+    assert_eq!(visibility.matched_count, 1);
+    assert_eq!(visibility.missing_count, 1);
+    assert!(!visibility.rows[0].is_latest);
+    assert!(central.found);
+    assert_eq!(central.name.as_deref(), Some("Cache Entity"));
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 3);
+    assert_eq!(stats.misses, 3);
+    assert_eq!(stats.hits, 3);
 }
 
 #[test]
