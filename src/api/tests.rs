@@ -5230,6 +5230,19 @@ fn reads_context_memory_preview_for_nowledge_context_wiring_shapes() {
         Some("context-preview-older")
     );
 
+    let cached_title_preview = db
+        .knowledge_context_memory_preview(&KnowledgeContextMemoryPreviewRequest {
+            unit_types: vec!["context-preview".to_string()],
+            latest_filter: KnowledgeContextMemoryLatestFilter::NullOrTrue,
+            include_labels: false,
+            limit: 400,
+        })
+        .unwrap();
+    assert_eq!(cached_title_preview, title_preview);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+
     let typed_preview = db
         .knowledge_context_memory_preview(&KnowledgeContextMemoryPreviewRequest {
             unit_types: vec!["context-preview".to_string()],
@@ -5271,6 +5284,19 @@ fn reads_context_memory_preview_for_nowledge_context_wiring_shapes() {
         label_preview.rows[0].memory_id.as_deref(),
         Some("context-preview-newer")
     );
+
+    let cached_label_preview = db
+        .knowledge_context_memory_preview(&KnowledgeContextMemoryPreviewRequest {
+            unit_types: vec!["context-preview".to_string()],
+            latest_filter: KnowledgeContextMemoryLatestFilter::TrueOnly,
+            include_labels: true,
+            limit: 2000,
+        })
+        .unwrap();
+    assert_eq!(cached_label_preview, label_preview);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.misses, 3);
+    assert_eq!(stats.hits, 4);
 }
 
 #[test]

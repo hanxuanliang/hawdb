@@ -7156,7 +7156,7 @@ impl Database {
         &self,
         request: &KnowledgeContextMemoryPreviewRequest,
     ) -> Result<KnowledgeContextMemoryPreviewOutput> {
-        knowledge_context_memory_preview_for(&self.catalog, &self.store, request)
+        knowledge_context_memory_preview_via_query_runtime(self, request)
     }
 
     pub fn knowledge_memories(
@@ -11279,9 +11279,8 @@ fn collect_entity_names_for_memory(
     }
 }
 
-fn knowledge_context_memory_preview_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_context_memory_preview_via_query_runtime(
+    db: &Database,
     request: &KnowledgeContextMemoryPreviewRequest,
 ) -> Result<KnowledgeContextMemoryPreviewOutput> {
     if request.unit_types.is_empty() || request.unit_types.iter().any(String::is_empty) {
@@ -11290,37 +11289,46 @@ fn knowledge_context_memory_preview_for(
         ));
     }
 
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(memory_label_id) = catalog.label_id("Memory") else {
-        return Ok(KnowledgeContextMemoryPreviewOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_memory_count: 0,
-            returned_count: 0,
-        });
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "unit_types".to_string(),
+        Value::List(
+            request
+                .unit_types
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    )]);
+    let latest_predicate = match request.latest_filter {
+        KnowledgeContextMemoryLatestFilter::NullOrTrue => {
+            "(m.is_latest IS NULL OR m.is_latest = true)"
+        }
+        KnowledgeContextMemoryLatestFilter::TrueOnly => "m.is_latest = true",
     };
-    let unit_types = request.unit_types.iter().collect::<BTreeSet<_>>();
-    let mut memories = store
-        .scan_nodes(Some(memory_label_id))
-        .filter(|memory| context_memory_matches_preview(memory, &unit_types, request))
-        .collect::<Vec<_>>();
-    memories.sort_by(|left, right| {
-        compare_skill_memory_created_at(
-            &left.properties.get("created_at").cloned(),
-            &right.properties.get("created_at").cloned(),
-            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
-        )
-        .then_with(|| node_external_id(left).cmp(&node_external_id(right)))
-        .then_with(|| left.id.0.cmp(&right.id.0))
-    });
-    let matched_memory_count = memories.len();
+    let query = format!(
+        "MATCH (m:Memory) \
+         WHERE m.unit_type IN $unit_types \
+         AND {latest_predicate} \
+         AND (m.is_crystal IS NULL OR m.is_crystal = false) \
+         RETURN m.id AS memory_id, id(m) AS memory_node_id, m.title AS title, \
+         m.unit_type AS unit_type, m.created_at AS created_at"
+    );
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let mut rows = output
+        .rows
+        .iter()
+        .map(context_memory_preview_memory_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    sort_context_memory_preview_memory_rows(&mut rows);
+    let matched_memory_count = rows.len();
 
     let mut rows = if request.include_labels {
-        context_memory_label_preview_rows(catalog, store, memories)
+        context_memory_label_preview_rows_via_query_runtime(db, rows)?
     } else {
-        memories
-            .into_iter()
-            .map(|memory| context_memory_preview_row(memory, None))
+        rows.into_iter()
+            .map(|row| row.with_label(None))
             .collect::<Vec<_>>()
     };
     if request.limit > 0 {
@@ -11336,93 +11344,166 @@ fn knowledge_context_memory_preview_for(
     })
 }
 
-fn context_memory_matches_preview(
-    memory: &NodeRecord,
-    unit_types: &BTreeSet<&String>,
-    request: &KnowledgeContextMemoryPreviewRequest,
-) -> bool {
-    memory
-        .properties
-        .get("unit_type")
-        .map(value_to_external_id)
-        .as_ref()
-        .is_some_and(|unit_type| unit_types.contains(unit_type))
-        && context_memory_matches_latest(memory, request.latest_filter)
-        && context_memory_is_not_crystal(memory)
+#[derive(Debug, Clone)]
+struct ContextMemoryPreviewMemoryRow {
+    memory_id: Option<String>,
+    memory_node_id: u64,
+    title: Option<String>,
+    unit_type: Option<String>,
+    created_at: Option<Value>,
 }
 
-fn context_memory_matches_latest(
-    memory: &NodeRecord,
-    filter: KnowledgeContextMemoryLatestFilter,
-) -> bool {
-    match filter {
-        KnowledgeContextMemoryLatestFilter::NullOrTrue => {
-            !matches!(memory.properties.get("is_latest"), Some(Value::Bool(false)))
-        }
-        KnowledgeContextMemoryLatestFilter::TrueOnly => {
-            memory.properties.get("is_latest") == Some(&Value::Bool(true))
+impl ContextMemoryPreviewMemoryRow {
+    fn with_label(
+        self,
+        label: Option<ContextMemoryPreviewLabelRow>,
+    ) -> KnowledgeContextMemoryPreviewRow {
+        KnowledgeContextMemoryPreviewRow {
+            memory_id: self.memory_id,
+            memory_node_id: self.memory_node_id,
+            title: self.title,
+            unit_type: self.unit_type,
+            created_at: self.created_at,
+            label_id: label.as_ref().and_then(|label| label.label_id.clone()),
+            label_node_id: label.as_ref().map(|label| label.label_node_id),
+            label_canonical_name: label
+                .as_ref()
+                .and_then(|label| label.label_canonical_name.clone()),
+            label_name: label.and_then(|label| label.label_name),
         }
     }
 }
 
-fn context_memory_is_not_crystal(memory: &NodeRecord) -> bool {
-    !matches!(memory.properties.get("is_crystal"), Some(Value::Bool(true)))
+#[derive(Debug, Clone)]
+struct ContextMemoryPreviewLabelRow {
+    memory_node_id: u64,
+    label_id: Option<String>,
+    label_node_id: u64,
+    label_canonical_name: Option<String>,
+    label_name: Option<String>,
 }
 
-fn context_memory_label_preview_rows(
-    catalog: &Catalog,
-    store: &GraphStore,
-    memories: Vec<&NodeRecord>,
-) -> Vec<KnowledgeContextMemoryPreviewRow> {
-    let Some(rel_type_id) = catalog.rel_type_id("HAS_LABEL") else {
-        return Vec::new();
-    };
-    let Some(label_label_id) = catalog.label_id("Label") else {
-        return Vec::new();
-    };
-    memories
-        .into_iter()
-        .flat_map(|memory| {
-            let mut labels = store
-                .outgoing_relationships(memory.id, rel_type_id)
-                .filter_map(|relationship| {
-                    store
-                        .node(relationship.target)
-                        .filter(|label| label.labels.contains(&label_label_id))
+fn context_memory_preview_memory_row_from_query(
+    row: &Row,
+) -> Result<ContextMemoryPreviewMemoryRow> {
+    let memory_node_id = row
+        .get("memory_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge context memory preview row is missing memory_node_id".to_string(),
+            )
+        })?;
+    Ok(ContextMemoryPreviewMemoryRow {
+        memory_id: optional_string_cell(row, "memory_id"),
+        memory_node_id,
+        title: optional_string_cell(row, "title"),
+        unit_type: optional_string_cell(row, "unit_type"),
+        created_at: optional_value_cell(row, "created_at"),
+    })
+}
+
+fn context_memory_preview_label_row_from_query(row: &Row) -> Result<ContextMemoryPreviewLabelRow> {
+    let memory_node_id = row
+        .get("memory_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge context memory preview label row is missing memory_node_id".to_string(),
+            )
+        })?;
+    let label_node_id = row
+        .get("label_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge context memory preview label row is missing label_node_id".to_string(),
+            )
+        })?;
+    Ok(ContextMemoryPreviewLabelRow {
+        memory_node_id,
+        label_id: optional_string_cell(row, "label_id"),
+        label_node_id,
+        label_canonical_name: optional_string_cell(row, "label_canonical_name"),
+        label_name: optional_string_cell(row, "label_name"),
+    })
+}
+
+fn sort_context_memory_preview_memory_rows(rows: &mut [ContextMemoryPreviewMemoryRow]) {
+    rows.sort_by(|left, right| {
+        compare_skill_memory_created_at(
+            &left.created_at,
+            &right.created_at,
+            KnowledgeSkillMemoryListOrder::CreatedAtDesc,
+        )
+        .then_with(|| left.memory_id.cmp(&right.memory_id))
+        .then_with(|| left.memory_node_id.cmp(&right.memory_node_id))
+    });
+}
+
+fn sort_context_memory_preview_label_rows(rows: &mut [ContextMemoryPreviewLabelRow]) {
+    rows.sort_by(|left, right| {
+        left.label_canonical_name
+            .cmp(&right.label_canonical_name)
+            .then_with(|| left.label_name.cmp(&right.label_name))
+            .then_with(|| left.label_id.cmp(&right.label_id))
+            .then_with(|| left.label_node_id.cmp(&right.label_node_id))
+    });
+}
+
+fn context_memory_label_preview_rows_via_query_runtime(
+    db: &Database,
+    memories: Vec<ContextMemoryPreviewMemoryRow>,
+) -> Result<Vec<KnowledgeContextMemoryPreviewRow>> {
+    if memories.is_empty() {
+        return Ok(Vec::new());
+    }
+    let memory_node_ids = memories
+        .iter()
+        .map(|memory| {
+            i64::try_from(memory.memory_node_id)
+                .map(Value::Int)
+                .map_err(|_| {
+                    SkeinError::Execution(format!(
+                        "memory node id {} exceeds query parameter range",
+                        memory.memory_node_id
+                    ))
                 })
-                .collect::<Vec<_>>();
-            labels.sort_by(|left, right| {
-                string_property(left, "canonical_name")
-                    .cmp(&string_property(right, "canonical_name"))
-                    .then_with(|| {
-                        string_property(left, "name").cmp(&string_property(right, "name"))
-                    })
-                    .then_with(|| node_external_id(left).cmp(&node_external_id(right)))
-                    .then_with(|| left.id.0.cmp(&right.id.0))
-            });
-            labels
-                .into_iter()
-                .map(|label| context_memory_preview_row(memory, Some(label)))
-                .collect::<Vec<_>>()
         })
-        .collect()
-}
-
-fn context_memory_preview_row(
-    memory: &NodeRecord,
-    label: Option<&NodeRecord>,
-) -> KnowledgeContextMemoryPreviewRow {
-    KnowledgeContextMemoryPreviewRow {
-        memory_id: node_external_id(memory),
-        memory_node_id: memory.id.0,
-        title: string_property(memory, "title"),
-        unit_type: string_property(memory, "unit_type"),
-        created_at: memory.properties.get("created_at").cloned(),
-        label_id: label.and_then(node_external_id),
-        label_node_id: label.map(|label| label.id.0),
-        label_canonical_name: label.and_then(|label| string_property(label, "canonical_name")),
-        label_name: label.and_then(|label| string_property(label, "name")),
+        .collect::<Result<Vec<_>>>()?;
+    let parameters =
+        BTreeMap::from([("memory_node_ids".to_string(), Value::List(memory_node_ids))]);
+    let label_output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory)-[:HAS_LABEL]->(l:Label) \
+         WHERE id(m) IN $memory_node_ids \
+         RETURN id(m) AS memory_node_id, l.id AS label_id, id(l) AS label_node_id, \
+         l.canonical_name AS label_canonical_name, l.name AS label_name",
+        &parameters,
+        None,
+    )?;
+    let mut labels_by_memory = BTreeMap::<u64, Vec<ContextMemoryPreviewLabelRow>>::new();
+    for row in &label_output.rows {
+        let label = context_memory_preview_label_row_from_query(row)?;
+        labels_by_memory
+            .entry(label.memory_node_id)
+            .or_default()
+            .push(label);
     }
+    for labels in labels_by_memory.values_mut() {
+        sort_context_memory_preview_label_rows(labels);
+    }
+
+    let mut output = Vec::new();
+    for memory in memories {
+        if let Some(labels) = labels_by_memory.remove(&memory.memory_node_id) {
+            output.extend(
+                labels
+                    .into_iter()
+                    .map(|label| memory.clone().with_label(Some(label))),
+            );
+        }
+    }
+    Ok(output)
 }
 
 fn knowledge_memories_via_query_runtime(
