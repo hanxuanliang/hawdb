@@ -3307,6 +3307,7 @@ fn search_segment_descriptor_fields(
         .flat_map(|document| document.metadata.keys().cloned())
         .collect::<BTreeSet<_>>();
     fields.insert(SEARCH_DOCUMENT_ID_FIELD.to_string());
+    fields.insert("space_id".to_string());
     fields
 }
 
@@ -7288,6 +7289,68 @@ mod tests {
                 timestamp_range_summary_used: true,
                 value_summary_used: false,
             }]
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_segment_descriptor_preserves_default_space_filter() {
+        let path = unique_test_dir("search_segment_descriptor_default_space");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for id in ["memory:default_0", "memory:default_1", "memory:default_2"] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: "Default scoped graph".to_string(),
+                        content: "segment descriptor default space retrieval".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::new(),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let descriptor =
+            std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
+        let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
+        assert!(descriptor
+            .segments
+            .iter()
+            .all(|segment| segment.metadata.contains_key("space_id")));
+
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index.search_with_options(
+            "segment descriptor default space retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([(
+                    "space_id".to_string(),
+                    DEFAULT_SPACE_ID.to_string(),
+                )]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 3);
+        assert_eq!(result.filtered_document_count, 3);
+        assert!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .persisted_segment_descriptor_used
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            0
         );
         std::fs::remove_dir_all(path).unwrap();
     }
