@@ -1,8 +1,8 @@
 use skein::{
     NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemQueryReportOptions, Result, SkeinError,
-    Value,
+    Value, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
@@ -99,14 +99,49 @@ fn nowledge_graph_route_evidence_json(
         .iter()
         .map(|route| route.query_runtime_evidence(graph, options, route_parity))
         .collect::<Vec<_>>();
-    let ready = routes.iter().all(route_evidence_ready);
+    let route_coverage = route_coverage(&routes);
+    let ready = route_coverage.required_routes_covered && routes.iter().all(route_evidence_ready);
     serde_json::json!({
         "protocol": NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
         "mode": graph.mode().as_str(),
         "ready": !routes.is_empty() && ready,
         "route_count": routes.len(),
+        "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        "covered_route_count": route_coverage.covered_routes.len(),
+        "covered_routes": route_coverage.covered_routes,
+        "missing_required_routes": route_coverage.missing_required_routes,
+        "required_routes_covered": route_coverage.required_routes_covered,
         "routes": routes,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RouteCoverage {
+    covered_routes: Vec<String>,
+    missing_required_routes: Vec<&'static str>,
+    required_routes_covered: bool,
+}
+
+fn route_coverage(routes: &[serde_json::Value]) -> RouteCoverage {
+    let route_names = routes
+        .iter()
+        .filter_map(|route| route.get("route").and_then(serde_json::Value::as_str))
+        .collect::<BTreeSet<_>>();
+    let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .filter(|route| route_names.contains(**route))
+        .map(|route| (*route).to_string())
+        .collect::<Vec<_>>();
+    let missing_required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .filter(|route| !route_names.contains(**route))
+        .copied()
+        .collect::<Vec<_>>();
+    RouteCoverage {
+        covered_routes,
+        required_routes_covered: missing_required_routes.is_empty(),
+        missing_required_routes,
+    }
 }
 
 fn route_evidence_ready(route: &serde_json::Value) -> bool {
@@ -623,7 +658,9 @@ mod tests {
         nowledge_graph_route_evidence_json, parse_route_parity_evidence,
         parse_route_query_inventory,
     };
-    use skein::{Database, NowledgeMemGraph, NowledgeMemGraphMode};
+    use skein::{
+        Database, NowledgeMemGraph, NowledgeMemGraphMode, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    };
 
     #[test]
     fn route_evidence_runs_queries_through_nowledge_runtime() {
@@ -665,7 +702,17 @@ mod tests {
         );
 
         assert_eq!(evidence["protocol"], "nmem-graph-route-evidence-v1");
-        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["required_routes_covered"], false);
+        assert_eq!(
+            evidence["covered_routes"],
+            serde_json::json!(["/graph/overview"])
+        );
+        assert!(evidence["missing_required_routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|route| route == "/graph/explore"));
         assert_eq!(evidence["routes"][0]["route"], "/graph/overview");
         assert_eq!(evidence["routes"][0]["shadow_compare_ready"], true);
         assert_eq!(
@@ -701,6 +748,65 @@ mod tests {
             evidence["routes"][0]["query_reports"][0]["statement_kind"],
             "match_return"
         );
+    }
+
+    #[test]
+    fn route_evidence_requires_complete_required_route_coverage() {
+        let mut db = Database::new();
+        db.query("CREATE (:Memory {id: 'mem-route', title: 'Route Evidence'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem-other', title: 'Other Evidence'})")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = parse_route_query_inventory(&serde_json::json!({
+            "routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+                .iter()
+                .map(|route| {
+                    serde_json::json!({
+                        "route": route,
+                        "shadow_compare_ready": true,
+                        "primary_ready": true,
+                        "queries": [
+                            {
+                                "name": format!("{}:memory-lookup", route),
+                                "cypher": "MATCH (m:Memory {id: $id}) RETURN m.title AS title",
+                                "parameters": {
+                                    "id": "mem-route"
+                                },
+                                "require_scan_pruning": true,
+                                "require_pruned": true
+                            }
+                        ],
+                        "blocker_codes": []
+                    })
+                })
+                .collect::<Vec<_>>()
+        }))
+        .unwrap();
+
+        let route_parity = ready_route_parity_for(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES);
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            Default::default(),
+            Some(&route_parity),
+        );
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(
+            evidence["required_route_count"],
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len())
+        );
+        assert_eq!(
+            evidence["covered_route_count"],
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len())
+        );
+        assert_eq!(
+            evidence["covered_routes"],
+            serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES)
+        );
+        assert_eq!(evidence["missing_required_routes"], serde_json::json!([]));
+        assert_eq!(evidence["required_routes_covered"], true);
     }
 
     #[test]
@@ -894,17 +1000,24 @@ mod tests {
     }
 
     fn ready_route_parity() -> super::RouteParityEvidence {
+        ready_route_parity_for(&["/graph/overview"])
+    }
+
+    fn ready_route_parity_for(routes: &[&str]) -> super::RouteParityEvidence {
         parse_route_parity_evidence(&serde_json::json!({
             "protocol": "nmem-graph-route-parity-evidence-v1",
-            "routes": [
-                {
-                    "route": "/graph/overview",
-                    "ready": true,
-                    "matched_per_million": 1000000,
-                    "primary_engine": "kuzu",
-                    "shadow_engine": "skein"
-                }
-            ]
+            "routes": routes
+                .iter()
+                .map(|route| {
+                    serde_json::json!({
+                        "route": route,
+                        "ready": true,
+                        "matched_per_million": 1000000,
+                        "primary_engine": "kuzu",
+                        "shadow_engine": "skein"
+                    })
+                })
+                .collect::<Vec<_>>()
         }))
         .unwrap()
     }
