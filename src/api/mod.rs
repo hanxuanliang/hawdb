@@ -7620,7 +7620,7 @@ impl Database {
         &self,
         request: &KnowledgeSkillThreadSourceListRequest,
     ) -> Result<KnowledgeSkillThreadSourceListOutput> {
-        knowledge_skill_thread_sources_for(&self.catalog, &self.store, request)
+        knowledge_skill_thread_sources_via_query_runtime(self, request)
     }
 
     pub fn knowledge_skill_detail_lookup(
@@ -22001,6 +22001,75 @@ fn knowledge_skill_thread_sources_for(
     })
 }
 
+fn knowledge_skill_thread_sources_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSkillThreadSourceListRequest,
+) -> Result<KnowledgeSkillThreadSourceListOutput> {
+    validate_knowledge_skill_thread_source_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "skill_id".to_string(),
+        Value::String(request.skill_id.clone()),
+    )]);
+    let skill_output = db.query_read_only_with_params_bounded(
+        "MATCH (s:Skill {id: $skill_id}) RETURN id(s) AS skill_node_id LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let skill_node_id = skill_output
+        .rows
+        .first()
+        .and_then(|row| row.get("skill_node_id"))
+        .and_then(value_to_non_negative_u64);
+    let Some(skill_node_id) = skill_node_id else {
+        return Ok(KnowledgeSkillThreadSourceListOutput {
+            graph_commit_epoch,
+            skill_id: request.skill_id.clone(),
+            skill_node_id: None,
+            found_skill: false,
+            rows: Vec::new(),
+            matched_count: 0,
+            returned_count: 0,
+        });
+    };
+
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (s:Skill {id: $skill_id})-[sm:SYNTHESIZED_FROM]->(m:Memory)<-[ct:COMPACTS_TO]-(t:Thread) \
+         RETURN s.id AS skill_id, id(s) AS skill_node_id, \
+         m.id AS memory_id, id(m) AS memory_node_id, id(sm) AS skill_memory_relationship_id, \
+         t.id AS thread_id, id(t) AS thread_node_id, t.thread_id AS thread_logical_id, \
+         t.title AS title, t.source AS source, id(ct) AS compacts_to_relationship_id \
+         ORDER BY skill_memory_relationship_id ASC, compacts_to_relationship_id ASC",
+        &parameters,
+        None,
+    )?;
+    let mut seen = BTreeSet::new();
+    let mut rows = output
+        .rows
+        .iter()
+        .map(knowledge_skill_thread_source_row_from_query)
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|row| seen.insert((row.memory_node_id, row.thread_node_id)))
+        .collect::<Vec<_>>();
+    sort_skill_thread_source_rows(&mut rows);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeSkillThreadSourceListOutput {
+        graph_commit_epoch,
+        skill_id: request.skill_id.clone(),
+        skill_node_id: Some(skill_node_id),
+        found_skill: true,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
 fn validate_knowledge_skill_thread_source_request(
     request: &KnowledgeSkillThreadSourceListRequest,
 ) -> Result<()> {
@@ -22010,6 +22079,67 @@ fn validate_knowledge_skill_thread_source_request(
         ));
     }
     Ok(())
+}
+
+fn knowledge_skill_thread_source_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeSkillThreadSourceRow> {
+    let skill_node_id = row
+        .get("skill_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge skill thread source row is missing skill_node_id".to_string(),
+            )
+        })?;
+    let memory_node_id = row
+        .get("memory_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge skill thread source row is missing memory_node_id".to_string(),
+            )
+        })?;
+    let skill_memory_relationship_id = row
+        .get("skill_memory_relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge skill thread source row is missing skill_memory_relationship_id"
+                    .to_string(),
+            )
+        })?;
+    let thread_node_id = row
+        .get("thread_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge skill thread source row is missing thread_node_id".to_string(),
+            )
+        })?;
+    let compacts_to_relationship_id = row
+        .get("compacts_to_relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge skill thread source row is missing compacts_to_relationship_id"
+                    .to_string(),
+            )
+        })?;
+
+    Ok(KnowledgeSkillThreadSourceRow {
+        skill_id: optional_string_cell(row, "skill_id"),
+        skill_node_id,
+        memory_id: optional_string_cell(row, "memory_id"),
+        memory_node_id,
+        skill_memory_relationship_id,
+        thread_id: optional_string_cell(row, "thread_id"),
+        thread_node_id,
+        thread_logical_id: optional_string_cell(row, "thread_logical_id"),
+        title: optional_string_cell(row, "title"),
+        source: optional_string_cell(row, "source"),
+        compacts_to_relationship_id,
+    })
 }
 
 fn knowledge_skill_detail_lookup_for(

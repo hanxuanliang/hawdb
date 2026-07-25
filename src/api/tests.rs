@@ -15272,7 +15272,11 @@ fn skill_state_rejects_empty_id() {
 
 #[test]
 fn reads_skill_thread_sources_for_context_wiring_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Skill {id: 'skill_context', stage: 'active'})")
         .unwrap();
     db.query("CREATE (:Skill {id: 'skill_other', stage: 'active'})")
@@ -15356,6 +15360,18 @@ fn reads_skill_thread_sources_for_context_wiring_shape() {
     assert_eq!(missing.skill_node_id, None);
     assert_eq!(missing.matched_count, 0);
     assert!(missing.rows.is_empty());
+
+    let cache_before_lookup = db.plan_cache_stats();
+    let cached_request = KnowledgeSkillThreadSourceListRequest {
+        skill_id: "missing_skill_cache".to_string(),
+        limit: 10,
+    };
+    db.knowledge_skill_thread_sources(&cached_request).unwrap();
+    db.knowledge_skill_thread_sources(&cached_request).unwrap();
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
 
     let tx = db.begin_read_transaction();
