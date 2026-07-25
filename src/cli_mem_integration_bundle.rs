@@ -1205,6 +1205,12 @@ mod tests {
             "routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
                 .iter()
                 .map(|route| {
+                    let required_query_families =
+                        skein::nowledge_mem_required_query_families_for_route(route);
+                    let query_family = required_query_families
+                        .first()
+                        .copied()
+                        .unwrap_or("memory_lookup");
                     serde_json::json!({
                         "route": route,
                         "shadow_compare_ready": true,
@@ -1219,9 +1225,12 @@ mod tests {
                             "computed_blocker_codes": []
                         },
                         "primary_ready": true,
+                        "required_query_families": required_query_families,
+                        "computed_required_query_families": required_query_families,
+                        "query_family_blocker_codes": [],
                         "query_runtime_ready": true,
                         "query_report_count": 1,
-                        "query_reports": [ready_graph_route_query_report()],
+                        "query_reports": [ready_graph_route_query_report(query_family)],
                         "blocker_codes": []
                     })
                 })
@@ -1229,10 +1238,11 @@ mod tests {
         })
     }
 
-    fn ready_graph_route_query_report() -> serde_json::Value {
+    fn ready_graph_route_query_report(query_family: &str) -> serde_json::Value {
         serde_json::json!({
             "query_name": "overview-memory-lookup",
             "query_index": 0,
+            "query_family": query_family,
             "protocol": "skein-nowledge-mem-query-report-v1",
             "statement_kind": "match_return",
             "execution_path": "fast_path",

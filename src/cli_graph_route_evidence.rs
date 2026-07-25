@@ -1,6 +1,7 @@
 use skein::{
-    NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemQueryReportOptions, Result, SkeinError,
-    Value, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    nowledge_mem_required_query_families_for_route, NowledgeMemGraph, NowledgeMemGraphMode,
+    NowledgeMemQueryReportOptions, Result, SkeinError, Value,
+    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -233,7 +234,7 @@ impl RouteQuery {
         if self.queries.is_empty() {
             blocker_codes.push("missing_route_queries".to_string());
         }
-        let required_query_families = required_query_families_for_route(&self.route);
+        let required_query_families = nowledge_mem_required_query_families_for_route(&self.route);
         if !required_query_families.is_empty() {
             let observed_query_families = self
                 .queries
@@ -314,27 +315,6 @@ impl RouteQuery {
             return RouteShadowCompareEvidence::missing_parity();
         };
         RouteShadowCompareEvidence::from_parity_route(route)
-    }
-}
-
-fn required_query_families_for_route(route: &str) -> &'static [&'static str] {
-    match route {
-        "/graph/overview"
-        | "/graph/live-preview"
-        | "/graph/live-preview/{node_id}"
-        | "/graph/community-members/{community_id}"
-        | "/library/community/{community_id}/recent-memories"
-        | "/graph/node-details/{node_id}" => &["memory_lookup"],
-        "/graph/explore"
-        | "/graph/expand/{node_id}"
-        | "/library/community/{community_id}/subgraph"
-        | "/library/community/{community_id}/related"
-        | "/graph/orphans"
-        | "/graph/shortest-path" => &["graph_traversal"],
-        "/graph/analysis" | "/graph/augmentation/state" | "/graph/augmentation/pagerank/plan" => {
-            &["projected_graph"]
-        }
-        _ => &[],
     }
 }
 
@@ -1434,7 +1414,7 @@ mod tests {
     }
 
     fn ready_route_query(route: &str) -> serde_json::Value {
-        let query_family = super::required_query_families_for_route(route)
+        let query_family = skein::nowledge_mem_required_query_families_for_route(route)
             .first()
             .copied()
             .unwrap_or("memory_lookup");

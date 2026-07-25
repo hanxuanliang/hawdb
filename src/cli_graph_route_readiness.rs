@@ -1,6 +1,7 @@
 use skein::{
-    Result, SkeinError, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
-    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    nowledge_mem_required_query_families_for_route, Result, SkeinError,
+    NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -278,13 +279,18 @@ struct RouteEvidence {
     shadow_compare_evidence_source: Option<String>,
     shadow_compare: RouteShadowCompareEvidence,
     primary_ready: bool,
+    required_query_families: Vec<String>,
+    computed_required_query_families: Vec<String>,
+    query_family_blocker_codes: Vec<String>,
     blocker_codes: Vec<String>,
     query_reports: Vec<QueryRuntimeReport>,
 }
 
 impl RouteEvidence {
     fn query_runtime_ready(&self) -> bool {
-        !self.query_reports.is_empty() && self.query_reports.iter().all(QueryRuntimeReport::ready)
+        self.query_family_blocker_codes.is_empty()
+            && !self.query_reports.is_empty()
+            && self.query_reports.iter().all(QueryRuntimeReport::ready)
     }
 
     fn json(self) -> serde_json::Value {
@@ -301,6 +307,9 @@ impl RouteEvidence {
             "shadow_compare_evidence_source": self.shadow_compare_evidence_source,
             "shadow_compare": self.shadow_compare.json(),
             "primary_ready": self.primary_ready,
+            "required_query_families": self.required_query_families,
+            "computed_required_query_families": self.computed_required_query_families,
+            "query_family_blocker_codes": self.query_family_blocker_codes,
             "query_runtime_ready": query_runtime_ready,
             "query_report_count": query_report_count,
             "query_reports": query_reports,
@@ -400,6 +409,7 @@ fn is_legacy_graph_engine(engine: &str) -> bool {
 struct QueryRuntimeReport {
     query_name: Option<String>,
     query_index: Option<u64>,
+    query_family: Option<String>,
     protocol: Option<String>,
     statement_kind: Option<String>,
     execution_path: Option<String>,
@@ -435,6 +445,7 @@ impl QueryRuntimeReport {
         let mut report = Self {
             query_name: str_path(value, &["query_name"]).map(str::to_string),
             query_index: u64_path(value, &["query_index"]),
+            query_family: str_path(value, &["query_family"]).map(str::to_string),
             protocol: str_path(value, &["protocol"]).map(str::to_string),
             statement_kind: str_path(value, &["statement_kind"]).map(str::to_string),
             execution_path: str_path(value, &["execution_path"]).map(str::to_string),
@@ -469,6 +480,7 @@ impl QueryRuntimeReport {
         serde_json::json!({
             "query_name": self.query_name,
             "query_index": self.query_index,
+            "query_family": self.query_family,
             "protocol": self.protocol,
             "statement_kind": self.statement_kind,
             "execution_path": self.execution_path,
@@ -503,6 +515,15 @@ impl QueryRuntimeReport {
             || self.query_index.is_none()
         {
             blockers.insert("query_report_identity_missing".to_string());
+        }
+        match self.query_family.as_deref() {
+            Some(family) if REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.contains(&family) => {}
+            Some(_) => {
+                blockers.insert("query_report_unknown_query_family".to_string());
+            }
+            None => {
+                blockers.insert("query_report_query_family_missing".to_string());
+            }
         }
         if self.protocol.as_deref() != Some(NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL) {
             blockers.insert("query_report_protocol_mismatch".to_string());
@@ -622,6 +643,22 @@ fn parse_route(value: &serde_json::Value) -> Result<RouteEvidence> {
         .filter(|route| !route.trim().is_empty())
         .ok_or_else(|| SkeinError::Semantic("graph route evidence route is required".to_string()))?
         .to_string();
+    let required_query_families = string_array_path(value, &["required_query_families"]);
+    let computed_required_query_families = nowledge_mem_required_query_families_for_route(&route)
+        .iter()
+        .map(|family| (*family).to_string())
+        .collect::<Vec<_>>();
+    let query_reports = value_path(value, &["query_reports"])
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(QueryRuntimeReport::parse)
+        .collect::<Vec<_>>();
+    let query_family_blocker_codes = route_query_family_blocker_codes(
+        &required_query_families,
+        &computed_required_query_families,
+        &query_reports,
+    );
     Ok(RouteEvidence {
         route,
         shadow_compare_ready: bool_path(value, &["shadow_compare_ready"]) == Some(true),
@@ -629,14 +666,36 @@ fn parse_route(value: &serde_json::Value) -> Result<RouteEvidence> {
             .map(str::to_string),
         shadow_compare: RouteShadowCompareEvidence::parse(value),
         primary_ready: bool_path(value, &["primary_ready"]) == Some(true),
+        required_query_families,
+        computed_required_query_families,
+        query_family_blocker_codes,
         blocker_codes: string_array_path(value, &["blocker_codes"]),
-        query_reports: value_path(value, &["query_reports"])
-            .and_then(serde_json::Value::as_array)
-            .into_iter()
-            .flatten()
-            .map(QueryRuntimeReport::parse)
-            .collect(),
+        query_reports,
     })
+}
+
+fn route_query_family_blocker_codes(
+    required_query_families: &[String],
+    computed_required_query_families: &[String],
+    query_reports: &[QueryRuntimeReport],
+) -> Vec<String> {
+    let mut blockers = BTreeSet::new();
+    if required_query_families != computed_required_query_families {
+        blockers.insert("route_required_query_families_mismatch".to_string());
+    }
+    if !computed_required_query_families.is_empty() {
+        let observed_query_families = query_reports
+            .iter()
+            .filter_map(|report| report.query_family.as_deref())
+            .collect::<BTreeSet<_>>();
+        if !computed_required_query_families
+            .iter()
+            .any(|family| observed_query_families.contains(family.as_str()))
+        {
+            blockers.insert("route_required_query_family_missing".to_string());
+        }
+    }
+    blockers.into_iter().collect()
 }
 
 fn route_primary_blocker_codes(
@@ -682,6 +741,7 @@ fn route_primary_blocker_codes(
         if !route.query_runtime_ready() {
             blockers.insert("route_query_runtime_not_ready".to_string());
         }
+        blockers.extend(route.query_family_blocker_codes.iter().cloned());
         for report in &route.query_reports {
             blockers.extend(report.blocker_codes.iter().cloned());
         }
@@ -984,6 +1044,63 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_fails_closed_without_required_query_families() {
+        let mut routes = ready_routes();
+        routes[0]
+            .as_object_mut()
+            .unwrap()
+            .remove("required_query_families");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        assert_eq!(
+            readiness["routes"][0]["query_family_blocker_codes"],
+            serde_json::json!(["route_required_query_families_mismatch"])
+        );
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_required_query_families_mismatch"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_when_route_query_family_does_not_match() {
+        let mut routes = ready_routes();
+        let shortest_path = routes
+            .iter_mut()
+            .find(|route| route["route"] == "/graph/shortest-path")
+            .unwrap();
+        shortest_path["query_reports"][0]["query_family"] = serde_json::json!("memory_lookup");
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(readiness["route_query_runtime_ready"], false);
+        let route = readiness["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|route| route["route"] == "/graph/shortest-path")
+            .unwrap();
+        assert_eq!(
+            route["computed_required_query_families"],
+            serde_json::json!(["graph_traversal"])
+        );
+        assert_eq!(
+            route["query_family_blocker_codes"],
+            serde_json::json!(["route_required_query_family_missing"])
+        );
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_required_query_family_missing"));
+    }
+
+    #[test]
     fn route_readiness_fails_closed_without_query_report_identity() {
         let mut routes = ready_routes();
         routes[0]["query_reports"][0]
@@ -1206,6 +1323,11 @@ mod tests {
     }
 
     fn ready_route(route: &str) -> serde_json::Value {
+        let required_query_families = skein::nowledge_mem_required_query_families_for_route(route);
+        let query_family = required_query_families
+            .first()
+            .copied()
+            .unwrap_or("memory_lookup");
         serde_json::json!({
             "route": route,
             "shadow_compare_ready": true,
@@ -1219,15 +1341,17 @@ mod tests {
                 "blocker_codes": []
             },
             "primary_ready": true,
-            "query_reports": [ready_query_report()],
+            "required_query_families": required_query_families,
+            "query_reports": [ready_query_report(query_family)],
             "blocker_codes": []
         })
     }
 
-    fn ready_query_report() -> serde_json::Value {
+    fn ready_query_report(query_family: &str) -> serde_json::Value {
         serde_json::json!({
             "query_name": "overview-memory-lookup",
             "query_index": 0,
+            "query_family": query_family,
             "protocol": "skein-nowledge-mem-query-report-v1",
             "statement_kind": "match_return",
             "execution_path": "fast_path",

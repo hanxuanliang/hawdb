@@ -107,6 +107,7 @@ pub use nowledge_inventory::{
 pub use nowledge_mem::{
     nowledge_mem_bounded_read_evidence_json, nowledge_mem_bounded_read_evidence_json_with_routes,
     nowledge_mem_graph_config, nowledge_mem_graph_config_with_search_mode,
+    nowledge_mem_required_query_families_for_route,
     nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemEmbeddedStore, NowledgeMemGraph,
     NowledgeMemGraphMode, NowledgeMemOpenOptions, NowledgeMemOpenReport,
     NowledgeMemQueryExecutionPath, NowledgeMemQueryOutput, NowledgeMemQueryReport,

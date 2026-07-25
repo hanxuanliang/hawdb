@@ -147,6 +147,28 @@ pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/graph/orphans",
     "/graph/shortest-path",
 ];
+
+pub fn nowledge_mem_required_query_families_for_route(route: &str) -> &'static [&'static str] {
+    match route {
+        "/graph/overview"
+        | "/graph/live-preview"
+        | "/graph/live-preview/{node_id}"
+        | "/graph/community-members/{community_id}"
+        | "/library/community/{community_id}/recent-memories"
+        | "/graph/node-details/{node_id}" => &["memory_lookup"],
+        "/graph/explore"
+        | "/graph/expand/{node_id}"
+        | "/library/community/{community_id}/subgraph"
+        | "/library/community/{community_id}/related"
+        | "/graph/orphans"
+        | "/graph/shortest-path" => &["graph_traversal"],
+        "/graph/analysis" | "/graph/augmentation/state" | "/graph/augmentation/pagerank/plan" => {
+            &["projected_graph"]
+        }
+        _ => &[],
+    }
+}
+
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ROWS: usize = 512;
 pub const DEFAULT_NOWLEDGE_MEM_READ_MAX_ESTIMATED_PAYLOAD_BYTES: usize = 4 * 1024 * 1024;
 

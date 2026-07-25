@@ -1,7 +1,7 @@
 use skein::{
-    Result, SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    nowledge_mem_required_query_families_for_route, Result, SkeinError,
+    NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
@@ -2047,6 +2047,9 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
         if !observed_routes.insert(route_name) {
             return false;
         }
+        if !graph_route_query_families_ready(route, route_name) {
+            return false;
+        }
         if bool_path(route, &["primary_ready"]) != Some(true)
             || bool_path(route, &["query_runtime_ready"]) != Some(true)
             || !graph_route_shadow_compare_ready(route)
@@ -2072,6 +2075,31 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
         .all(|route| observed_routes.contains(route))
 }
 
+fn graph_route_query_families_ready(route: &serde_json::Value, route_name: &str) -> bool {
+    let expected = nowledge_mem_required_query_families_for_route(route_name)
+        .iter()
+        .map(|family| (*family).to_string())
+        .collect::<Vec<_>>();
+    if string_array_path(route, &["required_query_families"]) != expected
+        || string_array_path(route, &["computed_required_query_families"]) != expected
+        || !string_array_path(route, &["query_family_blocker_codes"]).is_empty()
+    {
+        return false;
+    }
+    let Some(query_reports) =
+        json_get_path(route, &["query_reports"]).and_then(serde_json::Value::as_array)
+    else {
+        return false;
+    };
+    if expected.is_empty() {
+        return true;
+    }
+    query_reports.iter().any(|report| {
+        str_path(report, &["query_family"])
+            .is_some_and(|family| expected.iter().any(|expected| expected == family))
+    })
+}
+
 fn graph_route_shadow_compare_ready(route: &serde_json::Value) -> bool {
     bool_path(route, &["shadow_compare_ready"]) == Some(true)
         && str_path(route, &["shadow_compare_evidence_source"])
@@ -2094,6 +2122,8 @@ fn is_legacy_graph_engine(engine: &str) -> bool {
 fn graph_route_query_report_ready(report: &serde_json::Value) -> bool {
     non_empty_str_path(report, &["query_name"])
         && u64_path(report, &["query_index"]).is_some()
+        && str_path(report, &["query_family"])
+            .is_some_and(|family| REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.contains(&family))
         && str_path(report, &["protocol"]) == Some(SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL)
         && bool_path(report, &["ready"]) == Some(true)
         && string_array_path(report, &["blocker_codes"]).is_empty()
@@ -4065,6 +4095,63 @@ mod tests {
     }
 
     #[test]
+    fn rejects_graph_route_profiles_without_required_query_family_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["routes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("required_query_families");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
+    }
+
+    #[test]
+    fn rejects_graph_route_profiles_when_query_family_does_not_match_route() {
+        let mut bundle = ready_bundle();
+        let route = bundle["graph_route_readiness"]["routes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|route| route["route"] == "/graph/shortest-path")
+            .unwrap();
+        route["query_reports"][0]["query_family"] = serde_json::json!("memory_lookup");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.routes"])
+        );
+    }
+
+    #[test]
     fn rejects_graph_route_profiles_without_route_parity_source() {
         let mut bundle = ready_bundle();
         bundle["graph_route_readiness"]["routes"][0]
@@ -4947,6 +5034,12 @@ mod tests {
         REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
             .iter()
             .map(|route| {
+                let required_query_families =
+                    skein::nowledge_mem_required_query_families_for_route(route);
+                let query_family = required_query_families
+                    .first()
+                    .copied()
+                    .unwrap_or("memory_lookup");
                 serde_json::json!({
                     "route": route,
                     "shadow_compare_ready": true,
@@ -4961,9 +5054,12 @@ mod tests {
                         "computed_blocker_codes": []
                     },
                     "primary_ready": true,
+                    "required_query_families": required_query_families,
+                    "computed_required_query_families": required_query_families,
+                    "query_family_blocker_codes": [],
                     "query_runtime_ready": true,
                     "query_report_count": 1,
-                    "query_reports": [ready_graph_route_query_report()],
+                    "query_reports": [ready_graph_route_query_report(query_family)],
                     "blocker_codes": []
                 })
             })
@@ -5050,10 +5146,11 @@ mod tests {
         })
     }
 
-    fn ready_graph_route_query_report() -> serde_json::Value {
+    fn ready_graph_route_query_report(query_family: &str) -> serde_json::Value {
         serde_json::json!({
             "query_name": "overview-memory-lookup",
             "query_index": 0,
+            "query_family": query_family,
             "protocol": "skein-nowledge-mem-query-report-v1",
             "statement_kind": "match_return",
             "execution_path": "fast_path",
