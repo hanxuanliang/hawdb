@@ -7903,7 +7903,7 @@ impl Database {
         request: &KnowledgePageRankPlanRequest,
     ) -> KnowledgePageRankPlanOutput {
         knowledge_pagerank_plan_via_query_runtime(self, request)
-            .unwrap_or_else(|_| knowledge_pagerank_plan_for(&self.catalog, &self.store, request))
+            .unwrap_or_else(|_| empty_knowledge_pagerank_plan(self.store.commit_epoch()))
     }
 
     pub fn knowledge_pagerank_membership(
@@ -27697,76 +27697,19 @@ fn clear_knowledge_pagerank_scores_for(
     })
 }
 
-fn knowledge_pagerank_plan_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgePageRankPlanRequest,
-) -> KnowledgePageRankPlanOutput {
-    let cutoff = request.changed_since_epoch_nanos.map(Value::Int);
+fn empty_knowledge_pagerank_plan(graph_commit_epoch: u64) -> KnowledgePageRankPlanOutput {
     KnowledgePageRankPlanOutput {
-        graph_commit_epoch: store.commit_epoch(),
-        memory_node_count: count_nodes_with_label(catalog, store, "Memory"),
-        entity_node_count: count_nodes_with_label(catalog, store, "Entity"),
-        entity_relation_count: count_relationships_between_labels(
-            catalog,
-            store,
-            "RELATES_TO",
-            "Entity",
-            "Entity",
-            |_| true,
-        ),
-        mention_edge_count: count_relationships_between_labels(
-            catalog,
-            store,
-            "MENTIONS",
-            "Memory",
-            "Entity",
-            |_| true,
-        ),
-        active_memory_relation_count: count_relationships_between_labels(
-            catalog,
-            store,
-            "MEMORY_RELATES_TO",
-            "Memory",
-            "Memory",
-            relationship_is_active,
-        ),
-        changed_memory_count: cutoff.as_ref().map_or(0, |cutoff| {
-            count_changed_nodes_with_label(catalog, store, "Memory", cutoff)
-        }),
-        changed_entity_count: cutoff.as_ref().map_or(0, |cutoff| {
-            count_changed_nodes_with_label(catalog, store, "Entity", cutoff)
-        }),
-        changed_mention_edge_count: cutoff.as_ref().map_or(0, |cutoff| {
-            count_relationships_between_labels(
-                catalog,
-                store,
-                "MENTIONS",
-                "Memory",
-                "Entity",
-                |r| relationship_changed_since(r, cutoff),
-            )
-        }),
-        changed_entity_relation_count: cutoff.as_ref().map_or(0, |cutoff| {
-            count_relationships_between_labels(
-                catalog,
-                store,
-                "RELATES_TO",
-                "Entity",
-                "Entity",
-                |r| relationship_changed_since(r, cutoff),
-            )
-        }),
-        changed_memory_relation_count: cutoff.as_ref().map_or(0, |cutoff| {
-            count_relationships_between_labels(
-                catalog,
-                store,
-                "MEMORY_RELATES_TO",
-                "Memory",
-                "Memory",
-                |r| relationship_is_active(r) && relationship_changed_since(r, cutoff),
-            )
-        }),
+        graph_commit_epoch,
+        memory_node_count: 0,
+        entity_node_count: 0,
+        entity_relation_count: 0,
+        mention_edge_count: 0,
+        active_memory_relation_count: 0,
+        changed_memory_count: 0,
+        changed_entity_count: 0,
+        changed_mention_edge_count: 0,
+        changed_entity_relation_count: 0,
+        changed_memory_relation_count: 0,
     }
 }
 
@@ -27995,87 +27938,6 @@ fn knowledge_pagerank_central_entity_via_query_runtime(
             .map(value_to_external_id)
             .filter(|name| !name.is_empty()),
     })
-}
-
-fn count_nodes_with_label(catalog: &Catalog, store: &GraphStore, label: &str) -> usize {
-    let Some(label_id) = catalog.label_id(label) else {
-        return 0;
-    };
-    store.scan_nodes(Some(label_id)).count()
-}
-
-fn count_changed_nodes_with_label(
-    catalog: &Catalog,
-    store: &GraphStore,
-    label: &str,
-    cutoff: &Value,
-) -> usize {
-    let Some(label_id) = catalog.label_id(label) else {
-        return 0;
-    };
-    store
-        .scan_nodes(Some(label_id))
-        .filter(|node| node_changed_since(node, cutoff))
-        .count()
-}
-
-fn count_relationships_between_labels(
-    catalog: &Catalog,
-    store: &GraphStore,
-    rel_type: &str,
-    source_label: &str,
-    target_label: &str,
-    predicate: impl Fn(&RelRecord) -> bool,
-) -> usize {
-    let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
-        return 0;
-    };
-    let Some(source_label_id) = catalog.label_id(source_label) else {
-        return 0;
-    };
-    let Some(target_label_id) = catalog.label_id(target_label) else {
-        return 0;
-    };
-    store
-        .scan_relationships(Some(rel_type_id))
-        .filter(|relationship| {
-            predicate(relationship)
-                && store
-                    .node(relationship.source)
-                    .is_some_and(|node| node.labels.contains(&source_label_id))
-                && store
-                    .node(relationship.target)
-                    .is_some_and(|node| node.labels.contains(&target_label_id))
-        })
-        .count()
-}
-
-fn node_changed_since(node: &NodeRecord, cutoff: &Value) -> bool {
-    node.properties
-        .get("created_at")
-        .is_some_and(|value| value_is_greater(value, cutoff))
-        || node
-            .properties
-            .get("updated_at")
-            .is_some_and(|value| value_is_greater(value, cutoff))
-}
-
-fn relationship_changed_since(relationship: &RelRecord, cutoff: &Value) -> bool {
-    relationship
-        .properties
-        .get("created_at")
-        .is_some_and(|value| value_is_greater(value, cutoff))
-        || relationship
-            .properties
-            .get("updated_at")
-            .is_some_and(|value| value_is_greater(value, cutoff))
-}
-
-fn relationship_is_active(relationship: &RelRecord) -> bool {
-    relationship
-        .properties
-        .get("status")
-        .is_some_and(|value| value_to_external_id(value) == "active")
 }
 
 fn validate_non_empty_external_ids(external_ids: &[String], message: &str) -> Result<()> {
