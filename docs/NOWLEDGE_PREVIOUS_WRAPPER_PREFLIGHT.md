@@ -282,6 +282,23 @@ Automatic generation also needs `--library-readiness-search-projection` to
 point at an existing Skein search projection so `open_report` can prove that
 the embedded library opened both graph and search projection state.
 
+Search projection probes must also publish the scan-pruning contract that Mem
+relies on during the LanceDB replacement path. The Skein probe is not ready
+unless `predicate_pushdown.persisted_segment_descriptor_ready == true`,
+`predicate_pushdown.segment_descriptor_scan_filter_fields_ready == true`, and
+`predicate_pushdown.segment_descriptor_field_summaries` covers the required
+scan filter fields:
+
+```text
+kind, external_id, source_id, space_id, unit_type, importance, confidence,
+created_at, updated_at, event_start, event_end, is_latest
+```
+
+Shadow evidence carries the same requirement as
+`pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready == true`.
+This keeps route-level replacement gates tied to fields that can be pruned by
+segment descriptor metadata instead of only proving row-filter fallback.
+
 ## 8. Verify The Whole Preflight Bundle
 
 Use the bundle checker to collapse the preflight stage artifacts into one

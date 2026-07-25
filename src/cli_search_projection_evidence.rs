@@ -112,10 +112,22 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "row_filter_ready",
             "segment_pruning_ready",
             "numeric_min_max_ready",
+            "persisted_segment_descriptor_ready",
+            "segment_descriptor_scan_filter_fields_ready",
             "supported_ops",
-            "scan_filter_fields"
+            "scan_filter_fields",
+            "segment_descriptor_field_count",
+            "segment_descriptor_field_summaries"
+        ],
+        "required_skein_scan_filter_fields": SKEIN_REQUIRED_SCAN_FILTER_FIELDS,
+        "segment_descriptor_field_summary_fields": [
+            "field",
+            "segment_count",
+            "value_summary_used",
+            "numeric_range_summary_used"
         ],
         "example_primary_probe": ready_probe_template("lancedb"),
+        "example_skein_probe": ready_probe_template("skein"),
     })
 }
 
@@ -615,7 +627,8 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "numeric_min_max_ready": true,
             "persisted_segment_descriptor_ready": true,
             "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
-            "scan_filter_fields": ["unit_type", "metadata", "importance", "confidence", "history", "latest"]
+            "scan_filter_fields": SKEIN_REQUIRED_SCAN_FILTER_FIELDS,
+            "segment_descriptor_field_summaries": ready_segment_descriptor_field_summaries_template()
         },
         "compressed_vector_projection": {
             "engine": "turbovec",
@@ -630,6 +643,36 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "blocker_codes": []
         },
         "blocker_codes": []
+    })
+}
+
+fn ready_segment_descriptor_field_summaries_template() -> serde_json::Value {
+    serde_json::json!([
+        ready_segment_descriptor_field_summary_template("kind", true, false),
+        ready_segment_descriptor_field_summary_template("external_id", true, false),
+        ready_segment_descriptor_field_summary_template("source_id", true, false),
+        ready_segment_descriptor_field_summary_template("space_id", true, false),
+        ready_segment_descriptor_field_summary_template("unit_type", true, false),
+        ready_segment_descriptor_field_summary_template("importance", true, true),
+        ready_segment_descriptor_field_summary_template("confidence", true, true),
+        ready_segment_descriptor_field_summary_template("created_at", true, true),
+        ready_segment_descriptor_field_summary_template("updated_at", true, true),
+        ready_segment_descriptor_field_summary_template("event_start", true, true),
+        ready_segment_descriptor_field_summary_template("event_end", true, true),
+        ready_segment_descriptor_field_summary_template("is_latest", true, false)
+    ])
+}
+
+fn ready_segment_descriptor_field_summary_template(
+    field: &str,
+    value_summary_used: bool,
+    numeric_range_summary_used: bool,
+) -> serde_json::Value {
+    serde_json::json!({
+        "field": field,
+        "segment_count": 1,
+        "value_summary_used": value_summary_used,
+        "numeric_range_summary_used": numeric_range_summary_used,
     })
 }
 
@@ -949,7 +992,9 @@ mod tests {
     fn probe_contract_example_feeds_search_projection_evidence() {
         let contract = nowledge_search_projection_probe_contract_json();
         let example = &contract["example_primary_probe"];
+        let skein_example = &contract["example_skein_probe"];
         let evidence = nowledge_search_projection_evidence_json(example);
+        let skein_evidence = nowledge_search_projection_evidence_json(skein_example);
 
         assert_eq!(
             contract["protocol"],
@@ -967,10 +1012,44 @@ mod tests {
                 "source_chunks_index"
             ])
         );
+        assert_eq!(
+            contract["required_skein_scan_filter_fields"],
+            serde_json::json!([
+                "kind",
+                "external_id",
+                "source_id",
+                "space_id",
+                "unit_type",
+                "importance",
+                "confidence",
+                "created_at",
+                "updated_at",
+                "event_start",
+                "event_end",
+                "is_latest"
+            ])
+        );
+        assert!(contract["predicate_pushdown_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "segment_descriptor_field_summaries"));
+        assert!(contract["predicate_pushdown_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "segment_descriptor_scan_filter_fields_ready"));
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["predicate_pushdown_ready"], true);
         assert_eq!(evidence["compressed_vector_projection_required"], false);
         assert_eq!(evidence["compressed_vector_projection_ready"], true);
+        assert_eq!(skein_example["engine"], "skein");
+        assert_eq!(skein_evidence["ready"], true);
+        assert_eq!(skein_evidence["skein_predicate_pushdown_ready"], true);
+        assert_eq!(
+            skein_evidence["predicate_pushdown"]["segment_descriptor_scan_filter_fields_ready"],
+            true
+        );
     }
 
     #[test]
