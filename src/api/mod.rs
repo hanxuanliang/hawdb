@@ -7289,7 +7289,7 @@ impl Database {
         &self,
         request: &KnowledgeSynthesizedSourceIdsRequest,
     ) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
-        knowledge_synthesized_source_ids_for(&self.catalog, &self.store, request)
+        knowledge_synthesized_source_ids_via_query_runtime(self, request)
     }
 
     pub fn knowledge_scoped_entity(
@@ -13149,6 +13149,100 @@ fn knowledge_synthesized_source_ids_for(
             found_crystal: true,
             source_memory_ids: synthesized_source_ids_for_crystal(catalog, store, crystal),
         });
+    }
+
+    let returned_count = rows.len();
+    Ok(KnowledgeSynthesizedSourceIdsOutput {
+        graph_commit_epoch,
+        rows,
+        found_crystal_count,
+        missing_crystal_count,
+        returned_count,
+    })
+}
+
+fn knowledge_synthesized_source_ids_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSynthesizedSourceIdsRequest,
+) -> Result<KnowledgeSynthesizedSourceIdsOutput> {
+    validate_knowledge_synthesized_source_ids_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let parameters = BTreeMap::from([(
+        "crystal_memory_ids".to_string(),
+        Value::List(
+            request
+                .crystal_memory_ids
+                .iter()
+                .cloned()
+                .map(Value::String)
+                .collect(),
+        ),
+    )]);
+    let crystal_output = db.query_read_only_with_params_bounded(
+        "MATCH (c:Memory) \
+         WHERE c.id IN $crystal_memory_ids \
+         RETURN c.id AS crystal_memory_id, id(c) AS crystal_node_id",
+        &parameters,
+        Some(request.crystal_memory_ids.len()),
+    )?;
+    let mut crystal_node_ids = BTreeMap::new();
+    for row in &crystal_output.rows {
+        let Some(crystal_memory_id) = optional_string_cell(row, "crystal_memory_id") else {
+            continue;
+        };
+        let Some(crystal_node_id) = row
+            .get("crystal_node_id")
+            .and_then(value_to_non_negative_u64)
+        else {
+            continue;
+        };
+        crystal_node_ids.insert(crystal_memory_id, crystal_node_id);
+    }
+
+    let source_output = db.query_read_only_with_params_bounded(
+        "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) \
+         WHERE c.id IN $crystal_memory_ids \
+         WITH c.id AS crystal_memory_id, COLLECT(DISTINCT s.id) AS source_memory_ids \
+         RETURN crystal_memory_id, source_memory_ids",
+        &parameters,
+        None,
+    )?;
+    let mut source_ids_by_crystal = BTreeMap::new();
+    for row in &source_output.rows {
+        let Some(crystal_memory_id) = optional_string_cell(row, "crystal_memory_id") else {
+            continue;
+        };
+        let Some(source_memory_ids) = row.get("source_memory_ids").and_then(value_to_string_list)
+        else {
+            continue;
+        };
+        source_ids_by_crystal.insert(crystal_memory_id, source_memory_ids);
+    }
+
+    let mut rows = Vec::with_capacity(request.crystal_memory_ids.len());
+    let mut found_crystal_count = 0;
+    let mut missing_crystal_count = 0;
+    for crystal_memory_id in &request.crystal_memory_ids {
+        if let Some(crystal_node_id) = crystal_node_ids.get(crystal_memory_id) {
+            found_crystal_count += 1;
+            rows.push(KnowledgeSynthesizedSourceIdsRow {
+                crystal_memory_id: crystal_memory_id.clone(),
+                crystal_node_id: Some(*crystal_node_id),
+                found_crystal: true,
+                source_memory_ids: source_ids_by_crystal
+                    .get(crystal_memory_id)
+                    .cloned()
+                    .unwrap_or_default(),
+            });
+        } else {
+            missing_crystal_count += 1;
+            rows.push(KnowledgeSynthesizedSourceIdsRow {
+                crystal_memory_id: crystal_memory_id.clone(),
+                crystal_node_id: None,
+                found_crystal: false,
+                source_memory_ids: Vec::new(),
+            });
+        }
     }
 
     let returned_count = rows.len();

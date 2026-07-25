@@ -7351,6 +7351,48 @@ fn reads_synthesized_source_ids_for_feed_collection_shape() {
 }
 
 #[test]
+fn synthesized_source_ids_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'collect-cache-crystal-with-source', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'collect-cache-crystal-empty', is_crystal: true})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'collect-cache-source'})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'collect-cache-crystal-with-source'}), (s:Memory {id: 'collect-cache-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    let request = KnowledgeSynthesizedSourceIdsRequest {
+        crystal_memory_ids: vec![
+            "collect-cache-crystal-with-source".to_string(),
+            "collect-cache-crystal-empty".to_string(),
+            "collect-cache-missing".to_string(),
+        ],
+    };
+
+    let first = db.knowledge_synthesized_source_ids(&request).unwrap();
+    let second = db.knowledge_synthesized_source_ids(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.found_crystal_count, 2);
+    assert_eq!(first.missing_crystal_count, 1);
+    assert_eq!(
+        first.rows[0].source_memory_ids,
+        vec!["collect-cache-source"]
+    );
+    assert!(first.rows[1].found_crystal);
+    assert!(first.rows[1].source_memory_ids.is_empty());
+    assert!(!first.rows[2].found_crystal);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn synthesized_source_ids_rejects_invalid_request() {
     let db = Database::new();
 
