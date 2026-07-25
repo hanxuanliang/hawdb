@@ -1138,6 +1138,7 @@ mod tests {
         serde_json::json!({
             "protocol": "skein-nowledge-search-candidate-shadow-evidence",
             "route": "/search-index/skein-shadow/candidate-evidence",
+            "evidence_source": "nmem-rust-bridge",
             "engine": "skein-shadow",
             "ready": true,
             "candidate_primary_engine": "skein",
