@@ -537,15 +537,34 @@ fn query_requirement_blockers(query: &RouteCypherQuery, report: &serde_json::Val
         .get("scan_pruning_report_count")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(0);
+    if query.require_scan_pruning && scan_pruning_report_count != scan_pruning_reports.len() as u64
+    {
+        blockers.push("query_scan_pruning_report_count_mismatch".to_string());
+    }
     if query.require_scan_pruning
         && (scan_pruning_report_count == 0 || scan_pruning_reports.is_empty())
     {
         blockers.push("query_scan_pruning_required_but_missing".to_string());
     }
+    if query.require_scan_pruning
+        && scan_pruning_reports
+            .iter()
+            .any(|report| scan_pruning_strategy_kind(report).is_none())
+    {
+        blockers.push("query_scan_pruning_strategy_missing".to_string());
+    }
     if query.require_pruned && !scan_pruning_reports.iter().any(scan_report_pruned_rows) {
         blockers.push("query_pruned_scan_required_but_missing".to_string());
     }
     blockers
+}
+
+fn scan_pruning_strategy_kind(report: &serde_json::Value) -> Option<&str> {
+    report
+        .get("strategy")
+        .and_then(|strategy| strategy.get("kind"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|kind| !kind.trim().is_empty())
 }
 
 fn scan_report_pruned_rows(report: &serde_json::Value) -> bool {
@@ -698,11 +717,12 @@ fn error_class(error: &SkeinError) -> &'static str {
 mod tests {
     use super::{
         nowledge_graph_route_evidence_json, parse_route_parity_evidence,
-        parse_route_query_inventory,
+        parse_route_query_inventory, query_requirement_blockers, RouteCypherQuery,
     };
     use skein::{
         Database, NowledgeMemGraph, NowledgeMemGraphMode, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
+    use std::collections::BTreeMap;
 
     #[test]
     fn route_evidence_runs_queries_through_nowledge_runtime() {
@@ -1076,6 +1096,44 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "query_pruned_scan_required_but_missing"));
+    }
+
+    #[test]
+    fn route_query_requirements_reject_malformed_scan_pruning_evidence() {
+        let query = RouteCypherQuery {
+            name: "malformed-pruning".to_string(),
+            require_scan_pruning: true,
+            require_pruned: false,
+            cypher: "MATCH (m:Memory {id: $id}) RETURN m.title AS title".to_string(),
+            parameters: BTreeMap::new(),
+        };
+        let report = serde_json::json!({
+            "scan_pruning_report_count": 2,
+            "scan_pruning_reports": [
+                {
+                    "strategy": { "kind": "id_eq" },
+                    "pruned": true,
+                    "pruned_candidate_count": 1
+                },
+                {
+                    "strategy": {},
+                    "pruned": false,
+                    "pruned_candidate_count": 0
+                },
+                {
+                    "pruned": false,
+                    "pruned_candidate_count": 0
+                }
+            ]
+        });
+
+        assert_eq!(
+            query_requirement_blockers(&query, &report),
+            vec![
+                "query_scan_pruning_report_count_mismatch".to_string(),
+                "query_scan_pruning_strategy_missing".to_string(),
+            ]
+        );
     }
 
     #[test]
