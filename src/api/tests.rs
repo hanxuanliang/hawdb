@@ -7196,6 +7196,49 @@ fn reads_synthesized_source_coverage_for_existing_crystal_lookup_shapes() {
 }
 
 #[test]
+fn synthesized_source_coverage_uses_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query(
+        "CREATE (:Memory {id: 'coverage-cache-crystal-a', is_crystal: true, crystal_title: 'A'})",
+    )
+    .unwrap();
+    db.query(
+        "CREATE (:Memory {id: 'coverage-cache-crystal-b', is_crystal: true, crystal_title: 'B'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Memory {id: 'coverage-cache-source'})")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-cache-crystal-a'}), (s:Memory {id: 'coverage-cache-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    db.query("MATCH (c:Memory {id: 'coverage-cache-crystal-b'}), (s:Memory {id: 'coverage-cache-source'}) CREATE (c)-[:SYNTHESIZED_FROM]->(s)")
+        .unwrap();
+    let request = KnowledgeSynthesizedSourceCoverageRequest {
+        source_memory_ids: vec!["coverage-cache-source".to_string()],
+        required_covered_count: 1,
+        limit: 1,
+    };
+
+    let first = db.knowledge_synthesized_source_coverage(&request).unwrap();
+    let second = db.knowledge_synthesized_source_coverage(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_candidate_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(
+        first.rows[0].crystal_memory_id.as_deref(),
+        Some("coverage-cache-crystal-a")
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn synthesized_source_coverage_rejects_invalid_request() {
     let db = Database::new();
 

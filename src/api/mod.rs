@@ -7282,7 +7282,7 @@ impl Database {
         &self,
         request: &KnowledgeSynthesizedSourceCoverageRequest,
     ) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
-        knowledge_synthesized_source_coverage_for(&self.catalog, &self.store, request)
+        knowledge_synthesized_source_coverage_via_query_runtime(self, request)
     }
 
     pub fn knowledge_synthesized_source_ids(
@@ -12947,6 +12947,84 @@ fn knowledge_synthesized_source_coverage_for(
     })
 }
 
+fn knowledge_synthesized_source_coverage_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSynthesizedSourceCoverageRequest,
+) -> Result<KnowledgeSynthesizedSourceCoverageOutput> {
+    validate_knowledge_synthesized_source_coverage_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::from([
+        (
+            "source_memory_ids".to_string(),
+            Value::List(
+                request
+                    .source_memory_ids
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        ),
+        (
+            "required_covered_count".to_string(),
+            Value::Int(i64::try_from(request.required_covered_count).unwrap_or(i64::MAX)),
+        ),
+    ]);
+    let limit_clause = if request.limit > 0 {
+        parameters.insert(
+            "limit".to_string(),
+            Value::Int(i64::try_from(request.limit).unwrap_or(i64::MAX)),
+        );
+        " LIMIT $limit"
+    } else {
+        ""
+    };
+    let query = format!(
+        "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) \
+         WHERE c.is_crystal = true AND s.id IN $source_memory_ids \
+         WITH c.id AS crystal_memory_id, id(c) AS crystal_node_id, \
+         c.crystal_title AS crystal_title, COUNT(DISTINCT s.id) AS covered_count, \
+         COLLECT(DISTINCT s.id) AS matched_source_memory_ids \
+         WHERE covered_count = $required_covered_count \
+         RETURN crystal_memory_id, crystal_node_id, crystal_title, covered_count, \
+         matched_source_memory_ids \
+         ORDER BY crystal_memory_id ASC, crystal_node_id ASC{limit_clause}"
+    );
+    let output = db.query_read_only_with_params_bounded(
+        &query,
+        &parameters,
+        request.limit.gt(&0).then_some(request.limit),
+    )?;
+    let rows = output
+        .rows
+        .iter()
+        .map(knowledge_synthesized_source_coverage_row_from_query)
+        .collect::<Result<Vec<_>>>()?;
+    let returned_count = rows.len();
+
+    let matched_candidate_count = if request.limit > 0 {
+        let count_output = db.query_read_only_with_params_bounded(
+            "MATCH (c:Memory)-[:SYNTHESIZED_FROM]->(s:Memory) \
+             WHERE c.is_crystal = true AND s.id IN $source_memory_ids \
+             WITH c.id AS crystal_memory_id, COUNT(DISTINCT s.id) AS covered_count \
+             WHERE covered_count = $required_covered_count \
+             RETURN crystal_memory_id",
+            &parameters,
+            None,
+        )?;
+        count_output.rows.len()
+    } else {
+        returned_count
+    };
+
+    Ok(KnowledgeSynthesizedSourceCoverageOutput {
+        graph_commit_epoch,
+        rows,
+        matched_candidate_count,
+        returned_count,
+    })
+}
+
 fn empty_synthesized_source_coverage_output(
     graph_commit_epoch: u64,
 ) -> KnowledgeSynthesizedSourceCoverageOutput {
@@ -12992,6 +13070,43 @@ fn knowledge_synthesized_source_coverage_row(
         covered_count: matched_source_memory_ids.len(),
         matched_source_memory_ids,
     }
+}
+
+fn knowledge_synthesized_source_coverage_row_from_query(
+    row: &Row,
+) -> Result<KnowledgeSynthesizedSourceCoverageRow> {
+    let crystal_node_id = row
+        .get("crystal_node_id")
+        .and_then(value_to_non_negative_u64)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge synthesized source coverage row is missing crystal_node_id".to_string(),
+            )
+        })?;
+    let covered_count = row
+        .get("covered_count")
+        .and_then(value_to_non_negative_usize)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge synthesized source coverage row is missing covered_count".to_string(),
+            )
+        })?;
+    let matched_source_memory_ids = row
+        .get("matched_source_memory_ids")
+        .and_then(value_to_string_list)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge synthesized source coverage row is missing source ids".to_string(),
+            )
+        })?;
+
+    Ok(KnowledgeSynthesizedSourceCoverageRow {
+        crystal_memory_id: optional_string_cell(row, "crystal_memory_id"),
+        crystal_node_id,
+        crystal_title: optional_string_cell(row, "crystal_title"),
+        covered_count,
+        matched_source_memory_ids,
+    })
 }
 
 fn sort_synthesized_source_coverage_rows(rows: &mut [KnowledgeSynthesizedSourceCoverageRow]) {
@@ -16311,6 +16426,20 @@ fn value_to_map(value: &Value) -> Option<&BTreeMap<String, Value>> {
         Value::Map(values) => Some(values),
         _ => None,
     }
+}
+
+fn value_to_string_list(value: &Value) -> Option<Vec<String>> {
+    let Value::List(values) = value else {
+        return None;
+    };
+    Some(
+        values
+            .iter()
+            .filter(|value| !matches!(value, Value::Null))
+            .map(value_to_external_id)
+            .filter(|value| !value.is_empty())
+            .collect(),
+    )
 }
 
 fn optional_string_cell(row: &Row, column: &str) -> Option<String> {
