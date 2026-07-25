@@ -7754,7 +7754,8 @@ impl Database {
         &self,
         request: &KnowledgeMemoryDecayDetailRequest,
     ) -> Result<KnowledgeMemoryDecayDetailOutput> {
-        knowledge_memory_decay_detail_for(&self.catalog, &self.store, request)
+        knowledge_memory_decay_detail_via_query_runtime(self, request)
+            .or_else(|_| knowledge_memory_decay_detail_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_thread_compacted_memory_projected_list(
@@ -24200,6 +24201,46 @@ fn knowledge_memory_decay_detail_for(
     })
 }
 
+fn knowledge_memory_decay_detail_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryDecayDetailRequest,
+) -> Result<KnowledgeMemoryDecayDetailOutput> {
+    validate_knowledge_memory_decay_detail_request(request)?;
+    let parameters = BTreeMap::from([(
+        "memory_id".to_string(),
+        Value::String(request.memory_id.clone()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (m:Memory {id: $memory_id}) \
+         RETURN m AS memory \
+         ORDER BY id(m) ASC \
+         LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let memory = output
+        .rows
+        .first()
+        .map(knowledge_memory_decay_detail_row_from_query)
+        .transpose()?
+        .map(|memory| knowledge_memory_decay_detail_row_from_entity(&memory, request));
+    Ok(KnowledgeMemoryDecayDetailOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        found: memory.is_some(),
+        memory,
+    })
+}
+
+fn knowledge_memory_decay_detail_row_from_query(row: &Row) -> Result<KnowledgeEntity> {
+    row.get("memory")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory decay detail row is missing memory map".to_string(),
+            )
+        })
+}
+
 fn validate_knowledge_memory_decay_detail_request(
     request: &KnowledgeMemoryDecayDetailRequest,
 ) -> Result<()> {
@@ -24214,6 +24255,29 @@ fn validate_knowledge_memory_decay_detail_request(
         ));
     }
     Ok(())
+}
+
+fn knowledge_memory_decay_detail_row_from_entity(
+    memory: &KnowledgeEntity,
+    request: &KnowledgeMemoryDecayDetailRequest,
+) -> KnowledgeMemoryDecayDetail {
+    let property_names = knowledge_memory_decay_detail_property_names(request);
+    KnowledgeMemoryDecayDetail {
+        memory_id: memory.external_id.clone(),
+        node_id: memory.node_id,
+        title: string_property_value(&memory.properties, "title"),
+        content: string_property_value(&memory.properties, "content"),
+        unit_type: string_property_value(&memory.properties, "unit_type"),
+        source: string_property_value(&memory.properties, "source"),
+        raw_space_id: string_property_value(&memory.properties, "space_id"),
+        normalized_space_id: knowledge_entity_normalized_space_id(memory),
+        created_at: memory.properties.get("created_at").cloned(),
+        decay_score_cached: memory.properties.get("decay_score_cached").cloned(),
+        metadata: memory.properties.get("metadata").cloned(),
+        is_latest: boolean_property_value(&memory.properties, "is_latest"),
+        lifecycle_state: string_property_value(&memory.properties, "lifecycle_state"),
+        properties: projected_properties(&memory.properties, &property_names),
+    }
 }
 
 fn knowledge_memory_decay_detail_row(

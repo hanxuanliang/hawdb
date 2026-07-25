@@ -16713,7 +16713,11 @@ fn reads_thread_compacted_memories_for_nowledge_summary_and_full_shapes() {
 
 #[test]
 fn reads_memory_decay_detail_for_scheduler_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'scheduler-memory-decay-detail', title: 'Decay Detail', content: 'content', unit_type: 'fact', source: 'agent', space_id: 'default', created_at: 12, decay_score_cached: 0.4, metadata: '{}', is_latest: true, lifecycle_state: 'active', future_decay_field: 'future'})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
@@ -16722,14 +16726,13 @@ fn reads_memory_decay_detail_for_scheduler_shape() {
     db.query("MATCH (m:Memory {id: 'scheduler-memory-decay-detail'}) SET m.decay_score_cached = 0.9, m.future_decay_field = 'late'")
         .unwrap();
 
-    let output = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "scheduler-memory-decay-detail".to_string(),
-            property_names: Vec::new(),
-        })
-        .unwrap();
+    let request = KnowledgeMemoryDecayDetailRequest {
+        memory_id: "scheduler-memory-decay-detail".to_string(),
+        property_names: Vec::new(),
+    };
+    let output = db.knowledge_memory_decay_detail(&request).unwrap();
     assert!(output.found);
-    let memory = output.memory.unwrap();
+    let memory = output.memory.as_ref().unwrap();
     assert_eq!(
         memory.memory_id.as_deref(),
         Some("scheduler-memory-decay-detail")
@@ -16751,22 +16754,31 @@ fn reads_memory_decay_detail_for_scheduler_shape() {
     );
     assert!(!memory.properties.contains_key("future_decay_field"));
 
+    let projected_request = KnowledgeMemoryDecayDetailRequest {
+        memory_id: "scheduler-memory-decay-detail".to_string(),
+        property_names: vec![
+            "future_decay_field".to_string(),
+            "decay_score_cached".to_string(),
+            "future_decay_field".to_string(),
+        ],
+    };
     let projected = db
-        .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
-            memory_id: "scheduler-memory-decay-detail".to_string(),
-            property_names: vec![
-                "future_decay_field".to_string(),
-                "decay_score_cached".to_string(),
-                "future_decay_field".to_string(),
-            ],
-        })
+        .knowledge_memory_decay_detail(&projected_request)
         .unwrap();
-    let projected_memory = projected.memory.unwrap();
+    let projected_memory = projected.memory.as_ref().unwrap();
     assert_eq!(projected_memory.properties.len(), 2);
     assert_eq!(
         projected_memory.properties.get("future_decay_field"),
         Some(&Value::String("late".to_string()))
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated = db.knowledge_memory_decay_detail(&request).unwrap();
+    assert_eq!(repeated, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 1);
 
     let snapshot_output = snapshot
         .knowledge_memory_decay_detail(&KnowledgeMemoryDecayDetailRequest {
