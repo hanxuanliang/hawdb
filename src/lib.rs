@@ -135,7 +135,7 @@ pub use search::{
     SearchProjectionDelta, SearchProjectionDeltaReport, SearchProjectionFreshness,
     SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow, SearchRebuildOptions,
     SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
-    SearchTruncationReasonCode,
+    SearchTruncationReasonCode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
 pub use skein_optimizer::{
     Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,

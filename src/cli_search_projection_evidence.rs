@@ -1,4 +1,7 @@
-use crate::{Result, SearchIndex, SearchProjectionProbeOptions, SkeinError};
+use crate::{
+    Result, SearchIndex, SearchProjectionProbeOptions, SkeinError,
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+};
 use std::collections::BTreeSet;
 use std::path::Path;
 
@@ -17,21 +20,6 @@ const VECTOR_TABLES: &[&str] = &[
     "entities_index",
     "sources_index",
     "source_chunks_index",
-];
-
-const SKEIN_REQUIRED_SCAN_FILTER_FIELDS: &[&str] = &[
-    "kind",
-    "external_id",
-    "source_id",
-    "space_id",
-    "unit_type",
-    "importance",
-    "confidence",
-    "created_at",
-    "updated_at",
-    "event_start",
-    "event_end",
-    "is_latest",
 ];
 
 const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
@@ -121,7 +109,7 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "segment_descriptor_field_count",
             "segment_descriptor_field_summaries"
         ],
-        "required_skein_scan_filter_fields": SKEIN_REQUIRED_SCAN_FILTER_FIELDS,
+        "required_skein_scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "segment_descriptor_field_summary_fields": [
             "field",
             "segment_count",
@@ -633,7 +621,7 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "timestamp_min_max_ready": true,
             "persisted_segment_descriptor_ready": true,
             "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
-            "scan_filter_fields": SKEIN_REQUIRED_SCAN_FILTER_FIELDS,
+            "scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
             "segment_descriptor_field_summaries": ready_segment_descriptor_field_summaries_template()
         },
         "compressed_vector_projection": {
@@ -857,7 +845,7 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         "required_ops": required_ops,
         "supported_ops": supported_ops,
         "scan_filter_fields": scan_filter_fields,
-        "required_scan_filter_fields": SKEIN_REQUIRED_SCAN_FILTER_FIELDS,
+        "required_scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "segment_descriptor_field_count": segment_descriptor_field_count,
         "segment_descriptor_scan_filter_fields_ready": segment_descriptor_scan_filter_fields_ready,
         "segment_descriptor_field_summaries": segment_descriptor_field_summaries,
@@ -878,10 +866,10 @@ fn segment_descriptor_fields_cover_scan_filters(
         .iter()
         .filter_map(|summary| str_path(summary, &["field"]))
         .collect::<BTreeSet<_>>();
-    SKEIN_REQUIRED_SCAN_FILTER_FIELDS
+    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
         .iter()
         .all(|required| scan_filter_fields.iter().any(|field| field == required))
-        && SKEIN_REQUIRED_SCAN_FILTER_FIELDS
+        && NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
             .iter()
             .all(|required| summary_fields.contains(required))
 }

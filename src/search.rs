@@ -39,6 +39,20 @@ const RRF_K: f64 = 60.0;
 const SEARCH_COMPRESSION_HEADER: &str = "SKEIN_COMPRESSED_V1";
 const SEARCH_COMPRESSION_LEVEL: i32 = 3;
 const SEARCH_DOCUMENT_ID_FIELD: &str = "document_id";
+pub const NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS: &[&str] = &[
+    "kind",
+    "external_id",
+    "source_id",
+    "space_id",
+    "unit_type",
+    "importance",
+    "confidence",
+    "created_at",
+    "updated_at",
+    "event_start",
+    "event_end",
+    "is_latest",
+];
 #[cfg(not(test))]
 const SEARCH_FILTER_SEGMENT_TARGET_DOCUMENTS: usize = 128;
 #[cfg(test)]
@@ -2054,20 +2068,7 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
         "timestamp_min_max_ready": true,
         "persisted_segment_descriptor_ready": segment_descriptor_ready,
         "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
-        "scan_filter_fields": [
-            "kind",
-            "external_id",
-            "source_id",
-            "space_id",
-            "unit_type",
-            "importance",
-            "confidence",
-            "created_at",
-            "updated_at",
-            "event_start",
-            "event_end",
-            "is_latest"
-        ],
+        "scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "segment_descriptor_field_count": segment_descriptor_field_summaries.len(),
         "segment_descriptor_field_summaries": segment_descriptor_field_summaries,
     })
