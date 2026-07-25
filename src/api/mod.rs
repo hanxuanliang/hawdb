@@ -7834,24 +7834,14 @@ impl Database {
         &self,
         request: &KnowledgeLabelCanonicalLookupRequest,
     ) -> Result<KnowledgeLabelUsageListOutput> {
-        lookup_knowledge_labels_by_canonical_name_via_query_runtime(self, request).or_else(|_| {
-            lookup_knowledge_labels_by_canonical_name_for(&self.catalog, &self.store, request)
-        })
+        lookup_knowledge_labels_by_canonical_name_via_query_runtime(self, request)
     }
 
     pub fn scan_knowledge_labels_missing_canonical_name(
         &self,
         request: &KnowledgeLabelBackfillScanRequest,
     ) -> Result<KnowledgeLabelUsageListOutput> {
-        scan_knowledge_labels_missing_canonical_name_via_query_runtime(self, request).or_else(
-            |_| {
-                scan_knowledge_labels_missing_canonical_name_for(
-                    &self.catalog,
-                    &self.store,
-                    request,
-                )
-            },
-        )
+        scan_knowledge_labels_missing_canonical_name_via_query_runtime(self, request)
     }
 
     pub fn knowledge_label_usage(
@@ -7883,9 +7873,7 @@ impl Database {
         &self,
         request: &KnowledgeLabelRegexMemoryConnectionsRequest,
     ) -> Result<KnowledgeLabelRegexMemoryConnectionsOutput> {
-        knowledge_label_regex_memory_connections_via_query_runtime(self, request).or_else(|_| {
-            knowledge_label_regex_memory_connections_for(&self.catalog, &self.store, request)
-        })
+        knowledge_label_regex_memory_connections_via_query_runtime(self, request)
     }
 
     pub fn delete_knowledge_memory_labels(
@@ -26054,38 +26042,6 @@ fn label_lifecycle_assignments(update: &KnowledgeLabelLifecycleUpdate) -> BTreeM
     assignments
 }
 
-fn lookup_knowledge_labels_by_canonical_name_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeLabelCanonicalLookupRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    if request.canonical_name.is_empty() {
-        return Err(SkeinError::Semantic(
-            "knowledge label canonical lookup requires a non-empty canonical name".to_string(),
-        ));
-    }
-    validate_optional_label_id(request.exclude_label_id.as_deref())?;
-    let graph_commit_epoch = store.commit_epoch();
-    let rows = label_nodes(catalog, store)
-        .into_iter()
-        .filter(|node| {
-            node_string_property(node, "canonical_name").as_deref()
-                == Some(request.canonical_name.as_str())
-                && request
-                    .exclude_label_id
-                    .as_ref()
-                    .is_none_or(|label_id| node_external_id(node).as_ref() != Some(label_id))
-        })
-        .collect::<Vec<_>>();
-    Ok(label_usage_list_output(
-        catalog,
-        store,
-        graph_commit_epoch,
-        rows,
-        request.limit,
-    ))
-}
-
 fn lookup_knowledge_labels_by_canonical_name_via_query_runtime(
     db: &Database,
     request: &KnowledgeLabelCanonicalLookupRequest,
@@ -26127,34 +26083,6 @@ fn lookup_knowledge_labels_by_canonical_name_via_query_runtime(
         &parameters,
         request.limit,
     )
-}
-
-fn scan_knowledge_labels_missing_canonical_name_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeLabelBackfillScanRequest,
-) -> Result<KnowledgeLabelUsageListOutput> {
-    validate_optional_label_id(request.exclude_label_id.as_deref())?;
-    let graph_commit_epoch = store.commit_epoch();
-    let rows = label_nodes(catalog, store)
-        .into_iter()
-        .filter(|node| {
-            matches!(
-                node.properties.get("canonical_name"),
-                None | Some(Value::Null)
-            ) && request
-                .exclude_label_id
-                .as_ref()
-                .is_none_or(|label_id| node_external_id(node).as_ref() != Some(label_id))
-        })
-        .collect::<Vec<_>>();
-    Ok(label_usage_list_output(
-        catalog,
-        store,
-        graph_commit_epoch,
-        rows,
-        request.limit,
-    ))
 }
 
 fn scan_knowledge_labels_missing_canonical_name_via_query_runtime(
