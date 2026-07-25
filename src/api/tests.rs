@@ -17852,7 +17852,11 @@ fn thread_title_and_source_reads_use_query_runtime_plan_cache() {
 
 #[test]
 fn reads_thread_message_lookup_for_rest_fs_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', source: 'codex', message_count: 3, space_id: 'team'})")
         .unwrap();
     db.query(
@@ -17866,6 +17870,7 @@ fn reads_thread_message_lookup_for_rest_fs_shape() {
     db.query("CREATE (:Memory {id: 'alpha-thread-1', source: 'codex', message_count: 99})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
+    let cache_before_lookup = db.plan_cache_stats();
 
     let exact = db
         .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
@@ -17883,6 +17888,17 @@ fn reads_thread_message_lookup_for_rest_fs_shape() {
     assert_eq!(exact.raw_space_id.as_deref(), Some("team"));
     assert_eq!(exact.matched_count, 1);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    let repeated_exact = db
+        .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
+            key: "alpha-thread-1".to_string(),
+            source: "codex".to_string(),
+        })
+        .unwrap();
+    assert_eq!(exact, repeated_exact);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
     let prefix = db
         .knowledge_thread_message_lookup(&KnowledgeThreadMessageLookupRequest {
@@ -17948,7 +17964,11 @@ fn thread_message_lookup_rejects_empty_filters() {
 
 #[test]
 fn reads_thread_meta_lookup_for_rest_fs_shape() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'alpha-thread-1', thread_id: 'logical_a', title: 'Alpha Thread', summary: 'Alpha Summary', message_count: 3, source: 'codex', created_at: 10, updated_at: 20, space_id: 'team', project: 'graph', workspace: 'local'})")
         .unwrap();
     db.query("CREATE (:Thread {id: 'beta-thread-1', title: 'Beta Thread', message_count: 5, source: 'codex', space_id: '', project: '', workspace: 'remote'})")
@@ -17960,6 +17980,7 @@ fn reads_thread_meta_lookup_for_rest_fs_shape() {
     db.query("CREATE (:Memory {id: 'alpha-thread-1', source: 'codex', message_count: 99})")
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
+    let cache_before_lookup = db.plan_cache_stats();
 
     let exact = db
         .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
@@ -17985,6 +18006,17 @@ fn reads_thread_meta_lookup_for_rest_fs_shape() {
     assert_eq!(exact.workspace.as_deref(), Some("local"));
     assert_eq!(exact.matched_count, 1);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
+    let repeated_exact = db
+        .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {
+            key: "alpha-thread-1".to_string(),
+            source: "codex".to_string(),
+        })
+        .unwrap();
+    assert_eq!(exact, repeated_exact);
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
     let prefix = db
         .knowledge_thread_meta_lookup(&KnowledgeThreadMetaLookupRequest {

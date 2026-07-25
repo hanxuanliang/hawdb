@@ -7704,14 +7704,14 @@ impl Database {
         &self,
         request: &KnowledgeThreadMessageLookupRequest,
     ) -> Result<KnowledgeThreadMessageLookupOutput> {
-        knowledge_thread_message_lookup_for(&self.catalog, &self.store, request)
+        knowledge_thread_message_lookup_via_query_runtime(self, request)
     }
 
     pub fn knowledge_thread_meta_lookup(
         &self,
         request: &KnowledgeThreadMetaLookupRequest,
     ) -> Result<KnowledgeThreadMetaLookupOutput> {
-        knowledge_thread_meta_lookup_for(&self.catalog, &self.store, request)
+        knowledge_thread_meta_lookup_via_query_runtime(self, request)
     }
 
     pub fn knowledge_thread_identity(
@@ -22824,6 +22824,43 @@ fn knowledge_thread_message_lookup_for(
     })
 }
 
+fn knowledge_thread_message_lookup_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadMessageLookupRequest,
+) -> Result<KnowledgeThreadMessageLookupOutput> {
+    validate_knowledge_thread_message_lookup_request(request)?;
+    let parameters = thread_lookup_key_source_parameters(&request.key, &request.source);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread) \
+         WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source \
+         RETURN id(t) AS thread_node_id, t.id AS id, t.message_count AS message_count, \
+         t.space_id AS raw_space_id \
+         ORDER BY thread_node_id ASC",
+        &parameters,
+        None,
+    )?;
+    let matched_count = output.rows.len();
+    let first = output.rows.first();
+    Ok(KnowledgeThreadMessageLookupOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        key: request.key.clone(),
+        source_filter: request.source.clone(),
+        thread_node_id: first
+            .and_then(|row| row.get("thread_node_id"))
+            .and_then(value_to_non_negative_u64),
+        found_thread: first.is_some(),
+        id: first.and_then(|row| optional_string_cell(row, "id")),
+        message_count: first
+            .and_then(|row| row.get("message_count"))
+            .and_then(optional_non_null_value),
+        raw_space_id: first
+            .and_then(|row| row.get("raw_space_id"))
+            .filter(|value| !matches!(value, Value::Null))
+            .map(value_to_external_id),
+        matched_count,
+    })
+}
+
 fn validate_knowledge_thread_message_lookup_request(
     request: &KnowledgeThreadMessageLookupRequest,
 ) -> Result<()> {
@@ -22895,6 +22932,57 @@ fn knowledge_thread_meta_lookup_for(
     })
 }
 
+fn knowledge_thread_meta_lookup_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeThreadMetaLookupRequest,
+) -> Result<KnowledgeThreadMetaLookupOutput> {
+    validate_knowledge_thread_meta_lookup_request(request)?;
+    let parameters = thread_lookup_key_source_parameters(&request.key, &request.source);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (t:Thread) \
+         WHERE (t.id = $key OR t.id STARTS WITH $key OR t.id CONTAINS $key) AND t.source = $source \
+         RETURN id(t) AS thread_node_id, t.id AS id, t.thread_id AS thread_id, \
+         t.title AS title, t.summary AS summary, t.message_count AS message_count, \
+         t.source AS source, t.created_at AS created_at, t.updated_at AS updated_at, \
+         t.space_id AS raw_space_id, t.project AS project, t.workspace AS workspace \
+         ORDER BY thread_node_id ASC",
+        &parameters,
+        None,
+    )?;
+    let matched_count = output.rows.len();
+    let first = output.rows.first();
+    Ok(KnowledgeThreadMetaLookupOutput {
+        graph_commit_epoch: db.store.commit_epoch(),
+        key: request.key.clone(),
+        source_filter: request.source.clone(),
+        thread_node_id: first
+            .and_then(|row| row.get("thread_node_id"))
+            .and_then(value_to_non_negative_u64),
+        found_thread: first.is_some(),
+        id: first.and_then(|row| optional_string_cell(row, "id")),
+        thread_id: first.and_then(|row| optional_string_cell(row, "thread_id")),
+        title: first.and_then(|row| optional_string_cell(row, "title")),
+        summary: first.and_then(|row| optional_string_cell(row, "summary")),
+        message_count: first
+            .and_then(|row| row.get("message_count"))
+            .and_then(optional_non_null_value),
+        source: first.and_then(|row| optional_string_cell(row, "source")),
+        created_at: first
+            .and_then(|row| row.get("created_at"))
+            .and_then(optional_non_null_value),
+        updated_at: first
+            .and_then(|row| row.get("updated_at"))
+            .and_then(optional_non_null_value),
+        raw_space_id: first
+            .and_then(|row| row.get("raw_space_id"))
+            .filter(|value| !matches!(value, Value::Null))
+            .map(value_to_external_id),
+        project: first.and_then(|row| optional_string_cell(row, "project")),
+        workspace: first.and_then(|row| optional_string_cell(row, "workspace")),
+        matched_count,
+    })
+}
+
 fn validate_knowledge_thread_meta_lookup_request(
     request: &KnowledgeThreadMetaLookupRequest,
 ) -> Result<()> {
@@ -22909,6 +22997,13 @@ fn validate_knowledge_thread_meta_lookup_request(
         ));
     }
     Ok(())
+}
+
+fn thread_lookup_key_source_parameters(key: &str, source: &str) -> BTreeMap<String, Value> {
+    BTreeMap::from([
+        ("key".to_string(), Value::String(key.to_string())),
+        ("source".to_string(), Value::String(source.to_string())),
+    ])
 }
 
 fn exact_thread_id_or_logical_candidates<'a>(
