@@ -5001,6 +5001,59 @@ fn community_memory_read_rejects_invalid_scope() {
 }
 
 #[test]
+fn community_memory_reads_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Entity {id: 'community-cache-entity', community_id: 21})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'community-cache-mentioned', title: 'Mentioned', unit_type: 'fact', is_crystal: false, importance: 0.7})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'community-cache-direct', title: 'Direct', unit_type: 'fact', community_id: 21, is_crystal: false, importance: 0.6})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'community-cache-mentioned'}), (e:Entity {id: 'community-cache-entity'}) CREATE (m)-[:MENTIONS]->(e)")
+        .unwrap();
+    let request = KnowledgeCommunityMemoryListRequest {
+        community_ids: vec![Value::Int(21)],
+        source: KnowledgeCommunityMemorySource::Both,
+        crystal_filter: KnowledgeCommunityMemoryCrystalFilter::FalseOnly,
+        unit_types: vec!["fact".to_string()],
+        order: KnowledgeCommunityMemoryListOrder::CommunityBreadthImportanceCreatedAt,
+        limit: 0,
+    };
+
+    let first = db.knowledge_community_memories(&request).unwrap();
+    let second = db.knowledge_community_memories(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_row_count, 2);
+    assert_eq!(first.returned_count, 2);
+    assert_eq!(
+        first
+            .rows
+            .iter()
+            .map(|row| (row.memory_id.as_deref(), row.source))
+            .collect::<Vec<_>>(),
+        vec![
+            (
+                Some("community-cache-mentioned"),
+                KnowledgeCommunityMemoryRowSource::MentionedEntities
+            ),
+            (
+                Some("community-cache-direct"),
+                KnowledgeCommunityMemoryRowSource::DirectMemoryCommunity
+            )
+        ]
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 2);
+    assert_eq!(stats.misses, 2);
+    assert_eq!(stats.hits, 2);
+}
+
+#[test]
 fn reads_related_entity_names_for_memory_and_thread_shapes() {
     let mut db = Database::new();
     db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a'})")
