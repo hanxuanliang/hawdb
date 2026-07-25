@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
+const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 
 pub fn nowledge_graph_route_readiness_usage() -> String {
     "nowledge-graph-route-readiness requires [--require-ready] <route-evidence-json>".to_string()
@@ -41,7 +42,10 @@ pub fn run_nowledge_graph_route_readiness(
 }
 
 fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<serde_json::Value> {
-    let routes = parse_route_evidence(evidence)?;
+    let parsed_evidence = parse_route_evidence(evidence)?;
+    let evidence_protocol = parsed_evidence.protocol.clone();
+    let evidence_ready = parsed_evidence.ready;
+    let routes = parsed_evidence.routes;
     let route_names = routes
         .iter()
         .map(|route| route.route.clone())
@@ -51,8 +55,12 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
         .filter(|route| !route_names.contains(**route))
         .copied()
         .collect::<Vec<_>>();
-    let route_primary_blocker_codes =
-        route_primary_blocker_codes(&routes, &missing_required_routes);
+    let route_primary_blocker_codes = route_primary_blocker_codes(
+        evidence_protocol.as_deref(),
+        evidence_ready,
+        &routes,
+        &missing_required_routes,
+    );
     let shadow_compare_route_count = routes
         .iter()
         .filter(|route| route.shadow_compare_ready)
@@ -80,6 +88,8 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
 
     Ok(serde_json::json!({
         "protocol": NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
+        "evidence_protocol": evidence_protocol,
+        "evidence_ready": evidence_ready,
         "route_count": route_count,
         "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
         "missing_required_routes": missing_required_routes,
@@ -273,7 +283,24 @@ impl QueryRuntimeReport {
     }
 }
 
-fn parse_route_evidence(evidence: &serde_json::Value) -> Result<Vec<RouteEvidence>> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedRouteEvidence {
+    protocol: Option<String>,
+    ready: Option<bool>,
+    routes: Vec<RouteEvidence>,
+}
+
+fn parse_route_evidence(evidence: &serde_json::Value) -> Result<ParsedRouteEvidence> {
+    let protocol = if evidence.is_array() {
+        None
+    } else {
+        str_path(evidence, &["protocol"]).map(str::to_string)
+    };
+    let ready = if evidence.is_array() {
+        None
+    } else {
+        bool_path(evidence, &["ready"])
+    };
     let routes = if evidence.is_array() {
         evidence.as_array()
     } else {
@@ -282,7 +309,11 @@ fn parse_route_evidence(evidence: &serde_json::Value) -> Result<Vec<RouteEvidenc
     .ok_or_else(|| {
         SkeinError::Semantic("graph route evidence JSON must contain a routes array".to_string())
     })?;
-    routes.iter().map(parse_route).collect()
+    Ok(ParsedRouteEvidence {
+        protocol,
+        ready,
+        routes: routes.iter().map(parse_route).collect::<Result<Vec<_>>>()?,
+    })
 }
 
 fn parse_route(value: &serde_json::Value) -> Result<RouteEvidence> {
@@ -305,10 +336,18 @@ fn parse_route(value: &serde_json::Value) -> Result<RouteEvidence> {
 }
 
 fn route_primary_blocker_codes(
+    evidence_protocol: Option<&str>,
+    evidence_ready: Option<bool>,
     routes: &[RouteEvidence],
     missing_required_routes: &[&str],
 ) -> Vec<String> {
     let mut blockers = BTreeSet::new();
+    if evidence_protocol != Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL) {
+        blockers.insert("graph_route_evidence_protocol_mismatch".to_string());
+    }
+    if evidence_ready != Some(true) {
+        blockers.insert("graph_route_evidence_not_ready".to_string());
+    }
     if !missing_required_routes.is_empty() {
         blockers.insert("missing_required_routes".to_string());
     }
@@ -397,12 +436,15 @@ mod tests {
 
     #[test]
     fn route_readiness_reports_ready_for_all_required_routes() {
-        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
-            "routes": ready_routes()
-        }))
-        .unwrap();
+        let readiness =
+            nowledge_graph_route_readiness_json(&ready_evidence(ready_routes())).unwrap();
 
         assert_eq!(readiness["protocol"], "nmem-graph-route-readiness-v1");
+        assert_eq!(
+            readiness["evidence_protocol"],
+            "nmem-graph-route-evidence-v1"
+        );
+        assert_eq!(readiness["evidence_ready"], true);
         assert_eq!(
             readiness["route_count"],
             serde_json::json!(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len())
@@ -425,10 +467,7 @@ mod tests {
         let mut routes = ready_routes();
         routes.pop();
 
-        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
-            "routes": routes
-        }))
-        .unwrap();
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
         assert_eq!(readiness["route_primary_ready"], false);
         assert_eq!(
@@ -447,10 +486,7 @@ mod tests {
         routes[0]["primary_ready"] = serde_json::json!(false);
         routes[0]["blocker_codes"] = serde_json::json!(["primary_route_disabled"]);
 
-        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
-            "routes": routes
-        }))
-        .unwrap();
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
         assert_eq!(readiness["route_primary_ready"], false);
         assert_eq!(
@@ -464,10 +500,7 @@ mod tests {
         let mut routes = ready_routes();
         routes[0]["query_reports"] = serde_json::json!([]);
 
-        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
-            "routes": routes
-        }))
-        .unwrap();
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
         assert_eq!(readiness["route_primary_ready"], false);
         assert_eq!(readiness["route_query_runtime_ready"], false);
@@ -483,10 +516,7 @@ mod tests {
         let mut routes = ready_routes();
         routes[0]["query_reports"][0]["statement_kind"] = serde_json::json!("set_system_variable");
 
-        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
-            "routes": routes
-        }))
-        .unwrap();
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
         assert_eq!(readiness["route_primary_ready"], false);
         assert_eq!(readiness["route_query_runtime_ready"], false);
@@ -509,10 +539,7 @@ mod tests {
             .unwrap()
             .remove("scan_pruning_reports");
 
-        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
-            "routes": routes
-        }))
-        .unwrap();
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
 
         assert_eq!(readiness["route_primary_ready"], false);
         assert_eq!(readiness["route_query_runtime_ready"], false);
@@ -521,6 +548,46 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "query_report_scan_pruning_profile_missing"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_when_evidence_envelope_is_not_ready() {
+        let mut evidence = ready_evidence(ready_routes());
+        evidence["ready"] = serde_json::json!(false);
+
+        let readiness = nowledge_graph_route_readiness_json(&evidence).unwrap();
+
+        assert_eq!(readiness["evidence_ready"], false);
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "graph_route_evidence_not_ready"));
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_when_evidence_protocol_is_missing() {
+        let readiness = nowledge_graph_route_readiness_json(&serde_json::json!({
+            "routes": ready_routes()
+        }))
+        .unwrap();
+
+        assert_eq!(readiness["evidence_protocol"], serde_json::Value::Null);
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "graph_route_evidence_protocol_mismatch"));
+    }
+
+    fn ready_evidence(routes: Vec<serde_json::Value>) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "nmem-graph-route-evidence-v1",
+            "ready": true,
+            "routes": routes
+        })
     }
 
     fn ready_routes() -> Vec<serde_json::Value> {

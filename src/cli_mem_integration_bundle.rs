@@ -1034,6 +1034,8 @@ mod tests {
     fn ready_graph_route_readiness() -> serde_json::Value {
         serde_json::json!({
             "protocol": "nmem-graph-route-readiness-v1",
+            "evidence_protocol": "nmem-graph-route-evidence-v1",
+            "evidence_ready": true,
             "route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "missing_required_routes": [],

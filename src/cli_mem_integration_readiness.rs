@@ -19,6 +19,7 @@ const SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
 const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
     "skein-nowledge-query-runtime-preflight-v1";
 const NMEM_GRAPH_ROUTE_READINESS_PROTOCOL: &str = "nmem-graph-route-readiness-v1";
+const NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL: &str = "nmem-graph-route-evidence-v1";
 const SKEIN_NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 
 pub fn nowledge_mem_integration_readiness_usage() -> String {
@@ -544,6 +545,9 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             [
                 str_path(bundle, &["graph_route_readiness", "protocol"])
                     == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL),
+                str_path(bundle, &["graph_route_readiness", "evidence_protocol"])
+                    == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL),
+                bool_path(bundle, &["graph_route_readiness", "evidence_ready"]) == Some(true),
                 u64_path(bundle, &["graph_route_readiness", "route_count"])
                     .is_some_and(|value| value > 0),
                 u64_path(bundle, &["graph_route_readiness", "required_route_count"])
@@ -570,6 +574,8 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ],
             [
                 "graph_route_readiness.protocol",
+                "graph_route_readiness.evidence_protocol",
+                "graph_route_readiness.evidence_ready",
                 "graph_route_readiness.route_count",
                 "graph_route_readiness.required_route_count",
                 "graph_route_readiness.missing_required_routes",
@@ -1367,6 +1373,8 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
             "Nowledge Mem graph cutover requires route-level primary-read readiness evidence",
             [
                 "graph_route_readiness.protocol",
+                "graph_route_readiness.evidence_protocol",
+                "graph_route_readiness.evidence_ready",
                 "graph_route_readiness.route_count",
                 "graph_route_readiness.required_route_count",
                 "graph_route_readiness.missing_required_routes",
@@ -1743,6 +1751,9 @@ fn bounded_read_route_coverage_ready(bundle: &serde_json::Value) -> bool {
 fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
     str_path(bundle, &["graph_route_readiness", "protocol"])
         == Some(NMEM_GRAPH_ROUTE_READINESS_PROTOCOL)
+        && str_path(bundle, &["graph_route_readiness", "evidence_protocol"])
+            == Some(NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL)
+        && bool_path(bundle, &["graph_route_readiness", "evidence_ready"]) == Some(true)
         && u64_path(bundle, &["graph_route_readiness", "route_count"])
             .is_some_and(|value| value > 0)
         && u64_path(bundle, &["graph_route_readiness", "required_route_count"])
@@ -2942,6 +2953,8 @@ mod tests {
             route_check["failed_evidence_fields"],
             serde_json::json!([
                 "graph_route_readiness.protocol",
+                "graph_route_readiness.evidence_protocol",
+                "graph_route_readiness.evidence_ready",
                 "graph_route_readiness.route_count",
                 "graph_route_readiness.required_route_count",
                 "graph_route_readiness.missing_required_routes",
@@ -3253,6 +3266,63 @@ mod tests {
         assert_eq!(
             route_check["failed_evidence_fields"],
             serde_json::json!(["graph_route_readiness.protocol"])
+        );
+    }
+
+    #[test]
+    fn requires_graph_route_readiness_evidence_protocol() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["evidence_protocol"] = serde_json::json!("handwritten");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.evidence_protocol"])
+        );
+    }
+
+    #[test]
+    fn rejects_graph_route_readiness_when_route_evidence_is_not_ready() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["evidence_ready"] = serde_json::json!(false);
+        bundle["graph_route_readiness"]["route_primary_blocker_codes"] =
+            serde_json::json!(["graph_route_evidence_not_ready"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["graph_route_evidence_not_ready"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!([
+                "graph_route_readiness.evidence_ready",
+                "graph_route_readiness.route_primary_blocker_codes"
+            ])
         );
     }
 
@@ -3813,6 +3883,8 @@ mod tests {
         });
         bundle["graph_route_readiness"] = serde_json::json!({
             "protocol": "nmem-graph-route-readiness-v1",
+            "evidence_protocol": "nmem-graph-route-evidence-v1",
+            "evidence_ready": true,
             "route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "missing_required_routes": [],
