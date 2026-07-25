@@ -17034,7 +17034,11 @@ fn memory_cleanup_fingerprints_reject_empty_inputs_without_wal() {
 
 #[test]
 fn projects_thread_compacted_memory_fields_for_nowledge_growth() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'projected_thread_a', thread_id: 'projected_logical_a'})")
         .unwrap();
     db.query("CREATE (:Memory {id: 'projected_memory_a', title: 'Projected Alpha', content: 'alpha body', importance: 0.8, created_at: 10, space_id: '', future_field: 'future-a'})")
@@ -17053,26 +17057,26 @@ fn projects_thread_compacted_memory_fields_for_nowledge_growth() {
     db.query("MATCH (t:Thread {id: 'projected_thread_a'}), (m:Memory {id: 'projected_memory_c'}) CREATE (t)-[:COMPACTS_TO {compaction_method: 'late', created_at: 110, future_edge_field: 'edge-c'}]->(m)")
         .unwrap();
 
+    let request = KnowledgeThreadCompactedMemoryProjectedListRequest {
+        list: KnowledgeThreadCompactedMemoryListRequest {
+            thread_id: "projected_thread_a".to_string(),
+            identity_property: "id".to_string(),
+            limit: 2,
+        },
+        memory_property_names: vec![
+            "title".to_string(),
+            "future_field".to_string(),
+            "space_id".to_string(),
+            "title".to_string(),
+        ],
+        relationship_property_names: vec![
+            "compaction_method".to_string(),
+            "future_edge_field".to_string(),
+            "_id".to_string(),
+        ],
+    };
     let projected = db
-        .knowledge_thread_compacted_memory_projected_list(
-            &KnowledgeThreadCompactedMemoryProjectedListRequest {
-                list: KnowledgeThreadCompactedMemoryListRequest {
-                    thread_id: "projected_thread_a".to_string(),
-                    identity_property: "id".to_string(),
-                    limit: 2,
-                },
-                memory_property_names: vec![
-                    "title".to_string(),
-                    "future_field".to_string(),
-                    "space_id".to_string(),
-                    "title".to_string(),
-                ],
-                relationship_property_names: vec![
-                    "compaction_method".to_string(),
-                    "future_edge_field".to_string(),
-                ],
-            },
-        )
+        .knowledge_thread_compacted_memory_projected_list(&request)
         .unwrap();
 
     assert!(projected.found);
@@ -17105,6 +17109,19 @@ fn projects_thread_compacted_memory_fields_for_nowledge_growth() {
             .get("future_edge_field"),
         Some(&Value::String("edge-a".to_string()))
     );
+    assert!(!projected.rows[1]
+        .relationship_properties
+        .contains_key("_id"));
+
+    let stats = db.plan_cache_stats();
+    let repeated = db
+        .knowledge_thread_compacted_memory_projected_list(&request)
+        .unwrap();
+    assert_eq!(repeated, projected);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 2);
 
     let snapshot_projected = snapshot
         .knowledge_thread_compacted_memory_projected_list(
