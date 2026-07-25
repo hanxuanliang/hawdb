@@ -8031,20 +8031,14 @@ impl Database {
         &self,
         request: &KnowledgeGraphMetaRequest,
     ) -> Result<KnowledgeGraphMetaOutput> {
-        match knowledge_graph_meta_via_query_runtime(self, request) {
-            Ok(output) => Ok(output),
-            Err(_) => knowledge_graph_meta_for(&self.catalog, &self.store, request),
-        }
+        knowledge_graph_meta_via_query_runtime(self, request)
     }
 
     pub fn knowledge_graph_meta_projected(
         &self,
         request: &KnowledgeGraphMetaProjectedRequest,
     ) -> Result<KnowledgeGraphMetaProjectedOutput> {
-        match knowledge_graph_meta_projected_via_query_runtime(self, request) {
-            Ok(output) => Ok(output),
-            Err(_) => knowledge_graph_meta_projected_for(&self.catalog, &self.store, request),
-        }
+        knowledge_graph_meta_projected_via_query_runtime(self, request)
     }
 
     pub fn delete_knowledge_graph_meta(
@@ -29509,28 +29503,6 @@ fn knowledge_community_cleanup_statement(
     ))
 }
 
-fn knowledge_graph_meta_for(
-    catalog: &Catalog,
-    store: &GraphStore,
-    request: &KnowledgeGraphMetaRequest,
-) -> Result<KnowledgeGraphMetaOutput> {
-    validate_graph_meta_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let meta = node_by_label_property_external_id(
-        catalog,
-        store,
-        "GraphMeta",
-        "meta_id",
-        &request.meta_id,
-    )
-    .map(knowledge_graph_meta_from_node);
-    Ok(KnowledgeGraphMetaOutput {
-        graph_commit_epoch,
-        found: meta.is_some(),
-        meta,
-    })
-}
-
 fn knowledge_graph_meta_via_query_runtime(
     db: &Database,
     request: &KnowledgeGraphMetaRequest,
@@ -29656,18 +29628,6 @@ fn validate_graph_meta_projected_request(
         ));
     }
     Ok(())
-}
-
-fn knowledge_graph_meta_from_node(node: &NodeRecord) -> KnowledgeGraphMeta {
-    KnowledgeGraphMeta {
-        meta_id: node
-            .properties
-            .get("meta_id")
-            .map(value_to_external_id)
-            .filter(|meta_id| !meta_id.is_empty()),
-        node_id: node.id.0,
-        properties: node.properties.clone(),
-    }
 }
 
 fn knowledge_graph_meta_from_entity(entity: KnowledgeEntity) -> KnowledgeGraphMeta {
