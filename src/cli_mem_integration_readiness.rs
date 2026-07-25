@@ -730,6 +730,131 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
             ),
         ),
         check(
+            "query_runtime_preflight_alignment",
+            [
+                bool_path(
+                    bundle,
+                    &["replacement_summary_query_runtime_alignment", "ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "evidence_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &["replacement_summary_query_runtime_alignment", "summary_ready"],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "protocol_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "readiness_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "database_opened_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "probe_count_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "passed_probe_count_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "failed_probe_count_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "required_route_count_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "covered_route_count_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "covered_routes_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "required_routes_covered_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_query_runtime_alignment",
+                        "route_coverage_ready_matches",
+                    ],
+                ) == Some(true),
+            ],
+            [
+                "replacement_summary_query_runtime_alignment.ready",
+                "replacement_summary_query_runtime_alignment.evidence_ready",
+                "replacement_summary_query_runtime_alignment.summary_ready",
+                "replacement_summary_query_runtime_alignment.protocol_matches",
+                "replacement_summary_query_runtime_alignment.readiness_matches",
+                "replacement_summary_query_runtime_alignment.database_opened_matches",
+                "replacement_summary_query_runtime_alignment.probe_count_matches",
+                "replacement_summary_query_runtime_alignment.passed_probe_count_matches",
+                "replacement_summary_query_runtime_alignment.failed_probe_count_matches",
+                "replacement_summary_query_runtime_alignment.required_route_count_matches",
+                "replacement_summary_query_runtime_alignment.covered_route_count_matches",
+                "replacement_summary_query_runtime_alignment.covered_routes_matches",
+                "replacement_summary_query_runtime_alignment.required_routes_covered_matches",
+                "replacement_summary_query_runtime_alignment.route_coverage_ready_matches",
+            ],
+            blocker_codes(
+                bundle,
+                &[
+                    &["query_runtime_preflight", "blocker_codes"][..],
+                    &[
+                        "replacement_summary",
+                        "query_runtime_preflight",
+                        "blocker_codes",
+                    ][..],
+                    &["replacement_summary_query_runtime_alignment", "blocker_codes"][..],
+                ],
+            ),
+        ),
+        check(
             "library_readiness",
             [
                 str_path(bundle, &["library_readiness", "protocol"])
@@ -1300,6 +1425,21 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "query_runtime_preflight.required_routes_covered",
                 "query_runtime_preflight.blocker_codes",
                 "query_runtime_preflight.probes",
+            ],
+        ));
+    }
+    if !query_runtime_preflight_alignment_ready(bundle) {
+        actions.push(next_action(
+            "regenerate_query_runtime_preflight_alignment",
+            "live query runtime preflight evidence must match the replacement summary before Mem cutover",
+            [
+                "query_runtime_preflight.ready",
+                "replacement_summary.query_runtime_preflight.ready",
+                "replacement_summary_query_runtime_alignment.ready",
+                "replacement_summary_query_runtime_alignment.evidence_ready",
+                "replacement_summary_query_runtime_alignment.summary_ready",
+                "replacement_summary_query_runtime_alignment.covered_routes_matches",
+                "replacement_summary_query_runtime_alignment.blocker_codes",
             ],
         ));
     }
@@ -1882,6 +2022,66 @@ fn query_runtime_preflight_probe_scan_pruning_ready(probe: &serde_json::Value) -
     report_count == reports.len() as u64
         && u64_path(probe, &["execution_profile", "pruned_scan_count"]).is_some()
         && reports.iter().all(query_runtime_scan_pruning_report_ready)
+}
+
+fn query_runtime_preflight_alignment_ready(bundle: &serde_json::Value) -> bool {
+    [
+        &["replacement_summary_query_runtime_alignment", "ready"][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "evidence_ready",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "summary_ready",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "protocol_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "readiness_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "database_opened_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "probe_count_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "passed_probe_count_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "failed_probe_count_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "required_route_count_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "covered_route_count_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "covered_routes_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "required_routes_covered_matches",
+        ][..],
+        &[
+            "replacement_summary_query_runtime_alignment",
+            "route_coverage_ready_matches",
+        ][..],
+    ]
+    .iter()
+    .all(|path| bool_path(bundle, path) == Some(true))
 }
 
 fn query_runtime_scan_pruning_report_ready(report: &serde_json::Value) -> bool {
@@ -2884,6 +3084,88 @@ mod tests {
     }
 
     #[test]
+    fn requires_query_runtime_preflight_alignment() {
+        let mut bundle = ready_bundle();
+        bundle
+            .as_object_mut()
+            .unwrap()
+            .remove("replacement_summary_query_runtime_alignment");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight_alignment"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_runtime_preflight_alignment")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary_query_runtime_alignment.ready",
+                "replacement_summary_query_runtime_alignment.evidence_ready",
+                "replacement_summary_query_runtime_alignment.summary_ready",
+                "replacement_summary_query_runtime_alignment.protocol_matches",
+                "replacement_summary_query_runtime_alignment.readiness_matches",
+                "replacement_summary_query_runtime_alignment.database_opened_matches",
+                "replacement_summary_query_runtime_alignment.probe_count_matches",
+                "replacement_summary_query_runtime_alignment.passed_probe_count_matches",
+                "replacement_summary_query_runtime_alignment.failed_probe_count_matches",
+                "replacement_summary_query_runtime_alignment.required_route_count_matches",
+                "replacement_summary_query_runtime_alignment.covered_route_count_matches",
+                "replacement_summary_query_runtime_alignment.covered_routes_matches",
+                "replacement_summary_query_runtime_alignment.required_routes_covered_matches",
+                "replacement_summary_query_runtime_alignment.route_coverage_ready_matches"
+            ])
+        );
+        assert!(report["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| action["action"] == "regenerate_query_runtime_preflight_alignment"));
+    }
+
+    #[test]
+    fn rejects_stale_query_runtime_summary_when_route_coverage_differs() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_query_runtime_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_query_runtime_alignment"]["covered_routes_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_query_runtime_alignment"]["blocker_codes"] =
+            serde_json::json!(["query_runtime_preflight_covered_routes_mismatch"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight_alignment"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["query_runtime_preflight_covered_routes_mismatch"])
+        );
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_runtime_preflight_alignment")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary_query_runtime_alignment.ready",
+                "replacement_summary_query_runtime_alignment.covered_routes_matches"
+            ])
+        );
+    }
+
+    #[test]
     fn rejects_weak_graph_route_query_profiles_even_if_summary_is_ready() {
         let mut bundle = ready_bundle();
         bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
@@ -3494,6 +3776,7 @@ mod tests {
                 }
             }
         });
+        bundle["replacement_summary"]["query_runtime_preflight"] = ready_query_runtime_summary();
         bundle["replacement_summary_graph_route_alignment"] = serde_json::json!({
             "ready": true,
             "evidence_present": true,
@@ -3505,6 +3788,27 @@ mod tests {
             "primary_ready_routes_match": true,
             "evidence_required_routes_covered": true,
             "summary_required_routes_covered": true,
+            "blocker_codes": []
+        });
+        bundle["replacement_summary_query_runtime_alignment"] = serde_json::json!({
+            "ready": true,
+            "evidence_present": true,
+            "summary_present": true,
+            "evidence_ready": true,
+            "summary_ready": true,
+            "protocol_matches": true,
+            "readiness_matches": true,
+            "database_opened_matches": true,
+            "probe_count_matches": true,
+            "passed_probe_count_matches": true,
+            "failed_probe_count_matches": true,
+            "required_route_count_matches": true,
+            "covered_route_count_matches": true,
+            "covered_routes_matches": true,
+            "required_routes_covered_matches": true,
+            "route_coverage_ready_matches": true,
+            "evidence_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "summary_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "blocker_codes": []
         });
         bundle["graph_route_readiness"] = serde_json::json!({
@@ -3650,6 +3954,27 @@ mod tests {
                 })
             })
             .collect()
+    }
+
+    fn ready_query_runtime_summary() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-query-runtime-preflight-v1",
+            "present": true,
+            "ready": true,
+            "database_opened": true,
+            "probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "passed_probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "failed_probe_count": 0,
+            "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "missing_required_routes": [],
+            "required_routes_covered": true,
+            "route_coverage_ready": true,
+            "probe_details_ready": true,
+            "blocker_codes": []
+        })
     }
 
     fn ready_graph_route_query_report() -> serde_json::Value {

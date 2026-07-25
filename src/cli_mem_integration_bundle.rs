@@ -4,6 +4,8 @@ use std::path::Path;
 
 const NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL: &str =
     "nowledge-mem-skein-integration-bundle";
+const SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
+    "skein-nowledge-query-runtime-preflight-v1";
 
 pub fn nowledge_mem_integration_bundle_usage() -> String {
     "nowledge-mem-integration-bundle requires [--require-ready] --submodule-path <path> --submodule-commit <commit> --legacy-data-retained --coexistence-mode shadow|side_by_side --content-store-present --content-store-engine sqlite --content-store-messages-available --content-store-source-chunks-available --previous-wrapper-preflight-json <path> --replacement-summary-json <path> --bounded-read-evidence-json <path> --graph-route-readiness-json <path> --query-runtime-preflight-json <path> --search-candidate-shadow-evidence-json <path> --library-readiness-json <path>"
@@ -134,6 +136,9 @@ fn nowledge_mem_integration_bundle_json(
         bounded_read_alignment_json(&bounded_read_evidence, &replacement_summary);
     let graph_route_alignment =
         graph_route_alignment_json(&graph_route_readiness, &replacement_summary);
+    let query_runtime_alignment =
+        query_runtime_alignment_json(&query_runtime_preflight, &replacement_summary);
+    let graph_route_parity_alignment = graph_route_parity_alignment_json(&graph_route_readiness);
 
     Ok(serde_json::json!({
         "protocol": NOWLEDGE_MEM_SKEIN_INTEGRATION_BUNDLE_PROTOCOL,
@@ -169,7 +174,9 @@ fn nowledge_mem_integration_bundle_json(
         "replacement_summary_bounded_read_alignment": bounded_alignment,
         "graph_route_readiness": graph_route_readiness,
         "replacement_summary_graph_route_alignment": graph_route_alignment,
+        "graph_route_parity_alignment": graph_route_parity_alignment,
         "query_runtime_preflight": query_runtime_preflight,
+        "replacement_summary_query_runtime_alignment": query_runtime_alignment,
         "search_candidate_shadow_evidence": search_candidate_shadow_evidence,
         "library_readiness": library_readiness,
     }))
@@ -238,6 +245,88 @@ fn graph_route_primary_ready_routes(value: &serde_json::Value) -> BTreeSet<Strin
         .filter_map(|route| str_path(route, &["route"]))
         .map(str::to_string)
         .collect()
+}
+
+fn graph_route_parity_alignment_json(
+    graph_route_readiness: &serde_json::Value,
+) -> serde_json::Value {
+    let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .map(|route| (*route).to_string())
+        .collect::<BTreeSet<_>>();
+    let mut observed_routes = BTreeSet::new();
+    let mut ready_routes = BTreeSet::new();
+    let mut not_ready_routes = BTreeSet::new();
+    let mut blocker_routes = BTreeSet::new();
+
+    for route in graph_route_readiness
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let Some(route_name) = str_path(route, &["route"]) else {
+            continue;
+        };
+        observed_routes.insert(route_name.to_string());
+        if bool_path(route, &["shadow_compare_ready"]) == Some(true) {
+            ready_routes.insert(route_name.to_string());
+        } else {
+            not_ready_routes.insert(route_name.to_string());
+        }
+        if route
+            .get("blocker_codes")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|blockers| !blockers.is_empty())
+        {
+            blocker_routes.insert(route_name.to_string());
+        }
+    }
+
+    let missing_routes = required_routes
+        .difference(&observed_routes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let relevant_not_ready_routes = not_ready_routes
+        .intersection(&required_routes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let relevant_blocker_routes = blocker_routes
+        .intersection(&required_routes)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let ready = !required_routes.is_empty()
+        && missing_routes.is_empty()
+        && relevant_not_ready_routes.is_empty()
+        && relevant_blocker_routes.is_empty()
+        && required_routes
+            .iter()
+            .all(|route| ready_routes.contains(route));
+
+    serde_json::json!({
+        "ready": ready,
+        "required_route_count": required_routes.len(),
+        "ready_route_count": required_routes
+            .iter()
+            .filter(|route| ready_routes.contains(*route))
+            .count(),
+        "ready_routes": ready_routes,
+        "missing_routes": missing_routes,
+        "not_ready_routes": relevant_not_ready_routes,
+        "route_mismatch_routes": [],
+        "protocol_mismatch_routes": [],
+        "blocker_routes": relevant_blocker_routes,
+        "observed_blocker_codes": string_set_path(graph_route_readiness, &["blocker_codes"]),
+        "blocker_codes": graph_route_parity_blocker_codes(ready)
+    })
+}
+
+fn graph_route_parity_blocker_codes(ready: bool) -> Vec<&'static str> {
+    if ready {
+        Vec::new()
+    } else {
+        vec!["graph_route_parity_alignment_not_ready"]
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -409,6 +498,198 @@ impl BoundedReadAlignment {
     }
 }
 
+fn query_runtime_alignment_json(
+    query_runtime_preflight: &serde_json::Value,
+    replacement_summary: &serde_json::Value,
+) -> serde_json::Value {
+    let summary = replacement_summary
+        .get("query_runtime_preflight")
+        .unwrap_or(&serde_json::Value::Null);
+    let evidence_present = !query_runtime_preflight.is_null();
+    let summary_present = !summary.is_null();
+    let evidence_ready = bool_path(query_runtime_preflight, &["ready"]) == Some(true);
+    let summary_ready = bool_path(summary, &["ready"]) == Some(true);
+    let protocol_matches =
+        str_path(query_runtime_preflight, &["protocol"]) == str_path(summary, &["protocol"]);
+    let readiness_matches =
+        bool_path(query_runtime_preflight, &["ready"]) == bool_path(summary, &["ready"]);
+    let database_opened_matches = bool_path(query_runtime_preflight, &["database_opened"])
+        == bool_path(summary, &["database_opened"]);
+    let probe_count_matches =
+        u64_path(query_runtime_preflight, &["probe_count"]) == u64_path(summary, &["probe_count"]);
+    let passed_probe_count_matches = u64_path(query_runtime_preflight, &["passed_probe_count"])
+        == u64_path(summary, &["passed_probe_count"]);
+    let failed_probe_count_matches = u64_path(query_runtime_preflight, &["failed_probe_count"])
+        == u64_path(summary, &["failed_probe_count"]);
+    let required_route_count_matches = u64_path(query_runtime_preflight, &["required_route_count"])
+        == u64_path(summary, &["required_route_count"]);
+    let covered_route_count_matches = u64_path(query_runtime_preflight, &["covered_route_count"])
+        == u64_path(summary, &["covered_route_count"]);
+    let evidence_covered_routes = query_runtime_probe_route_set(query_runtime_preflight);
+    let summary_covered_routes = string_set_path(summary, &["covered_routes"]);
+    let covered_routes_matches = evidence_covered_routes == summary_covered_routes;
+    let required_routes_covered_matches =
+        bool_path(query_runtime_preflight, &["required_routes_covered"])
+            == bool_path(summary, &["required_routes_covered"]);
+    let route_coverage_ready_matches = query_runtime_route_coverage_ready(query_runtime_preflight)
+        == bool_path(summary, &["route_coverage_ready"]);
+    let alignment = QueryRuntimeAlignment {
+        evidence_present,
+        summary_present,
+        evidence_ready,
+        summary_ready,
+        protocol_matches,
+        readiness_matches,
+        database_opened_matches,
+        probe_count_matches,
+        passed_probe_count_matches,
+        failed_probe_count_matches,
+        required_route_count_matches,
+        covered_route_count_matches,
+        covered_routes_matches,
+        required_routes_covered_matches,
+        route_coverage_ready_matches,
+    };
+
+    serde_json::json!({
+        "ready": alignment.ready(),
+        "evidence_present": alignment.evidence_present,
+        "summary_present": alignment.summary_present,
+        "evidence_ready": alignment.evidence_ready,
+        "summary_ready": alignment.summary_ready,
+        "protocol_matches": alignment.protocol_matches,
+        "readiness_matches": alignment.readiness_matches,
+        "database_opened_matches": alignment.database_opened_matches,
+        "probe_count_matches": alignment.probe_count_matches,
+        "passed_probe_count_matches": alignment.passed_probe_count_matches,
+        "failed_probe_count_matches": alignment.failed_probe_count_matches,
+        "required_route_count_matches": alignment.required_route_count_matches,
+        "covered_route_count_matches": alignment.covered_route_count_matches,
+        "covered_routes_matches": alignment.covered_routes_matches,
+        "required_routes_covered_matches": alignment.required_routes_covered_matches,
+        "route_coverage_ready_matches": alignment.route_coverage_ready_matches,
+        "evidence_covered_routes": evidence_covered_routes,
+        "summary_covered_routes": summary_covered_routes,
+        "blocker_codes": alignment.blocker_codes()
+    })
+}
+
+fn query_runtime_probe_route_set(value: &serde_json::Value) -> BTreeSet<String> {
+    value
+        .get("probes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|probe| str_path(probe, &["route"]))
+        .map(str::to_string)
+        .collect()
+}
+
+fn query_runtime_route_coverage_ready(value: &serde_json::Value) -> Option<bool> {
+    let observed_routes = query_runtime_probe_route_set(value);
+    Some(
+        str_path(value, &["protocol"]) == Some(SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL)
+            && u64_path(value, &["required_route_count"])
+                == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+            && u64_path(value, &["covered_route_count"])
+                == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
+            && bool_path(value, &["required_routes_covered"]) == Some(true)
+            && string_set_path(value, &["missing_required_routes"]).is_empty()
+            && REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+                .iter()
+                .all(|route| observed_routes.contains(*route)),
+    )
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QueryRuntimeAlignment {
+    evidence_present: bool,
+    summary_present: bool,
+    evidence_ready: bool,
+    summary_ready: bool,
+    protocol_matches: bool,
+    readiness_matches: bool,
+    database_opened_matches: bool,
+    probe_count_matches: bool,
+    passed_probe_count_matches: bool,
+    failed_probe_count_matches: bool,
+    required_route_count_matches: bool,
+    covered_route_count_matches: bool,
+    covered_routes_matches: bool,
+    required_routes_covered_matches: bool,
+    route_coverage_ready_matches: bool,
+}
+
+impl QueryRuntimeAlignment {
+    fn ready(&self) -> bool {
+        self.evidence_present
+            && self.summary_present
+            && self.evidence_ready
+            && self.summary_ready
+            && self.protocol_matches
+            && self.readiness_matches
+            && self.database_opened_matches
+            && self.probe_count_matches
+            && self.passed_probe_count_matches
+            && self.failed_probe_count_matches
+            && self.required_route_count_matches
+            && self.covered_route_count_matches
+            && self.covered_routes_matches
+            && self.required_routes_covered_matches
+            && self.route_coverage_ready_matches
+    }
+
+    fn blocker_codes(&self) -> Vec<&'static str> {
+        let mut blockers = Vec::new();
+        if !self.evidence_present {
+            blockers.push("query_runtime_preflight_missing");
+        }
+        if !self.summary_present {
+            blockers.push("replacement_summary_query_runtime_preflight_missing");
+        }
+        if !self.evidence_ready {
+            blockers.push("query_runtime_preflight_not_ready");
+        }
+        if !self.summary_ready {
+            blockers.push("replacement_summary_query_runtime_preflight_not_ready");
+        }
+        if !self.protocol_matches {
+            blockers.push("query_runtime_preflight_protocol_mismatch");
+        }
+        if !self.readiness_matches {
+            blockers.push("query_runtime_preflight_readiness_mismatch");
+        }
+        if !self.database_opened_matches {
+            blockers.push("query_runtime_preflight_database_opened_mismatch");
+        }
+        if !self.probe_count_matches {
+            blockers.push("query_runtime_preflight_probe_count_mismatch");
+        }
+        if !self.passed_probe_count_matches {
+            blockers.push("query_runtime_preflight_passed_probe_count_mismatch");
+        }
+        if !self.failed_probe_count_matches {
+            blockers.push("query_runtime_preflight_failed_probe_count_mismatch");
+        }
+        if !self.required_route_count_matches {
+            blockers.push("query_runtime_preflight_required_route_count_mismatch");
+        }
+        if !self.covered_route_count_matches {
+            blockers.push("query_runtime_preflight_covered_route_count_mismatch");
+        }
+        if !self.covered_routes_matches {
+            blockers.push("query_runtime_preflight_covered_routes_mismatch");
+        }
+        if !self.required_routes_covered_matches {
+            blockers.push("query_runtime_preflight_required_routes_covered_mismatch");
+        }
+        if !self.route_coverage_ready_matches {
+            blockers.push("query_runtime_preflight_route_coverage_ready_mismatch");
+        }
+        blockers
+    }
+}
+
 fn coexistence_blocker_codes(
     legacy_data_retained: bool,
     legacy_data_deleted: bool,
@@ -531,6 +812,10 @@ mod tests {
             bundle["replacement_summary_bounded_read_alignment"]["ready"],
             true
         );
+        assert_eq!(
+            bundle["replacement_summary_query_runtime_alignment"]["ready"],
+            true
+        );
         assert_eq!(readiness["ready"], true);
         assert_eq!(readiness["failed_checks"], serde_json::json!([]));
     }
@@ -570,6 +855,34 @@ mod tests {
         assert_eq!(
             readiness["failed_checks"],
             serde_json::json!(["bounded_read_evidence_alignment"])
+        );
+    }
+
+    #[test]
+    fn generated_bundle_detects_query_runtime_alignment_mismatch() {
+        let mut inputs = ready_inputs();
+        inputs.query_runtime_preflight.as_mut().unwrap()["probes"]
+            .as_array_mut()
+            .unwrap()
+            .pop();
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["replacement_summary_query_runtime_alignment"]["blocker_codes"],
+            serde_json::json!([
+                "query_runtime_preflight_covered_routes_mismatch",
+                "query_runtime_preflight_route_coverage_ready_mismatch"
+            ])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(
+            readiness["failed_checks"],
+            serde_json::json!([
+                "query_runtime_preflight",
+                "query_runtime_preflight_alignment"
+            ])
         );
     }
 
@@ -643,9 +956,14 @@ mod tests {
                 "table_parity_ready": true,
                 "embedding_identity_parity": true,
                 "incremental_watermark_parity": true,
+                "pushdown_evidence": {
+                    "ready": true,
+                    "shadow_segment_descriptor_scan_filter_fields_ready": true
+                },
                 "blocker_codes": []
             },
             "bounded_read_evidence": ready_bounded_read_evidence(),
+            "query_runtime_preflight": ready_replacement_summary_query_runtime_preflight(),
             "cutover_evidence": {
                 "storage_recovery_required": true,
                 "storage_recovery_ready": true,
@@ -669,6 +987,27 @@ mod tests {
                 "background_maintenance_blocker_codes": [],
                 "background_maintenance_blockers": []
             }
+        })
+    }
+
+    fn ready_replacement_summary_query_runtime_preflight() -> serde_json::Value {
+        serde_json::json!({
+            "protocol": "skein-nowledge-query-runtime-preflight-v1",
+            "present": true,
+            "ready": true,
+            "database_opened": true,
+            "probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "passed_probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "failed_probe_count": 0,
+            "required_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_route_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+            "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "missing_required_routes": [],
+            "required_routes_covered": true,
+            "route_coverage_ready": true,
+            "probe_details_ready": true,
+            "blocker_codes": []
         })
     }
 
