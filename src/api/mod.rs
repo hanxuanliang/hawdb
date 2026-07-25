@@ -7676,7 +7676,7 @@ impl Database {
         &self,
         request: &KnowledgeThreadListRequest,
     ) -> Result<KnowledgeThreadListOutput> {
-        knowledge_threads_for(&self.catalog, &self.store, request)
+        knowledge_threads_via_query_runtime(self, request)
     }
 
     pub fn knowledge_thread_sources(
@@ -10627,7 +10627,7 @@ fn knowledge_community_entity_visibility_via_query_runtime(
     }
 
     let mut rows = Vec::new();
-    entities.sort_by(|left, right| left.entity_node_id.cmp(&right.entity_node_id));
+    entities.sort_by_key(|entity| entity.entity_node_id);
     for entity in entities {
         if let Some(memory_rows) = memory_rows_by_entity.remove(&entity.entity_node_id) {
             rows.extend(
@@ -14403,6 +14403,13 @@ fn boolean_property(node: &NodeRecord, property: &str) -> Option<bool> {
 fn boolean_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<bool> {
     match properties.get(property) {
         Some(Value::Bool(value)) => Some(*value),
+        _ => None,
+    }
+}
+
+fn integer_property_value(properties: &BTreeMap<String, Value>, property: &str) -> Option<i64> {
+    match properties.get(property) {
+        Some(Value::Int(value)) => Some(*value),
         _ => None,
     }
 }
@@ -22321,41 +22328,33 @@ fn compare_skill_memory_values(left: &Value, right: &Value) -> std::cmp::Orderin
     }
 }
 
-fn knowledge_threads_for(
-    catalog: &Catalog,
-    store: &GraphStore,
+fn knowledge_threads_via_query_runtime(
+    db: &Database,
     request: &KnowledgeThreadListRequest,
 ) -> Result<KnowledgeThreadListOutput> {
     validate_knowledge_thread_list_request(request)?;
-    let graph_commit_epoch = store.commit_epoch();
-    let Some(label_id) = catalog.label_id("Thread") else {
-        return Ok(KnowledgeThreadListOutput {
-            graph_commit_epoch,
-            rows: Vec::new(),
-            matched_count: 0,
-            returned_count: 0,
-            missing_ids: request.ids.clone(),
-            missing_thread_ids: request.thread_ids.clone(),
-        });
-    };
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::new();
+    let predicate = knowledge_thread_list_query_predicate(request, &mut parameters);
+    let query = format!("MATCH (t:Thread){predicate} RETURN t AS thread");
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
 
-    let requested_ids = request.ids.iter().cloned().collect::<BTreeSet<_>>();
-    let requested_thread_ids = request.thread_ids.iter().cloned().collect::<BTreeSet<_>>();
     let mut matched_ids = BTreeSet::new();
     let mut matched_thread_ids = BTreeSet::new();
-    let mut rows = store
-        .scan_nodes(Some(label_id))
-        .filter(|node| {
-            thread_matches_list_request(node, request, &requested_ids, &requested_thread_ids)
-        })
-        .map(|node| {
-            if let Some(id) = node_external_id(node) {
-                matched_ids.insert(id);
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(|row| row.get("thread").and_then(knowledge_entity_from_value))
+        .filter(|thread| thread_metadata_matches_list_request(thread, request))
+        .map(|thread| {
+            let row = knowledge_thread_list_row_from_entity(&thread);
+            if let Some(id) = &row.id {
+                matched_ids.insert(id.clone());
             }
-            if let Some(thread_id) = string_property(node, "thread_id") {
-                matched_thread_ids.insert(thread_id);
+            if let Some(thread_id) = &row.thread_id {
+                matched_thread_ids.insert(thread_id.clone());
             }
-            knowledge_thread_list_row(node)
+            row
         })
         .collect::<Vec<_>>();
 
@@ -22456,96 +22455,108 @@ fn validate_knowledge_thread_list_request(request: &KnowledgeThreadListRequest) 
     Ok(())
 }
 
-fn thread_matches_list_request(
-    node: &NodeRecord,
+fn knowledge_thread_list_query_predicate(
     request: &KnowledgeThreadListRequest,
-    requested_ids: &BTreeSet<String>,
-    requested_thread_ids: &BTreeSet<String>,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    let mut predicates = Vec::new();
+    if !request.ids.is_empty() {
+        parameters.insert(
+            "ids".to_string(),
+            Value::List(request.ids.iter().cloned().map(Value::String).collect()),
+        );
+        predicates.push("t.id IN $ids");
+    }
+    if !request.thread_ids.is_empty() {
+        parameters.insert(
+            "thread_ids".to_string(),
+            Value::List(
+                request
+                    .thread_ids
+                    .iter()
+                    .cloned()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        predicates.push("t.thread_id IN $thread_ids");
+    }
+    if let Some(lookup_key) = &request.lookup_key {
+        parameters.insert("lookup_key".to_string(), Value::String(lookup_key.clone()));
+        predicates.push(
+            "(t.id = $lookup_key OR t.id STARTS WITH $lookup_key OR t.id CONTAINS $lookup_key OR t.thread_id = $lookup_key)",
+        );
+    }
+    if let Some(source) = &request.source {
+        parameters.insert("source".to_string(), Value::String(source.clone()));
+        predicates.push("t.source = $source");
+    }
+    if let Some(normalized_space_id) = &request.normalized_space_id {
+        parameters.insert(
+            "normalized_space_id".to_string(),
+            Value::String(normalized_space_id.clone()),
+        );
+        if normalized_space_id == "default" {
+            predicates.push(
+                "(t.space_id IS NULL OR t.space_id = '' OR t.space_id = $normalized_space_id)",
+            );
+        } else {
+            predicates.push("t.space_id = $normalized_space_id");
+        }
+    }
+    if request.require_thread_id {
+        predicates.push("t.thread_id IS NOT NULL AND t.thread_id <> ''");
+    }
+    if let Some(after_id) = &request.after_id {
+        parameters.insert("after_id".to_string(), Value::String(after_id.clone()));
+        predicates.push("t.id > $after_id");
+    }
+
+    if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    }
+}
+
+fn thread_metadata_matches_list_request(
+    thread: &KnowledgeEntity,
+    request: &KnowledgeThreadListRequest,
 ) -> bool {
-    let id = node_external_id(node);
-    let thread_id = string_property(node, "thread_id");
-    if !requested_ids.is_empty() && !id.as_ref().is_some_and(|id| requested_ids.contains(id)) {
-        return false;
-    }
-    if !requested_thread_ids.is_empty()
-        && !thread_id
-            .as_ref()
-            .is_some_and(|thread_id| requested_thread_ids.contains(thread_id))
-    {
-        return false;
-    }
-    if request.lookup_key.as_ref().is_some_and(|key| {
-        !id.as_ref()
-            .is_some_and(|id| id == key || id.starts_with(key) || id.contains(key))
-            && thread_id.as_ref().is_none_or(|thread_id| thread_id != key)
-    }) {
-        return false;
-    }
-    if request
-        .source
-        .as_ref()
-        .is_some_and(|source| string_property(node, "source").as_ref() != Some(source))
-    {
-        return false;
-    }
-    if request
-        .normalized_space_id
-        .as_ref()
-        .is_some_and(|space_id| normalized_node_space_id(node) != *space_id)
-    {
-        return false;
-    }
-    if request.require_thread_id && thread_id.is_none() {
-        return false;
-    }
-    if request
-        .after_id
-        .as_ref()
-        .is_some_and(|after| id.as_ref().is_none_or(|id| id.as_str() <= after.as_str()))
-    {
-        return false;
-    }
-    if request
-        .metadata_contains
-        .as_ref()
-        .is_some_and(|marker| !thread_metadata_contains(node, marker))
-    {
-        return false;
-    }
-    true
+    request.metadata_contains.as_ref().is_none_or(|marker| {
+        thread
+            .properties
+            .get("metadata")
+            .map(value_to_external_id)
+            .is_some_and(|metadata| metadata.contains(marker))
+    })
 }
 
-fn thread_metadata_contains(node: &NodeRecord, marker: &str) -> bool {
-    node.properties
-        .get("metadata")
-        .map(value_to_external_id)
-        .is_some_and(|metadata| metadata.contains(marker))
-}
-
-fn knowledge_thread_list_row(node: &NodeRecord) -> KnowledgeThreadListRow {
-    let title = string_property(node, "title");
-    let source = string_property(node, "source");
+fn knowledge_thread_list_row_from_entity(thread: &KnowledgeEntity) -> KnowledgeThreadListRow {
+    let id = string_property_value(&thread.properties, "id");
+    let title = string_property_value(&thread.properties, "title");
+    let source = string_property_value(&thread.properties, "source");
     let display_title = title
         .clone()
         .or_else(|| source.clone())
         .unwrap_or_else(|| "Thread".to_string());
     KnowledgeThreadListRow {
-        id: node_external_id(node),
-        thread_id: string_property(node, "thread_id"),
-        node_id: node.id.0,
+        id,
+        thread_id: string_property_value(&thread.properties, "thread_id"),
+        node_id: thread.node_id,
         display_title,
         title,
-        summary: string_property(node, "summary"),
+        summary: string_property_value(&thread.properties, "summary"),
         source,
-        project: string_property(node, "project"),
-        workspace: string_property(node, "workspace"),
-        raw_space_id: string_property(node, "space_id"),
-        normalized_space_id: normalized_node_space_id(node),
-        metadata: node.properties.get("metadata").cloned(),
-        message_count: integer_property(node, "message_count").unwrap_or(0),
-        created_at: node.properties.get("created_at").cloned(),
-        updated_at: node.properties.get("updated_at").cloned(),
-        import_date: node.properties.get("import_date").cloned(),
+        project: string_property_value(&thread.properties, "project"),
+        workspace: string_property_value(&thread.properties, "workspace"),
+        raw_space_id: string_property_value(&thread.properties, "space_id"),
+        normalized_space_id: knowledge_entity_normalized_space_id(thread),
+        metadata: thread.properties.get("metadata").cloned(),
+        message_count: integer_property_value(&thread.properties, "message_count").unwrap_or(0),
+        created_at: thread.properties.get("created_at").cloned(),
+        updated_at: thread.properties.get("updated_at").cloned(),
+        import_date: thread.properties.get("import_date").cloned(),
     }
 }
 
@@ -33490,7 +33501,7 @@ fn scan_pruning_report_value(report: &ScanPruningReport) -> Value {
             "label_id".to_string(),
             report
                 .label_id
-                .map(|label_id| Value::Int(i64::try_from(label_id.0).unwrap_or(i64::MAX)))
+                .map(|label_id| Value::Int(i64::from(label_id.0)))
                 .unwrap_or(Value::Null),
         ),
         (

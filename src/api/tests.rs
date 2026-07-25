@@ -17473,7 +17473,11 @@ fn thread_message_read_rejects_empty_thread_id() {
 
 #[test]
 fn lists_threads_for_nowledge_source_page_space_and_lookup_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Alpha Thread', summary: 'Alpha summary', source: 'slack', project: 'graph', workspace: 'local', space_id: '', metadata: 'is_favorite:true', message_count: 5, created_at: 10, updated_at: 30})")
         .unwrap();
     db.query("CREATE (:Thread {id: 'thread_b', thread_id: 'logical_b', title: 'Beta Thread', source: 'slack', space_id: 'archive', message_count: 2, created_at: 20, updated_at: 40})")
@@ -17577,6 +17581,20 @@ fn lists_threads_for_nowledge_source_page_space_and_lookup_shapes() {
         .unwrap();
     assert_eq!(ranked.matched_count, 4);
     assert_eq!(ranked.rows[0].thread_id.as_deref(), Some("logical_c"));
+
+    let cache_before_lookup = db.plan_cache_stats();
+    let cached_request = KnowledgeThreadListRequest {
+        thread_ids: vec!["logical_a".to_string()],
+        limit: 10,
+        order: KnowledgeThreadListOrder::IdAsc,
+        ..KnowledgeThreadListRequest::default()
+    };
+    db.knowledge_threads(&cached_request).unwrap();
+    db.knowledge_threads(&cached_request).unwrap();
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, cache_before_lookup.entries + 1);
+    assert_eq!(stats.misses, cache_before_lookup.misses + 1);
+    assert_eq!(stats.hits, cache_before_lookup.hits + 1);
 
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
 }
