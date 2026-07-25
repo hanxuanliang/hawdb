@@ -17230,7 +17230,11 @@ fn thread_compacted_memory_read_rejects_invalid_identity() {
 
 #[test]
 fn reads_memory_compacting_threads_for_nowledge_metadata_and_source_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(64),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'memory_a'})").unwrap();
     db.query("CREATE (:Memory {id: 'memory_b'})").unwrap();
     db.query("CREATE (:Thread {id: 'thread_a', thread_id: 'logical_a', title: 'Thread A', source: 'slack', metadata: '{\"source\":\"rest\"}', space_id: ''})")
@@ -17245,16 +17249,15 @@ fn reads_memory_compacting_threads_for_nowledge_metadata_and_source_shapes() {
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let output = db
-        .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
-            memory_ids: vec![
-                "memory_a".to_string(),
-                "missing".to_string(),
-                "memory_b".to_string(),
-            ],
-            limit_per_memory: 0,
-        })
-        .unwrap();
+    let request = KnowledgeMemoryCompactingThreadListRequest {
+        memory_ids: vec![
+            "memory_a".to_string(),
+            "missing".to_string(),
+            "memory_b".to_string(),
+        ],
+        limit_per_memory: 0,
+    };
+    let output = db.knowledge_memory_compacting_threads(&request).unwrap();
     assert_eq!(output.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(output.found_memory_count, 2);
     assert_eq!(output.missing_memory_count, 1);
@@ -17292,6 +17295,14 @@ fn reads_memory_compacting_threads_for_nowledge_metadata_and_source_shapes() {
     assert_eq!(output.rows[3].memory_id, "memory_b");
     assert_eq!(output.rows[3].thread_id.as_deref(), Some("thread_b"));
 
+    let stats = db.plan_cache_stats();
+    let repeated = db.knowledge_memory_compacting_threads(&request).unwrap();
+    assert_eq!(repeated, output);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 5);
+
     let limited = db
         .knowledge_memory_compacting_threads(&KnowledgeMemoryCompactingThreadListRequest {
             memory_ids: vec!["memory_a".to_string()],
@@ -17307,7 +17318,11 @@ fn reads_memory_compacting_threads_for_nowledge_metadata_and_source_shapes() {
 
 #[test]
 fn projects_memory_compacting_thread_fields_for_nowledge_growth() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(64),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Memory {id: 'projected_compacting_memory_a'})")
         .unwrap();
     db.query("CREATE (:Memory {id: 'projected_compacting_memory_b'})")
@@ -17330,29 +17345,29 @@ fn projects_memory_compacting_thread_fields_for_nowledge_growth() {
     db.query("MATCH (t:Thread {id: 'projected_compacting_thread_c'}), (m:Memory {id: 'projected_compacting_memory_a'}) CREATE (t)-[:COMPACTS_TO {created_at: 40, future_edge_field: 'edge-d'}]->(m)")
         .unwrap();
 
+    let request = KnowledgeMemoryCompactingThreadProjectedListRequest {
+        list: KnowledgeMemoryCompactingThreadListRequest {
+            memory_ids: vec![
+                "projected_compacting_memory_a".to_string(),
+                "missing_projected_compacting_memory".to_string(),
+                "projected_compacting_memory_b".to_string(),
+            ],
+            limit_per_memory: 1,
+        },
+        thread_property_names: vec![
+            "title".to_string(),
+            "future_thread_field".to_string(),
+            "space_id".to_string(),
+            "title".to_string(),
+        ],
+        relationship_property_names: vec![
+            "created_at".to_string(),
+            "future_edge_field".to_string(),
+            "_id".to_string(),
+        ],
+    };
     let projected = db
-        .knowledge_memory_compacting_thread_projected_list(
-            &KnowledgeMemoryCompactingThreadProjectedListRequest {
-                list: KnowledgeMemoryCompactingThreadListRequest {
-                    memory_ids: vec![
-                        "projected_compacting_memory_a".to_string(),
-                        "missing_projected_compacting_memory".to_string(),
-                        "projected_compacting_memory_b".to_string(),
-                    ],
-                    limit_per_memory: 1,
-                },
-                thread_property_names: vec![
-                    "title".to_string(),
-                    "future_thread_field".to_string(),
-                    "space_id".to_string(),
-                    "title".to_string(),
-                ],
-                relationship_property_names: vec![
-                    "created_at".to_string(),
-                    "future_edge_field".to_string(),
-                ],
-            },
-        )
+        .knowledge_memory_compacting_thread_projected_list(&request)
         .unwrap();
 
     assert_eq!(projected.found_memory_count, 2);
@@ -17383,6 +17398,9 @@ fn projects_memory_compacting_thread_fields_for_nowledge_growth() {
             .get("future_edge_field"),
         Some(&Value::String("edge-a".to_string()))
     );
+    assert!(!projected.rows[0]
+        .relationship_properties
+        .contains_key("_id"));
     assert_eq!(
         projected.rows[1].memory_id,
         "missing_projected_compacting_memory"
@@ -17394,6 +17412,16 @@ fn projects_memory_compacting_thread_fields_for_nowledge_growth() {
         projected.rows[2].thread_id.as_deref(),
         Some("projected_compacting_thread_b")
     );
+
+    let stats = db.plan_cache_stats();
+    let repeated = db
+        .knowledge_memory_compacting_thread_projected_list(&request)
+        .unwrap();
+    assert_eq!(repeated, projected);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 5);
 
     let snapshot_projected = snapshot
         .knowledge_memory_compacting_thread_projected_list(

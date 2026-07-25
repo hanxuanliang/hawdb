@@ -7786,14 +7786,24 @@ impl Database {
         &self,
         request: &KnowledgeMemoryCompactingThreadListRequest,
     ) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
-        knowledge_memory_compacting_threads_for(&self.catalog, &self.store, request)
+        knowledge_memory_compacting_threads_via_query_runtime(self, request).or_else(|_| {
+            knowledge_memory_compacting_threads_for(&self.catalog, &self.store, request)
+        })
     }
 
     pub fn knowledge_memory_compacting_thread_projected_list(
         &self,
         request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
     ) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
-        knowledge_memory_compacting_thread_projected_list_for(&self.catalog, &self.store, request)
+        knowledge_memory_compacting_thread_projected_list_via_query_runtime(self, request).or_else(
+            |_| {
+                knowledge_memory_compacting_thread_projected_list_for(
+                    &self.catalog,
+                    &self.store,
+                    request,
+                )
+            },
+        )
     }
 
     pub fn knowledge_thread_messages(
@@ -24729,24 +24739,44 @@ fn knowledge_memory_compacting_threads_for(
         let Some(memory) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
         else {
             missing_memory_count += 1;
-            rows.push(KnowledgeMemoryCompactingThreadRow {
-                memory_id: memory_id.clone(),
-                memory_node_id: None,
-                found_memory: false,
-                thread_id: None,
-                thread_node_id: None,
-                thread_logical_id: None,
-                title: None,
-                source: None,
-                metadata: None,
-                raw_space_id: None,
-                normalized_space_id: None,
-                relationship_id: None,
-            });
+            rows.push(missing_memory_compacting_thread_row(memory_id));
             continue;
         };
         found_memory_count += 1;
         let mut memory_rows = compacting_thread_rows_for_memory(catalog, store, memory);
+        if request.limit_per_memory > 0 {
+            memory_rows.truncate(request.limit_per_memory);
+        }
+        rows.extend(memory_rows);
+    }
+    let returned_thread_count = rows.iter().filter(|row| row.thread_id.is_some()).count();
+    Ok(KnowledgeMemoryCompactingThreadListOutput {
+        graph_commit_epoch,
+        rows,
+        found_memory_count,
+        missing_memory_count,
+        returned_thread_count,
+    })
+}
+
+fn knowledge_memory_compacting_threads_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryCompactingThreadListRequest,
+) -> Result<KnowledgeMemoryCompactingThreadListOutput> {
+    validate_memory_compacting_thread_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut rows = Vec::new();
+    let mut found_memory_count = 0;
+    let mut missing_memory_count = 0;
+    for memory_id in &request.memory_ids {
+        let Some(memory) = memory_entity_by_external_id_via_query_runtime(db, memory_id)? else {
+            missing_memory_count += 1;
+            rows.push(missing_memory_compacting_thread_row(memory_id));
+            continue;
+        };
+        found_memory_count += 1;
+        let mut memory_rows =
+            compacting_thread_rows_for_memory_via_query_runtime(db, memory_id, memory.node_id)?;
         if request.limit_per_memory > 0 {
             memory_rows.truncate(request.limit_per_memory);
         }
@@ -24776,18 +24806,7 @@ fn knowledge_memory_compacting_thread_projected_list_for(
         let Some(memory) = seed_node_by_label_and_external_id(catalog, store, "Memory", memory_id)
         else {
             missing_memory_count += 1;
-            rows.push(KnowledgeMemoryCompactingThreadProjectedRow {
-                memory_id: memory_id.clone(),
-                memory_node_id: None,
-                found_memory: false,
-                thread_id: None,
-                thread_node_id: None,
-                thread_logical_id: None,
-                thread_properties: BTreeMap::new(),
-                normalized_space_id: None,
-                relationship_id: None,
-                relationship_properties: BTreeMap::new(),
-            });
+            rows.push(missing_memory_compacting_thread_projected_row(memory_id));
             continue;
         };
         found_memory_count += 1;
@@ -24798,6 +24817,44 @@ fn knowledge_memory_compacting_thread_projected_list_for(
             &request.thread_property_names,
             &request.relationship_property_names,
         );
+        if request.list.limit_per_memory > 0 {
+            memory_rows.truncate(request.list.limit_per_memory);
+        }
+        rows.extend(memory_rows);
+    }
+    let returned_thread_count = rows.iter().filter(|row| row.thread_id.is_some()).count();
+    Ok(KnowledgeMemoryCompactingThreadProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        found_memory_count,
+        missing_memory_count,
+        returned_thread_count,
+    })
+}
+
+fn knowledge_memory_compacting_thread_projected_list_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeMemoryCompactingThreadProjectedListRequest,
+) -> Result<KnowledgeMemoryCompactingThreadProjectedListOutput> {
+    validate_memory_compacting_thread_projected_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut rows = Vec::new();
+    let mut found_memory_count = 0;
+    let mut missing_memory_count = 0;
+    for memory_id in &request.list.memory_ids {
+        let Some(memory) = memory_entity_by_external_id_via_query_runtime(db, memory_id)? else {
+            missing_memory_count += 1;
+            rows.push(missing_memory_compacting_thread_projected_row(memory_id));
+            continue;
+        };
+        found_memory_count += 1;
+        let mut memory_rows = compacting_thread_projected_rows_for_memory_via_query_runtime(
+            db,
+            memory_id,
+            memory.node_id,
+            &request.thread_property_names,
+            &request.relationship_property_names,
+        )?;
         if request.list.limit_per_memory > 0 {
             memory_rows.truncate(request.list.limit_per_memory);
         }
@@ -24842,6 +24899,70 @@ fn validate_memory_compacting_thread_projected_request(
     Ok(())
 }
 
+fn memory_entity_by_external_id_via_query_runtime(
+    db: &Database,
+    memory_id: &str,
+) -> Result<Option<KnowledgeEntity>> {
+    let parameters = BTreeMap::from([(
+        "memory_id".to_string(),
+        Value::String(memory_id.to_string()),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (memory:Memory {id: $memory_id}) \
+         RETURN memory AS memory \
+         ORDER BY id(memory) ASC \
+         LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    let by_id = output
+        .rows
+        .first()
+        .map(|row| {
+            row.get("memory")
+                .and_then(knowledge_entity_from_value)
+                .ok_or_else(|| {
+                    SkeinError::Execution(
+                        "knowledge memory compacting thread row is missing memory map".to_string(),
+                    )
+                })
+        })
+        .transpose()?;
+    if by_id.is_some() {
+        return Ok(by_id);
+    }
+
+    let Some(memory_node_id) = memory_id
+        .parse::<u64>()
+        .ok()
+        .and_then(|id| i64::try_from(id).ok())
+    else {
+        return Ok(None);
+    };
+    let parameters = BTreeMap::from([("memory_node_id".to_string(), Value::Int(memory_node_id))]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (memory:Memory) \
+         WHERE id(memory) = $memory_node_id \
+         RETURN memory AS memory \
+         LIMIT 1",
+        &parameters,
+        Some(1),
+    )?;
+    output
+        .rows
+        .first()
+        .map(|row| {
+            row.get("memory")
+                .and_then(knowledge_entity_from_value)
+                .ok_or_else(|| {
+                    SkeinError::Execution(
+                        "knowledge memory compacting thread row is missing memory map".to_string(),
+                    )
+                })
+        })
+        .transpose()
+}
+
 fn compacting_thread_rows_for_memory(
     catalog: &Catalog,
     store: &GraphStore,
@@ -24863,13 +24984,36 @@ fn compacting_thread_rows_for_memory(
                 .map(|thread| compacting_thread_row(&memory_id, memory.id, thread, relationship))
         })
         .collect::<Vec<_>>();
-    rows.sort_by(|left, right| {
-        left.thread_logical_id
-            .cmp(&right.thread_logical_id)
-            .then_with(|| left.thread_id.cmp(&right.thread_id))
-            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
-    });
+    sort_memory_compacting_thread_rows(&mut rows);
     rows
+}
+
+fn compacting_thread_rows_for_memory_via_query_runtime(
+    db: &Database,
+    memory_id: &str,
+    memory_node_id: u64,
+) -> Result<Vec<KnowledgeMemoryCompactingThreadRow>> {
+    let parameters = BTreeMap::from([(
+        "memory_node_id".to_string(),
+        Value::Int(i64::try_from(memory_node_id).map_err(|_| {
+            SkeinError::Execution("knowledge memory node id exceeds i64".to_string())
+        })?),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (thread:Thread)-[relationship:COMPACTS_TO]->(memory) \
+         WHERE id(memory) = $memory_node_id \
+         RETURN thread AS thread, relationship AS relationship, \
+         id(relationship) AS relationship_id",
+        &parameters,
+        None,
+    )?;
+    let mut rows = output
+        .rows
+        .iter()
+        .map(|row| compacting_thread_row_from_query(row, memory_id, memory_node_id))
+        .collect::<Result<Vec<_>>>()?;
+    sort_memory_compacting_thread_rows(&mut rows);
+    Ok(rows)
 }
 
 fn compacting_thread_projected_rows_for_memory(
@@ -24904,13 +25048,100 @@ fn compacting_thread_projected_rows_for_memory(
                 })
         })
         .collect::<Vec<_>>();
+    sort_memory_compacting_thread_projected_rows(&mut rows);
+    rows
+}
+
+fn compacting_thread_projected_rows_for_memory_via_query_runtime(
+    db: &Database,
+    memory_id: &str,
+    memory_node_id: u64,
+    thread_property_names: &[String],
+    relationship_property_names: &[String],
+) -> Result<Vec<KnowledgeMemoryCompactingThreadProjectedRow>> {
+    let parameters = BTreeMap::from([(
+        "memory_node_id".to_string(),
+        Value::Int(i64::try_from(memory_node_id).map_err(|_| {
+            SkeinError::Execution("knowledge memory node id exceeds i64".to_string())
+        })?),
+    )]);
+    let output = db.query_read_only_with_params_bounded(
+        "MATCH (thread:Thread)-[relationship:COMPACTS_TO]->(memory) \
+         WHERE id(memory) = $memory_node_id \
+         RETURN thread AS thread, relationship AS relationship, \
+         id(relationship) AS relationship_id",
+        &parameters,
+        None,
+    )?;
+    let mut rows = output
+        .rows
+        .iter()
+        .map(|row| {
+            compacting_thread_projected_row_from_query(
+                row,
+                memory_id,
+                memory_node_id,
+                thread_property_names,
+                relationship_property_names,
+            )
+        })
+        .collect::<Result<Vec<_>>>()?;
+    sort_memory_compacting_thread_projected_rows(&mut rows);
+    Ok(rows)
+}
+
+fn sort_memory_compacting_thread_rows(rows: &mut [KnowledgeMemoryCompactingThreadRow]) {
     rows.sort_by(|left, right| {
         left.thread_logical_id
             .cmp(&right.thread_logical_id)
             .then_with(|| left.thread_id.cmp(&right.thread_id))
             .then_with(|| left.relationship_id.cmp(&right.relationship_id))
     });
-    rows
+}
+
+fn sort_memory_compacting_thread_projected_rows(
+    rows: &mut [KnowledgeMemoryCompactingThreadProjectedRow],
+) {
+    rows.sort_by(|left, right| {
+        left.thread_logical_id
+            .cmp(&right.thread_logical_id)
+            .then_with(|| left.thread_id.cmp(&right.thread_id))
+            .then_with(|| left.relationship_id.cmp(&right.relationship_id))
+    });
+}
+
+fn missing_memory_compacting_thread_row(memory_id: &str) -> KnowledgeMemoryCompactingThreadRow {
+    KnowledgeMemoryCompactingThreadRow {
+        memory_id: memory_id.to_string(),
+        memory_node_id: None,
+        found_memory: false,
+        thread_id: None,
+        thread_node_id: None,
+        thread_logical_id: None,
+        title: None,
+        source: None,
+        metadata: None,
+        raw_space_id: None,
+        normalized_space_id: None,
+        relationship_id: None,
+    }
+}
+
+fn missing_memory_compacting_thread_projected_row(
+    memory_id: &str,
+) -> KnowledgeMemoryCompactingThreadProjectedRow {
+    KnowledgeMemoryCompactingThreadProjectedRow {
+        memory_id: memory_id.to_string(),
+        memory_node_id: None,
+        found_memory: false,
+        thread_id: None,
+        thread_node_id: None,
+        thread_logical_id: None,
+        thread_properties: BTreeMap::new(),
+        normalized_space_id: None,
+        relationship_id: None,
+        relationship_properties: BTreeMap::new(),
+    }
 }
 
 fn compacting_thread_projected_row(
@@ -24938,6 +25169,64 @@ fn compacting_thread_projected_row(
     }
 }
 
+fn compacting_thread_projected_row_from_query(
+    row: &Row,
+    memory_id: &str,
+    memory_node_id: u64,
+    thread_property_names: &[String],
+    relationship_property_names: &[String],
+) -> Result<KnowledgeMemoryCompactingThreadProjectedRow> {
+    let thread = row
+        .get("thread")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory compacting thread projected row is missing thread map"
+                    .to_string(),
+            )
+        })?;
+    let relationship = row
+        .get("relationship")
+        .and_then(value_to_map)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory compacting thread projected row is missing relationship map"
+                    .to_string(),
+            )
+        })?;
+    let relationship_id = row
+        .get("relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory compacting thread projected row is missing relationship_id"
+                    .to_string(),
+            )
+        })?;
+    let mut relationship_properties = relationship.clone();
+    relationship_properties.remove("_id");
+    relationship_properties.remove("source_id");
+    relationship_properties.remove("target_id");
+    relationship_properties.remove("type");
+
+    Ok(KnowledgeMemoryCompactingThreadProjectedRow {
+        memory_id: memory_id.to_string(),
+        memory_node_id: Some(memory_node_id),
+        found_memory: true,
+        thread_id: knowledge_entity_id_property(&thread),
+        thread_node_id: Some(thread.node_id),
+        thread_logical_id: string_property_value(&thread.properties, "thread_id"),
+        thread_properties: projected_properties(&thread.properties, thread_property_names),
+        normalized_space_id: Some(knowledge_entity_normalized_space_id(&thread)),
+        relationship_id: Some(relationship_id),
+        relationship_properties: projected_properties(
+            &relationship_properties,
+            relationship_property_names,
+        ),
+    })
+}
+
 fn compacting_thread_row(
     memory_id: &str,
     memory_node_id: NodeId,
@@ -24958,6 +25247,52 @@ fn compacting_thread_row(
         normalized_space_id: Some(normalized_node_space_id(thread)),
         relationship_id: Some(relationship.id.0),
     }
+}
+
+fn compacting_thread_row_from_query(
+    row: &Row,
+    memory_id: &str,
+    memory_node_id: u64,
+) -> Result<KnowledgeMemoryCompactingThreadRow> {
+    let thread = row
+        .get("thread")
+        .and_then(knowledge_entity_from_value)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory compacting thread row is missing thread map".to_string(),
+            )
+        })?;
+    let relationship = row
+        .get("relationship")
+        .and_then(value_to_map)
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory compacting thread row is missing relationship map".to_string(),
+            )
+        })?;
+    let relationship_id = row
+        .get("relationship_id")
+        .and_then(value_to_non_negative_u64)
+        .or_else(|| relationship.get("_id").and_then(value_to_non_negative_u64))
+        .ok_or_else(|| {
+            SkeinError::Execution(
+                "knowledge memory compacting thread row is missing relationship_id".to_string(),
+            )
+        })?;
+    Ok(KnowledgeMemoryCompactingThreadRow {
+        memory_id: memory_id.to_string(),
+        memory_node_id: Some(memory_node_id),
+        found_memory: true,
+        thread_id: knowledge_entity_id_property(&thread),
+        thread_node_id: Some(thread.node_id),
+        thread_logical_id: string_property_value(&thread.properties, "thread_id"),
+        title: string_property_value(&thread.properties, "title"),
+        source: string_property_value(&thread.properties, "source"),
+        metadata: thread.properties.get("metadata").cloned(),
+        raw_space_id: string_property_value(&thread.properties, "space_id"),
+        normalized_space_id: Some(knowledge_entity_normalized_space_id(&thread)),
+        relationship_id: Some(relationship_id),
+    })
 }
 
 fn knowledge_thread_messages_for(
