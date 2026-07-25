@@ -7641,14 +7641,16 @@ impl Database {
         &self,
         request: &KnowledgeSkillListRequest,
     ) -> Result<KnowledgeSkillListOutput> {
-        knowledge_skills_for(&self.catalog, &self.store, request)
+        knowledge_skills_via_query_runtime(self, request)
+            .or_else(|_| knowledge_skills_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_skill_projected_list(
         &self,
         request: &KnowledgeSkillProjectedListRequest,
     ) -> Result<KnowledgeSkillProjectedListOutput> {
-        knowledge_skill_projected_list_for(&self.catalog, &self.store, request)
+        knowledge_skill_projected_list_via_query_runtime(self, request)
+            .or_else(|_| knowledge_skill_projected_list_for(&self.catalog, &self.store, request))
     }
 
     pub fn update_knowledge_thread_metadata_batch(
@@ -21751,6 +21753,56 @@ fn knowledge_skills_for(
     })
 }
 
+fn knowledge_skills_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSkillListRequest,
+) -> Result<KnowledgeSkillListOutput> {
+    validate_knowledge_skill_list_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let (query, parameters) = knowledge_skill_list_query(request);
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let mut matched_ids = BTreeSet::new();
+    let mut rows = output
+        .rows
+        .iter()
+        .map(|row| {
+            let skill = row
+                .get("skill")
+                .and_then(knowledge_entity_from_value)
+                .ok_or_else(|| {
+                    SkeinError::Execution(
+                        "knowledge skill list row is missing skill map".to_string(),
+                    )
+                })?;
+            if let Some(id) = knowledge_entity_id_property(&skill) {
+                matched_ids.insert(id);
+            }
+            Ok(knowledge_skill_row_from_entity(&skill))
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    sort_skill_rows(&mut rows, request.order);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+    let missing_ids = request
+        .ids
+        .iter()
+        .filter(|id| !matched_ids.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeSkillListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_ids,
+    })
+}
+
 fn knowledge_skill_projected_list_for(
     catalog: &Catalog,
     store: &GraphStore,
@@ -21783,6 +21835,64 @@ fn knowledge_skill_projected_list_for(
             )
         })
         .collect::<Vec<_>>();
+
+    sort_skill_projected_rows(&mut rows, request.list.order);
+    let matched_count = rows.len();
+    if request.list.limit > 0 {
+        rows.truncate(request.list.limit);
+    }
+    let returned_count = rows.len();
+    let rows = rows
+        .into_iter()
+        .map(|(row, _updated_at)| row)
+        .collect::<Vec<_>>();
+    let missing_ids = request
+        .list
+        .ids
+        .iter()
+        .filter(|id| !matched_ids.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok(KnowledgeSkillProjectedListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+        missing_ids,
+    })
+}
+
+fn knowledge_skill_projected_list_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeSkillProjectedListRequest,
+) -> Result<KnowledgeSkillProjectedListOutput> {
+    validate_knowledge_skill_projected_list_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let (query, parameters) = knowledge_skill_list_query(&request.list);
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let mut matched_ids = BTreeSet::new();
+    let mut rows = output
+        .rows
+        .iter()
+        .map(|row| {
+            let skill = row
+                .get("skill")
+                .and_then(knowledge_entity_from_value)
+                .ok_or_else(|| {
+                    SkeinError::Execution(
+                        "knowledge skill projected list row is missing skill map".to_string(),
+                    )
+                })?;
+            if let Some(id) = knowledge_entity_id_property(&skill) {
+                matched_ids.insert(id);
+            }
+            Ok((
+                knowledge_skill_projected_row_from_entity(&skill, &request.property_names),
+                skill.properties.get("updated_at").cloned(),
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     sort_skill_projected_rows(&mut rows, request.list.order);
     let matched_count = rows.len();
@@ -21857,6 +21967,46 @@ fn validate_knowledge_skill_list_request(request: &KnowledgeSkillListRequest) ->
     Ok(())
 }
 
+fn knowledge_skill_list_query(
+    request: &KnowledgeSkillListRequest,
+) -> (String, BTreeMap<String, Value>) {
+    let mut parameters = BTreeMap::new();
+    let mut predicates = Vec::new();
+    if !request.ids.is_empty() {
+        parameters.insert(
+            "ids".to_string(),
+            Value::List(request.ids.iter().cloned().map(Value::String).collect()),
+        );
+        predicates.push("skill.id IN $ids");
+    }
+    if let Some(lookup_key) = &request.lookup_key {
+        parameters.insert("lookup_key".to_string(), Value::String(lookup_key.clone()));
+        predicates.push(
+            "(skill.id = $lookup_key OR skill.id STARTS WITH $lookup_key OR skill.id CONTAINS $lookup_key)",
+        );
+    }
+    if !request.stages.is_empty() {
+        parameters.insert(
+            "stages".to_string(),
+            Value::List(request.stages.iter().cloned().map(Value::String).collect()),
+        );
+        predicates.push("skill.stage IN $stages");
+    }
+    if let Some(after_id) = &request.after_id {
+        parameters.insert("after_id".to_string(), Value::String(after_id.clone()));
+        predicates.push("skill.id > $after_id");
+    }
+    let predicate = if predicates.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", predicates.join(" AND "))
+    };
+    (
+        format!("MATCH (skill:Skill){predicate} RETURN skill AS skill"),
+        parameters,
+    )
+}
+
 fn skill_matches_list_request(
     node: &NodeRecord,
     request: &KnowledgeSkillListRequest,
@@ -21903,6 +22053,18 @@ fn knowledge_skill_projected_row(
     }
 }
 
+fn knowledge_skill_projected_row_from_entity(
+    skill: &KnowledgeEntity,
+    property_names: &[String],
+) -> KnowledgeSkillProjectedRow {
+    KnowledgeSkillProjectedRow {
+        id: knowledge_entity_id_property(skill),
+        node_id: skill.node_id,
+        properties: projected_properties(&skill.properties, property_names),
+        normalized_space_id: knowledge_entity_normalized_space_id(skill),
+    }
+}
+
 fn knowledge_skill_row(node: &NodeRecord) -> KnowledgeSkillRow {
     KnowledgeSkillRow {
         id: node_external_id(node),
@@ -21927,6 +22089,33 @@ fn knowledge_skill_row(node: &NodeRecord) -> KnowledgeSkillRow {
         rationale: string_property(node, "rationale"),
         kind: string_property(node, "kind"),
         confidence: node.properties.get("confidence").cloned(),
+    }
+}
+
+fn knowledge_skill_row_from_entity(skill: &KnowledgeEntity) -> KnowledgeSkillRow {
+    KnowledgeSkillRow {
+        id: knowledge_entity_id_property(skill),
+        node_id: skill.node_id,
+        title: string_property_value(&skill.properties, "title"),
+        name: string_property_value(&skill.properties, "name"),
+        description: string_property_value(&skill.properties, "description"),
+        stage: string_property_value(&skill.properties, "stage"),
+        version: skill.properties.get("version").cloned(),
+        use_count: integer_property_value(&skill.properties, "use_count").unwrap_or(0),
+        success_rate: skill.properties.get("success_rate").cloned(),
+        metadata: skill.properties.get("metadata").cloned(),
+        bundle_path: string_property_value(&skill.properties, "bundle_path"),
+        triggers: skill.properties.get("triggers").cloned(),
+        content_hash: string_property_value(&skill.properties, "content_hash"),
+        raw_space_id: string_property_value(&skill.properties, "space_id"),
+        normalized_space_id: knowledge_entity_normalized_space_id(skill),
+        created_at: skill.properties.get("created_at").cloned(),
+        updated_at: skill.properties.get("updated_at").cloned(),
+        evidence_count: integer_property_value(&skill.properties, "evidence_count").unwrap_or(0),
+        scope: string_property_value(&skill.properties, "scope"),
+        rationale: string_property_value(&skill.properties, "rationale"),
+        kind: string_property_value(&skill.properties, "kind"),
+        confidence: skill.properties.get("confidence").cloned(),
     }
 }
 

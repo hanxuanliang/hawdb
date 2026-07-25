@@ -14795,7 +14795,11 @@ fn typed_skill_delete_persists_as_one_wal_batch_and_replays() {
 
 #[test]
 fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(64),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Skill {id: 'skill_active_a', title: 'Active A', name: 'active-a', description: 'first active', triggers: '[\"a\"]', stage: 'active', version: 1, use_count: 7, success_rate: 0.8, metadata: '{\"rank\":1}', bundle_path: '/tmp/a', content_hash: 'hash-a', space_id: '', created_at: 1, updated_at: 20, evidence_count: 3, scope: 'workspace', rationale: 'test', kind: 'procedure', confidence: 0.9})")
         .unwrap();
     db.query("CREATE (:Skill {id: 'skill_active_b', title: 'Active B', name: 'active-b', description: 'second active', triggers: '[\"b\"]', stage: 'active', version: 2, use_count: 9, metadata: '{\"rank\":2}', bundle_path: '/tmp/b', space_id: 'research', updated_at: 30})")
@@ -14806,14 +14810,13 @@ fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let active = db
-        .knowledge_skills(&KnowledgeSkillListRequest {
-            stages: vec!["active".to_string()],
-            limit: 10,
-            order: KnowledgeSkillListOrder::UpdatedAtDesc,
-            ..KnowledgeSkillListRequest::default()
-        })
-        .unwrap();
+    let active_request = KnowledgeSkillListRequest {
+        stages: vec!["active".to_string()],
+        limit: 10,
+        order: KnowledgeSkillListOrder::UpdatedAtDesc,
+        ..KnowledgeSkillListRequest::default()
+    };
+    let active = db.knowledge_skills(&active_request).unwrap();
     assert_eq!(active.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(active.matched_count, 2);
     assert_eq!(active.returned_count, 2);
@@ -14848,6 +14851,14 @@ fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
     assert_eq!(active.rows[1].rationale.as_deref(), Some("test"));
     assert_eq!(active.rows[1].kind.as_deref(), Some("procedure"));
     assert_eq!(active.rows[1].confidence, Some(Value::Float(0.9)));
+
+    let stats = db.plan_cache_stats();
+    let repeated = db.knowledge_skills(&active_request).unwrap();
+    assert_eq!(repeated, active);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 1);
 
     let fs_page = db
         .knowledge_skills(&KnowledgeSkillListRequest {
@@ -14932,7 +14943,11 @@ fn lists_skills_for_nowledge_catalog_lookup_and_fs_shapes() {
 
 #[test]
 fn projects_skill_list_fields_for_mcp_catalog_growth() {
-    let mut db = Database::new();
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(64),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
     db.query("CREATE (:Skill {id: 'mcp-skill-catalog-active', stage: 'active', name: 'catalog-active', title: 'Catalog Active', description: 'active catalog skill', triggers: '[\"catalog\"]', content_hash: 'hash-active', metadata: '{\"stage\":\"active\"}', space_id: '', updated_at: 20, future_field: 'future-active'})")
         .unwrap();
     db.query("CREATE (:Skill {id: 'mcp-skill-catalog-draft', stage: 'draft', name: 'catalog-draft', title: 'Catalog Draft', description: 'draft catalog skill', triggers: '[\"draft\"]', content_hash: 'hash-draft', metadata: '{\"stage\":\"draft\"}', space_id: 'team', updated_at: 10, future_field: 'future-draft'})")
@@ -14941,35 +14956,34 @@ fn projects_skill_list_fields_for_mcp_catalog_growth() {
         .unwrap();
     let graph_commit_epoch = db.store.commit_epoch();
 
-    let projected = db
-        .knowledge_skill_projected_list(&KnowledgeSkillProjectedListRequest {
-            list: KnowledgeSkillListRequest {
-                stages: vec![
-                    "active".to_string(),
-                    "draft".to_string(),
-                    "stale".to_string(),
-                    "candidate".to_string(),
-                    "promotable".to_string(),
-                    "rejected".to_string(),
-                ],
-                limit: 1500,
-                order: KnowledgeSkillListOrder::UpdatedAtDesc,
-                ..KnowledgeSkillListRequest::default()
-            },
-            property_names: vec![
-                "stage".to_string(),
-                "name".to_string(),
-                "title".to_string(),
-                "description".to_string(),
-                "triggers".to_string(),
-                "content_hash".to_string(),
-                "metadata".to_string(),
-                "space_id".to_string(),
-                "future_field".to_string(),
-                "stage".to_string(),
+    let request = KnowledgeSkillProjectedListRequest {
+        list: KnowledgeSkillListRequest {
+            stages: vec![
+                "active".to_string(),
+                "draft".to_string(),
+                "stale".to_string(),
+                "candidate".to_string(),
+                "promotable".to_string(),
+                "rejected".to_string(),
             ],
-        })
-        .unwrap();
+            limit: 1500,
+            order: KnowledgeSkillListOrder::UpdatedAtDesc,
+            ..KnowledgeSkillListRequest::default()
+        },
+        property_names: vec![
+            "stage".to_string(),
+            "name".to_string(),
+            "title".to_string(),
+            "description".to_string(),
+            "triggers".to_string(),
+            "content_hash".to_string(),
+            "metadata".to_string(),
+            "space_id".to_string(),
+            "future_field".to_string(),
+            "stage".to_string(),
+        ],
+    };
+    let projected = db.knowledge_skill_projected_list(&request).unwrap();
 
     assert_eq!(projected.graph_commit_epoch, graph_commit_epoch);
     assert_eq!(db.store.commit_epoch(), graph_commit_epoch);
@@ -14998,6 +15012,14 @@ fn projects_skill_list_fields_for_mcp_catalog_growth() {
         Some(&Value::String(String::new()))
     );
     assert!(!projected.rows[0].properties.contains_key("updated_at"));
+
+    let stats = db.plan_cache_stats();
+    let repeated = db.knowledge_skill_projected_list(&request).unwrap();
+    assert_eq!(repeated, projected);
+    let repeated_stats = db.plan_cache_stats();
+    assert_eq!(repeated_stats.entries, stats.entries);
+    assert_eq!(repeated_stats.misses, stats.misses);
+    assert_eq!(repeated_stats.hits, stats.hits + 1);
 
     let snapshot = db.begin_read_transaction();
     db.query("CREATE (:Skill {id: 'mcp-skill-catalog-late', stage: 'active', updated_at: 100})")
