@@ -8191,7 +8191,6 @@ impl Database {
         request: &KnowledgeNeighborsRequest,
     ) -> KnowledgeNeighborsOutput {
         knowledge_neighbors_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_neighbors_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_scoped_neighbors(
@@ -8199,7 +8198,6 @@ impl Database {
         request: &KnowledgeScopedNeighborsRequest,
     ) -> KnowledgeNeighborsOutput {
         knowledge_scoped_neighbors_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_scoped_neighbors_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_relationships(
@@ -31958,7 +31956,7 @@ fn knowledge_neighbors_for(
 fn knowledge_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeNeighborsRequest,
-) -> Option<KnowledgeNeighborsOutput> {
+) -> KnowledgeNeighborsOutput {
     knowledge_scoped_neighbors_via_query_runtime(
         db,
         &KnowledgeScopedNeighborsRequest {
@@ -32028,11 +32026,8 @@ fn knowledge_query_runtime_failed_neighbors_output(
 fn knowledge_scoped_neighbors_via_query_runtime(
     db: &Database,
     request: &KnowledgeScopedNeighborsRequest,
-) -> Option<KnowledgeNeighborsOutput> {
+) -> KnowledgeNeighborsOutput {
     let navigation = &request.navigation;
-    if navigation.max_hops > 1 {
-        return None;
-    }
     let graph_commit_epoch = db.store.commit_epoch();
     let seed_request = KnowledgeEntityRequest {
         label: navigation.label.clone(),
@@ -32041,10 +32036,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
     let seed = match knowledge_relationship_seed_via_query_runtime(db, &seed_request) {
         Ok(seed) => seed,
         Err(_) => {
-            return Some(knowledge_query_runtime_failed_neighbors_output(
-                graph_commit_epoch,
-                request,
-            ));
+            return knowledge_query_runtime_failed_neighbors_output(graph_commit_epoch, request);
         }
     };
     let Some(seed) = seed else {
@@ -32068,7 +32060,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             relationship_limit: None,
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-        return Some(KnowledgeNeighborsOutput {
+        return KnowledgeNeighborsOutput {
             graph_commit_epoch,
             seed_node_id: None,
             paths: Vec::new(),
@@ -32076,7 +32068,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        });
+        };
     };
     if !request.metadata_filters.is_empty()
         && !knowledge_entity_matches_filters(&seed, &request.metadata_filters)
@@ -32098,7 +32090,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             relationship_limit: None,
         });
         attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 1);
-        return Some(KnowledgeNeighborsOutput {
+        return KnowledgeNeighborsOutput {
             graph_commit_epoch,
             seed_node_id: Some(seed.node_id),
             paths: Vec::new(),
@@ -32106,17 +32098,17 @@ fn knowledge_scoped_neighbors_via_query_runtime(
             fanout_reason_details: Vec::new(),
             fanout_reasons: Vec::new(),
             diagnostics,
-        });
+        };
     }
 
     let relationship_type_name = match navigation.relationship_type.as_deref() {
         Some(name) => match db.catalog.rel_type_id(name) {
             Some(_) => {
                 if validate_cypher_identifier(name, "relationship type").is_err() {
-                    return Some(knowledge_query_runtime_failed_neighbors_output(
+                    return knowledge_query_runtime_failed_neighbors_output(
                         graph_commit_epoch,
                         request,
-                    ));
+                    );
                 }
                 Some(name.to_string())
             }
@@ -32139,7 +32131,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
                         relationship_limit: None,
                     });
                 attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-                return Some(KnowledgeNeighborsOutput {
+                return KnowledgeNeighborsOutput {
                     graph_commit_epoch,
                     seed_node_id: Some(seed.node_id),
                     paths: Vec::new(),
@@ -32147,26 +32139,24 @@ fn knowledge_scoped_neighbors_via_query_runtime(
                     fanout_reason_details: Vec::new(),
                     fanout_reasons: Vec::new(),
                     diagnostics,
-                });
+                };
             }
         },
         None => None,
     };
 
-    let (paths, fanout_reason_details) = match knowledge_relationship_rows_via_query_runtime(
+    let (paths, fanout_reason_details) = match expand_knowledge_neighbors_via_query_runtime(
         db,
         "seed",
-        seed.node_id,
+        NodeId(seed.node_id),
         relationship_type_name.as_deref(),
         navigation.direction,
         navigation.limit,
+        navigation.max_hops,
     ) {
         Ok(rows) => rows,
         Err(_) => {
-            return Some(knowledge_query_runtime_failed_neighbors_output(
-                graph_commit_epoch,
-                request,
-            ));
+            return knowledge_query_runtime_failed_neighbors_output(graph_commit_epoch, request);
         }
     };
     let mut diagnostics = knowledge_traversal_diagnostics(KnowledgeTraversalDiagnosticInput {
@@ -32186,7 +32176,7 @@ fn knowledge_scoped_neighbors_via_query_runtime(
         relationship_limit: None,
     });
     attach_traversal_metadata_filters(&mut diagnostics, &request.metadata_filters, 0);
-    Some(KnowledgeNeighborsOutput {
+    KnowledgeNeighborsOutput {
         graph_commit_epoch,
         seed_node_id: Some(seed.node_id),
         paths,
@@ -32194,7 +32184,76 @@ fn knowledge_scoped_neighbors_via_query_runtime(
         fanout_reasons: knowledge_fanout_reason_messages(&fanout_reason_details),
         fanout_reason_details,
         diagnostics,
-    })
+    }
+}
+
+fn expand_knowledge_neighbors_via_query_runtime(
+    db: &Database,
+    seed_hit_id: &str,
+    seed_node_id: NodeId,
+    relationship_type_name: Option<&str>,
+    direction: KnowledgeNeighborDirection,
+    limit: usize,
+    max_hops: usize,
+) -> Result<(
+    Vec<KnowledgeGraphContextPath>,
+    Vec<KnowledgeFanoutReasonDetail>,
+)> {
+    let mut paths = Vec::new();
+    let mut fanout_reason_details = Vec::new();
+    let mut seen_relationships = BTreeSet::new();
+    let mut seen_frontier_nodes = BTreeSet::new();
+    let mut frontier = VecDeque::from([(seed_node_id, 0usize)]);
+    seen_frontier_nodes.insert(seed_node_id.0);
+
+    while let Some((current_node, depth)) = frontier.pop_front() {
+        if depth >= max_hops {
+            continue;
+        }
+        let remaining_limit = limit.saturating_sub(paths.len());
+        let (mut next_paths, mut next_fanout_reason_details) =
+            knowledge_relationship_rows_via_query_runtime(
+                db,
+                seed_hit_id,
+                current_node.0,
+                relationship_type_name,
+                direction,
+                remaining_limit,
+            )?;
+        let reached_limit = next_fanout_reason_details
+            .iter()
+            .any(|reason| matches!(reason.code, KnowledgeFanoutReasonCode::PathLimitReached));
+        fanout_reason_details.append(&mut next_fanout_reason_details);
+
+        for mut path in next_paths.drain(..) {
+            if !seen_relationships.insert(path.relationship_id) {
+                continue;
+            }
+            if paths.len() >= limit {
+                fanout_reason_details.push(KnowledgeFanoutReasonDetail::path_limit(
+                    "knowledge_neighbors",
+                    limit,
+                    seed_hit_id,
+                ));
+                return Ok((paths, fanout_reason_details));
+            }
+            path.hop = depth + 1;
+            let next_node_id = match path.direction {
+                KnowledgeGraphPathDirection::Outgoing => path.target_node_id,
+                KnowledgeGraphPathDirection::Incoming => path.source_node_id,
+            };
+            paths.push(path);
+            if seen_frontier_nodes.insert(next_node_id) {
+                frontier.push_back((NodeId(next_node_id), depth + 1));
+            }
+        }
+
+        if reached_limit {
+            return Ok((paths, fanout_reason_details));
+        }
+    }
+
+    Ok((paths, fanout_reason_details))
 }
 
 fn knowledge_scoped_neighbors_for(
