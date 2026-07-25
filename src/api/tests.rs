@@ -7248,6 +7248,42 @@ fn crystal_read_rejects_invalid_filters() {
 }
 
 #[test]
+fn crystal_reads_use_query_runtime_plan_cache() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        max_plan_cache_entries: Some(8),
+        statement_summary_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+    db.query("CREATE (:Memory {id: 'crystal-cache-alpha', is_crystal: true, crystal_title: 'Alpha', importance: 0.9, created_at: 20})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'crystal-cache-beta', is_crystal: true, crystal_title: 'Beta', importance: 0.7, created_at: 30})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'crystal-cache-skip', is_crystal: false, crystal_title: 'Skip', importance: 9.0})")
+        .unwrap();
+    let request = KnowledgeCrystalListRequest {
+        key_match: Some("crystal-cache".to_string()),
+        after_id: None,
+        limit: 1,
+        order: KnowledgeCrystalListOrder::ImportanceDescCreatedAtDesc,
+    };
+
+    let first = db.knowledge_crystals(&request).unwrap();
+    let second = db.knowledge_crystals(&request).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(first.matched_count, 2);
+    assert_eq!(first.returned_count, 1);
+    assert_eq!(
+        first.rows[0].memory_id.as_deref(),
+        Some("crystal-cache-alpha")
+    );
+    let stats = db.plan_cache_stats();
+    assert_eq!(stats.entries, 1);
+    assert_eq!(stats.misses, 1);
+    assert_eq!(stats.hits, 1);
+}
+
+#[test]
 fn merges_crystal_source_for_mcp_create_crystal_shape() {
     let path = unique_test_dir("crystal_source_merge_wal_replay");
     {

@@ -7254,7 +7254,7 @@ impl Database {
         &self,
         request: &KnowledgeCrystalListRequest,
     ) -> Result<KnowledgeCrystalListOutput> {
-        knowledge_crystals_for(&self.catalog, &self.store, request)
+        knowledge_crystals_via_query_runtime(self, request)
     }
 
     pub fn merge_knowledge_crystal_source(
@@ -14151,6 +14151,40 @@ fn knowledge_crystals_for(
     })
 }
 
+fn knowledge_crystals_via_query_runtime(
+    db: &Database,
+    request: &KnowledgeCrystalListRequest,
+) -> Result<KnowledgeCrystalListOutput> {
+    validate_knowledge_crystal_list_request(request)?;
+    let graph_commit_epoch = db.store.commit_epoch();
+    let mut parameters = BTreeMap::new();
+    let predicate = knowledge_crystal_list_query_predicate(request, &mut parameters);
+    let query = format!("MATCH (m:Memory){predicate} RETURN m AS memory");
+    let output = db.query_read_only_with_params_bounded(&query, &parameters, None)?;
+    let mut rows = output
+        .rows
+        .iter()
+        .filter_map(|row| {
+            row.get("memory")
+                .and_then(knowledge_entity_from_value)
+                .map(|memory| knowledge_crystal_row_from_entity(&memory))
+        })
+        .collect::<Vec<_>>();
+    sort_crystal_rows(&mut rows, request);
+    let matched_count = rows.len();
+    if request.limit > 0 {
+        rows.truncate(request.limit);
+    }
+    let returned_count = rows.len();
+
+    Ok(KnowledgeCrystalListOutput {
+        graph_commit_epoch,
+        rows,
+        matched_count,
+        returned_count,
+    })
+}
+
 fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest) -> Result<()> {
     if request.key_match.as_ref().is_some_and(String::is_empty) {
         return Err(SkeinError::Semantic(
@@ -14168,6 +14202,23 @@ fn validate_knowledge_crystal_list_request(request: &KnowledgeCrystalListRequest
         ));
     }
     Ok(())
+}
+
+fn knowledge_crystal_list_query_predicate(
+    request: &KnowledgeCrystalListRequest,
+    parameters: &mut BTreeMap<String, Value>,
+) -> String {
+    let mut predicates = vec!["m.is_crystal = true"];
+    if let Some(key_match) = &request.key_match {
+        parameters.insert("key_match".to_string(), Value::String(key_match.clone()));
+        predicates
+            .push("(m.id = $key_match OR m.id STARTS WITH $key_match OR m.id CONTAINS $key_match)");
+    }
+    if let Some(after_id) = &request.after_id {
+        parameters.insert("after_id".to_string(), Value::String(after_id.clone()));
+        predicates.push("m.id > $after_id");
+    }
+    format!(" WHERE {}", predicates.join(" AND "))
 }
 
 fn memory_matches_crystal_list(memory: &NodeRecord, request: &KnowledgeCrystalListRequest) -> bool {
@@ -14201,6 +14252,30 @@ fn knowledge_crystal_row(memory: &NodeRecord) -> KnowledgeCrystalRow {
         metadata: memory.properties.get("metadata").cloned(),
         is_latest: boolean_property(memory, "is_latest"),
         is_crystal: boolean_property(memory, "is_crystal"),
+    }
+}
+
+fn knowledge_crystal_row_from_entity(memory: &KnowledgeEntity) -> KnowledgeCrystalRow {
+    let crystal_title = string_property_value(&memory.properties, "crystal_title");
+    let title = string_property_value(&memory.properties, "title");
+    let display_title = crystal_title
+        .clone()
+        .or_else(|| title.clone())
+        .unwrap_or_default();
+    KnowledgeCrystalRow {
+        memory_id: memory.external_id.clone(),
+        node_id: memory.node_id,
+        crystal_title,
+        title,
+        display_title,
+        content: string_property_value(&memory.properties, "content"),
+        importance: memory.properties.get("importance").cloned(),
+        unit_type: string_property_value(&memory.properties, "unit_type"),
+        created_at: memory.properties.get("created_at").cloned(),
+        updated_at: memory.properties.get("updated_at").cloned(),
+        metadata: memory.properties.get("metadata").cloned(),
+        is_latest: boolean_property_value(&memory.properties, "is_latest"),
+        is_crystal: boolean_property_value(&memory.properties, "is_crystal"),
     }
 }
 
