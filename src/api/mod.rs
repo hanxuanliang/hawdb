@@ -8207,7 +8207,6 @@ impl Database {
         request: &KnowledgeRelationshipsRequest,
     ) -> KnowledgeRelationshipsOutput {
         knowledge_relationships_via_query_runtime(self, request)
-            .unwrap_or_else(|| knowledge_relationships_for(&self.catalog, &self.store, request))
     }
 
     pub fn knowledge_scoped_relationships(
@@ -8215,7 +8214,11 @@ impl Database {
         request: &KnowledgeScopedRelationshipsRequest,
     ) -> KnowledgeRelationshipsOutput {
         knowledge_scoped_relationships_via_query_runtime(self, request).unwrap_or_else(|_| {
-            knowledge_scoped_relationships_for(&self.catalog, &self.store, request)
+            knowledge_empty_relationship_groups_for_query_runtime_failure(
+                &self.catalog,
+                &self.store,
+                request,
+            )
         })
     }
 
@@ -32360,16 +32363,18 @@ fn knowledge_relationships_for(
 fn knowledge_relationships_via_query_runtime(
     db: &Database,
     request: &KnowledgeRelationshipsRequest,
-) -> Option<KnowledgeRelationshipsOutput> {
-    let output = knowledge_scoped_relationships_via_query_runtime(
-        db,
-        &KnowledgeScopedRelationshipsRequest {
-            relationships: request.clone(),
-            metadata_filters: BTreeMap::new(),
-        },
-    )
-    .ok()?;
-    Some(output)
+) -> KnowledgeRelationshipsOutput {
+    let scoped_request = KnowledgeScopedRelationshipsRequest {
+        relationships: request.clone(),
+        metadata_filters: BTreeMap::new(),
+    };
+    knowledge_scoped_relationships_via_query_runtime(db, &scoped_request).unwrap_or_else(|_| {
+        knowledge_empty_relationship_groups_for_query_runtime_failure(
+            &db.catalog,
+            &db.store,
+            &scoped_request,
+        )
+    })
 }
 
 fn knowledge_scoped_relationships_via_query_runtime(
@@ -32793,6 +32798,31 @@ fn knowledge_empty_relationship_groups_for_missing_type(
             })
             .collect(),
         relationship_type_found: false,
+        found_seed_count: 0,
+        missing_seed_count: 0,
+        filtered_out_seed_count: 0,
+        relationship_count: 0,
+    }
+}
+
+fn knowledge_empty_relationship_groups_for_query_runtime_failure(
+    catalog: &Catalog,
+    store: &GraphStore,
+    request: &KnowledgeScopedRelationshipsRequest,
+) -> KnowledgeRelationshipsOutput {
+    KnowledgeRelationshipsOutput {
+        graph_commit_epoch: store.commit_epoch(),
+        groups: request
+            .relationships
+            .seeds
+            .iter()
+            .map(|seed| knowledge_empty_relationship_group(seed, None, false))
+            .collect(),
+        relationship_type_found: request
+            .relationships
+            .relationship_type
+            .as_deref()
+            .is_none_or(|name| catalog.rel_type_id(name).is_some()),
         found_seed_count: 0,
         missing_seed_count: 0,
         filtered_out_seed_count: 0,
