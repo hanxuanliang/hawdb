@@ -1,5 +1,6 @@
 use skein::{
     Database, DatabaseConfig, Result, SkeinError, Value, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -312,6 +313,7 @@ fn probe_blocker_codes(
     output_row_count: usize,
 ) -> Vec<&'static str> {
     let mut blockers = Vec::new();
+    blockers.extend(query_runtime_probe_identity_blocker_codes(probe));
     if probe.require_scan_pruning && scan_pruning_report_count < probe.min_scan_pruning_reports {
         blockers.push("scan_pruning_report_missing");
     }
@@ -322,6 +324,24 @@ fn probe_blocker_codes(
         if output_row_count > max_output_rows {
             blockers.push("output_row_count_exceeded");
         }
+    }
+    blockers
+}
+
+fn query_runtime_probe_identity_blocker_codes(probe: &QueryRuntimeProbe) -> Vec<&'static str> {
+    let mut blockers = Vec::new();
+    if probe.name.trim().is_empty() || probe.name == "unnamed" {
+        blockers.push("query_runtime_probe_name_missing");
+    }
+    match probe.route.as_deref() {
+        Some(route) if REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.contains(&route) => {}
+        Some(_) => blockers.push("query_runtime_probe_unknown_route"),
+        None => blockers.push("query_runtime_probe_route_missing"),
+    }
+    match probe.query_family.as_deref() {
+        Some(family) if REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.contains(&family) => {}
+        Some(_) => blockers.push("query_runtime_probe_unknown_query_family"),
+        None => blockers.push("query_runtime_probe_query_family_missing"),
     }
     blockers
 }
@@ -788,6 +808,55 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "query_runtime_duplicate_routes"));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn query_runtime_preflight_rejects_probe_without_identity() {
+        let root = unique_test_dir("query-runtime-preflight-missing-identity");
+        let graph_path = root.join("graph");
+        let probe_path = root.join("probes.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut db = Database::open(&graph_path).unwrap();
+        db.query("CREATE (:Memory {id: 'mem-a', kind: 'note', title: 'A'})")
+            .unwrap();
+        drop(db);
+        std::fs::write(
+            &probe_path,
+            serde_json::json!({
+                "probes": [
+                    {
+                        "cypher": "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.title AS title",
+                        "parameters": {"kind": "note"}
+                    }
+                ]
+            })
+            .to_string(),
+        )
+        .unwrap();
+
+        let (report, _) = run_nowledge_query_runtime_preflight(
+            [
+                "--probe-json",
+                probe_path.to_str().unwrap(),
+                graph_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["probes"][0]["success"], true);
+        assert_eq!(report["probes"][0]["ready"], false);
+        assert_eq!(
+            report["probes"][0]["blocker_codes"],
+            serde_json::json!([
+                "query_runtime_probe_name_missing",
+                "query_runtime_probe_route_missing",
+                "query_runtime_probe_query_family_missing"
+            ])
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

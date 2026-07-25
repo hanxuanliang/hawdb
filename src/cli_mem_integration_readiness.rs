@@ -2208,7 +2208,8 @@ fn duplicate_routes(routes: &[&str]) -> Vec<String> {
 }
 
 fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
-    bool_path(probe, &["ready"]) == Some(true)
+    query_runtime_preflight_probe_identity_ready(probe)
+        && bool_path(probe, &["ready"]) == Some(true)
         && bool_path(probe, &["success"]) == Some(true)
         && non_empty_str_path(probe, &["selected_plan_fingerprint"])
         && u64_path(probe, &["output_row_count"]).is_some()
@@ -2218,6 +2219,16 @@ fn query_runtime_preflight_probe_ready(probe: &serde_json::Value) -> bool {
         && query_runtime_preflight_probe_plan_cache_ready(probe)
         && query_runtime_preflight_probe_scan_pruning_ready(probe)
         && string_array_path(probe, &["blocker_codes"]).is_empty()
+}
+
+fn query_runtime_preflight_probe_identity_ready(probe: &serde_json::Value) -> bool {
+    str_path(probe, &["name"]).is_some_and(|name| {
+        let name = name.trim();
+        !name.is_empty() && name != "unnamed"
+    }) && str_path(probe, &["route"])
+        .is_some_and(|route| REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.contains(&route))
+        && str_path(probe, &["query_family"])
+            .is_some_and(|family| REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.contains(&family))
 }
 
 fn query_runtime_preflight_probe_plan_cache_ready(probe: &serde_json::Value) -> bool {
@@ -3494,6 +3505,33 @@ mod tests {
     }
 
     #[test]
+    fn rejects_query_runtime_preflight_without_probe_identity() {
+        let mut bundle = ready_bundle();
+        bundle["query_runtime_preflight"]["probes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("query_family");
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        let query_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_runtime_preflight")
+            .unwrap();
+        assert_eq!(
+            query_check["failed_evidence_fields"],
+            serde_json::json!(["query_runtime_preflight.probes"])
+        );
+    }
+
+    #[test]
     fn rejects_query_runtime_preflight_without_scan_pruning_reports() {
         let mut bundle = ready_bundle();
         bundle["query_runtime_preflight"]["probes"][0]["execution_profile"]
@@ -3577,7 +3615,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             check["failed_evidence_fields"],
-            serde_json::json!(["query_runtime_preflight.route_coverage"])
+            serde_json::json!([
+                "query_runtime_preflight.route_coverage",
+                "query_runtime_preflight.probes"
+            ])
         );
         assert!(check["blocker_codes"]
             .as_array()

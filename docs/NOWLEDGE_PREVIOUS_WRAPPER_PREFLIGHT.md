@@ -467,7 +467,10 @@ cargo run --quiet --bin skein -- \
 
 Use probes from active Nowledge Mem route fixtures. A probe can require scan
 pruning evidence with `require_scan_pruning` and `require_pruned`; missing or
-weak probe evidence keeps integration readiness fail-closed.
+weak probe evidence keeps integration readiness fail-closed. Every probe must
+carry a stable `name`, a required graph read `route`, and a Nowledge replacement
+`query_family`; anonymous probes, stale routes, or unknown query families are
+not accepted as production cutover evidence.
 Each successful probe must include a selected plan fingerprint, non-empty
 selected plan operator/class counts, optimizer decision count, plan-cache state,
 and `execution_profile.scan_pruning_reports` whose length matches
