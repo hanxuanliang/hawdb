@@ -62,8 +62,10 @@ pub use api::{
     SLOW_QUERY_LOG_EVENT_PROTOCOL,
 };
 pub use blackbox::{
-    blackbox_report_json, write_blackbox_report, BlackboxReportOptions, BlackboxRunStatus,
-    BLACKBOX_EVENT_PROTOCOL, BLACKBOX_REPORT_PROTOCOL,
+    blackbox_report, blackbox_report_json, write_blackbox_report, write_blackbox_report_typed,
+    BlackboxArtifactReport, BlackboxEventReport, BlackboxJsonArtifactSummary,
+    BlackboxJsonlArtifactSummary, BlackboxRedactionReport, BlackboxReport, BlackboxReportOptions,
+    BlackboxRunStatus, BLACKBOX_EVENT_PROTOCOL, BLACKBOX_REPORT_PROTOCOL,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,

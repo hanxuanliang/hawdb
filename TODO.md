@@ -137,6 +137,8 @@ query family, or cutover gate requires them.
     embedded Mem library facade.
   - [x] Expose redacted typed slow-query summaries through the embedded Mem
     library facade.
+  - [x] Expose typed blackbox manifests, artifacts, and events through Rust
+    library APIs while preserving redacted JSON output.
   - Keep reports compact and redacted by default so production can keep them on.
   - CLI tools may wrap library APIs for developer workflows, but must not be the
     only supported interface.

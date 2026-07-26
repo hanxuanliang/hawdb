@@ -1,5 +1,4 @@
 use crate::{Result, SkeinError};
-use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -64,6 +63,182 @@ impl BlackboxRunStatus {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxRedactionReport {
+    pub raw_query_text_copied: bool,
+    pub raw_parameters_copied: bool,
+    pub raw_artifact_payloads_copied: bool,
+    pub artifact_paths_are_relative: bool,
+}
+
+impl Default for BlackboxRedactionReport {
+    fn default() -> Self {
+        Self {
+            raw_query_text_copied: false,
+            raw_parameters_copied: false,
+            raw_artifact_payloads_copied: false,
+            artifact_paths_are_relative: true,
+        }
+    }
+}
+
+impl BlackboxRedactionReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "raw_query_text_copied": self.raw_query_text_copied,
+            "raw_parameters_copied": self.raw_parameters_copied,
+            "raw_artifact_payloads_copied": self.raw_artifact_payloads_copied,
+            "artifact_paths_are_relative": self.artifact_paths_are_relative,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxJsonArtifactSummary {
+    pub parse_ready: bool,
+    pub parse_error_kind: Option<String>,
+    pub protocol: Option<String>,
+    pub ready: Option<bool>,
+    pub decision: Option<String>,
+    pub blocker_codes: Vec<String>,
+    pub blocking_categories: Vec<String>,
+    pub failed_checks: Vec<String>,
+    pub missing_evidence: Vec<String>,
+    pub production_cutover_ready: Option<bool>,
+    pub production_replacement_per_million: Option<u64>,
+}
+
+impl BlackboxJsonArtifactSummary {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "parse_ready": self.parse_ready,
+            "parse_error_kind": self.parse_error_kind,
+            "protocol": self.protocol,
+            "ready": self.ready,
+            "decision": self.decision,
+            "blocker_codes": self.blocker_codes,
+            "blocking_categories": self.blocking_categories,
+            "failed_checks": self.failed_checks,
+            "missing_evidence": self.missing_evidence,
+            "production_cutover_ready": self.production_cutover_ready,
+            "production_replacement_per_million": self.production_replacement_per_million,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxJsonlArtifactSummary {
+    pub line_count: usize,
+    pub nonempty_line_count: usize,
+}
+
+impl BlackboxJsonlArtifactSummary {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "line_count": self.line_count,
+            "nonempty_line_count": self.nonempty_line_count,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxArtifactReport {
+    pub name: String,
+    pub format: String,
+    pub byte_len: usize,
+    pub checksum: u64,
+    pub json: Option<BlackboxJsonArtifactSummary>,
+    pub jsonl: Option<BlackboxJsonlArtifactSummary>,
+}
+
+impl BlackboxArtifactReport {
+    pub fn json(&self) -> serde_json::Value {
+        let mut artifact = serde_json::Map::new();
+        artifact.insert("name".to_string(), serde_json::json!(self.name));
+        artifact.insert("format".to_string(), serde_json::json!(self.format));
+        artifact.insert("byte_len".to_string(), serde_json::json!(self.byte_len));
+        artifact.insert("checksum".to_string(), serde_json::json!(self.checksum));
+        if let Some(summary) = self.json.as_ref() {
+            artifact.insert("json".to_string(), summary.json());
+        }
+        if let Some(summary) = self.jsonl.as_ref() {
+            artifact.insert("jsonl".to_string(), summary.json());
+        }
+        serde_json::Value::Object(artifact)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxEventReport {
+    pub protocol: String,
+    pub protocol_version: u64,
+    pub run_id: String,
+    pub sequence: usize,
+    pub event: String,
+    pub artifact: BlackboxArtifactReport,
+}
+
+impl BlackboxEventReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "protocol_version": self.protocol_version,
+            "run_id": self.run_id,
+            "sequence": self.sequence,
+            "event": self.event,
+            "artifact": self.artifact.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxReport {
+    pub protocol: String,
+    pub protocol_version: u64,
+    pub run_id: String,
+    pub run_status: BlackboxRunStatus,
+    pub exit_code: Option<i64>,
+    pub generated_unix_seconds: u64,
+    pub artifact_dir_present: bool,
+    pub artifact_count: usize,
+    pub events_path: String,
+    pub artifacts: Vec<BlackboxArtifactReport>,
+    pub redaction: BlackboxRedactionReport,
+}
+
+impl BlackboxReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "protocol_version": self.protocol_version,
+            "run_id": self.run_id,
+            "run_status": self.run_status.as_str(),
+            "exit_code": self.exit_code,
+            "generated_unix_seconds": self.generated_unix_seconds,
+            "artifact_dir_present": self.artifact_dir_present,
+            "artifact_count": self.artifact_count,
+            "events_path": self.events_path,
+            "artifacts": self.artifacts.iter().map(BlackboxArtifactReport::json).collect::<Vec<_>>(),
+            "redaction": self.redaction.json(),
+        })
+    }
+
+    pub fn events(&self) -> Vec<BlackboxEventReport> {
+        self.artifacts
+            .iter()
+            .enumerate()
+            .map(|(index, artifact)| BlackboxEventReport {
+                protocol: BLACKBOX_EVENT_PROTOCOL.to_string(),
+                protocol_version: 1,
+                run_id: self.run_id.clone(),
+                sequence: index + 1,
+                event: "artifact_observed".to_string(),
+                artifact: artifact.clone(),
+            })
+            .collect()
+    }
+}
+
 impl std::str::FromStr for BlackboxRunStatus {
     type Err = SkeinError;
 
@@ -79,7 +254,7 @@ impl std::str::FromStr for BlackboxRunStatus {
     }
 }
 
-pub fn blackbox_report_json(options: &BlackboxReportOptions) -> Result<serde_json::Value> {
+pub fn blackbox_report(options: &BlackboxReportOptions) -> Result<BlackboxReport> {
     if !options.artifact_dir.is_dir() {
         return Err(SkeinError::Semantic(
             "blackbox artifact_dir does not exist or is not a directory".to_string(),
@@ -94,49 +269,41 @@ pub fn blackbox_report_json(options: &BlackboxReportOptions) -> Result<serde_jso
         .clone()
         .unwrap_or_else(|| format!("skein-blackbox-{generated_unix_seconds}"));
     let artifacts = collect_blackbox_artifacts(&options.artifact_dir)?;
-    Ok(serde_json::json!({
-        "protocol": BLACKBOX_REPORT_PROTOCOL,
-        "protocol_version": 1,
-        "run_id": run_id,
-        "run_status": options.run_status.as_str(),
-        "exit_code": options.exit_code,
-        "generated_unix_seconds": generated_unix_seconds,
-        "artifact_dir_present": true,
-        "artifact_count": artifacts.len(),
-        "events_path": "events.jsonl",
-        "artifacts": artifacts,
-        "redaction": {
-            "raw_query_text_copied": false,
-            "raw_parameters_copied": false,
-            "raw_artifact_payloads_copied": false,
-            "artifact_paths_are_relative": true
-        }
-    }))
+    Ok(BlackboxReport {
+        protocol: BLACKBOX_REPORT_PROTOCOL.to_string(),
+        protocol_version: 1,
+        run_id,
+        run_status: options.run_status,
+        exit_code: options.exit_code,
+        generated_unix_seconds,
+        artifact_dir_present: true,
+        artifact_count: artifacts.len(),
+        events_path: "events.jsonl".to_string(),
+        artifacts,
+        redaction: BlackboxRedactionReport::default(),
+    })
+}
+
+pub fn blackbox_report_json(options: &BlackboxReportOptions) -> Result<serde_json::Value> {
+    Ok(blackbox_report(options)?.json())
 }
 
 pub fn write_blackbox_report(options: &BlackboxReportOptions) -> Result<serde_json::Value> {
+    Ok(write_blackbox_report_typed(options)?.json())
+}
+
+pub fn write_blackbox_report_typed(options: &BlackboxReportOptions) -> Result<BlackboxReport> {
     fs::create_dir_all(&options.output_dir)?;
-    let manifest = blackbox_report_json(options)?;
-    let artifacts = manifest
-        .get("artifacts")
-        .and_then(serde_json::Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    write_blackbox_events(
-        &options.output_dir.join("events.jsonl"),
-        manifest
-            .get("run_id")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("unknown"),
-        &artifacts,
-    )?;
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+    let manifest = blackbox_report(options)?;
+    write_blackbox_events(&options.output_dir.join("events.jsonl"), &manifest.events())?;
+    let manifest_json = manifest.json();
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest_json)
         .map_err(|error| SkeinError::Execution(format!("blackbox manifest JSON error: {error}")))?;
     fs::write(options.output_dir.join("manifest.json"), manifest_bytes)?;
     Ok(manifest)
 }
 
-fn collect_blackbox_artifacts(artifact_dir: &Path) -> Result<Vec<serde_json::Value>> {
+fn collect_blackbox_artifacts(artifact_dir: &Path) -> Result<Vec<BlackboxArtifactReport>> {
     let mut artifacts = Vec::new();
     for artifact_name in KNOWN_ARTIFACTS {
         let path = artifact_dir.join(artifact_name);
@@ -144,26 +311,20 @@ fn collect_blackbox_artifacts(artifact_dir: &Path) -> Result<Vec<serde_json::Val
             continue;
         }
         let bytes = fs::read(&path)?;
-        let mut artifact = BTreeMap::new();
-        artifact.insert(
-            "name".to_string(),
-            serde_json::Value::String((*artifact_name).to_string()),
-        );
-        artifact.insert(
-            "format".to_string(),
-            serde_json::Value::String(artifact_format(artifact_name).to_string()),
-        );
-        artifact.insert("byte_len".to_string(), serde_json::json!(bytes.len()));
-        artifact.insert(
-            "checksum".to_string(),
-            serde_json::json!(checksum_bytes(&bytes)),
-        );
-        if artifact_name.ends_with(".json") {
-            artifact.insert("json".to_string(), json_artifact_summary(&bytes));
-        } else if artifact_name.ends_with(".jsonl") {
-            artifact.insert("jsonl".to_string(), jsonl_artifact_summary(&bytes));
-        }
-        artifacts.push(serde_json::Value::Object(artifact.into_iter().collect()));
+        let json = artifact_name
+            .ends_with(".json")
+            .then(|| json_artifact_summary(&bytes));
+        let jsonl = artifact_name
+            .ends_with(".jsonl")
+            .then(|| jsonl_artifact_summary(&bytes));
+        artifacts.push(BlackboxArtifactReport {
+            name: (*artifact_name).to_string(),
+            format: artifact_format(artifact_name).to_string(),
+            byte_len: bytes.len(),
+            checksum: checksum_bytes(&bytes),
+            json,
+            jsonl,
+        });
     }
     Ok(artifacts)
 }
@@ -178,46 +339,59 @@ fn artifact_format(name: &str) -> &'static str {
     }
 }
 
-fn json_artifact_summary(bytes: &[u8]) -> serde_json::Value {
+fn json_artifact_summary(bytes: &[u8]) -> BlackboxJsonArtifactSummary {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else {
-        return serde_json::json!({
-            "parse_ready": false,
-            "parse_error_kind": "invalid_json"
-        });
+        return BlackboxJsonArtifactSummary {
+            parse_ready: false,
+            parse_error_kind: Some("invalid_json".to_string()),
+            protocol: None,
+            ready: None,
+            decision: None,
+            blocker_codes: Vec::new(),
+            blocking_categories: Vec::new(),
+            failed_checks: Vec::new(),
+            missing_evidence: Vec::new(),
+            production_cutover_ready: None,
+            production_replacement_per_million: None,
+        };
     };
-    serde_json::json!({
-        "parse_ready": true,
-        "protocol": string_field(&value, "protocol"),
-        "ready": first_bool_field(&value, &[
-            "ready",
-            "production_cutover_ready",
-            "route_primary_ready",
-            "required_contract_ready",
-            "library_ready",
-            "integration_ready"
-        ]),
-        "decision": string_field(&value, "decision"),
-        "blocker_codes": string_array_field(&value, "blocker_codes"),
-        "blocking_categories": string_array_field(&value, "blocking_categories"),
-        "failed_checks": string_array_field(&value, "failed_checks"),
-        "missing_evidence": string_array_field(&value, "missing_evidence"),
-        "production_cutover_ready": value
+    BlackboxJsonArtifactSummary {
+        parse_ready: true,
+        parse_error_kind: None,
+        protocol: string_field(&value, "protocol"),
+        ready: first_bool_field(
+            &value,
+            &[
+                "ready",
+                "production_cutover_ready",
+                "route_primary_ready",
+                "required_contract_ready",
+                "library_ready",
+                "integration_ready",
+            ],
+        ),
+        decision: string_field(&value, "decision"),
+        blocker_codes: string_array_field(&value, "blocker_codes"),
+        blocking_categories: string_array_field(&value, "blocking_categories"),
+        failed_checks: string_array_field(&value, "failed_checks"),
+        missing_evidence: string_array_field(&value, "missing_evidence"),
+        production_cutover_ready: value
             .get("production_cutover_ready")
             .and_then(serde_json::Value::as_bool),
-        "production_replacement_per_million": value
+        production_replacement_per_million: value
             .get("production_replacement_per_million")
             .and_then(serde_json::Value::as_u64),
-    })
+    }
 }
 
-fn jsonl_artifact_summary(bytes: &[u8]) -> serde_json::Value {
+fn jsonl_artifact_summary(bytes: &[u8]) -> BlackboxJsonlArtifactSummary {
     let text = String::from_utf8_lossy(bytes);
     let line_count = text.lines().count();
     let nonempty_line_count = text.lines().filter(|line| !line.trim().is_empty()).count();
-    serde_json::json!({
-        "line_count": line_count,
-        "nonempty_line_count": nonempty_line_count,
-    })
+    BlackboxJsonlArtifactSummary {
+        line_count,
+        nonempty_line_count,
+    }
 }
 
 fn string_field(value: &serde_json::Value, key: &str) -> Option<String> {
@@ -243,22 +417,10 @@ fn string_array_field(value: &serde_json::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
-fn write_blackbox_events(
-    events_path: &Path,
-    run_id: &str,
-    artifacts: &[serde_json::Value],
-) -> Result<()> {
+fn write_blackbox_events(events_path: &Path, events: &[BlackboxEventReport]) -> Result<()> {
     let mut file = fs::File::create(events_path)?;
-    for (index, artifact) in artifacts.iter().enumerate() {
-        let event = serde_json::json!({
-            "protocol": BLACKBOX_EVENT_PROTOCOL,
-            "protocol_version": 1,
-            "run_id": run_id,
-            "sequence": index + 1,
-            "event": "artifact_observed",
-            "artifact": artifact,
-        });
-        let event_line = serde_json::to_string(&event).map_err(|error| {
+    for event in events {
+        let event_line = serde_json::to_string(&event.json()).map_err(|error| {
             SkeinError::Execution(format!("blackbox event JSON error: {error}"))
         })?;
         writeln!(file, "{event_line}")?;
@@ -334,6 +496,80 @@ mod tests {
         assert_eq!(events.lines().count(), 3);
         assert!(events.contains(BLACKBOX_EVENT_PROTOCOL));
         assert!(events.contains("slow-query-log.jsonl"));
+    }
+
+    #[test]
+    fn blackbox_report_typed_api_exposes_redacted_manifest_and_events() {
+        let root = unique_test_dir("blackbox-report-typed");
+        let artifact_dir = root.join("artifacts");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(
+            artifact_dir.join("replacement-summary.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "protocol": "skein-nowledge-replacement-summary",
+                "production_cutover_ready": false,
+                "production_replacement_per_million": 500_000,
+                "blocking_categories": ["query_runtime_preflight"],
+                "query": "MATCH (secret {token: $token}) RETURN secret",
+                "parameters": {"token": "secret-token"}
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            artifact_dir.join("skein-log.jsonl"),
+            "{\"event\":\"started\"}\n\n",
+        )
+        .unwrap();
+
+        let report = blackbox_report(&BlackboxReportOptions {
+            artifact_dir,
+            output_dir: root.join("blackbox"),
+            run_id: Some("run-typed".to_string()),
+            run_status: BlackboxRunStatus::Running,
+            exit_code: None,
+        })
+        .unwrap();
+
+        assert_eq!(report.protocol, BLACKBOX_REPORT_PROTOCOL);
+        assert_eq!(report.run_id, "run-typed");
+        assert_eq!(report.run_status, BlackboxRunStatus::Running);
+        assert_eq!(report.artifact_count, 2);
+        assert!(report.redaction.artifact_paths_are_relative);
+        assert!(!report.redaction.raw_query_text_copied);
+        assert!(!report.redaction.raw_parameters_copied);
+        let replacement = report
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == "replacement-summary.json")
+            .unwrap();
+        let summary = replacement.json.as_ref().unwrap();
+        assert!(summary.parse_ready);
+        assert_eq!(
+            summary.protocol.as_deref(),
+            Some("skein-nowledge-replacement-summary")
+        );
+        assert_eq!(summary.ready, Some(false));
+        assert_eq!(
+            summary.blocking_categories,
+            vec!["query_runtime_preflight".to_string()]
+        );
+        assert_eq!(summary.production_replacement_per_million, Some(500_000));
+        let log = report
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.name == "skein-log.jsonl")
+            .unwrap();
+        assert_eq!(log.jsonl.as_ref().unwrap().line_count, 2);
+        assert_eq!(log.jsonl.as_ref().unwrap().nonempty_line_count, 1);
+        let events = report.events();
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].protocol, BLACKBOX_EVENT_PROTOCOL);
+        assert_eq!(events[0].run_id, "run-typed");
+        let rendered = serde_json::to_string(&report.json()).unwrap();
+        assert!(!rendered.contains("MATCH"));
+        assert!(!rendered.contains("secret-token"));
+        assert!(!rendered.contains(root.to_string_lossy().as_ref()));
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {
