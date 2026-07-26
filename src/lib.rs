@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod api;
+pub mod background_maintenance_evidence;
 pub mod blackbox;
 pub mod bounded_read_evidence;
 pub mod compat;
@@ -66,6 +67,10 @@ pub use api::{
     SearchProjectionGraphDeltaRequest, SlowQueryLogExportOptions, SlowQueryLogRecordSummary,
     GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
     SLOW_QUERY_LOG_EVENT_PROTOCOL,
+};
+pub use background_maintenance_evidence::{
+    nowledge_background_maintenance_evidence_json, nowledge_background_maintenance_evidence_usage,
+    run_nowledge_background_maintenance_evidence,
 };
 pub use blackbox::{
     blackbox_report, blackbox_report_json, write_blackbox_report, write_blackbox_report_typed,
