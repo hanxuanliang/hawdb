@@ -1,4 +1,7 @@
 use crate::blackbox::{write_blackbox_report, BlackboxReportOptions, BlackboxRunStatus};
+use crate::nowledge_mem::{
+    NowledgeMemEmbeddedStore, NowledgeMemOpenOptions, NowledgeMemOpenReport,
+};
 use crate::store::DurabilityPolicy;
 use crate::{Database, DatabaseConfig, Result};
 use std::path::{Path, PathBuf};
@@ -53,6 +56,12 @@ impl SkeinEmbedded {
         })
     }
 
+    pub fn open_nowledge_mem(
+        options: NowledgeMemOpenOptions,
+    ) -> Result<(NowledgeMemEmbeddedStore, NowledgeMemOpenReport)> {
+        NowledgeMemEmbeddedStore::open_with_options(options)
+    }
+
     pub fn path(&self) -> &Path {
         &self.path
     }
@@ -94,7 +103,10 @@ impl SkeinEmbedded {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Value;
+    use crate::{
+        NowledgeMemGraphMode, NowledgeMemReadinessOptions, Value,
+        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+    };
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -133,6 +145,27 @@ mod tests {
         assert!(slow_log.contains("query_digest"));
         assert!(!slow_log.contains("MATCH"));
         assert!(!slow_log.contains("m1"));
+    }
+
+    #[test]
+    fn embedded_handle_opens_nowledge_mem_store() {
+        let root = unique_test_dir("embedded-nowledge-mem");
+        let graph_path = root.join("graph");
+        let (mut store, open_report) = SkeinEmbedded::open_nowledge_mem(
+            NowledgeMemOpenOptions::graph_only(&graph_path, NowledgeMemGraphMode::WritableCutover),
+        )
+        .unwrap();
+
+        let readiness = store.library_readiness(&NowledgeMemReadinessOptions::default());
+
+        assert_eq!(open_report.mode, NowledgeMemGraphMode::WritableCutover);
+        assert!(open_report.graph_configured);
+        assert!(open_report.graph_opened);
+        assert!(!open_report.search_projection_configured);
+        assert!(!open_report.search_projection_opened);
+        assert_eq!(readiness.protocol, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL);
+        assert_eq!(readiness.mode, NowledgeMemGraphMode::WritableCutover);
+        assert!(readiness.graph_open);
     }
 
     fn unique_test_dir(prefix: &str) -> PathBuf {

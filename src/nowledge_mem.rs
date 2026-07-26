@@ -863,6 +863,52 @@ pub struct NowledgeMemReadinessOptions {
     pub background_maintenance_options: BackgroundMaintenanceOptions,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemLibraryReadinessReport {
+    pub protocol: String,
+    pub present: bool,
+    pub ready: bool,
+    pub mode: NowledgeMemGraphMode,
+    pub blocker_codes: Vec<String>,
+    pub readiness_by_area: serde_json::Value,
+    pub ready_area_count: usize,
+    pub blocked_area_count: usize,
+    pub graph_open: bool,
+    pub graph_read_only: bool,
+    pub bounded_read_evidence: serde_json::Value,
+    pub storage_recovery: serde_json::Value,
+    pub background_maintenance: serde_json::Value,
+    pub query_family_evidence: serde_json::Value,
+    pub search_projection_evidence: serde_json::Value,
+    pub search_projection_shadow_evidence: serde_json::Value,
+}
+
+impl NowledgeMemLibraryReadinessReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "present": self.present,
+            "ready": self.ready,
+            "mode": self.mode.as_str(),
+            "blocker_codes": self.blocker_codes,
+            "readiness_by_area": self.readiness_by_area,
+            "ready_area_count": self.ready_area_count,
+            "blocked_area_count": self.blocked_area_count,
+            "graph": {
+                "open": self.graph_open,
+                "mode": self.mode.as_str(),
+                "read_only": self.graph_read_only,
+            },
+            "bounded_read_evidence": self.bounded_read_evidence,
+            "storage_recovery": self.storage_recovery,
+            "background_maintenance": self.background_maintenance,
+            "query_family_evidence": self.query_family_evidence,
+            "search_projection_evidence": self.search_projection_evidence,
+            "search_projection_shadow_evidence": self.search_projection_shadow_evidence,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemRetrievalReport {
     pub protocol: String,
@@ -1358,6 +1404,13 @@ impl NowledgeMemEmbeddedStore {
         &mut self,
         options: &NowledgeMemReadinessOptions,
     ) -> serde_json::Value {
+        self.library_readiness(options).json()
+    }
+
+    pub fn library_readiness(
+        &mut self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> NowledgeMemLibraryReadinessReport {
         let bounded_read_evidence = options
             .bounded_read_evidence
             .clone()
@@ -1417,29 +1470,30 @@ impl NowledgeMemEmbeddedStore {
         );
         let ready_area_count = readiness_area_count(&readiness_by_area, true);
         let blocked_area_count = readiness_area_count(&readiness_by_area, false);
+        let blocker_codes = blocker_codes
+            .into_iter()
+            .map(str::to_string)
+            .collect::<Vec<_>>();
         let ready = blocker_codes.is_empty();
 
-        serde_json::json!({
-            "protocol": NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-            "present": true,
-            "ready": ready,
-            "mode": self.graph.mode().as_str(),
-            "blocker_codes": blocker_codes,
-            "readiness_by_area": readiness_by_area,
-            "ready_area_count": ready_area_count,
-            "blocked_area_count": blocked_area_count,
-            "graph": {
-                "open": true,
-                "mode": self.graph.mode().as_str(),
-                "read_only": self.graph.database().config().read_only,
-            },
-            "bounded_read_evidence": bounded_read_evidence,
-            "storage_recovery": storage_recovery,
-            "background_maintenance": background_maintenance,
-            "query_family_evidence": query_family_evidence,
-            "search_projection_evidence": search_projection_evidence,
-            "search_projection_shadow_evidence": search_projection_shadow_evidence,
-        })
+        NowledgeMemLibraryReadinessReport {
+            protocol: NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL.to_string(),
+            present: true,
+            ready,
+            mode: self.graph.mode(),
+            blocker_codes,
+            readiness_by_area,
+            ready_area_count,
+            blocked_area_count,
+            graph_open: true,
+            graph_read_only: self.graph.database().config().read_only,
+            bounded_read_evidence,
+            storage_recovery,
+            background_maintenance,
+            query_family_evidence,
+            search_projection_evidence,
+            search_projection_shadow_evidence,
+        }
     }
 
     fn bounded_read_probe_evidence_json(
@@ -2937,6 +2991,39 @@ mod tests {
         assert_eq!(readiness["ready_area_count"], 1);
         assert_eq!(readiness["blocked_area_count"], 6);
         assert!(!readiness.to_string().contains("redacted"));
+    }
+
+    #[test]
+    fn embedded_store_exposes_typed_library_readiness_report() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let report = store.library_readiness(&NowledgeMemReadinessOptions::default());
+        let json = report.json();
+
+        assert_eq!(report.protocol, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL);
+        assert!(report.present);
+        assert!(!report.ready);
+        assert_eq!(report.mode, NowledgeMemGraphMode::ShadowReadOnly);
+        assert!(report.graph_open);
+        assert!(!report.graph_read_only);
+        assert_eq!(report.ready_area_count, 1);
+        assert_eq!(report.blocked_area_count, 6);
+        assert!(report
+            .blocker_codes
+            .iter()
+            .any(|code| code == "bounded_read_evidence_not_ready"));
+        assert_eq!(json["ready"], false);
+        assert_eq!(
+            json["blocker_codes"],
+            serde_json::json!(report.blocker_codes)
+        );
+        assert_eq!(json["graph"]["read_only"], false);
+        assert_eq!(
+            json["bounded_read_evidence"]["blocker_codes"],
+            serde_json::json!(["bounded_read_probe_missing"])
+        );
     }
 
     #[test]
