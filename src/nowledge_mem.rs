@@ -1656,6 +1656,9 @@ pub struct NowledgeMemSearchCandidateReport {
     pub filtered_document_count: usize,
     pub total_hits: usize,
     pub returned_hit_count: usize,
+    pub returned_kind_counts: BTreeMap<String, usize>,
+    pub returned_missing_external_id_count: usize,
+    pub returned_missing_source_id_count: usize,
     pub truncated: bool,
     pub candidate_set: SearchCandidateSetReport,
     pub filtered_out_count: usize,
@@ -1686,6 +1689,9 @@ impl NowledgeMemSearchCandidateReport {
             "filtered_document_count": self.filtered_document_count,
             "total_hits": self.total_hits,
             "returned_hit_count": self.returned_hit_count,
+            "returned_kind_counts": self.returned_kind_counts,
+            "returned_missing_external_id_count": self.returned_missing_external_id_count,
+            "returned_missing_source_id_count": self.returned_missing_source_id_count,
             "truncated": self.truncated,
             "candidate_set": search_candidate_set_report_json(&self.candidate_set),
             "filtered_out_count": self.filtered_out_count,
@@ -3342,6 +3348,17 @@ fn nowledge_mem_search_candidate_report(
     result: &SearchResultSet,
 ) -> NowledgeMemSearchCandidateReport {
     let pushdown = &result.candidate_set.metadata_predicate_pushdown;
+    let returned_kind_counts = search_candidate_returned_kind_counts(&result.hits);
+    let returned_missing_external_id_count = result
+        .hits
+        .iter()
+        .filter(|hit| hit.external_id.is_none())
+        .count();
+    let returned_missing_source_id_count = result
+        .hits
+        .iter()
+        .filter(|hit| hit.source_id.is_none())
+        .count();
     NowledgeMemSearchCandidateReport {
         protocol: NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL.to_string(),
         compressed_vector_search_mode: request.compressed_vector_search_mode,
@@ -3353,6 +3370,9 @@ fn nowledge_mem_search_candidate_report(
         filtered_document_count: result.filtered_document_count,
         total_hits: result.total_hits,
         returned_hit_count: result.hits.len(),
+        returned_kind_counts,
+        returned_missing_external_id_count,
+        returned_missing_source_id_count,
         truncated: result.truncated,
         candidate_set: result.candidate_set.clone(),
         filtered_out_count: result.candidate_set.filtered_out_count,
@@ -3389,6 +3409,17 @@ fn nowledge_mem_search_candidate_report(
             .map(|code| code.as_str().to_string())
             .collect(),
     }
+}
+
+fn search_candidate_returned_kind_counts(
+    hits: &[crate::search::SearchHit],
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for hit in hits {
+        let kind = hit.kind.as_deref().unwrap_or("unknown");
+        *counts.entry(kind.to_string()).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn search_candidate_set_report_json(report: &SearchCandidateSetReport) -> serde_json::Value {
@@ -5377,6 +5408,80 @@ mod tests {
             2
         );
         assert!(!output.report.json().to_string().contains("[1.0,0.0]"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_projection_candidate_api_preserves_source_chunk_identity() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_api_source_chunk");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::SourceChunk,
+                    external_id: "chunk-1".to_string(),
+                    title: "Source chunk candidate".to_string(),
+                    body: "source chunk identity candidate read".to_string(),
+                    embedding: None,
+                    source_id: Some("source-1".to_string()),
+                    metadata: BTreeMap::from([
+                        ("space_id".to_string(), "default".to_string()),
+                        ("lifecycle_state".to_string(), "active".to_string()),
+                    ]),
+                })
+                .unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "memory-1".to_string(),
+                    title: "Memory candidate".to_string(),
+                    body: "source chunk identity candidate read".to_string(),
+                    embedding: None,
+                    source_id: Some("source-1".to_string()),
+                    metadata: BTreeMap::from([
+                        ("space_id".to_string(), "default".to_string()),
+                        ("lifecycle_state".to_string(), "active".to_string()),
+                    ]),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let request = NowledgeMemSearchCandidateRequest::text("source chunk identity", 10)
+            .with_metadata_filters(BTreeMap::from([(
+                "kind__in".to_string(),
+                r#"["source_chunk"]"#.to_string(),
+            )]));
+
+        let output = store.search_candidates(&request).unwrap();
+
+        assert_eq!(output.result.total_hits, 1);
+        let hit = &output.result.hits[0];
+        assert_eq!(hit.id, "source_chunk:chunk-1");
+        assert_eq!(hit.kind.as_deref(), Some("source_chunk"));
+        assert_eq!(hit.external_id.as_deref(), Some("chunk-1"));
+        assert_eq!(hit.source_id.as_deref(), Some("source-1"));
+        assert_eq!(
+            output.report.returned_kind_counts.get("source_chunk"),
+            Some(&1)
+        );
+        assert_eq!(output.report.returned_missing_external_id_count, 0);
+        assert_eq!(output.report.returned_missing_source_id_count, 0);
+        assert_eq!(output.report.metadata_filter_count, 1);
+        assert_eq!(output.report.pushed_predicate_count, 1);
+        assert_eq!(
+            output.report.json()["returned_kind_counts"]["source_chunk"],
+            1
+        );
+        assert!(!output
+            .report
+            .json()
+            .to_string()
+            .contains("source chunk identity candidate read"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

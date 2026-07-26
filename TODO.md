@@ -127,8 +127,10 @@ query family, or cutover gate requires them.
     - [x] Cover vector candidate generation through the same typed
       embedded-library API, including compact ranking-input diagnostics without
       copying embedding values into reports.
-  - Then cover vector candidate generation, ranking inputs, source chunk
-    identity, fail-soft behavior, and repair/rebuild markers.
+    - [x] Cover source chunk identity through the same typed embedded-library
+      API and compact diagnostics, preserving `kind`, `external_id`, and
+      `source_id` without copying document bodies into reports.
+  - Then cover fail-soft behavior and repair/rebuild markers.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
