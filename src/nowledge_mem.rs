@@ -129,6 +129,8 @@ pub const NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL: &str =
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
+pub const NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str =
+    "skein-nowledge-query-runtime-preflight-v1";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-candidate-shadow-evidence";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE: &str = "nmem-rust-bridge";
@@ -176,6 +178,228 @@ pub fn nowledge_mem_required_query_families_for_route(route: &str) -> &'static [
             &["projected_graph"]
         }
         _ => &[],
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeQueryRuntimePreflightProbe {
+    pub name: String,
+    pub route: Option<String>,
+    pub query_family: Option<String>,
+    pub cypher: String,
+    pub parameters: BTreeMap<String, Value>,
+    pub require_scan_pruning: bool,
+    pub require_pruned: bool,
+    pub min_scan_pruning_reports: usize,
+    pub max_output_rows: Option<usize>,
+}
+
+impl NowledgeQueryRuntimePreflightProbe {
+    pub fn new(name: impl Into<String>, cypher: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            route: None,
+            query_family: None,
+            cypher: cypher.into(),
+            parameters: BTreeMap::new(),
+            require_scan_pruning: false,
+            require_pruned: false,
+            min_scan_pruning_reports: 1,
+            max_output_rows: None,
+        }
+    }
+
+    pub fn with_route(mut self, route: impl Into<String>) -> Self {
+        self.route = Some(route.into());
+        self
+    }
+
+    pub fn with_query_family(mut self, query_family: impl Into<String>) -> Self {
+        self.query_family = Some(query_family.into());
+        self
+    }
+
+    pub fn with_parameters(mut self, parameters: BTreeMap<String, Value>) -> Self {
+        self.parameters = parameters;
+        self
+    }
+
+    pub fn require_scan_pruning(mut self, min_scan_pruning_reports: usize) -> Self {
+        self.require_scan_pruning = true;
+        self.min_scan_pruning_reports = min_scan_pruning_reports;
+        self
+    }
+
+    pub fn require_pruned(mut self) -> Self {
+        self.require_pruned = true;
+        self
+    }
+
+    pub fn with_max_output_rows(mut self, max_output_rows: usize) -> Self {
+        self.max_output_rows = Some(max_output_rows);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeQueryRuntimePreflightReport {
+    pub protocol: String,
+    pub ready: bool,
+    pub database_opened: bool,
+    pub probe_count: usize,
+    pub passed_probe_count: usize,
+    pub failed_probe_count: usize,
+    pub required_route_count: usize,
+    pub covered_route_count: usize,
+    pub covered_routes: Vec<String>,
+    pub missing_required_routes: Vec<String>,
+    pub required_routes_covered: bool,
+    pub unknown_routes: Vec<String>,
+    pub duplicate_routes: Vec<String>,
+    pub route_coverage_ready: bool,
+    pub route_coverage_blocker_codes: Vec<String>,
+    pub blocker_codes: Vec<String>,
+    pub probes: Vec<NowledgeQueryRuntimePreflightProbeReport>,
+}
+
+impl NowledgeQueryRuntimePreflightReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "ready": self.ready,
+            "database_opened": self.database_opened,
+            "probe_count": self.probe_count,
+            "passed_probe_count": self.passed_probe_count,
+            "failed_probe_count": self.failed_probe_count,
+            "required_route_count": self.required_route_count,
+            "covered_route_count": self.covered_route_count,
+            "covered_routes": self.covered_routes,
+            "missing_required_routes": self.missing_required_routes,
+            "required_routes_covered": self.required_routes_covered,
+            "unknown_routes": self.unknown_routes,
+            "duplicate_routes": self.duplicate_routes,
+            "route_coverage_ready": self.route_coverage_ready,
+            "route_coverage_blocker_codes": self.route_coverage_blocker_codes,
+            "blocker_codes": self.blocker_codes,
+            "probes": self.probes.iter().map(NowledgeQueryRuntimePreflightProbeReport::json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeQueryRuntimePreflightProbeReport {
+    pub name: String,
+    pub route: Option<String>,
+    pub query_family: Option<String>,
+    pub ready: bool,
+    pub success: bool,
+    pub output_row_count: usize,
+    pub selected_plan_fingerprint: Option<String>,
+    pub search_mode: Option<String>,
+    pub selected_plan_operator_counts: BTreeMap<String, usize>,
+    pub selected_plan_class_counts: BTreeMap<String, usize>,
+    pub optimizer_decision_count: usize,
+    pub plan_cache_lookup: Option<String>,
+    pub plan_cache_bypass_reason: Option<String>,
+    pub plan_cache_cacheable: bool,
+    pub plan_cache_hit: bool,
+    pub plan_cache_miss: bool,
+    pub plan_cache_bypassed: bool,
+    pub work_priority: Option<String>,
+    pub work_class: Option<String>,
+    pub estimated_operations: Option<usize>,
+    pub max_rows: Option<usize>,
+    pub detection_row_cap: Option<usize>,
+    pub row_limit_enforced_before_output: bool,
+    pub operator_row_cap_enabled: bool,
+    pub blocking_operator_kinds: Vec<String>,
+    pub scan_pruning_reports: Vec<ScanPruningReport>,
+    pub pruned_scan_count: usize,
+    pub error_class: Option<String>,
+    pub blocker_codes: Vec<String>,
+}
+
+impl NowledgeQueryRuntimePreflightProbeReport {
+    pub fn json(&self) -> serde_json::Value {
+        let mut value = serde_json::json!({
+            "name": self.name,
+            "route": self.route,
+            "query_family": self.query_family,
+            "ready": self.ready,
+            "success": self.success,
+            "blocker_codes": self.blocker_codes,
+        });
+        let object = value
+            .as_object_mut()
+            .expect("query runtime preflight probe report is an object");
+        if self.success {
+            object.insert(
+                "output_row_count".to_string(),
+                serde_json::json!(self.output_row_count),
+            );
+            object.insert(
+                "selected_plan_fingerprint".to_string(),
+                serde_json::json!(self.selected_plan_fingerprint),
+            );
+            object.insert(
+                "search_mode".to_string(),
+                serde_json::json!(self.search_mode),
+            );
+            object.insert(
+                "selected_plan_operator_counts".to_string(),
+                serde_json::json!(self.selected_plan_operator_counts),
+            );
+            object.insert(
+                "selected_plan_class_counts".to_string(),
+                serde_json::json!(self.selected_plan_class_counts),
+            );
+            object.insert(
+                "optimizer_decision_count".to_string(),
+                serde_json::json!(self.optimizer_decision_count),
+            );
+            object.insert(
+                "plan_cache_lookup".to_string(),
+                serde_json::json!(self.plan_cache_lookup),
+            );
+            object.insert(
+                "plan_cache".to_string(),
+                serde_json::json!({
+                    "lookup": self.plan_cache_lookup,
+                    "bypass_reason": self.plan_cache_bypass_reason,
+                    "cacheable": self.plan_cache_cacheable,
+                    "hit": self.plan_cache_hit,
+                    "miss": self.plan_cache_miss,
+                    "bypassed": self.plan_cache_bypassed,
+                }),
+            );
+            object.insert(
+                "work_request".to_string(),
+                serde_json::json!({
+                    "priority": self.work_priority,
+                    "class": self.work_class,
+                    "estimated_operations": self.estimated_operations,
+                }),
+            );
+            object.insert(
+                "execution_profile".to_string(),
+                serde_json::json!({
+                    "max_rows": self.max_rows,
+                    "detection_row_cap": self.detection_row_cap,
+                    "row_limit_enforced_before_output": self.row_limit_enforced_before_output,
+                    "operator_row_cap_enabled": self.operator_row_cap_enabled,
+                    "blocking_operator_kinds": self.blocking_operator_kinds,
+                    "scan_pruning_report_count": self.scan_pruning_reports.len(),
+                    "pruned_scan_count": self.pruned_scan_count,
+                    "scan_pruning_reports": self.scan_pruning_reports.iter().map(scan_pruning_report_json).collect::<Vec<_>>(),
+                }),
+            );
+        } else {
+            object.insert(
+                "error_class".to_string(),
+                serde_json::json!(self.error_class),
+            );
+        }
+        value
     }
 }
 
@@ -1664,6 +1888,20 @@ impl NowledgeMemEmbeddedStoreHandle {
         Ok(self.lock_store()?.readiness_dashboard_json(options))
     }
 
+    pub fn query_runtime_preflight(
+        &self,
+        probes: &[NowledgeQueryRuntimePreflightProbe],
+    ) -> Result<NowledgeQueryRuntimePreflightReport> {
+        Ok(self.lock_store()?.query_runtime_preflight(probes))
+    }
+
+    pub fn query_runtime_preflight_json(
+        &self,
+        probes: &[NowledgeQueryRuntimePreflightProbe],
+    ) -> Result<serde_json::Value> {
+        Ok(self.lock_store()?.query_runtime_preflight_json(probes))
+    }
+
     fn lock_store(&self) -> Result<MutexGuard<'_, NowledgeMemEmbeddedStore>> {
         self.inner.lock().map_err(|_| {
             SkeinError::Execution("nowledge mem embedded store lock poisoned".to_string())
@@ -1879,6 +2117,20 @@ impl NowledgeMemEmbeddedStore {
     ) -> Result<NowledgeMemQueryOutput> {
         self.graph
             .query_with_params_with_report_options(cypher, parameters, options)
+    }
+
+    pub fn query_runtime_preflight(
+        &mut self,
+        probes: &[NowledgeQueryRuntimePreflightProbe],
+    ) -> NowledgeQueryRuntimePreflightReport {
+        nowledge_query_runtime_preflight_report(self.graph.database_mut(), probes)
+    }
+
+    pub fn query_runtime_preflight_json(
+        &mut self,
+        probes: &[NowledgeQueryRuntimePreflightProbe],
+    ) -> serde_json::Value {
+        self.query_runtime_preflight(probes).json()
     }
 
     pub fn slow_query_report(&self) -> NowledgeMemSlowQueryReport {
@@ -2177,6 +2429,270 @@ fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Val
             serde_json::json!({"kind": "property_range", "property": property})
         }
         ScanPruningStrategy::OrUnion => serde_json::json!({"kind": "or_union"}),
+    }
+}
+
+#[derive(Debug)]
+struct NowledgeQueryRuntimeRouteCoverage {
+    required_route_count: usize,
+    covered_route_count: usize,
+    covered_routes: Vec<String>,
+    missing_required_routes: Vec<String>,
+    required_routes_covered: bool,
+    unknown_routes: Vec<String>,
+    duplicate_routes: Vec<String>,
+    ready: bool,
+    blocker_codes: Vec<String>,
+}
+
+fn nowledge_query_runtime_preflight_report(
+    db: &mut Database,
+    probes: &[NowledgeQueryRuntimePreflightProbe],
+) -> NowledgeQueryRuntimePreflightReport {
+    let route_coverage = nowledge_query_runtime_route_coverage(probes);
+    let probe_reports = probes
+        .iter()
+        .map(|probe| nowledge_query_runtime_probe_report(db, probe))
+        .collect::<Vec<_>>();
+    let passed_probe_count = probe_reports.iter().filter(|probe| probe.ready).count();
+    let failed_probe_count = probe_reports.len().saturating_sub(passed_probe_count);
+    let blocker_codes =
+        query_runtime_preflight_blocker_codes(probes.len(), failed_probe_count, &route_coverage);
+
+    NowledgeQueryRuntimePreflightReport {
+        protocol: NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL.to_string(),
+        ready: blocker_codes.is_empty(),
+        database_opened: true,
+        probe_count: probes.len(),
+        passed_probe_count,
+        failed_probe_count,
+        required_route_count: route_coverage.required_route_count,
+        covered_route_count: route_coverage.covered_route_count,
+        covered_routes: route_coverage.covered_routes,
+        missing_required_routes: route_coverage.missing_required_routes,
+        required_routes_covered: route_coverage.required_routes_covered,
+        unknown_routes: route_coverage.unknown_routes,
+        duplicate_routes: route_coverage.duplicate_routes,
+        route_coverage_ready: route_coverage.ready,
+        route_coverage_blocker_codes: route_coverage.blocker_codes,
+        blocker_codes,
+        probes: probe_reports,
+    }
+}
+
+fn nowledge_query_runtime_route_coverage(
+    probes: &[NowledgeQueryRuntimePreflightProbe],
+) -> NowledgeQueryRuntimeRouteCoverage {
+    let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
+    let mut route_counts = BTreeMap::<&str, usize>::new();
+    for route in probes.iter().filter_map(|probe| probe.route.as_deref()) {
+        *route_counts.entry(route).or_default() += 1;
+    }
+    let observed_routes = route_counts.keys().copied().collect::<BTreeSet<_>>();
+    let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| observed_routes.contains(route))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let missing_required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .copied()
+        .filter(|route| !observed_routes.contains(route))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let unknown_routes = observed_routes
+        .iter()
+        .filter(|route| !required_routes.contains(**route))
+        .map(|route| (*route).to_string())
+        .collect::<Vec<_>>();
+    let duplicate_routes = route_counts
+        .iter()
+        .filter(|(_, count)| **count > 1)
+        .map(|(route, _)| (*route).to_string())
+        .collect::<Vec<_>>();
+    let required_routes_covered = missing_required_routes.is_empty();
+    let mut blocker_codes = Vec::new();
+    if !required_routes_covered {
+        blocker_codes.push("query_runtime_route_coverage_missing".to_string());
+    }
+    if !unknown_routes.is_empty() {
+        blocker_codes.push("query_runtime_unknown_routes".to_string());
+    }
+    let ready = blocker_codes.is_empty();
+
+    NowledgeQueryRuntimeRouteCoverage {
+        required_route_count: REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
+        covered_route_count: covered_routes.len(),
+        covered_routes,
+        missing_required_routes,
+        required_routes_covered,
+        unknown_routes,
+        duplicate_routes,
+        ready,
+        blocker_codes,
+    }
+}
+
+fn nowledge_query_runtime_probe_report(
+    db: &mut Database,
+    probe: &NowledgeQueryRuntimePreflightProbe,
+) -> NowledgeQueryRuntimePreflightProbeReport {
+    match db.explain_analyze_query_with_params(&probe.cypher, &probe.parameters) {
+        Ok(output) => {
+            let scan_pruning_report_count = output.execution_profile.scan_pruning_reports.len();
+            let pruned_scan_count = output
+                .execution_profile
+                .scan_pruning_reports
+                .iter()
+                .filter(|report| report.pruned)
+                .count();
+            let output_row_count = output.output.rows.len();
+            let blocker_codes = query_runtime_probe_blocker_codes(
+                probe,
+                scan_pruning_report_count,
+                pruned_scan_count,
+                output_row_count,
+            );
+            let plan_cache_lookup = output.plan_cache_lookup;
+            let plan_cache = NowledgeMemPlanCacheReport::from_lookup(Some(plan_cache_lookup));
+            NowledgeQueryRuntimePreflightProbeReport {
+                name: probe.name.clone(),
+                route: probe.route.clone(),
+                query_family: probe.query_family.clone(),
+                ready: blocker_codes.is_empty(),
+                success: true,
+                output_row_count,
+                selected_plan_fingerprint: Some(output.trace.selected_plan_fingerprint),
+                search_mode: Some(output.trace.search_mode.as_str().to_string()),
+                selected_plan_operator_counts: output.trace.selected_plan_operator_counts,
+                selected_plan_class_counts: output.trace.selected_plan_class_counts,
+                optimizer_decision_count: output.trace.decisions.len(),
+                plan_cache_lookup: Some(plan_cache_lookup.as_str().to_string()),
+                plan_cache_bypass_reason: plan_cache_lookup
+                    .bypass_reason()
+                    .map(|reason| reason.as_str().to_string()),
+                plan_cache_cacheable: plan_cache.cacheable,
+                plan_cache_hit: plan_cache.hit,
+                plan_cache_miss: plan_cache.miss,
+                plan_cache_bypassed: plan_cache.bypassed,
+                work_priority: Some(output.work_request.priority.as_str().to_string()),
+                work_class: Some(output.work_request.class.as_str().to_string()),
+                estimated_operations: Some(output.work_request.estimated_operations),
+                max_rows: output.execution_profile.max_rows,
+                detection_row_cap: output.execution_profile.detection_row_cap,
+                row_limit_enforced_before_output: output
+                    .execution_profile
+                    .row_limit_enforced_before_output,
+                operator_row_cap_enabled: output.execution_profile.operator_row_cap_enabled,
+                blocking_operator_kinds: output.execution_profile.blocking_operator_kinds,
+                scan_pruning_reports: output.execution_profile.scan_pruning_reports,
+                pruned_scan_count,
+                error_class: None,
+                blocker_codes,
+            }
+        }
+        Err(error) => NowledgeQueryRuntimePreflightProbeReport {
+            name: probe.name.clone(),
+            route: probe.route.clone(),
+            query_family: probe.query_family.clone(),
+            ready: false,
+            success: false,
+            output_row_count: 0,
+            selected_plan_fingerprint: None,
+            search_mode: None,
+            selected_plan_operator_counts: BTreeMap::new(),
+            selected_plan_class_counts: BTreeMap::new(),
+            optimizer_decision_count: 0,
+            plan_cache_lookup: None,
+            plan_cache_bypass_reason: None,
+            plan_cache_cacheable: false,
+            plan_cache_hit: false,
+            plan_cache_miss: false,
+            plan_cache_bypassed: false,
+            work_priority: None,
+            work_class: None,
+            estimated_operations: None,
+            max_rows: None,
+            detection_row_cap: None,
+            row_limit_enforced_before_output: false,
+            operator_row_cap_enabled: false,
+            blocking_operator_kinds: Vec::new(),
+            scan_pruning_reports: Vec::new(),
+            pruned_scan_count: 0,
+            error_class: Some(skein_error_class(&error).to_string()),
+            blocker_codes: vec!["query_runtime_failed".to_string()],
+        },
+    }
+}
+
+fn query_runtime_preflight_blocker_codes(
+    probe_count: usize,
+    failed_probe_count: usize,
+    route_coverage: &NowledgeQueryRuntimeRouteCoverage,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if probe_count == 0 {
+        blockers.push("query_runtime_probes_missing".to_string());
+    }
+    if failed_probe_count > 0 {
+        blockers.push("query_runtime_probe_failed".to_string());
+    }
+    blockers.extend(route_coverage.blocker_codes.iter().cloned());
+    blockers
+}
+
+fn query_runtime_probe_blocker_codes(
+    probe: &NowledgeQueryRuntimePreflightProbe,
+    scan_pruning_report_count: usize,
+    pruned_scan_count: usize,
+    output_row_count: usize,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    blockers.extend(query_runtime_probe_identity_blocker_codes(probe));
+    if probe.require_scan_pruning && scan_pruning_report_count < probe.min_scan_pruning_reports {
+        blockers.push("scan_pruning_report_missing".to_string());
+    }
+    if probe.require_pruned && pruned_scan_count == 0 {
+        blockers.push("scan_pruning_not_pruned".to_string());
+    }
+    if let Some(max_output_rows) = probe.max_output_rows {
+        if output_row_count > max_output_rows {
+            blockers.push("output_row_count_exceeded".to_string());
+        }
+    }
+    blockers
+}
+
+fn query_runtime_probe_identity_blocker_codes(
+    probe: &NowledgeQueryRuntimePreflightProbe,
+) -> Vec<String> {
+    let mut blockers = Vec::new();
+    if probe.name.trim().is_empty() || probe.name == "unnamed" {
+        blockers.push("query_runtime_probe_name_missing".to_string());
+    }
+    match probe.route.as_deref() {
+        Some(route) if REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.contains(&route) => {}
+        Some(_) => blockers.push("query_runtime_probe_unknown_route".to_string()),
+        None => blockers.push("query_runtime_probe_route_missing".to_string()),
+    }
+    match probe.query_family.as_deref() {
+        Some(family) if REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.contains(&family) => {}
+        Some(_) => blockers.push("query_runtime_probe_unknown_query_family".to_string()),
+        None => blockers.push("query_runtime_probe_query_family_missing".to_string()),
+    }
+    blockers
+}
+
+fn skein_error_class(error: &SkeinError) -> &'static str {
+    match error {
+        SkeinError::Parse(_) => "parse",
+        SkeinError::Semantic(_) => "semantic",
+        SkeinError::Storage(_) => "storage",
+        SkeinError::Execution(_) => "execution",
     }
 }
 
@@ -2775,15 +3291,16 @@ mod tests {
         NowledgeMemReadinessDashboard, NowledgeMemReadinessOptions,
         NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
         NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
-        NowledgeMemStorageRecoveryReport, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL,
-        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NowledgeMemStorageRecoveryReport, NowledgeQueryRuntimePreflightProbe,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
-        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -3143,6 +3660,97 @@ mod tests {
         assert!(final_slow_query.ready);
         assert_eq!(final_slow_query.latest_sequence, Some(5));
         assert_eq!(final_slow_query.record_count, 5);
+    }
+
+    #[test]
+    fn embedded_store_exposes_typed_query_runtime_preflight() {
+        let db = Database::new_with_config(DatabaseConfig {
+            max_plan_cache_entries: Some(8),
+            ..DatabaseConfig::default()
+        });
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        store
+            .query_with_report("CREATE (:Memory {id: 'preflight-1', title: 'Preflight'})")
+            .unwrap();
+        let probes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| {
+                NowledgeQueryRuntimePreflightProbe::new(
+                    format!("probe:{route}"),
+                    "MATCH (m:Memory {id: 'preflight-1'}) RETURN m.title AS title",
+                )
+                .with_route(*route)
+                .with_query_family(super::nowledge_mem_required_query_families_for_route(route)[0])
+                .require_scan_pruning(1)
+                .require_pruned()
+                .with_max_output_rows(1)
+            })
+            .collect::<Vec<_>>();
+
+        let report = store.query_runtime_preflight(&probes);
+        let json = report.json();
+
+        assert_eq!(report.protocol, NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL);
+        assert!(report.ready);
+        assert!(report.database_opened);
+        assert_eq!(
+            report.probe_count,
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(report.passed_probe_count, report.probe_count);
+        assert_eq!(report.failed_probe_count, 0);
+        assert!(report.required_routes_covered);
+        assert!(report.route_coverage_ready);
+        assert!(report.blocker_codes.is_empty());
+        assert!(report.probes.iter().all(|probe| probe.ready));
+        assert!(report
+            .probes
+            .iter()
+            .all(|probe| probe.selected_plan_fingerprint.is_some()));
+        assert!(report
+            .probes
+            .iter()
+            .all(|probe| !probe.scan_pruning_reports.is_empty()));
+        assert_eq!(json["protocol"], NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL);
+        assert_eq!(json["ready"], true);
+        assert_eq!(json["probe_count"], probes.len());
+        assert_eq!(json["probes"][0]["output_row_count"], 1);
+        assert_eq!(
+            json["probes"][0]["execution_profile"]["scan_pruning_report_count"],
+            1
+        );
+        assert!(json["probes"][0]["selected_plan_fingerprint"]
+            .as_str()
+            .is_some_and(|fingerprint| fingerprint.contains("IndexNodeSeek")));
+    }
+
+    #[test]
+    fn embedded_store_query_runtime_preflight_redacts_failed_probe_values() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        let probe = NowledgeQueryRuntimePreflightProbe::new(
+            "probe:/graph/node-details/{node_id}",
+            "MATCH (m:Memory {id: 'secret-preflight-id'}) RETURN missing(",
+        )
+        .with_route("/graph/node-details/{node_id}")
+        .with_query_family("memory_lookup");
+
+        let report = store.query_runtime_preflight(&[probe]);
+        let json = report.json();
+        let encoded = json.to_string();
+
+        assert!(!report.ready);
+        assert_eq!(report.failed_probe_count, 1);
+        assert_eq!(
+            report.probes[0].blocker_codes,
+            vec!["query_runtime_failed".to_string()]
+        );
+        assert_eq!(json["probes"][0]["success"], false);
+        assert_eq!(json["probes"][0]["error_class"], "parse");
+        assert!(!encoded.contains("secret-preflight-id"));
+        assert!(!encoded.contains("RETURN missing"));
     }
 
     #[test]

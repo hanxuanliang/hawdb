@@ -147,6 +147,8 @@ query family, or cutover gate requires them.
   - `nowledge-query-runtime-preflight` runs JSON-defined probes through the
     read-only query runtime with `EXPLAIN ANALYZE` and emits plan/profile
     evidence without rows, parameters, or local paths.
+  - [x] Expose typed query-runtime preflight probes and reports through the
+    embedded Mem library facade.
   - Do not add new query-shape-specific typed APIs unless they are required for
     compatibility with an existing caller during migration.
 
