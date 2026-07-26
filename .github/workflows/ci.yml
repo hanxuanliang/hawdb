@@ -614,3 +614,6 @@ jobs:
 
       - name: Loom QoS scheduler model
         run: cargo test -p skein-qos --features loom-tests loom_tests
+
+      - name: Loom slow query ring model
+        run: cargo test -p skein --features loom-tests api::system_sql::loom_tests

@@ -1163,6 +1163,7 @@ name = "skein"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "loom",
  "regex",
  "serde",
  "serde_json",

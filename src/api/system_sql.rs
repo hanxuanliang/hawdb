@@ -955,3 +955,54 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "loom-tests"))]
+pub(crate) mod loom_tests {
+    use super::{SlowQueryLog, SlowQueryRecord};
+    use loom::sync::{Arc, Mutex};
+    use loom::thread;
+
+    #[test]
+    fn slow_query_ring_preserves_bounds_under_modeled_concurrent_access() {
+        loom::model(|| {
+            let log = Arc::new(Mutex::new(SlowQueryLog::new(2)));
+
+            let first_writer = spawn_slow_query_writer(Arc::clone(&log), "first");
+            let second_writer = spawn_slow_query_writer(Arc::clone(&log), "second");
+            let snapshotter = {
+                let log = Arc::clone(&log);
+                thread::spawn(move || {
+                    let snapshot = log.lock().unwrap().snapshot();
+                    assert_snapshot_invariants(&snapshot, 2);
+                })
+            };
+
+            first_writer.join().unwrap();
+            second_writer.join().unwrap();
+            snapshotter.join().unwrap();
+
+            let snapshot = log.lock().unwrap().snapshot();
+            assert_snapshot_invariants(&snapshot, 2);
+            assert_eq!(snapshot.len(), 2);
+            assert_eq!(snapshot.last().map(|record| record.sequence), Some(2));
+        });
+    }
+
+    fn spawn_slow_query_writer(
+        log: Arc<Mutex<SlowQueryLog>>,
+        query_text: &'static str,
+    ) -> thread::JoinHandle<()> {
+        thread::spawn(move || {
+            log.lock().unwrap().push(SlowQueryRecord::completed(
+                "cypher", query_text, 1, 1, true, None, true,
+            ));
+        })
+    }
+
+    fn assert_snapshot_invariants(snapshot: &[SlowQueryRecord], capacity: usize) {
+        assert!(snapshot.len() <= capacity);
+        for pair in snapshot.windows(2) {
+            assert!(pair[0].sequence < pair[1].sequence);
+        }
+    }
+}

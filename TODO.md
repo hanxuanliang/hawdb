@@ -122,8 +122,8 @@ query family, or cutover gate requires them.
     in CI.
   - [x] Cover local QoS scheduler background admission and permit accounting
     with a feature-gated Loom model in CI.
-  - Add model or sanitizer coverage for slow-query ring before it becomes a
-    heavily shared Mem observability path.
+  - [x] Cover bounded slow-query ring capacity and sequence invariants with a
+    feature-gated Loom model in CI.
 - [ ] Add library readiness APIs for Mem integration.
   - Expose structured readiness, slow-query, blackbox, storage-recovery,
     background-maintenance, and search-projection reports through Rust APIs.
