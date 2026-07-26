@@ -113,7 +113,7 @@ query family, or cutover gate requires them.
 
 ## P1: Operability
 
-- [ ] Add compact readiness dashboards for route, query-family, storage, search,
+- [x] Add compact readiness dashboards for route, query-family, storage, search,
   and background-maintenance blockers.
 - [x] Add stable counters for plan cache hit, miss, admission, eviction, and
   memory pressure.

@@ -123,6 +123,8 @@ pub const NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-r
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
 pub const NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-slow-query-report-v1";
+pub const NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL: &str =
+    "skein-nowledge-mem-readiness-dashboard-v1";
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
@@ -1015,6 +1017,83 @@ impl NowledgeMemLibraryReadinessReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemReadinessAreaSummary {
+    pub name: String,
+    pub ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+impl NowledgeMemReadinessAreaSummary {
+    fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "name": self.name,
+            "ready": self.ready,
+            "blocker_codes": self.blocker_codes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemReadinessDashboard {
+    pub protocol: String,
+    pub ready: bool,
+    pub mode: NowledgeMemGraphMode,
+    pub area_count: usize,
+    pub ready_area_count: usize,
+    pub blocked_area_count: usize,
+    pub blocker_codes: Vec<String>,
+    pub areas: Vec<NowledgeMemReadinessAreaSummary>,
+    pub slow_query_ready: bool,
+    pub slow_query_record_count: usize,
+}
+
+impl NowledgeMemReadinessDashboard {
+    fn from_reports(
+        library: &NowledgeMemLibraryReadinessReport,
+        slow_query: &NowledgeMemSlowQueryReport,
+    ) -> Self {
+        let areas = nowledge_mem_readiness_dashboard_areas(library, slow_query);
+        let blocked_area_count = areas.iter().filter(|area| !area.ready).count();
+        let ready_area_count = areas.len().saturating_sub(blocked_area_count);
+
+        Self {
+            protocol: NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL.to_string(),
+            ready: library.ready && slow_query.ready,
+            mode: library.mode,
+            area_count: areas.len(),
+            ready_area_count,
+            blocked_area_count,
+            blocker_codes: library.blocker_codes.clone(),
+            areas,
+            slow_query_ready: slow_query.ready,
+            slow_query_record_count: slow_query.record_count,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "ready": self.ready,
+            "mode": self.mode.as_str(),
+            "area_count": self.area_count,
+            "ready_area_count": self.ready_area_count,
+            "blocked_area_count": self.blocked_area_count,
+            "blocker_codes": self.blocker_codes,
+            "areas": self.areas.iter().map(NowledgeMemReadinessAreaSummary::json).collect::<Vec<_>>(),
+            "slow_query": {
+                "ready": self.slow_query_ready,
+                "record_count": self.slow_query_record_count,
+            },
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            },
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemStorageRecoveryReport {
     pub protocol: String,
     pub present: bool,
@@ -1846,6 +1925,22 @@ impl NowledgeMemEmbeddedStore {
         }
     }
 
+    pub fn readiness_dashboard(
+        &mut self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> NowledgeMemReadinessDashboard {
+        let library = self.library_readiness(options);
+        let slow_query = self.slow_query_report();
+        NowledgeMemReadinessDashboard::from_reports(&library, &slow_query)
+    }
+
+    pub fn readiness_dashboard_json(
+        &mut self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> serde_json::Value {
+        self.readiness_dashboard(options).json()
+    }
+
     fn bounded_read_probe_evidence_json(
         &mut self,
         options: &NowledgeMemReadinessOptions,
@@ -2343,6 +2438,63 @@ fn readiness_area_count(readiness_by_area: &serde_json::Value, ready: bool) -> u
         .count()
 }
 
+fn nowledge_mem_readiness_dashboard_areas(
+    library: &NowledgeMemLibraryReadinessReport,
+    slow_query: &NowledgeMemSlowQueryReport,
+) -> Vec<NowledgeMemReadinessAreaSummary> {
+    let readiness = &library.readiness_by_area;
+    vec![
+        readiness_dashboard_area_from_json(readiness, "graph", "graph_not_ready"),
+        readiness_dashboard_area_from_json(readiness, "query", "bounded_read_evidence_not_ready"),
+        readiness_dashboard_area_from_json(
+            readiness,
+            "query_family",
+            "query_family_evidence_not_ready",
+        ),
+        readiness_dashboard_area_from_json(readiness, "storage", "storage_recovery_not_ready"),
+        readiness_dashboard_area_from_json(
+            readiness,
+            "search_projection",
+            "search_projection_evidence_not_ready",
+        ),
+        readiness_dashboard_area_from_json(
+            readiness,
+            "search_projection_shadow",
+            "search_projection_shadow_evidence_not_ready",
+        ),
+        readiness_dashboard_area_from_json(
+            readiness,
+            "background",
+            "background_maintenance_not_ready",
+        ),
+        NowledgeMemReadinessAreaSummary {
+            name: "slow_query".to_string(),
+            ready: slow_query.ready,
+            blocker_codes: if slow_query.ready {
+                Vec::new()
+            } else {
+                vec!["slow_query_report_not_ready".to_string()]
+            },
+        },
+    ]
+}
+
+fn readiness_dashboard_area_from_json(
+    readiness_by_area: &serde_json::Value,
+    name: &'static str,
+    fallback_blocker_code: &'static str,
+) -> NowledgeMemReadinessAreaSummary {
+    let area = readiness_by_area
+        .get(name)
+        .unwrap_or(&serde_json::Value::Null);
+    let ready = area.get("ready").and_then(serde_json::Value::as_bool) == Some(true);
+    NowledgeMemReadinessAreaSummary {
+        name: name.to_string(),
+        ready,
+        blocker_codes: readiness_blocker_codes(area, fallback_blocker_code, ready),
+    }
+}
+
 fn nowledge_mem_retrieval_report(
     mode: NowledgeMemGraphMode,
     compressed_vector_search_mode: CompressedVectorSearchMode,
@@ -2506,13 +2658,14 @@ mod tests {
         nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemEmbeddedStore,
         NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions,
         NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
-        NowledgeMemReadReport, NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
+        NowledgeMemReadReport, NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
+        NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
         NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
         NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
         NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
@@ -3379,6 +3532,71 @@ mod tests {
     }
 
     #[test]
+    fn embedded_store_exposes_compact_readiness_dashboard() {
+        let db = Database::new_with_config(DatabaseConfig {
+            slow_query_log_threshold_micros: 0,
+            slow_query_log_capacity: 4,
+            ..DatabaseConfig::default()
+        });
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        store
+            .query_with_report(
+                "CREATE (:Memory {id: 'dashboard-secret', title: 'Dashboard Secret'})",
+            )
+            .unwrap();
+
+        let dashboard = store.readiness_dashboard(&NowledgeMemReadinessOptions::default());
+        let json = dashboard.json();
+        let encoded = json.to_string();
+
+        assert_eq!(
+            dashboard.protocol,
+            NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL
+        );
+        assert_eq!(dashboard.mode, NowledgeMemGraphMode::ShadowReadOnly);
+        assert!(!dashboard.ready);
+        assert_eq!(dashboard.area_count, 8);
+        assert_eq!(dashboard.ready_area_count, 3);
+        assert_eq!(dashboard.blocked_area_count, 5);
+        assert!(dashboard.slow_query_ready);
+        assert_eq!(dashboard.slow_query_record_count, 1);
+        assert!(readiness_dashboard_area(&dashboard, "graph").ready);
+        assert!(readiness_dashboard_area(&dashboard, "background").ready);
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "query").blocker_codes,
+            vec!["bounded_read_probe_missing".to_string()]
+        );
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "query_family").blocker_codes,
+            vec!["query_family_evidence_missing".to_string()]
+        );
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "storage").blocker_codes,
+            vec![
+                "durable_recovery_not_observed".to_string(),
+                "checkpoint_boundary_missing".to_string(),
+                "wal_replay_unbounded".to_string()
+            ]
+        );
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "search_projection").blocker_codes,
+            vec!["search_projection_not_configured".to_string()]
+        );
+        assert_eq!(
+            readiness_dashboard_area(&dashboard, "search_projection_shadow").blocker_codes,
+            vec!["primary_search_projection_probe_missing".to_string()]
+        );
+        assert!(readiness_dashboard_area(&dashboard, "slow_query").ready);
+        assert_eq!(json["protocol"], NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL);
+        assert_eq!(json["redaction"]["query_text_copied"], false);
+        assert_eq!(json["redaction"]["parameters_copied"], false);
+        assert_eq!(json["redaction"]["local_paths_copied"], false);
+        assert!(!encoded.contains("Dashboard Secret"));
+        assert!(!encoded.contains("dashboard-secret"));
+    }
+
+    #[test]
     fn storage_recovery_report_exposes_typed_readiness_summary() {
         let report =
             NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
@@ -4206,6 +4424,17 @@ mod tests {
                 "replacement_readiness_per_million": 1_000_000,
             }))
             .collect::<Vec<_>>())
+    }
+
+    fn readiness_dashboard_area<'a>(
+        dashboard: &'a NowledgeMemReadinessDashboard,
+        name: &str,
+    ) -> &'a NowledgeMemReadinessAreaSummary {
+        dashboard
+            .areas
+            .iter()
+            .find(|area| area.name == name)
+            .expect("readiness dashboard area")
     }
 
     fn unique_nowledge_mem_test_dir(name: &str) -> std::path::PathBuf {
