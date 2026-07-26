@@ -12,6 +12,7 @@ pub mod optimizer;
 pub mod planner;
 pub mod previous_wrapper_preflight;
 pub mod qos;
+pub mod query_family_evidence;
 pub mod replacement_summary;
 pub mod search;
 pub mod store;
@@ -163,6 +164,10 @@ pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
     LocalQosPermit, LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission,
     QosAdmissionCode, RankedBackgroundWork, WorkClass, WorkPriority, WorkRequest, WORK_CLASS_COUNT,
+};
+pub use query_family_evidence::{
+    nowledge_query_family_evidence_json, nowledge_query_family_evidence_usage,
+    run_nowledge_query_family_evidence,
 };
 pub use replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
