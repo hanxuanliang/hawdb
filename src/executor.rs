@@ -2193,27 +2193,27 @@ fn execute_bindings_with_limit(
                 ..
             } = input.as_ref()
             {
-                if predicate_references_only_variable(predicate, rel_variable) {
-                    if let Ok(filter) = property_filter_from_predicate(predicate) {
-                        let input = execute_adjacency_expand(
-                            input,
-                            expand_input,
-                            catalog,
-                            store,
-                            execution_limit,
-                            Some(&filter),
-                        )?;
-                        let mut output = Vec::new();
-                        for binding in input {
-                            if evaluate_predicate(predicate, catalog, store, &binding) {
-                                output.push(binding);
-                                if execution_limit.is_reached(output.len()) {
-                                    return Ok(output);
-                                }
+                if let Some(filter) =
+                    exact_relationship_scan_filter_from_predicate(predicate, rel_variable)
+                {
+                    let input = execute_adjacency_expand(
+                        input,
+                        expand_input,
+                        catalog,
+                        store,
+                        execution_limit,
+                        Some(&filter),
+                    )?;
+                    let mut output = Vec::new();
+                    for binding in input {
+                        if evaluate_predicate(predicate, catalog, store, &binding) {
+                            output.push(binding);
+                            if execution_limit.is_reached(output.len()) {
+                                return Ok(output);
                             }
                         }
-                        return Ok(output);
                     }
+                    return Ok(output);
                 }
             }
             let input = execute_bindings(input, catalog, store)?;
@@ -4225,6 +4225,56 @@ fn predicate_references_only_variable(predicate: &Predicate, variable: &str) -> 
         | Predicate::ExpressionNotEq { .. }
         | Predicate::ExpressionCompare { .. }
         | Predicate::ExpressionContains { .. } => false,
+    }
+}
+
+fn exact_relationship_scan_filter_from_predicate(
+    predicate: &Predicate,
+    variable: &str,
+) -> Option<PropertyFilter> {
+    if let Predicate::And(predicates) = predicate {
+        let mut filters = predicates
+            .iter()
+            .filter_map(|predicate| {
+                exact_relationship_scan_filter_from_predicate(predicate, variable)
+            })
+            .collect::<Vec<_>>();
+        return match filters.len() {
+            0 => None,
+            1 => filters.pop(),
+            _ => Some(PropertyFilter::And(filters)),
+        };
+    }
+    if predicate_references_only_variable(predicate, variable) {
+        return property_filter_from_predicate(predicate)
+            .ok()
+            .filter(exact_relationship_scan_filter_is_safe);
+    }
+    None
+}
+
+fn exact_relationship_scan_filter_is_safe(filter: &PropertyFilter) -> bool {
+    match filter {
+        PropertyFilter::And(filters) | PropertyFilter::Or(filters) => {
+            filters.iter().all(exact_relationship_scan_filter_is_safe)
+        }
+        PropertyFilter::Eq { .. }
+        | PropertyFilter::IdEq { .. }
+        | PropertyFilter::IdRange { .. }
+        | PropertyFilter::IdIn { .. }
+        | PropertyFilter::IsNull { .. }
+        | PropertyFilter::IsNotNull { .. }
+        | PropertyFilter::In { .. }
+        | PropertyFilter::Range { .. } => true,
+        PropertyFilter::DefaultIfNullOrEq { negated, .. } => !negated,
+        PropertyFilter::Not(_)
+        | PropertyFilter::IdNotEq { .. }
+        | PropertyFilter::NotEq { .. }
+        | PropertyFilter::ListContains { .. }
+        | PropertyFilter::Contains { .. }
+        | PropertyFilter::StartsWith { .. }
+        | PropertyFilter::EndsWith { .. }
+        | PropertyFilter::RegexMatch { .. } => false,
     }
 }
 
