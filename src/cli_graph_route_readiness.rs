@@ -107,12 +107,24 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
         .iter()
         .map(RouteEvidence::query_runtime_missing_profile_evidence_count)
         .sum::<usize>();
+    let relationship_property_pruning_required_count = routes
+        .iter()
+        .map(RouteEvidence::relationship_property_pruning_required_count)
+        .sum::<usize>();
+    let relationship_property_pruning_report_count = routes
+        .iter()
+        .map(RouteEvidence::relationship_property_pruning_report_count)
+        .sum::<usize>();
     let route_query_plan_evidence_ready =
         route_coverage.ready && routes.iter().all(RouteEvidence::query_plan_evidence_ready);
     let route_query_profile_evidence_ready = route_coverage.ready
         && routes
             .iter()
             .all(RouteEvidence::query_profile_evidence_ready);
+    let route_relationship_property_pruning_evidence_ready = route_coverage.ready
+        && routes
+            .iter()
+            .all(RouteEvidence::relationship_property_pruning_evidence_ready);
     let route_primary_ready = route_coverage.ready && route_primary_blocker_codes.is_empty();
     let route_count = routes.len();
 
@@ -142,10 +154,13 @@ fn nowledge_graph_route_readiness_json(evidence: &serde_json::Value) -> Result<s
         "query_runtime_failed_query_count": query_runtime_failed_query_count,
         "query_runtime_missing_plan_evidence_count": query_runtime_missing_plan_evidence_count,
         "query_runtime_missing_profile_evidence_count": query_runtime_missing_profile_evidence_count,
+        "relationship_property_pruning_required_count": relationship_property_pruning_required_count,
+        "relationship_property_pruning_report_count": relationship_property_pruning_report_count,
         "missing_query_runtime_routes": missing_query_runtime_routes,
         "route_query_runtime_ready": missing_query_runtime_routes.is_empty(),
         "route_query_plan_evidence_ready": route_query_plan_evidence_ready,
         "route_query_profile_evidence_ready": route_query_profile_evidence_ready,
+        "route_relationship_property_pruning_evidence_ready": route_relationship_property_pruning_evidence_ready,
         "route_primary_ready": route_primary_ready,
         "route_primary_blocker_codes": route_primary_blocker_codes,
         "routes": routes.into_iter().map(RouteEvidence::json).collect::<Vec<_>>(),
@@ -315,6 +330,9 @@ struct RouteEvidence {
     required_query_families: Vec<String>,
     computed_required_query_families: Vec<String>,
     query_family_blocker_codes: Vec<String>,
+    reported_relationship_property_pruning_required_count: Option<u64>,
+    reported_relationship_property_pruning_report_count: Option<u64>,
+    reported_relationship_property_pruning_evidence_ready: Option<bool>,
     blocker_codes: Vec<String>,
     query_reports: Vec<QueryRuntimeReport>,
 }
@@ -367,6 +385,31 @@ impl RouteEvidence {
         !self.query_reports.is_empty() && self.query_runtime_missing_profile_evidence_count() == 0
     }
 
+    fn relationship_property_pruning_required_count(&self) -> usize {
+        self.reported_relationship_property_pruning_required_count
+            .unwrap_or(0) as usize
+    }
+
+    fn relationship_property_pruning_report_count(&self) -> usize {
+        self.query_reports
+            .iter()
+            .filter(|report| report.relationship_property_pruning_evidence_ready())
+            .count()
+    }
+
+    fn relationship_property_pruning_evidence_ready(&self) -> bool {
+        let Some(required_count) = self.reported_relationship_property_pruning_required_count
+        else {
+            return false;
+        };
+        let Some(reported_count) = self.reported_relationship_property_pruning_report_count else {
+            return false;
+        };
+        self.reported_relationship_property_pruning_evidence_ready == Some(true)
+            && reported_count == required_count
+            && self.relationship_property_pruning_report_count() as u64 == reported_count
+    }
+
     fn json(self) -> serde_json::Value {
         let query_runtime_ready = self.query_runtime_ready();
         let query_report_count = self.query_runtime_report_count();
@@ -379,6 +422,14 @@ impl RouteEvidence {
             self.query_runtime_missing_profile_evidence_count();
         let query_plan_evidence_ready = self.query_plan_evidence_ready();
         let query_profile_evidence_ready = self.query_profile_evidence_ready();
+        let relationship_property_pruning_required_count =
+            self.reported_relationship_property_pruning_required_count;
+        let relationship_property_pruning_report_count =
+            self.relationship_property_pruning_report_count();
+        let reported_relationship_property_pruning_report_count =
+            self.reported_relationship_property_pruning_report_count;
+        let relationship_property_pruning_evidence_ready =
+            self.relationship_property_pruning_evidence_ready();
         let query_reports = self
             .query_reports
             .into_iter()
@@ -401,6 +452,10 @@ impl RouteEvidence {
             "query_runtime_failed_query_count": query_runtime_failed_query_count,
             "query_runtime_missing_plan_evidence_count": query_runtime_missing_plan_evidence_count,
             "query_runtime_missing_profile_evidence_count": query_runtime_missing_profile_evidence_count,
+            "relationship_property_pruning_required_count": relationship_property_pruning_required_count,
+            "relationship_property_pruning_report_count": relationship_property_pruning_report_count,
+            "reported_relationship_property_pruning_report_count": reported_relationship_property_pruning_report_count,
+            "relationship_property_pruning_evidence_ready": relationship_property_pruning_evidence_ready,
             "query_plan_evidence_ready": query_plan_evidence_ready,
             "query_profile_evidence_ready": query_profile_evidence_ready,
             "query_reports": query_reports,
@@ -690,6 +745,12 @@ impl QueryRuntimeReport {
             && self.plan_cache_bypassed == Some(false)
     }
 
+    fn relationship_property_pruning_evidence_ready(&self) -> bool {
+        self.scan_pruning_reports
+            .iter()
+            .any(relationship_property_pruning_report_ready)
+    }
+
     fn scan_pruning_reports_ready(&self) -> bool {
         self.scan_pruning_report_count == Some(self.scan_pruning_reports.len() as u64)
             && !self.scan_pruning_reports.is_empty()
@@ -714,6 +775,12 @@ fn scan_pruning_report_ready(report: &serde_json::Value) -> bool {
         && u64_path(report, &["candidate_count_before_filter"]).is_some()
         && u64_path(report, &["output_count"]).is_some()
         && u64_path(report, &["filtered_out_count"]).is_some()
+}
+
+fn relationship_property_pruning_report_ready(report: &serde_json::Value) -> bool {
+    scan_pruning_report_ready(report)
+        && str_path(report, &["record_kind"]) == Some("relationship")
+        && str_path(report, &["strategy", "kind"]) == Some("relationship_property")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -782,6 +849,18 @@ fn parse_route(value: &serde_json::Value) -> Result<RouteEvidence> {
         required_query_families,
         computed_required_query_families,
         query_family_blocker_codes,
+        reported_relationship_property_pruning_required_count: u64_path(
+            value,
+            &["relationship_property_pruning_required_count"],
+        ),
+        reported_relationship_property_pruning_report_count: u64_path(
+            value,
+            &["relationship_property_pruning_report_count"],
+        ),
+        reported_relationship_property_pruning_evidence_ready: bool_path(
+            value,
+            &["relationship_property_pruning_evidence_ready"],
+        ),
         blocker_codes: string_array_path(value, &["blocker_codes"]),
         query_reports,
     })
@@ -862,6 +941,9 @@ fn route_primary_blocker_codes(
         }
         if !route.query_profile_evidence_ready() {
             blockers.insert("route_query_profile_evidence_not_ready".to_string());
+        }
+        if !route.relationship_property_pruning_evidence_ready() {
+            blockers.insert("route_relationship_property_pruning_evidence_not_ready".to_string());
         }
         blockers.extend(route.query_family_blocker_codes.iter().cloned());
         for report in &route.query_reports {
@@ -970,8 +1052,14 @@ mod tests {
         assert_eq!(readiness["query_runtime_failed_query_count"], 0);
         assert_eq!(readiness["query_runtime_missing_plan_evidence_count"], 0);
         assert_eq!(readiness["query_runtime_missing_profile_evidence_count"], 0);
+        assert_eq!(readiness["relationship_property_pruning_required_count"], 0);
+        assert_eq!(readiness["relationship_property_pruning_report_count"], 0);
         assert_eq!(readiness["route_query_plan_evidence_ready"], true);
         assert_eq!(readiness["route_query_profile_evidence_ready"], true);
+        assert_eq!(
+            readiness["route_relationship_property_pruning_evidence_ready"],
+            true
+        );
         assert_eq!(
             readiness["route_primary_blocker_codes"],
             serde_json::json!([])
@@ -1337,6 +1425,56 @@ mod tests {
     }
 
     #[test]
+    fn route_readiness_accepts_relationship_property_pruning_evidence() {
+        let mut routes = ready_routes();
+        routes[0]["relationship_property_pruning_required_count"] = serde_json::json!(1);
+        routes[0]["relationship_property_pruning_report_count"] = serde_json::json!(1);
+        routes[0]["query_reports"][0]["scan_pruning_reports"][0]["record_kind"] =
+            serde_json::json!("relationship");
+        routes[0]["query_reports"][0]["scan_pruning_reports"][0]["strategy"] = serde_json::json!({
+            "kind": "relationship_property",
+            "property": "type"
+        });
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], true);
+        assert_eq!(readiness["relationship_property_pruning_required_count"], 1);
+        assert_eq!(readiness["relationship_property_pruning_report_count"], 1);
+        assert_eq!(
+            readiness["route_relationship_property_pruning_evidence_ready"],
+            true
+        );
+        assert_eq!(
+            readiness["routes"][0]["relationship_property_pruning_report_count"],
+            1
+        );
+    }
+
+    #[test]
+    fn route_readiness_fails_closed_without_relationship_property_pruning_report() {
+        let mut routes = ready_routes();
+        routes[0]["relationship_property_pruning_required_count"] = serde_json::json!(1);
+        routes[0]["relationship_property_pruning_report_count"] = serde_json::json!(0);
+        routes[0]["relationship_property_pruning_evidence_ready"] = serde_json::json!(false);
+
+        let readiness = nowledge_graph_route_readiness_json(&ready_evidence(routes)).unwrap();
+
+        assert_eq!(readiness["route_primary_ready"], false);
+        assert_eq!(
+            readiness["route_relationship_property_pruning_evidence_ready"],
+            false
+        );
+        assert_eq!(readiness["relationship_property_pruning_required_count"], 1);
+        assert_eq!(readiness["relationship_property_pruning_report_count"], 0);
+        assert!(readiness["route_primary_blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "route_relationship_property_pruning_evidence_not_ready"));
+    }
+
+    #[test]
     fn route_readiness_fails_closed_without_scan_pruning_report_details() {
         let mut routes = ready_routes();
         routes[0]["query_reports"][0]["scan_pruning_reports"][0]
@@ -1520,6 +1658,9 @@ mod tests {
             },
             "primary_ready": true,
             "required_query_families": required_query_families,
+            "relationship_property_pruning_required_count": 0,
+            "relationship_property_pruning_report_count": 0,
+            "relationship_property_pruning_evidence_ready": true,
             "query_reports": [ready_query_report(query_family)],
             "blocker_codes": []
         })

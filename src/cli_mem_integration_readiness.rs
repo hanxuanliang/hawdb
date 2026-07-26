@@ -639,6 +639,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 u64_path(bundle, &["graph_route_readiness", "query_runtime_report_count"])
                     .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
                 graph_route_query_plan_profile_summary_ready(bundle),
+                graph_route_relationship_property_pruning_summary_ready(bundle),
                 string_array_path_is_empty(
                     bundle,
                     &["graph_route_readiness", "missing_query_runtime_routes"],
@@ -674,6 +675,7 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
                 "graph_route_readiness.query_runtime_plan_profile_counts",
+                "graph_route_readiness.relationship_property_pruning_counts",
                 "graph_route_readiness.missing_query_runtime_routes",
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
@@ -1511,6 +1513,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
                 "graph_route_readiness.query_runtime_plan_profile_counts",
+                "graph_route_readiness.relationship_property_pruning_counts",
                 "graph_route_readiness.missing_query_runtime_routes",
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
@@ -2263,6 +2266,32 @@ fn graph_route_query_plan_profile_summary_ready(bundle: &serde_json::Value) -> b
         ) == Some(true)
 }
 
+fn graph_route_relationship_property_pruning_summary_ready(bundle: &serde_json::Value) -> bool {
+    let Some(required_count) = u64_path(
+        bundle,
+        &[
+            "graph_route_readiness",
+            "relationship_property_pruning_required_count",
+        ],
+    ) else {
+        return false;
+    };
+    u64_path(
+        bundle,
+        &[
+            "graph_route_readiness",
+            "relationship_property_pruning_report_count",
+        ],
+    ) == Some(required_count)
+        && bool_path(
+            bundle,
+            &[
+                "graph_route_readiness",
+                "route_relationship_property_pruning_evidence_ready",
+            ],
+        ) == Some(true)
+}
+
 fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
     let Some(routes) = json_get_path(bundle, &["graph_route_readiness", "routes"])
         .and_then(serde_json::Value::as_array)
@@ -2291,6 +2320,7 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
             || bool_path(route, &["query_runtime_ready"]) != Some(true)
             || bool_path(route, &["query_plan_evidence_ready"]) != Some(true)
             || bool_path(route, &["query_profile_evidence_ready"]) != Some(true)
+            || bool_path(route, &["relationship_property_pruning_evidence_ready"]) != Some(true)
             || !graph_route_shadow_compare_ready(route)
             || u64_path(route, &["query_report_count"]).is_none_or(|value| value == 0)
         {
@@ -2311,6 +2341,7 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
             || u64_path(route, &["query_runtime_failed_query_count"]) != Some(0)
             || u64_path(route, &["query_runtime_missing_plan_evidence_count"]) != Some(0)
             || u64_path(route, &["query_runtime_missing_profile_evidence_count"]) != Some(0)
+            || !graph_route_relationship_property_pruning_route_ready(route, query_reports)
             || !query_reports.iter().all(graph_route_query_report_ready)
         {
             return false;
@@ -2320,6 +2351,27 @@ fn graph_route_query_profiles_ready(bundle: &serde_json::Value) -> bool {
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
         .iter()
         .all(|route| observed_routes.contains(route))
+}
+
+fn graph_route_relationship_property_pruning_route_ready(
+    route: &serde_json::Value,
+    query_reports: &[serde_json::Value],
+) -> bool {
+    let Some(required_count) = u64_path(route, &["relationship_property_pruning_required_count"])
+    else {
+        return false;
+    };
+    let Some(reported_count) = u64_path(route, &["relationship_property_pruning_report_count"])
+    else {
+        return false;
+    };
+    let actual_count = query_reports
+        .iter()
+        .filter(|report| graph_route_query_report_has_relationship_property_pruning(report))
+        .count() as u64;
+    reported_count == required_count
+        && actual_count == reported_count
+        && bool_path(route, &["relationship_property_pruning_evidence_ready"]) == Some(true)
 }
 
 fn graph_route_query_families_ready(route: &serde_json::Value, route_name: &str) -> bool {
@@ -2412,6 +2464,18 @@ fn graph_route_query_report_scan_pruning_present(report: &serde_json::Value) -> 
     report_count == reports.len() as u64
         && !reports.is_empty()
         && reports.iter().all(query_runtime_scan_pruning_report_ready)
+}
+
+fn graph_route_query_report_has_relationship_property_pruning(report: &serde_json::Value) -> bool {
+    json_get_path(report, &["scan_pruning_reports"])
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|scan_report| {
+            query_runtime_scan_pruning_report_ready(scan_report)
+                && str_path(scan_report, &["record_kind"]) == Some("relationship")
+                && str_path(scan_report, &["strategy", "kind"]) == Some("relationship_property")
+        })
 }
 
 fn graph_route_readiness_alignment_ready(bundle: &serde_json::Value) -> bool {
@@ -3937,6 +4001,7 @@ mod tests {
                 "graph_route_readiness.query_runtime_route_count",
                 "graph_route_readiness.query_runtime_report_count",
                 "graph_route_readiness.query_runtime_plan_profile_counts",
+                "graph_route_readiness.relationship_property_pruning_counts",
                 "graph_route_readiness.missing_query_runtime_routes",
                 "graph_route_readiness.route_query_runtime_ready",
                 "graph_route_readiness.route_primary_ready",
@@ -4412,6 +4477,35 @@ mod tests {
         assert_eq!(
             route_check["failed_evidence_fields"],
             serde_json::json!(["graph_route_readiness.query_runtime_plan_profile_counts"])
+        );
+    }
+
+    #[test]
+    fn rejects_graph_route_readiness_without_relationship_property_pruning_counts() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]
+            .as_object_mut()
+            .unwrap()
+            .remove("relationship_property_pruning_required_count");
+        bundle["graph_route_readiness"]["route_relationship_property_pruning_evidence_ready"] =
+            serde_json::json!(false);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["graph_route_readiness"])
+        );
+        let route_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "graph_route_readiness")
+            .unwrap();
+        assert_eq!(
+            route_check["failed_evidence_fields"],
+            serde_json::json!(["graph_route_readiness.relationship_property_pruning_counts"])
         );
     }
 
@@ -5331,10 +5425,13 @@ mod tests {
             "query_runtime_failed_query_count": 0,
             "query_runtime_missing_plan_evidence_count": 0,
             "query_runtime_missing_profile_evidence_count": 0,
+            "relationship_property_pruning_required_count": 0,
+            "relationship_property_pruning_report_count": 0,
             "missing_query_runtime_routes": [],
             "route_query_runtime_ready": true,
             "route_query_plan_evidence_ready": true,
             "route_query_profile_evidence_ready": true,
+            "route_relationship_property_pruning_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
             "routes": ready_graph_route_profile_routes()
@@ -5485,6 +5582,9 @@ mod tests {
                     "query_runtime_failed_query_count": 0,
                     "query_runtime_missing_plan_evidence_count": 0,
                     "query_runtime_missing_profile_evidence_count": 0,
+                    "relationship_property_pruning_required_count": 0,
+                    "relationship_property_pruning_report_count": 0,
+                    "relationship_property_pruning_evidence_ready": true,
                     "query_plan_evidence_ready": true,
                     "query_profile_evidence_ready": true,
                     "query_reports": [ready_graph_route_query_report(query_family)],

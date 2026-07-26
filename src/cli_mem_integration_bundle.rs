@@ -1178,6 +1178,102 @@ mod tests {
     }
 
     fn ready_graph_route_readiness() -> serde_json::Value {
+        let routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| {
+                let required_query_families =
+                    skein::nowledge_mem_required_query_families_for_route(route);
+                let query_family = required_query_families
+                    .first()
+                    .copied()
+                    .unwrap_or("memory_lookup");
+                let mut object = serde_json::Map::new();
+                object.insert("route".to_string(), serde_json::json!(route));
+                object.insert("shadow_compare_ready".to_string(), serde_json::json!(true));
+                object.insert(
+                    "shadow_compare_evidence_source".to_string(),
+                    serde_json::json!("route_parity_evidence"),
+                );
+                object.insert(
+                    "shadow_compare".to_string(),
+                    serde_json::json!({
+                        "source": "route_parity_evidence",
+                        "ready": true,
+                        "matched_per_million": 1000000,
+                        "primary_engine": "kuzu",
+                        "shadow_engine": "skein",
+                        "blocker_codes": [],
+                        "computed_blocker_codes": []
+                    }),
+                );
+                object.insert("primary_ready".to_string(), serde_json::json!(true));
+                object.insert(
+                    "required_query_families".to_string(),
+                    serde_json::json!(required_query_families),
+                );
+                object.insert(
+                    "computed_required_query_families".to_string(),
+                    serde_json::json!(required_query_families),
+                );
+                object.insert(
+                    "query_family_blocker_codes".to_string(),
+                    serde_json::json!([]),
+                );
+                object.insert("query_runtime_ready".to_string(), serde_json::json!(true));
+                object.insert("query_report_count".to_string(), serde_json::json!(1));
+                object.insert(
+                    "query_runtime_report_count".to_string(),
+                    serde_json::json!(1),
+                );
+                object.insert(
+                    "query_runtime_plan_report_count".to_string(),
+                    serde_json::json!(1),
+                );
+                object.insert(
+                    "query_runtime_profile_report_count".to_string(),
+                    serde_json::json!(1),
+                );
+                object.insert(
+                    "query_runtime_failed_query_count".to_string(),
+                    serde_json::json!(0),
+                );
+                object.insert(
+                    "query_runtime_missing_plan_evidence_count".to_string(),
+                    serde_json::json!(0),
+                );
+                object.insert(
+                    "query_runtime_missing_profile_evidence_count".to_string(),
+                    serde_json::json!(0),
+                );
+                object.insert(
+                    "relationship_property_pruning_required_count".to_string(),
+                    serde_json::json!(0),
+                );
+                object.insert(
+                    "relationship_property_pruning_report_count".to_string(),
+                    serde_json::json!(0),
+                );
+                object.insert(
+                    "relationship_property_pruning_evidence_ready".to_string(),
+                    serde_json::json!(true),
+                );
+                object.insert(
+                    "query_plan_evidence_ready".to_string(),
+                    serde_json::json!(true),
+                );
+                object.insert(
+                    "query_profile_evidence_ready".to_string(),
+                    serde_json::json!(true),
+                );
+                object.insert(
+                    "query_reports".to_string(),
+                    serde_json::json!([ready_graph_route_query_report(query_family)]),
+                );
+                object.insert("blocker_codes".to_string(), serde_json::json!([]));
+                serde_json::Value::Object(object)
+            })
+            .collect::<Vec<_>>();
+
         serde_json::json!({
             "protocol": "nmem-graph-route-readiness-v1",
             "evidence_protocol": "nmem-graph-route-evidence-v1",
@@ -1203,95 +1299,16 @@ mod tests {
             "query_runtime_failed_query_count": 0,
             "query_runtime_missing_plan_evidence_count": 0,
             "query_runtime_missing_profile_evidence_count": 0,
+            "relationship_property_pruning_required_count": 0,
+            "relationship_property_pruning_report_count": 0,
             "missing_query_runtime_routes": [],
             "route_query_runtime_ready": true,
             "route_query_plan_evidence_ready": true,
             "route_query_profile_evidence_ready": true,
+            "route_relationship_property_pruning_evidence_ready": true,
             "route_primary_ready": true,
             "route_primary_blocker_codes": [],
-            "routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
-                .iter()
-                .map(|route| {
-                    let required_query_families =
-                        skein::nowledge_mem_required_query_families_for_route(route);
-                    let query_family = required_query_families
-                        .first()
-                        .copied()
-                        .unwrap_or("memory_lookup");
-                    let mut object = serde_json::Map::new();
-                    object.insert("route".to_string(), serde_json::json!(route));
-                    object.insert("shadow_compare_ready".to_string(), serde_json::json!(true));
-                    object.insert(
-                        "shadow_compare_evidence_source".to_string(),
-                        serde_json::json!("route_parity_evidence"),
-                    );
-                    object.insert(
-                        "shadow_compare".to_string(),
-                        serde_json::json!({
-                            "source": "route_parity_evidence",
-                            "ready": true,
-                            "matched_per_million": 1000000,
-                            "primary_engine": "kuzu",
-                            "shadow_engine": "skein",
-                            "blocker_codes": [],
-                            "computed_blocker_codes": []
-                        }),
-                    );
-                    object.insert("primary_ready".to_string(), serde_json::json!(true));
-                    object.insert(
-                        "required_query_families".to_string(),
-                        serde_json::json!(required_query_families),
-                    );
-                    object.insert(
-                        "computed_required_query_families".to_string(),
-                        serde_json::json!(required_query_families),
-                    );
-                    object.insert(
-                        "query_family_blocker_codes".to_string(),
-                        serde_json::json!([]),
-                    );
-                    object.insert("query_runtime_ready".to_string(), serde_json::json!(true));
-                    object.insert("query_report_count".to_string(), serde_json::json!(1));
-                    object.insert(
-                        "query_runtime_report_count".to_string(),
-                        serde_json::json!(1),
-                    );
-                    object.insert(
-                        "query_runtime_plan_report_count".to_string(),
-                        serde_json::json!(1),
-                    );
-                    object.insert(
-                        "query_runtime_profile_report_count".to_string(),
-                        serde_json::json!(1),
-                    );
-                    object.insert(
-                        "query_runtime_failed_query_count".to_string(),
-                        serde_json::json!(0),
-                    );
-                    object.insert(
-                        "query_runtime_missing_plan_evidence_count".to_string(),
-                        serde_json::json!(0),
-                    );
-                    object.insert(
-                        "query_runtime_missing_profile_evidence_count".to_string(),
-                        serde_json::json!(0),
-                    );
-                    object.insert(
-                        "query_plan_evidence_ready".to_string(),
-                        serde_json::json!(true),
-                    );
-                    object.insert(
-                        "query_profile_evidence_ready".to_string(),
-                        serde_json::json!(true),
-                    );
-                    object.insert(
-                        "query_reports".to_string(),
-                        serde_json::json!([ready_graph_route_query_report(query_family)]),
-                    );
-                    object.insert("blocker_codes".to_string(), serde_json::json!([]));
-                    serde_json::Value::Object(object)
-                })
-                .collect::<Vec<_>>()
+            "routes": routes
         })
     }
 
