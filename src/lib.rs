@@ -1,6 +1,7 @@
 pub mod analytics;
 pub mod api;
 pub mod blackbox;
+pub mod bounded_read_evidence;
 pub mod compat;
 pub mod cypher;
 pub mod embedded;
@@ -71,6 +72,10 @@ pub use blackbox::{
     BlackboxArtifactReport, BlackboxEventReport, BlackboxJsonArtifactSummary,
     BlackboxJsonlArtifactSummary, BlackboxRedactionReport, BlackboxReport, BlackboxReportOptions,
     BlackboxRunStatus, BLACKBOX_EVENT_PROTOCOL, BLACKBOX_REPORT_PROTOCOL,
+};
+pub use bounded_read_evidence::{
+    nowledge_bounded_read_evidence_usage, parse_covered_routes_json,
+    parse_graph_route_readiness_json, parse_read_report_json, run_nowledge_bounded_read_evidence,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
