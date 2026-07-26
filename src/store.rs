@@ -470,6 +470,7 @@ pub enum ScanPruningStrategy {
     PropertyMissingOrNull { property: String },
     PropertyExists { property: String },
     PropertyDefaultIfNullEq { property: String },
+    PropertyDefaultIfNullNotEq { property: String },
     PropertyIn { property: String },
     PropertyRange { property: String },
     OrUnion,
@@ -5016,15 +5017,23 @@ impl GraphStore {
                 value,
                 negated,
             } => {
-                if *negated {
-                    return None;
-                }
-                Some(ScanPruningCandidate::exact(
+                let strategy = if *negated {
+                    ScanPruningStrategy::PropertyDefaultIfNullNotEq {
+                        property: property.clone(),
+                    }
+                } else {
                     ScanPruningStrategy::PropertyDefaultIfNullEq {
                         property: property.clone(),
-                    },
-                    self.node_ids_for_default_if_null_eq(label_id, property, empty, default, value),
-                ))
+                    }
+                };
+                let node_ids = if *negated {
+                    self.node_ids_for_default_if_null_not_eq(
+                        label_id, property, empty, default, value,
+                    )
+                } else {
+                    self.node_ids_for_default_if_null_eq(label_id, property, empty, default, value)
+                };
+                Some(ScanPruningCandidate::exact(strategy, node_ids))
             }
             PropertyFilter::In { property, values } => Some(ScanPruningCandidate::exact(
                 if values.is_empty() {
@@ -5124,6 +5133,14 @@ impl GraphStore {
                     .map(|node| self.node_matches_label(node, label_id))
                     .unwrap_or(false)
             })
+            .collect()
+    }
+
+    fn node_ids_for_label(&self, label_id: Option<LabelId>) -> BTreeSet<NodeId> {
+        self.nodes
+            .values()
+            .filter(|node| self.node_matches_label(node, label_id))
+            .map(|node| node.id)
             .collect()
     }
 
@@ -5243,6 +5260,22 @@ impl GraphStore {
             return BTreeSet::new();
         }
         self.node_ids_for_property_values(label_id, property, std::slice::from_ref(value))
+    }
+
+    fn node_ids_for_default_if_null_not_eq(
+        &self,
+        label_id: Option<LabelId>,
+        property: &str,
+        empty: &Value,
+        default: &Value,
+        value: &Value,
+    ) -> BTreeSet<NodeId> {
+        let equal_node_ids =
+            self.node_ids_for_default_if_null_eq(label_id, property, empty, default, value);
+        self.node_ids_for_label(label_id)
+            .difference(&equal_node_ids)
+            .copied()
+            .collect()
     }
 
     fn node_ids_for_property_range(
@@ -10710,6 +10743,61 @@ mod tests {
         assert_eq!(scan.report.candidate_count_before_filter, 3);
         assert_eq!(scan.report.candidate_count_before_pruning, 4);
         assert_eq!(scan.report.pruned_candidate_count, 1);
+        assert_eq!(scan.report.filtered_out_count, 0);
+    }
+
+    #[test]
+    fn scan_pruning_uses_default_if_null_not_eq_for_normalized_default_filter() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(&mut catalog, "Thread", properties([]))
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Thread",
+                properties([("space_id", Value::String(String::new()))]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Thread",
+                properties([("space_id", Value::String("default".to_string()))]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Thread",
+                properties([("space_id", Value::String("team".to_string()))]),
+            )
+            .unwrap();
+
+        let label = catalog.label_id("Thread").unwrap();
+        let scan = store.scan_nodes_with_filter_pruning(
+            Some(label),
+            Some(&PropertyFilter::DefaultIfNullOrEq {
+                property: "space_id".to_string(),
+                empty: Value::String(String::new()),
+                default: Value::String("default".to_string()),
+                value: Value::String("default".to_string()),
+                negated: true,
+            }),
+        );
+
+        assert_eq!(scan.nodes.len(), 1);
+        assert_eq!(
+            scan.report.strategy,
+            ScanPruningStrategy::PropertyDefaultIfNullNotEq {
+                property: "space_id".to_string()
+            }
+        );
+        assert!(scan.report.pruned);
+        assert_eq!(scan.report.candidate_count_before_filter, 1);
+        assert_eq!(scan.report.candidate_count_before_pruning, 4);
+        assert_eq!(scan.report.pruned_candidate_count, 3);
         assert_eq!(scan.report.filtered_out_count, 0);
     }
 

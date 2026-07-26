@@ -87,6 +87,10 @@ query family, or cutover gate requires them.
   - [x] Push exact graph normalized default equality predicates such as
     `CASE WHEN space_id IS NULL OR space_id = '' THEN 'default' ELSE space_id END`
     through scan planning when the comparison is an equality.
+    - [x] Cover parameterized Nowledge thread-space predicates such as
+      `$source_space_id` with `EXPLAIN ANALYZE` scan-pruning evidence.
+    - [x] Push parameterized normalized default inequality predicates such as
+      `$target_space_id` through exact scan pruning for thread move reads.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow

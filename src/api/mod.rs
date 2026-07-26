@@ -37014,6 +37014,9 @@ fn scan_pruning_strategy_value(strategy: &ScanPruningStrategy) -> Value {
         ScanPruningStrategy::PropertyDefaultIfNullEq { property } => {
             scan_pruning_property_strategy_value("property_default_if_null_eq", property)
         }
+        ScanPruningStrategy::PropertyDefaultIfNullNotEq { property } => {
+            scan_pruning_property_strategy_value("property_default_if_null_not_eq", property)
+        }
         ScanPruningStrategy::PropertyIn { property } => {
             scan_pruning_property_strategy_value("property_in", property)
         }

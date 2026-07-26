@@ -2431,6 +2431,9 @@ fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Val
         ScanPruningStrategy::PropertyDefaultIfNullEq { property } => {
             serde_json::json!({"kind": "property_default_if_null_eq", "property": property})
         }
+        ScanPruningStrategy::PropertyDefaultIfNullNotEq { property } => {
+            serde_json::json!({"kind": "property_default_if_null_not_eq", "property": property})
+        }
         ScanPruningStrategy::PropertyIn { property } => {
             serde_json::json!({"kind": "property_in", "property": property})
         }

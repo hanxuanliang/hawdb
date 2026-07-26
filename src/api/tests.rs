@@ -27582,6 +27582,92 @@ fn explain_analyze_reports_default_if_null_eq_scan_pruning_profile() {
 }
 
 #[test]
+fn explain_analyze_reports_parameterized_default_if_null_eq_scan_pruning_profile() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread-missing', thread_id: 'logical-1'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread-empty', thread_id: 'logical-2', space_id: ''})")
+        .unwrap();
+    db.query(
+        "CREATE (:Thread {id: 'thread-default', thread_id: 'logical-3', space_id: 'default'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Thread {id: 'thread-team', thread_id: 'logical-4', space_id: 'team'})")
+        .unwrap();
+
+    let output = db
+        .explain_analyze_query_with_params(
+            "MATCH (t:Thread) \
+             WHERE CASE WHEN t.space_id IS NULL OR t.space_id = '' \
+             THEN 'default' ELSE t.space_id END = $source_space_id \
+             RETURN t.id AS id",
+            &BTreeMap::from([(
+                "source_space_id".to_string(),
+                Value::String("default".to_string()),
+            )]),
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 3);
+    assert_eq!(output.execution_profile.scan_pruning_reports.len(), 1);
+    let scan = &output.execution_profile.scan_pruning_reports[0];
+    assert!(scan.pruned);
+    assert_eq!(scan.candidate_count_before_pruning, 4);
+    assert_eq!(scan.candidate_count_before_filter, 3);
+    assert_eq!(scan.pruned_candidate_count, 1);
+    assert_eq!(scan.output_count, 3);
+    assert_eq!(
+        scan.strategy,
+        crate::store::ScanPruningStrategy::PropertyDefaultIfNullEq {
+            property: "space_id".to_string()
+        }
+    );
+}
+
+#[test]
+fn explain_analyze_reports_parameterized_default_if_null_not_eq_scan_pruning_profile() {
+    let mut db = Database::new();
+    db.query("CREATE (:Thread {id: 'thread-missing', thread_id: 'logical-1'})")
+        .unwrap();
+    db.query("CREATE (:Thread {id: 'thread-empty', thread_id: 'logical-2', space_id: ''})")
+        .unwrap();
+    db.query(
+        "CREATE (:Thread {id: 'thread-default', thread_id: 'logical-3', space_id: 'default'})",
+    )
+    .unwrap();
+    db.query("CREATE (:Thread {id: 'thread-team', thread_id: 'logical-4', space_id: 'team'})")
+        .unwrap();
+
+    let output = db
+        .explain_analyze_query_with_params(
+            "MATCH (t:Thread) \
+             WHERE CASE WHEN t.space_id IS NULL OR t.space_id = '' \
+             THEN 'default' ELSE t.space_id END <> $target_space_id \
+             RETURN t.id AS id",
+            &BTreeMap::from([(
+                "target_space_id".to_string(),
+                Value::String("default".to_string()),
+            )]),
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 1);
+    assert_eq!(output.execution_profile.scan_pruning_reports.len(), 1);
+    let scan = &output.execution_profile.scan_pruning_reports[0];
+    assert!(scan.pruned);
+    assert_eq!(scan.candidate_count_before_pruning, 4);
+    assert_eq!(scan.candidate_count_before_filter, 1);
+    assert_eq!(scan.pruned_candidate_count, 3);
+    assert_eq!(scan.output_count, 1);
+    assert_eq!(
+        scan.strategy,
+        crate::store::ScanPruningStrategy::PropertyDefaultIfNullNotEq {
+            property: "space_id".to_string()
+        }
+    );
+}
+
+#[test]
 fn cypher_explain_returns_structured_plan_row() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Explain row'})")
