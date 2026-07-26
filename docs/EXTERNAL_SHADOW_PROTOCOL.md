@@ -598,20 +598,23 @@ caller-owned durable database preflight instead of the fixture-local
 `background_maintenance` summary.
 
 For bounded graph-read evidence, first generate a read report and then compile
-it with route coverage:
+it with graph route readiness:
 
 ```text
 skein nowledge-bounded-read-report <database-path> <cypher> > read-report.json
 skein nowledge-bounded-read-evidence \
-  --covered-routes-json covered-routes.json \
+  --graph-route-readiness-json graph-route-readiness.json \
   read-report.json > bounded-read-evidence.json
 ```
 
 `covered-routes.json` may be either a JSON array of route identifiers or an
-object with a `covered_routes` string array. The emitted evidence includes
-`covered_routes`, `required_covered_routes`, and `missing_covered_routes`.
-Missing production graph-read routes add the stable
-`missing_covered_routes` blocker and keep bounded-read readiness false, so a
+object with a `covered_routes` string array when callers need to override the
+route list. Without that override, `nowledge-bounded-read-evidence` uses
+`primary_ready_routes` from `graph-route-readiness.json`. The emitted evidence
+includes `covered_routes`, `required_covered_routes`, `missing_covered_routes`,
+route primary readiness, query plan/profile evidence readiness, and relationship
+property pruning counts. Missing production graph-read routes or missing graph
+route readiness add stable blockers and keep bounded-read readiness false, so a
 single bounded query probe cannot be mistaken for full route cutover coverage.
 
 The embedded library readiness report also accepts query-family replacement
@@ -629,6 +632,7 @@ manually composing API calls:
 skein nowledge-mem-library-readiness \
   --bounded-probe-json bounded-probe.json \
   --covered-routes-json covered-routes.json \
+  --graph-route-readiness-json graph-route-readiness.json \
   --query-family-evidence-json query-family-evidence.json \
   --primary-search-projection-probe-json lancedb-probe.json \
   --search-projection skein-search-index \

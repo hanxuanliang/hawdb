@@ -434,10 +434,32 @@ run_skein nowledge-query-family-evidence \
   "$preflight_root/migration-gate.json" \
   > "$preflight_root/query-family-evidence.json"
 
+if [[ -z "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
+  run_skein nowledge-graph-route-evidence \
+    "${graph_route_database:-$skein_preflight_db}" \
+    "$graph_route_query_json" \
+    > "$preflight_root/graph-route-evidence.json"
+  graph_route_evidence_json="$preflight_root/graph-route-evidence.json"
+fi
+
+if [[ -z "$graph_route_readiness_json" && -n "$graph_route_evidence_json" ]]; then
+  run_skein nowledge-graph-route-readiness \
+    --require-ready \
+    "$graph_route_evidence_json" \
+    > "$preflight_root/graph-route-readiness.json"
+  graph_route_readiness_json="$preflight_root/graph-route-readiness.json"
+fi
+
 if [[ -z "$bounded_read_evidence_json" ]]; then
   if [[ -n "$bounded_read_report_json" ]]; then
+    bounded_read_evidence_args=(--require-ready)
+    if [[ -n "$graph_route_readiness_json" ]]; then
+      bounded_read_evidence_args+=(
+        --graph-route-readiness-json "$graph_route_readiness_json"
+      )
+    fi
     run_skein nowledge-bounded-read-evidence \
-      --require-ready \
+      "${bounded_read_evidence_args[@]}" \
       "$bounded_read_report_json" \
       > "$preflight_root/bounded-read-evidence.json"
     bounded_read_evidence_json="$preflight_root/bounded-read-evidence.json"
@@ -459,8 +481,14 @@ if [[ -z "$bounded_read_evidence_json" ]]; then
       "${bounded_read_database:-$skein_preflight_db}" \
       "$bounded_read_cypher" \
       > "$preflight_root/bounded-read-report.json"
+    bounded_read_evidence_args=(--require-ready)
+    if [[ -n "$graph_route_readiness_json" ]]; then
+      bounded_read_evidence_args+=(
+        --graph-route-readiness-json "$graph_route_readiness_json"
+      )
+    fi
     run_skein nowledge-bounded-read-evidence \
-      --require-ready \
+      "${bounded_read_evidence_args[@]}" \
       "$preflight_root/bounded-read-report.json" \
       > "$preflight_root/bounded-read-evidence.json"
     bounded_read_evidence_json="$preflight_root/bounded-read-evidence.json"
@@ -525,22 +553,6 @@ else
     "${library_readiness_args[@]}" \
     "${library_readiness_graph:-$skein_preflight_db}" \
     > "$preflight_root/library-readiness.json"
-fi
-
-if [[ -z "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
-  run_skein nowledge-graph-route-evidence \
-    "${graph_route_database:-$skein_preflight_db}" \
-    "$graph_route_query_json" \
-    > "$preflight_root/graph-route-evidence.json"
-  graph_route_evidence_json="$preflight_root/graph-route-evidence.json"
-fi
-
-if [[ -z "$graph_route_readiness_json" && -n "$graph_route_evidence_json" ]]; then
-  run_skein nowledge-graph-route-readiness \
-    --require-ready \
-    "$graph_route_evidence_json" \
-    > "$preflight_root/graph-route-readiness.json"
-  graph_route_readiness_json="$preflight_root/graph-route-readiness.json"
 fi
 
 if [[ -n "$query_runtime_preflight_json" ]]; then

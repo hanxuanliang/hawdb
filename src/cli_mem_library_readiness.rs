@@ -1,12 +1,13 @@
 use skein::{
     NowledgeGraphStatement, NowledgeMemEmbeddedStore, NowledgeMemGraphMode, NowledgeMemOpenOptions,
-    NowledgeMemReadinessOptions, Result, SearchProjectionProbeOptions, SkeinError, Value,
+    NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary, Result,
+    SearchProjectionProbeOptions, SkeinError, Value,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
 
 pub fn nowledge_mem_library_readiness_usage() -> String {
-    "nowledge-mem-library-readiness requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--search-projection <path>] [--bounded-probe-json <path>] [--bounded-read-evidence-json <path>] [--covered-routes-json <path>] [--query-family-evidence-json <path>] [--search-projection-evidence-json <path>] [--primary-search-projection-probe-json <path>] [--search-projection-shadow-evidence-json <path>] [--active-model <model>] [--active-dimension <n>] <graph-db>"
+    "nowledge-mem-library-readiness requires [--require-ready] [--mode shadow_read_only|writable_cutover] [--search-projection <path>] [--bounded-probe-json <path>] [--bounded-read-evidence-json <path>] [--covered-routes-json <path>] [--graph-route-readiness-json <path>] [--query-family-evidence-json <path>] [--search-projection-evidence-json <path>] [--primary-search-projection-probe-json <path>] [--search-projection-shadow-evidence-json <path>] [--active-model <model>] [--active-dimension <n>] <graph-db>"
         .to_string()
 }
 
@@ -19,6 +20,7 @@ pub fn run_nowledge_mem_library_readiness(
     let mut bounded_read_probe = None;
     let mut bounded_read_evidence = None;
     let mut covered_routes = Vec::new();
+    let mut graph_route_readiness = None;
     let mut replacement_readiness_by_query_family = None;
     let mut search_projection_evidence = None;
     let mut primary_search_projection_probe = None;
@@ -63,6 +65,14 @@ pub fn run_nowledge_mem_library_readiness(
                 covered_routes.extend(parse_covered_routes_json(&read_json_file(Path::new(
                     &path,
                 ))?)?);
+            }
+            "--graph-route-readiness-json" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(nowledge_mem_library_readiness_usage()))?;
+                graph_route_readiness = Some(parse_graph_route_readiness_json(&read_json_file(
+                    Path::new(&path),
+                )?)?);
             }
             "--query-family-evidence-json" => {
                 let path = args
@@ -124,6 +134,7 @@ pub fn run_nowledge_mem_library_readiness(
         bounded_read_probe,
         bounded_read_evidence,
         covered_routes,
+        graph_route_readiness,
         replacement_readiness_by_query_family,
         search_projection_evidence,
         search_projection_probe_options,
@@ -247,6 +258,50 @@ fn required_string_array_items(items: &[serde_json::Value], field: &str) -> Resu
         .collect()
 }
 
+fn parse_graph_route_readiness_json(
+    value: &serde_json::Value,
+) -> Result<NowledgeMemRouteReadinessSummary> {
+    Ok(NowledgeMemRouteReadinessSummary {
+        route_primary_ready: required_bool(value, "route_primary_ready")?,
+        primary_ready_routes: required_string_array(value, "primary_ready_routes")?,
+        route_query_plan_evidence_ready: required_bool(value, "route_query_plan_evidence_ready")?,
+        route_query_profile_evidence_ready: required_bool(
+            value,
+            "route_query_profile_evidence_ready",
+        )?,
+        relationship_property_pruning_required_count: required_u64(
+            value,
+            "relationship_property_pruning_required_count",
+        )?,
+        relationship_property_pruning_report_count: required_u64(
+            value,
+            "relationship_property_pruning_report_count",
+        )?,
+        route_relationship_property_pruning_evidence_ready: required_bool(
+            value,
+            "route_relationship_property_pruning_evidence_ready",
+        )?,
+    })
+}
+
+fn required_bool(value: &serde_json::Value, field: &str) -> Result<bool> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_bool)
+        .ok_or_else(|| {
+            SkeinError::Semantic(format!("readiness JSON field '{field}' must be a boolean"))
+        })
+}
+
+fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| {
+            SkeinError::Semantic(format!("readiness JSON field '{field}' must be an integer"))
+        })
+}
+
 fn parse_positive_usize(flag: &str, value: &str) -> Result<usize> {
     let parsed = value
         .parse::<usize>()
@@ -286,6 +341,7 @@ mod tests {
         let graph_path = root.join("graph");
         let bounded_probe_path = root.join("bounded-probe.json");
         let covered_routes_path = root.join("covered-routes.json");
+        let graph_route_readiness_path = root.join("graph-route-readiness.json");
         std::fs::create_dir_all(&root).unwrap();
         let mut db = Database::open(&graph_path).unwrap();
         db.query("CREATE (:Memory {id: 'mem-cli', title: 'CLI readiness'})")
@@ -310,6 +366,11 @@ mod tests {
             .to_string(),
         )
         .unwrap();
+        std::fs::write(
+            &graph_route_readiness_path,
+            ready_graph_route_readiness().to_string(),
+        )
+        .unwrap();
 
         let (readiness, require_ready) = run_nowledge_mem_library_readiness(
             [
@@ -317,6 +378,8 @@ mod tests {
                 bounded_probe_path.to_str().unwrap(),
                 "--covered-routes-json",
                 covered_routes_path.to_str().unwrap(),
+                "--graph-route-readiness-json",
+                graph_route_readiness_path.to_str().unwrap(),
                 graph_path.to_str().unwrap(),
             ]
             .into_iter()
@@ -459,6 +522,18 @@ mod tests {
                     "replacement_readiness_per_million": 1_000_000
                 }
             ]
+        })
+    }
+
+    fn ready_graph_route_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "route_primary_ready": true,
+            "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "route_query_plan_evidence_ready": true,
+            "route_query_profile_evidence_ready": true,
+            "relationship_property_pruning_required_count": 0,
+            "relationship_property_pruning_report_count": 0,
+            "route_relationship_property_pruning_evidence_ready": true
         })
     }
 

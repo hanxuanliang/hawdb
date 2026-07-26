@@ -1,11 +1,11 @@
 use skein::{
-    nowledge_mem_bounded_read_evidence_json_with_routes, NowledgeMemGraphMode,
-    NowledgeMemReadReport, Result, SkeinError,
+    nowledge_mem_bounded_read_evidence_json_with_route_readiness, NowledgeMemGraphMode,
+    NowledgeMemReadReport, NowledgeMemRouteReadinessSummary, Result, SkeinError,
 };
 use std::path::Path;
 
 pub fn nowledge_bounded_read_evidence_usage() -> String {
-    "nowledge-bounded-read-evidence requires [--require-ready] [--covered-route <route> ...] [--covered-routes-json <path>] <read-report-json>".to_string()
+    "nowledge-bounded-read-evidence requires [--require-ready] [--covered-route <route> ...] [--covered-routes-json <path>] [--graph-route-readiness-json <path>] <read-report-json>".to_string()
 }
 
 pub fn run_nowledge_bounded_read_evidence(
@@ -13,6 +13,7 @@ pub fn run_nowledge_bounded_read_evidence(
 ) -> Result<(serde_json::Value, bool)> {
     let mut require_ready = false;
     let mut covered_routes = Vec::new();
+    let mut graph_route_readiness = None;
     let mut report_path = None;
     while let Some(flag) = args.next() {
         match flag.as_str() {
@@ -34,6 +35,14 @@ pub fn run_nowledge_bounded_read_evidence(
                     &path,
                 ))?)?);
             }
+            "--graph-route-readiness-json" => {
+                let path = args
+                    .next()
+                    .ok_or_else(|| SkeinError::Semantic(nowledge_bounded_read_evidence_usage()))?;
+                graph_route_readiness = Some(parse_graph_route_readiness_json(&read_json_file(
+                    Path::new(&path),
+                )?)?);
+            }
             value if value.starts_with("--") => {
                 return Err(SkeinError::Semantic(nowledge_bounded_read_evidence_usage()));
             }
@@ -48,8 +57,17 @@ pub fn run_nowledge_bounded_read_evidence(
         return Err(SkeinError::Semantic(nowledge_bounded_read_evidence_usage()));
     };
     let report = parse_read_report_json(&read_json_file(Path::new(&report_path))?)?;
+    if covered_routes.is_empty() {
+        if let Some(readiness) = graph_route_readiness.as_ref() {
+            covered_routes = readiness.primary_ready_routes.clone();
+        }
+    }
     Ok((
-        nowledge_mem_bounded_read_evidence_json_with_routes(&report, &covered_routes),
+        nowledge_mem_bounded_read_evidence_json_with_route_readiness(
+            &report,
+            &covered_routes,
+            graph_route_readiness.as_ref(),
+        ),
         require_ready,
     ))
 }
@@ -80,6 +98,32 @@ fn parse_read_report_json(value: &serde_json::Value) -> Result<NowledgeMemReadRe
     })
 }
 
+fn parse_graph_route_readiness_json(
+    value: &serde_json::Value,
+) -> Result<NowledgeMemRouteReadinessSummary> {
+    Ok(NowledgeMemRouteReadinessSummary {
+        route_primary_ready: required_bool(value, "route_primary_ready")?,
+        primary_ready_routes: required_string_array(value, "primary_ready_routes")?,
+        route_query_plan_evidence_ready: required_bool(value, "route_query_plan_evidence_ready")?,
+        route_query_profile_evidence_ready: required_bool(
+            value,
+            "route_query_profile_evidence_ready",
+        )?,
+        relationship_property_pruning_required_count: required_u64(
+            value,
+            "relationship_property_pruning_required_count",
+        )?,
+        relationship_property_pruning_report_count: required_u64(
+            value,
+            "relationship_property_pruning_report_count",
+        )?,
+        route_relationship_property_pruning_evidence_ready: required_bool(
+            value,
+            "route_relationship_property_pruning_evidence_ready",
+        )?,
+    })
+}
+
 fn parse_mode(value: &str) -> Result<NowledgeMemGraphMode> {
     match value {
         "shadow_read_only" => Ok(NowledgeMemGraphMode::ShadowReadOnly),
@@ -106,6 +150,13 @@ fn required_bool(value: &serde_json::Value, field: &str) -> Result<bool> {
 
 fn required_usize(value: &serde_json::Value, field: &str) -> Result<usize> {
     optional_usize(value, field)?.ok_or_else(|| invalid_field(field, "integer"))
+}
+
+fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| invalid_field(field, "integer"))
 }
 
 fn optional_usize(value: &serde_json::Value, field: &str) -> Result<Option<usize>> {
@@ -171,14 +222,24 @@ mod tests {
 
     #[test]
     fn bounded_read_evidence_command_accepts_ready_read_report() {
-        let path = unique_test_file("bounded_read_ready");
-        std::fs::write(&path, ready_report().to_string()).unwrap();
+        let report_path = unique_test_file("bounded_read_ready");
+        let route_readiness_path = unique_test_file("graph_route_readiness");
+        std::fs::write(&report_path, ready_report().to_string()).unwrap();
+        std::fs::write(
+            &route_readiness_path,
+            ready_graph_route_readiness().to_string(),
+        )
+        .unwrap();
 
         let mut args = vec!["--require-ready".to_string()];
         for route in REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES {
             args.extend(["--covered-route".to_string(), (*route).to_string()]);
         }
-        args.push(path.to_string_lossy().to_string());
+        args.extend([
+            "--graph-route-readiness-json".to_string(),
+            route_readiness_path.to_string_lossy().to_string(),
+        ]);
+        args.push(report_path.to_string_lossy().to_string());
 
         let (evidence, require_ready) =
             run_nowledge_bounded_read_evidence(args.into_iter()).unwrap();
@@ -191,17 +252,121 @@ mod tests {
         assert_eq!(evidence["ready"], true);
         assert_eq!(evidence["mode"], "shadow_read_only");
         assert_eq!(evidence["execution_row_cap"], 513);
+        assert_eq!(evidence["route_primary_ready"], true);
+        assert_eq!(evidence["route_query_plan_evidence_ready"], true);
+        assert_eq!(evidence["route_query_profile_evidence_ready"], true);
+        assert_eq!(
+            evidence["route_relationship_property_pruning_evidence_ready"],
+            true
+        );
         assert_eq!(
             evidence["covered_routes"].as_array().unwrap().len(),
             REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
         );
         assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(report_path).unwrap();
+        std::fs::remove_file(route_readiness_path).unwrap();
     }
 
     #[test]
     fn bounded_read_evidence_command_accepts_covered_routes_json() {
+        let report_path = unique_test_file("bounded_read_ready");
+        let routes_path = unique_test_file("bounded_read_routes");
+        let route_readiness_path = unique_test_file("graph_route_readiness");
+        std::fs::write(&report_path, ready_report().to_string()).unwrap();
+        std::fs::write(
+            &routes_path,
+            serde_json::json!({
+                "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            })
+            .to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            &route_readiness_path,
+            ready_graph_route_readiness().to_string(),
+        )
+        .unwrap();
+
+        let (evidence, _) = run_nowledge_bounded_read_evidence(
+            [
+                "--covered-routes-json",
+                routes_path.to_str().unwrap(),
+                "--graph-route-readiness-json",
+                route_readiness_path.to_str().unwrap(),
+                report_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
+        std::fs::remove_file(report_path).unwrap();
+        std::fs::remove_file(routes_path).unwrap();
+        std::fs::remove_file(route_readiness_path).unwrap();
+    }
+
+    #[test]
+    fn bounded_read_evidence_command_uses_graph_route_readiness_routes_by_default() {
+        let report_path = unique_test_file("bounded_read_ready");
+        let route_readiness_path = unique_test_file("graph_route_readiness");
+        std::fs::write(&report_path, ready_report().to_string()).unwrap();
+        std::fs::write(
+            &route_readiness_path,
+            ready_graph_route_readiness().to_string(),
+        )
+        .unwrap();
+
+        let (evidence, _) = run_nowledge_bounded_read_evidence(
+            [
+                "--graph-route-readiness-json",
+                route_readiness_path.to_str().unwrap(),
+                report_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(
+            evidence["covered_routes"].as_array().unwrap().len(),
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
+        std::fs::remove_file(report_path).unwrap();
+        std::fs::remove_file(route_readiness_path).unwrap();
+    }
+
+    #[test]
+    fn bounded_read_evidence_command_fails_closed_for_incomplete_report() {
+        let path = unique_test_file("bounded_read_incomplete");
+        let mut report = ready_report();
+        report.as_object_mut().unwrap().remove("execution_row_cap");
+        std::fs::write(&path, report.to_string()).unwrap();
+
+        let (evidence, _) = run_nowledge_bounded_read_evidence(
+            [path.to_str().unwrap()].into_iter().map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(
+            evidence["blocker_codes"],
+            serde_json::json!([
+                "missing_execution_row_cap",
+                "missing_covered_routes",
+                "graph_route_readiness_missing"
+            ])
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn bounded_read_evidence_command_fails_closed_without_graph_route_readiness() {
         let report_path = unique_test_file("bounded_read_ready");
         let routes_path = unique_test_file("bounded_read_routes");
         std::fs::write(&report_path, ready_report().to_string()).unwrap();
@@ -225,30 +390,13 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(evidence["ready"], true);
-        assert_eq!(evidence["missing_covered_routes"], serde_json::json!([]));
-        std::fs::remove_file(report_path).unwrap();
-        std::fs::remove_file(routes_path).unwrap();
-    }
-
-    #[test]
-    fn bounded_read_evidence_command_fails_closed_for_incomplete_report() {
-        let path = unique_test_file("bounded_read_incomplete");
-        let mut report = ready_report();
-        report.as_object_mut().unwrap().remove("execution_row_cap");
-        std::fs::write(&path, report.to_string()).unwrap();
-
-        let (evidence, _) = run_nowledge_bounded_read_evidence(
-            [path.to_str().unwrap()].into_iter().map(str::to_string),
-        )
-        .unwrap();
-
         assert_eq!(evidence["ready"], false);
         assert_eq!(
             evidence["blocker_codes"],
-            serde_json::json!(["missing_execution_row_cap", "missing_covered_routes"])
+            serde_json::json!(["graph_route_readiness_missing"])
         );
-        std::fs::remove_file(path).unwrap();
+        std::fs::remove_file(report_path).unwrap();
+        std::fs::remove_file(routes_path).unwrap();
     }
 
     fn ready_report() -> serde_json::Value {
@@ -267,6 +415,18 @@ mod tests {
             "blocking_operator_count": 0,
             "blocking_operator_kinds": [],
             "streaming": false
+        })
+    }
+
+    fn ready_graph_route_readiness() -> serde_json::Value {
+        serde_json::json!({
+            "route_primary_ready": true,
+            "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "route_query_plan_evidence_ready": true,
+            "route_query_profile_evidence_ready": true,
+            "relationship_property_pruning_required_count": 0,
+            "relationship_property_pruning_report_count": 0,
+            "route_relationship_property_pruning_evidence_ready": true
         })
     }
 

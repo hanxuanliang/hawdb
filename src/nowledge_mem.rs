@@ -261,13 +261,57 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_routes(
     report: &NowledgeMemReadReport,
     covered_routes: &[String],
 ) -> serde_json::Value {
+    nowledge_mem_bounded_read_evidence_json_with_route_readiness(report, covered_routes, None)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemRouteReadinessSummary {
+    pub route_primary_ready: bool,
+    pub primary_ready_routes: Vec<String>,
+    pub route_query_plan_evidence_ready: bool,
+    pub route_query_profile_evidence_ready: bool,
+    pub relationship_property_pruning_required_count: u64,
+    pub relationship_property_pruning_report_count: u64,
+    pub route_relationship_property_pruning_evidence_ready: bool,
+}
+
+pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
+    report: &NowledgeMemReadReport,
+    covered_routes: &[String],
+    route_readiness: Option<&NowledgeMemRouteReadinessSummary>,
+) -> serde_json::Value {
     let blocker_codes = nowledge_mem_bounded_read_blocker_codes(report);
     let missing_covered_routes = missing_nowledge_mem_bounded_read_routes(covered_routes);
+    let route_readiness_blocker = route_readiness.and_then(|summary| {
+        (!summary.route_primary_ready
+            || !summary.route_query_plan_evidence_ready
+            || !summary.route_query_profile_evidence_ready
+            || !summary.route_relationship_property_pruning_evidence_ready
+            || summary.relationship_property_pruning_required_count
+                != summary.relationship_property_pruning_report_count)
+            .then_some("graph_route_readiness_not_ready")
+    });
     let blocker_codes = blocker_codes
         .into_iter()
         .chain((!missing_covered_routes.is_empty()).then_some("missing_covered_routes"))
+        .chain((route_readiness.is_none()).then_some("graph_route_readiness_missing"))
+        .chain(route_readiness_blocker)
         .collect::<Vec<_>>();
     let ready = blocker_codes.is_empty();
+    let route_primary_ready = route_readiness.map(|summary| summary.route_primary_ready);
+    let primary_ready_routes = route_readiness
+        .map(|summary| summary.primary_ready_routes.clone())
+        .unwrap_or_default();
+    let route_query_plan_evidence_ready =
+        route_readiness.map(|summary| summary.route_query_plan_evidence_ready);
+    let route_query_profile_evidence_ready =
+        route_readiness.map(|summary| summary.route_query_profile_evidence_ready);
+    let relationship_property_pruning_required_count =
+        route_readiness.map(|summary| summary.relationship_property_pruning_required_count);
+    let relationship_property_pruning_report_count =
+        route_readiness.map(|summary| summary.relationship_property_pruning_report_count);
+    let route_relationship_property_pruning_evidence_ready =
+        route_readiness.map(|summary| summary.route_relationship_property_pruning_evidence_ready);
 
     serde_json::json!({
         "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
@@ -286,6 +330,13 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_routes(
         "covered_routes": covered_routes,
         "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
         "missing_covered_routes": missing_covered_routes,
+        "route_primary_ready": route_primary_ready,
+        "primary_ready_routes": primary_ready_routes,
+        "route_query_plan_evidence_ready": route_query_plan_evidence_ready,
+        "route_query_profile_evidence_ready": route_query_profile_evidence_ready,
+        "relationship_property_pruning_required_count": relationship_property_pruning_required_count,
+        "relationship_property_pruning_report_count": relationship_property_pruning_report_count,
+        "route_relationship_property_pruning_evidence_ready": route_relationship_property_pruning_evidence_ready,
         "blocker_codes": blocker_codes,
     })
 }
@@ -800,6 +851,7 @@ pub struct NowledgeMemReadinessOptions {
     pub bounded_read_probe: Option<NowledgeGraphStatement>,
     pub bounded_read_evidence: Option<serde_json::Value>,
     pub covered_routes: Vec<String>,
+    pub graph_route_readiness: Option<NowledgeMemRouteReadinessSummary>,
     pub replacement_readiness_by_query_family: Option<serde_json::Value>,
     pub read_options: NowledgeMemReadOptions,
     pub search_projection_evidence: Option<serde_json::Value>,
@@ -1403,9 +1455,10 @@ impl NowledgeMemEmbeddedStore {
             });
         };
         match self.read_query_with_params(&probe.cypher, &probe.parameters, &options.read_options) {
-            Ok(read) => nowledge_mem_bounded_read_evidence_json_with_routes(
+            Ok(read) => nowledge_mem_bounded_read_evidence_json_with_route_readiness(
                 &read.report,
                 &options.covered_routes,
+                options.graph_route_readiness.as_ref(),
             ),
             Err(_) => serde_json::json!({
                 "protocol": NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
@@ -2089,12 +2142,12 @@ fn estimate_value_payload_bytes(value: &Value) -> usize {
 mod tests {
     use super::{
         nowledge_mem_bounded_read_evidence_json,
-        nowledge_mem_bounded_read_evidence_json_with_routes, nowledge_mem_graph_config,
+        nowledge_mem_bounded_read_evidence_json_with_route_readiness, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode,
         nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemEmbeddedStore,
         NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions,
         NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
-        NowledgeMemReadReport, NowledgeMemReadinessOptions,
+        NowledgeMemReadReport, NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
         NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
         NowledgeMemSearchProjection, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
@@ -2411,11 +2464,15 @@ mod tests {
         assert_eq!(read.report.bounded_read_evidence_json()["ready"], false);
         assert_eq!(
             read.report.bounded_read_evidence_json()["blocker_codes"],
-            serde_json::json!(["missing_covered_routes"])
+            serde_json::json!(["missing_covered_routes", "graph_route_readiness_missing"])
         );
         let covered_routes = full_bounded_read_routes();
-        let evidence =
-            nowledge_mem_bounded_read_evidence_json_with_routes(&read.report, &covered_routes);
+        let route_readiness = ready_route_readiness_summary();
+        let evidence = nowledge_mem_bounded_read_evidence_json_with_route_readiness(
+            &read.report,
+            &covered_routes,
+            Some(&route_readiness),
+        );
         assert_eq!(evidence["ready"], true);
         assert_eq!(
             evidence["covered_routes"],
@@ -2459,7 +2516,8 @@ mod tests {
                 "missing_execution_row_cap",
                 "row_limit_not_enforced_before_output",
                 "operator_row_cap_disabled",
-                "missing_covered_routes"
+                "missing_covered_routes",
+                "graph_route_readiness_missing"
             ])
         );
     }
@@ -2489,7 +2547,11 @@ mod tests {
         assert_eq!(evidence["mode"], "writable_cutover");
         assert_eq!(
             evidence["blocker_codes"],
-            serde_json::json!(["not_shadow_read_only", "missing_covered_routes"])
+            serde_json::json!([
+                "not_shadow_read_only",
+                "missing_covered_routes",
+                "graph_route_readiness_missing"
+            ])
         );
     }
 
@@ -2894,6 +2956,7 @@ mod tests {
                 parameters: BTreeMap::new(),
             }),
             covered_routes: full_bounded_read_routes(),
+            graph_route_readiness: Some(ready_route_readiness_summary()),
             replacement_readiness_by_query_family: Some(ready_query_family_replacement()),
             ..NowledgeMemReadinessOptions::default()
         });
@@ -3511,6 +3574,18 @@ mod tests {
             .iter()
             .map(|route| (*route).to_string())
             .collect()
+    }
+
+    fn ready_route_readiness_summary() -> NowledgeMemRouteReadinessSummary {
+        NowledgeMemRouteReadinessSummary {
+            route_primary_ready: true,
+            primary_ready_routes: full_bounded_read_routes(),
+            route_query_plan_evidence_ready: true,
+            route_query_profile_evidence_ready: true,
+            relationship_property_pruning_required_count: 0,
+            relationship_property_pruning_report_count: 0,
+            route_relationship_property_pruning_evidence_ready: true,
+        }
     }
 
     fn ready_query_family_replacement() -> serde_json::Value {
