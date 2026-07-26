@@ -5,6 +5,7 @@ pub mod compat;
 pub mod cypher;
 pub mod embedded;
 pub mod executor;
+pub mod graph_route_readiness;
 pub mod mem_integration_readiness;
 pub mod nowledge_inventory;
 pub mod nowledge_mem;
@@ -103,6 +104,11 @@ pub use cypher::RelationshipDirection;
 pub use embedded::{SkeinEmbedded, SkeinEmbeddedOpenOptions};
 pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
+pub use graph_route_readiness::{
+    nowledge_graph_route_readiness_json, nowledge_graph_route_readiness_usage,
+    run_nowledge_graph_route_readiness, NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
+    NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
+};
 pub use mem_integration_readiness::{
     nowledge_mem_integration_readiness, nowledge_mem_integration_readiness_json,
     nowledge_mem_integration_readiness_usage, run_nowledge_mem_integration_readiness,
