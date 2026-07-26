@@ -124,6 +124,9 @@ query family, or cutover gate requires them.
     - [x] Expose a typed embedded-library search candidate API that returns
       `SearchResultSet` plus compact predicate-pushdown and segment-pruning
       report data without requiring graph context expansion.
+    - [x] Cover vector candidate generation through the same typed
+      embedded-library API, including compact ranking-input diagnostics without
+      copying embedding values into reports.
   - Then cover vector candidate generation, ranking inputs, source chunk
     identity, fail-soft behavior, and repair/rebuild markers.
   - Remove LanceDB from a route only after the matching search projection

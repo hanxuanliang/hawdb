@@ -1594,6 +1594,42 @@ impl NowledgeMemSearchCandidateRequest {
         }
     }
 
+    pub fn vector(query_embedding: Vec<f32>, limit: usize) -> Self {
+        Self {
+            query_text: String::new(),
+            query_embedding: Some(query_embedding),
+            mode: SearchMode::Vector,
+            limit,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+        }
+    }
+
+    pub fn hybrid(query_text: impl Into<String>, query_embedding: Vec<f32>, limit: usize) -> Self {
+        Self {
+            query_text: query_text.into(),
+            query_embedding: Some(query_embedding),
+            mode: SearchMode::Hybrid,
+            limit,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+        }
+    }
+
+    pub fn with_rank_window(mut self, rank_window: Option<usize>) -> Self {
+        self.rank_window = rank_window;
+        self
+    }
+
+    pub fn with_fusion_weights(mut self, fusion_weights: SearchFusionWeights) -> Self {
+        self.fusion_weights = fusion_weights;
+        self
+    }
+
     pub fn with_metadata_filters(mut self, metadata_filters: BTreeMap<String, String>) -> Self {
         self.metadata_filters = metadata_filters;
         self
@@ -1613,6 +1649,7 @@ pub struct NowledgeMemSearchCandidateReport {
     pub protocol: String,
     pub compressed_vector_search_mode: CompressedVectorSearchMode,
     pub mode: SearchMode,
+    pub query_embedding_dimension: Option<usize>,
     pub limit: usize,
     pub rank_window: Option<usize>,
     pub document_count: usize,
@@ -1630,6 +1667,8 @@ pub struct NowledgeMemSearchCandidateReport {
     pub scanned_segment_count: usize,
     pub persisted_segment_descriptor_used: bool,
     pub retriever_backends: BTreeMap<String, String>,
+    pub retriever_available: BTreeMap<String, bool>,
+    pub retriever_candidate_counts: BTreeMap<String, usize>,
     pub fallback_reason_codes: Vec<String>,
     pub truncation_reason_codes: Vec<String>,
 }
@@ -1640,6 +1679,7 @@ impl NowledgeMemSearchCandidateReport {
             "protocol": self.protocol,
             "compressed_vector_search_mode": self.compressed_vector_search_mode.as_str(),
             "mode": search_mode_name(self.mode),
+            "query_embedding_dimension": self.query_embedding_dimension,
             "limit": self.limit,
             "rank_window": self.rank_window,
             "document_count": self.document_count,
@@ -1657,6 +1697,8 @@ impl NowledgeMemSearchCandidateReport {
             "scanned_segment_count": self.scanned_segment_count,
             "persisted_segment_descriptor_used": self.persisted_segment_descriptor_used,
             "retriever_backends": self.retriever_backends,
+            "retriever_available": self.retriever_available,
+            "retriever_candidate_counts": self.retriever_candidate_counts,
             "fallback_reason_codes": self.fallback_reason_codes,
             "truncation_reason_codes": self.truncation_reason_codes,
         })
@@ -3304,6 +3346,7 @@ fn nowledge_mem_search_candidate_report(
         protocol: NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL.to_string(),
         compressed_vector_search_mode: request.compressed_vector_search_mode,
         mode: request.mode,
+        query_embedding_dimension: request.query_embedding.as_ref().map(std::vec::Vec::len),
         limit: result.limit,
         rank_window: result.rank_window,
         document_count: result.document_count,
@@ -3324,6 +3367,16 @@ fn nowledge_mem_search_candidate_report(
             .retrievers
             .iter()
             .map(|retriever| (retriever.name.clone(), retriever.backend.clone()))
+            .collect(),
+        retriever_available: result
+            .retrievers
+            .iter()
+            .map(|retriever| (retriever.name.clone(), retriever.available))
+            .collect(),
+        retriever_candidate_counts: result
+            .retrievers
+            .iter()
+            .map(|retriever| (retriever.name.clone(), retriever.candidate_count))
             .collect(),
         fallback_reason_codes: result
             .fallback_reason_codes
@@ -5247,6 +5300,84 @@ mod tests {
                 [0]["field"],
             "lifecycle_state"
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_projection_candidate_api_reports_vector_generation_inputs() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_api_vector");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            for (external_id, lifecycle_state, embedding) in [
+                ("aaa-deleted", "deleted", vec![1.0, 0.0]),
+                ("aab-forgotten", "forgotten", vec![1.0, 0.0]),
+                ("zza-active", "active", vec![1.0, 0.0]),
+                ("zzb-other", "active", vec![0.6, 0.8]),
+            ] {
+                index
+                    .upsert_projection_row(SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: external_id.to_string(),
+                        title: format!("{external_id} vector candidate"),
+                        body: "vector candidate read".to_string(),
+                        embedding: Some(embedding),
+                        source_id: Some("source-vector".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("lifecycle_state".to_string(), lifecycle_state.to_string()),
+                        ]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let request = NowledgeMemSearchCandidateRequest::vector(vec![1.0, 0.0], 10)
+            .with_rank_window(Some(2))
+            .with_metadata_filters(BTreeMap::from([(
+                "lifecycle_state__not_in".to_string(),
+                r#"["deleted","forgotten"]"#.to_string(),
+            )]));
+
+        let output = store.search_candidates(&request).unwrap();
+
+        assert_eq!(output.result.total_hits, 2);
+        assert_eq!(output.result.hits[0].id, "memory:zza-active");
+        assert_eq!(output.result.hits[0].vector_rank, Some(1));
+        assert_eq!(output.report.mode, SearchMode::Vector);
+        assert_eq!(output.report.query_embedding_dimension, Some(2));
+        assert_eq!(output.report.rank_window, Some(2));
+        assert_eq!(
+            output.report.retriever_backends.get("vector"),
+            Some(&"scalar_vector_scan".to_string())
+        );
+        assert_eq!(output.report.retriever_available.get("vector"), Some(&true));
+        assert_eq!(output.report.retriever_available.get("text"), Some(&false));
+        assert_eq!(
+            output.report.retriever_candidate_counts.get("vector"),
+            Some(&2)
+        );
+        assert_eq!(output.report.pushed_predicate_count, 1);
+        assert_eq!(output.report.pruned_segment_count, 1);
+        assert_eq!(output.report.filtered_out_count, 2);
+        assert!(output.report.persisted_segment_descriptor_used);
+        assert_eq!(output.report.json()["query_embedding_dimension"], 2);
+        assert_eq!(
+            output.report.json()["retriever_candidate_counts"]["vector"],
+            2
+        );
+        assert!(!output.report.json().to_string().contains("[1.0,0.0]"));
+
         std::fs::remove_dir_all(root).unwrap();
     }
 
