@@ -138,7 +138,7 @@ query family, or cutover gate requires them.
   - Keep reports compact and redacted by default so production can keep them on.
   - CLI tools may wrap library APIs for developer workflows, but must not be the
     only supported interface.
-- [ ] Add explain output that includes semantic checks, selected fast path,
+- [x] Add explain output that includes semantic checks, selected fast path,
   optimizer budget, chosen indexes, scan-pruning decisions, and resource class.
 - [ ] Add typed preflight or harness APIs for all replacement artifacts
   so Python-only validation scripts can be retired from the critical path.

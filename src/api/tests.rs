@@ -27486,6 +27486,8 @@ fn explain_analyze_reports_storage_scan_pruning_profile() {
 #[test]
 fn cypher_explain_returns_structured_plan_row() {
     let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 1, title: 'Explain row'})")
+        .unwrap();
 
     let output = db
         .query("EXPLAIN MATCH (m:Memory) WHERE m.id = 1 RETURN m.title AS title")
@@ -27504,6 +27506,50 @@ fn cypher_explain_returns_structured_plan_row() {
         Some(Value::String(fingerprint)) if fingerprint.contains("Memory")
     ));
     assert!(row.contains_key("work_request"));
+    let Some(Value::Map(semantic_checks)) = row.get("semantic_checks") else {
+        panic!("expected semantic checks map");
+    };
+    assert_eq!(
+        semantic_checks.get("parse"),
+        Some(&Value::String("passed".to_string()))
+    );
+    assert_eq!(
+        semantic_checks.get("semantic_validation"),
+        Some(&Value::String("passed".to_string()))
+    );
+    let Some(Value::Map(fast_path)) = row.get("fast_path") else {
+        panic!("expected fast path map");
+    };
+    assert_eq!(fast_path.get("selected"), Some(&Value::Bool(true)));
+    assert_eq!(
+        fast_path.get("reason"),
+        Some(&Value::String(
+            "index_node_seek_without_residual_filter".to_string()
+        ))
+    );
+    let Some(Value::Map(optimizer_budget)) = row.get("optimizer_budget") else {
+        panic!("expected optimizer budget map");
+    };
+    assert_eq!(optimizer_budget.get("max_groups"), Some(&Value::Int(128)));
+    assert_eq!(
+        optimizer_budget.get("budget_exceeded"),
+        Some(&Value::Bool(false))
+    );
+    let Some(Value::List(chosen_indexes)) = row.get("chosen_indexes") else {
+        panic!("expected chosen indexes list");
+    };
+    assert!(chosen_indexes.iter().any(|index| {
+        matches!(
+            index,
+            Value::Map(index)
+                if index.get("operator")
+                    == Some(&Value::String("IndexNodeSeek".to_string()))
+        )
+    }));
+    assert_eq!(
+        row.get("resource_class"),
+        Some(&Value::String("query".to_string()))
+    );
 }
 
 #[test]

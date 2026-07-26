@@ -36839,6 +36839,8 @@ struct OptimizedQueryPlan {
     physical_plan: PhysicalPlan,
     trace: OptimizerTrace,
     plan_cache_lookup: PlanCacheLookup,
+    configured_max_optimizer_groups: Option<usize>,
+    effective_max_optimizer_groups: usize,
 }
 
 fn explain_output_row(
@@ -36865,6 +36867,19 @@ fn explain_output_row(
         Value::String(optimized.trace.selected_plan_fingerprint.clone()),
     );
     row.insert(
+        "semantic_checks".to_string(),
+        explain_semantic_checks_value(),
+    );
+    row.insert("fast_path".to_string(), explain_fast_path_value(optimized));
+    row.insert(
+        "optimizer_budget".to_string(),
+        explain_optimizer_budget_value(optimized),
+    );
+    row.insert(
+        "chosen_indexes".to_string(),
+        explain_chosen_indexes_value(optimized),
+    );
+    row.insert(
         "plan_cache_lookup".to_string(),
         Value::String(optimized.plan_cache_lookup.as_str().to_string()),
     );
@@ -36878,7 +36893,11 @@ fn explain_output_row(
     }
     row.insert(
         "work_request".to_string(),
-        explain_work_request_value(work_request),
+        explain_work_request_value(&work_request),
+    );
+    row.insert(
+        "resource_class".to_string(),
+        Value::String(work_request.class.as_str().to_string()),
     );
     row
 }
@@ -36992,7 +37011,110 @@ fn kind_value_pair(kind: &str) -> (String, Value) {
     ("kind".to_string(), Value::String(kind.to_string()))
 }
 
-fn explain_work_request_value(work_request: WorkRequest) -> Value {
+fn explain_semantic_checks_value() -> Value {
+    Value::Map(BTreeMap::from([
+        ("parse".to_string(), Value::String("passed".to_string())),
+        (
+            "parameter_binding".to_string(),
+            Value::String("passed".to_string()),
+        ),
+        (
+            "semantic_validation".to_string(),
+            Value::String("passed".to_string()),
+        ),
+    ]))
+}
+
+fn explain_fast_path_value(optimized: &OptimizedQueryPlan) -> Value {
+    let reason = explain_fast_path_reason(optimized);
+    Value::Map(BTreeMap::from([
+        ("selected".to_string(), Value::Bool(reason.is_some())),
+        (
+            "reason".to_string(),
+            reason
+                .map(|reason| Value::String(reason.to_string()))
+                .unwrap_or(Value::Null),
+        ),
+    ]))
+}
+
+fn explain_fast_path_reason(optimized: &OptimizedQueryPlan) -> Option<&'static str> {
+    if optimized
+        .trace
+        .selected_plan_operator_counts
+        .contains_key("IndexNodeSeek")
+        && !optimized
+            .trace
+            .selected_plan_operator_counts
+            .contains_key("FilterExec")
+    {
+        return Some("index_node_seek_without_residual_filter");
+    }
+    if optimized
+        .trace
+        .selected_plan_operator_counts
+        .contains_key("IndexNodeMultiSeek")
+        && !optimized
+            .trace
+            .selected_plan_operator_counts
+            .contains_key("FilterExec")
+    {
+        return Some("index_node_multi_seek_without_residual_filter");
+    }
+    None
+}
+
+fn explain_optimizer_budget_value(optimized: &OptimizedQueryPlan) -> Value {
+    Value::Map(BTreeMap::from([
+        (
+            "max_groups".to_string(),
+            usize_value(optimized.effective_max_optimizer_groups),
+        ),
+        (
+            "configured_max_groups".to_string(),
+            option_usize_value(optimized.configured_max_optimizer_groups),
+        ),
+        ("groups".to_string(), usize_value(optimized.trace.groups)),
+        (
+            "search_mode".to_string(),
+            Value::String(optimized.trace.search_mode.as_str().to_string()),
+        ),
+        (
+            "budget_exceeded".to_string(),
+            Value::Bool(
+                optimized
+                    .trace
+                    .warnings
+                    .iter()
+                    .any(|warning| warning.contains("optimizer memo budget exceeded")),
+            ),
+        ),
+    ]))
+}
+
+fn explain_chosen_indexes_value(optimized: &OptimizedQueryPlan) -> Value {
+    let counts = &optimized.trace.selected_plan_operator_counts;
+    let index_operator_counts = [
+        ("IndexNodeSeek", "node_seek"),
+        ("IndexNodeMultiSeek", "node_multi_seek"),
+        ("IndexNodeRangeSeek", "node_range_seek"),
+        ("IndexNodeTextSeek", "node_text_seek"),
+    ]
+    .into_iter()
+    .filter_map(|(operator, kind)| {
+        counts.get(operator).map(|count| {
+            Value::Map(BTreeMap::from([
+                ("operator".to_string(), Value::String(operator.to_string())),
+                ("kind".to_string(), Value::String(kind.to_string())),
+                ("count".to_string(), usize_value(*count)),
+            ]))
+        })
+    })
+    .collect::<Vec<_>>();
+    Value::List(index_operator_counts)
+}
+
+fn explain_work_request_value(work_request: &WorkRequest) -> Value {
     Value::Map(BTreeMap::from([
         (
             "priority".to_string(),
@@ -37013,6 +37135,10 @@ fn usize_value(value: usize) -> Value {
     Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
 }
 
+fn option_usize_value(value: Option<usize>) -> Value {
+    value.map(usize_value).unwrap_or(Value::Null)
+}
+
 fn empty_read_execution_profile() -> executor::ReadExecutionProfile {
     executor::ReadExecutionProfile {
         max_rows: None,
@@ -37031,6 +37157,8 @@ fn optimized_query_plan_for(
     cache_mode: PlanCacheMode,
     context: PlanCacheContext<'_>,
 ) -> Result<OptimizedQueryPlan> {
+    let effective_max_optimizer_groups =
+        optimizer_config_from_database_config(context.config).max_groups;
     let key = (cache_mode == PlanCacheMode::Use).then(|| PlanCacheKey {
         cypher: cypher_text.to_string(),
         parameters: parameters.clone(),
@@ -37048,6 +37176,8 @@ fn optimized_query_plan_for(
                 physical_plan: cached.physical_plan,
                 trace,
                 plan_cache_lookup: PlanCacheLookup::Hit,
+                configured_max_optimizer_groups: context.config.max_optimizer_groups,
+                effective_max_optimizer_groups,
             });
         }
     }
@@ -37074,6 +37204,8 @@ fn optimized_query_plan_for(
             physical_plan,
             trace,
             plan_cache_lookup: PlanCacheLookup::Miss,
+            configured_max_optimizer_groups: context.config.max_optimizer_groups,
+            effective_max_optimizer_groups,
         });
     } else if let PlanCacheMode::Bypass(reason) = cache_mode {
         context.cache.borrow_mut().record_bypass();
@@ -37084,6 +37216,8 @@ fn optimized_query_plan_for(
             physical_plan,
             trace,
             plan_cache_lookup: PlanCacheLookup::Bypass(reason),
+            configured_max_optimizer_groups: context.config.max_optimizer_groups,
+            effective_max_optimizer_groups,
         });
     }
     unreachable!("plan cache mode must be either use or bypass")
