@@ -5,6 +5,7 @@ pub mod compat;
 pub mod cypher;
 pub mod embedded;
 pub mod executor;
+pub mod graph_route_evidence;
 pub mod graph_route_readiness;
 pub mod mem_integration_readiness;
 pub mod nowledge_inventory;
@@ -104,6 +105,12 @@ pub use cypher::RelationshipDirection;
 pub use embedded::{SkeinEmbedded, SkeinEmbeddedOpenOptions};
 pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
+pub use graph_route_evidence::{
+    nowledge_graph_route_evidence_json, nowledge_graph_route_evidence_usage,
+    parse_route_parity_evidence, parse_route_query_inventory, run_nowledge_graph_route_evidence,
+    RouteCypherQuery, RouteParityEvidence, RouteParityEvidenceRoute, RouteQuery,
+    NMEM_GRAPH_ROUTE_PARITY_EVIDENCE_PROTOCOL,
+};
 pub use graph_route_readiness::{
     nowledge_graph_route_readiness_json, nowledge_graph_route_readiness_usage,
     run_nowledge_graph_route_readiness, NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
