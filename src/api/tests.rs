@@ -27668,6 +27668,55 @@ fn explain_analyze_reports_parameterized_default_if_null_not_eq_scan_pruning_pro
 }
 
 #[test]
+fn explain_analyze_reports_relationship_property_scan_pruning_profile() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'source'})").unwrap();
+    db.query("CREATE (:Entity {id: 'active'})").unwrap();
+    db.query("CREATE (:Entity {id: 'deleted'})").unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'source'}), (e:Entity {id: 'active'}) \
+         CREATE (m)-[:RELATES_TO {lifecycle_state: 'active'}]->(e)",
+    )
+    .unwrap();
+    db.query(
+        "MATCH (m:Memory {id: 'source'}), (e:Entity {id: 'deleted'}) \
+         CREATE (m)-[:RELATES_TO {lifecycle_state: 'deleted'}]->(e)",
+    )
+    .unwrap();
+
+    let output = db
+        .explain_analyze_query(
+            "MATCH (m:Memory {id: 'source'})-[r:RELATES_TO {lifecycle_state: 'active'}]->(e:Entity) \
+             RETURN e.id AS id",
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 1);
+    assert_eq!(
+        output.output.rows[0].get("id"),
+        Some(&Value::String("active".to_string()))
+    );
+    assert_eq!(output.execution_profile.scan_pruning_reports.len(), 2);
+    let relationship_scan = output
+        .execution_profile
+        .scan_pruning_reports
+        .iter()
+        .find(|scan| {
+            scan.strategy
+                == crate::store::ScanPruningStrategy::PropertyEq {
+                    property: "lifecycle_state".to_string(),
+                }
+        })
+        .expect("relationship property pruning report");
+    assert!(relationship_scan.pruned);
+    assert_eq!(relationship_scan.label_id, None);
+    assert_eq!(relationship_scan.candidate_count_before_pruning, 2);
+    assert_eq!(relationship_scan.candidate_count_before_filter, 1);
+    assert_eq!(relationship_scan.pruned_candidate_count, 1);
+    assert_eq!(relationship_scan.output_count, 1);
+}
+
+#[test]
 fn cypher_explain_returns_structured_plan_row() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Explain row'})")

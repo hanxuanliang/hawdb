@@ -3165,6 +3165,27 @@ fn one_hop_relationships<'a>(
 ) -> Vec<(&'a RelRecord, &'a NodeRecord)> {
     let mut matches = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
+    if let Some(filter) = property_filter_from_properties(rel_properties) {
+        let scan = store.scan_relationships_with_filter_pruning(rel_type_id, Some(&filter));
+        record_scan_pruning_report(scan.report.clone());
+        collect_one_hop_relationships(
+            scan.relationships.into_iter().filter(|relationship| {
+                relationship_target_for_source_direction(relationship, source, direction).is_some()
+            }),
+            store,
+            target_label_ids,
+            rel_properties,
+            |relationship| {
+                relationship_target_for_source_direction(relationship, source, direction)
+                    .expect("relationship direction was checked before target lookup")
+            },
+            &mut seen,
+            &mut matches,
+        );
+        matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
+        return matches;
+    }
+
     if let Some(rel_type_id) = rel_type_id {
         if matches!(
             direction,
@@ -3230,6 +3251,30 @@ fn one_hop_relationships<'a>(
     }
     matches.sort_by_key(|(relationship, target)| (target.id, relationship.id));
     matches
+}
+
+fn relationship_target_for_source_direction(
+    relationship: &RelRecord,
+    source: NodeId,
+    direction: RelationshipDirection,
+) -> Option<NodeId> {
+    match direction {
+        RelationshipDirection::Outgoing => {
+            (relationship.source == source).then_some(relationship.target)
+        }
+        RelationshipDirection::Incoming => {
+            (relationship.target == source).then_some(relationship.source)
+        }
+        RelationshipDirection::Undirected => {
+            if relationship.source == source {
+                Some(relationship.target)
+            } else if relationship.target == source {
+                Some(relationship.source)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn relationship_count_sum_leg(
