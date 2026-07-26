@@ -159,6 +159,8 @@ query family, or cutover gate requires them.
     and keep the CLI as a thin wrapper.
   - [x] Expose Nowledge Mem integration readiness as a typed Rust library gate
     and keep the CLI as a thin wrapper.
+  - [x] Expose Nowledge Mem integration bundle generation through Rust library
+    APIs and keep the CLI as a thin wrapper.
   - [x] Expose query-family evidence generation through Rust library APIs and
     keep the CLI as a thin wrapper.
   - [x] Expose graph-route readiness generation through Rust library APIs and

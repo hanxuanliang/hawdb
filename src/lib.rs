@@ -9,6 +9,7 @@ pub mod embedded;
 pub mod executor;
 pub mod graph_route_evidence;
 pub mod graph_route_readiness;
+pub mod mem_integration_bundle;
 pub mod mem_integration_readiness;
 pub mod mem_library_readiness;
 pub mod nowledge_inventory;
@@ -129,6 +130,10 @@ pub use graph_route_readiness::{
     nowledge_graph_route_readiness_json, nowledge_graph_route_readiness_usage,
     run_nowledge_graph_route_readiness, NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
     NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
+};
+pub use mem_integration_bundle::{
+    nowledge_mem_integration_bundle_json, nowledge_mem_integration_bundle_usage,
+    run_nowledge_mem_integration_bundle, IntegrationBundleInputs,
 };
 pub use mem_integration_readiness::{
     nowledge_mem_integration_readiness, nowledge_mem_integration_readiness_json,
