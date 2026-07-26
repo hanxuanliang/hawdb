@@ -200,6 +200,36 @@ fn graph_route_alignment_json(
     let evidence_route_primary_ready =
         bool_path(graph_route_readiness, &["route_primary_ready"]) == Some(true);
     let summary_route_primary_ready = bool_path(summary, &["route_primary_ready"]) == Some(true);
+    let evidence_route_query_plan_evidence_ready =
+        bool_path(graph_route_readiness, &["route_query_plan_evidence_ready"]) == Some(true);
+    let summary_route_query_plan_evidence_ready =
+        bool_path(summary, &["route_query_plan_evidence_ready"]) == Some(true);
+    let evidence_route_query_profile_evidence_ready = bool_path(
+        graph_route_readiness,
+        &["route_query_profile_evidence_ready"],
+    ) == Some(true);
+    let summary_route_query_profile_evidence_ready =
+        bool_path(summary, &["route_query_profile_evidence_ready"]) == Some(true);
+    let evidence_route_relationship_property_pruning_evidence_ready = bool_path(
+        graph_route_readiness,
+        &["route_relationship_property_pruning_evidence_ready"],
+    ) == Some(true);
+    let summary_route_relationship_property_pruning_evidence_ready = bool_path(
+        summary,
+        &["route_relationship_property_pruning_evidence_ready"],
+    ) == Some(true);
+    let evidence_relationship_property_pruning_required_count = u64_path(
+        graph_route_readiness,
+        &["relationship_property_pruning_required_count"],
+    );
+    let summary_relationship_property_pruning_required_count =
+        u64_path(summary, &["relationship_property_pruning_required_count"]);
+    let evidence_relationship_property_pruning_report_count = u64_path(
+        graph_route_readiness,
+        &["relationship_property_pruning_report_count"],
+    );
+    let summary_relationship_property_pruning_report_count =
+        u64_path(summary, &["relationship_property_pruning_report_count"]);
     let evidence_primary_ready_routes = graph_route_primary_ready_routes(graph_route_readiness);
     let summary_primary_ready_routes = string_set_path(summary, &["primary_ready_routes"]);
     let required_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
@@ -207,6 +237,19 @@ fn graph_route_alignment_json(
         .map(|route| (*route).to_string())
         .collect::<BTreeSet<_>>();
     let route_primary_ready_matches = evidence_route_primary_ready == summary_route_primary_ready;
+    let route_query_plan_evidence_ready_matches =
+        evidence_route_query_plan_evidence_ready == summary_route_query_plan_evidence_ready;
+    let route_query_profile_evidence_ready_matches =
+        evidence_route_query_profile_evidence_ready == summary_route_query_profile_evidence_ready;
+    let route_relationship_property_pruning_evidence_ready_matches =
+        evidence_route_relationship_property_pruning_evidence_ready
+            == summary_route_relationship_property_pruning_evidence_ready;
+    let relationship_property_pruning_required_count_matches =
+        evidence_relationship_property_pruning_required_count
+            == summary_relationship_property_pruning_required_count;
+    let relationship_property_pruning_report_count_matches =
+        evidence_relationship_property_pruning_report_count
+            == summary_relationship_property_pruning_report_count;
     let primary_ready_routes_match = evidence_primary_ready_routes == summary_primary_ready_routes;
     let evidence_required_routes_covered = required_routes
         .iter()
@@ -222,6 +265,17 @@ fn graph_route_alignment_json(
         evidence_route_primary_ready,
         summary_route_primary_ready,
         route_primary_ready_matches,
+        evidence_route_query_plan_evidence_ready,
+        summary_route_query_plan_evidence_ready,
+        route_query_plan_evidence_ready_matches,
+        evidence_route_query_profile_evidence_ready,
+        summary_route_query_profile_evidence_ready,
+        route_query_profile_evidence_ready_matches,
+        evidence_route_relationship_property_pruning_evidence_ready,
+        summary_route_relationship_property_pruning_evidence_ready,
+        route_relationship_property_pruning_evidence_ready_matches,
+        relationship_property_pruning_required_count_matches,
+        relationship_property_pruning_report_count_matches,
         primary_ready_routes_match,
         evidence_required_routes_covered,
         summary_required_routes_covered,
@@ -236,6 +290,21 @@ fn graph_route_alignment_json(
         "evidence_route_primary_ready": evidence_route_primary_ready,
         "summary_route_primary_ready": summary_route_primary_ready,
         "route_primary_ready_matches": route_primary_ready_matches,
+        "evidence_route_query_plan_evidence_ready": evidence_route_query_plan_evidence_ready,
+        "summary_route_query_plan_evidence_ready": summary_route_query_plan_evidence_ready,
+        "route_query_plan_evidence_ready_matches": route_query_plan_evidence_ready_matches,
+        "evidence_route_query_profile_evidence_ready": evidence_route_query_profile_evidence_ready,
+        "summary_route_query_profile_evidence_ready": summary_route_query_profile_evidence_ready,
+        "route_query_profile_evidence_ready_matches": route_query_profile_evidence_ready_matches,
+        "evidence_route_relationship_property_pruning_evidence_ready": evidence_route_relationship_property_pruning_evidence_ready,
+        "summary_route_relationship_property_pruning_evidence_ready": summary_route_relationship_property_pruning_evidence_ready,
+        "route_relationship_property_pruning_evidence_ready_matches": route_relationship_property_pruning_evidence_ready_matches,
+        "evidence_relationship_property_pruning_required_count": evidence_relationship_property_pruning_required_count,
+        "summary_relationship_property_pruning_required_count": summary_relationship_property_pruning_required_count,
+        "relationship_property_pruning_required_count_matches": relationship_property_pruning_required_count_matches,
+        "evidence_relationship_property_pruning_report_count": evidence_relationship_property_pruning_report_count,
+        "summary_relationship_property_pruning_report_count": summary_relationship_property_pruning_report_count,
+        "relationship_property_pruning_report_count_matches": relationship_property_pruning_report_count_matches,
         "primary_ready_routes_match": primary_ready_routes_match,
         "evidence_required_routes_covered": evidence_required_routes_covered,
         "summary_required_routes_covered": summary_required_routes_covered,
@@ -367,6 +436,17 @@ struct GraphRouteAlignment {
     evidence_route_primary_ready: bool,
     summary_route_primary_ready: bool,
     route_primary_ready_matches: bool,
+    evidence_route_query_plan_evidence_ready: bool,
+    summary_route_query_plan_evidence_ready: bool,
+    route_query_plan_evidence_ready_matches: bool,
+    evidence_route_query_profile_evidence_ready: bool,
+    summary_route_query_profile_evidence_ready: bool,
+    route_query_profile_evidence_ready_matches: bool,
+    evidence_route_relationship_property_pruning_evidence_ready: bool,
+    summary_route_relationship_property_pruning_evidence_ready: bool,
+    route_relationship_property_pruning_evidence_ready_matches: bool,
+    relationship_property_pruning_required_count_matches: bool,
+    relationship_property_pruning_report_count_matches: bool,
     primary_ready_routes_match: bool,
     evidence_required_routes_covered: bool,
     summary_required_routes_covered: bool,
@@ -381,6 +461,17 @@ impl GraphRouteAlignment {
             && self.evidence_route_primary_ready
             && self.summary_route_primary_ready
             && self.route_primary_ready_matches
+            && self.evidence_route_query_plan_evidence_ready
+            && self.summary_route_query_plan_evidence_ready
+            && self.route_query_plan_evidence_ready_matches
+            && self.evidence_route_query_profile_evidence_ready
+            && self.summary_route_query_profile_evidence_ready
+            && self.route_query_profile_evidence_ready_matches
+            && self.evidence_route_relationship_property_pruning_evidence_ready
+            && self.summary_route_relationship_property_pruning_evidence_ready
+            && self.route_relationship_property_pruning_evidence_ready_matches
+            && self.relationship_property_pruning_required_count_matches
+            && self.relationship_property_pruning_report_count_matches
             && self.primary_ready_routes_match
             && self.evidence_required_routes_covered
             && self.summary_required_routes_covered
@@ -408,6 +499,39 @@ impl GraphRouteAlignment {
         }
         if !self.route_primary_ready_matches {
             blockers.push("graph_route_primary_ready_mismatch");
+        }
+        if !self.evidence_route_query_plan_evidence_ready {
+            blockers.push("graph_route_query_plan_evidence_not_ready");
+        }
+        if !self.summary_route_query_plan_evidence_ready {
+            blockers.push("replacement_summary_query_plan_evidence_not_ready");
+        }
+        if !self.route_query_plan_evidence_ready_matches {
+            blockers.push("graph_route_query_plan_evidence_mismatch");
+        }
+        if !self.evidence_route_query_profile_evidence_ready {
+            blockers.push("graph_route_query_profile_evidence_not_ready");
+        }
+        if !self.summary_route_query_profile_evidence_ready {
+            blockers.push("replacement_summary_query_profile_evidence_not_ready");
+        }
+        if !self.route_query_profile_evidence_ready_matches {
+            blockers.push("graph_route_query_profile_evidence_mismatch");
+        }
+        if !self.evidence_route_relationship_property_pruning_evidence_ready {
+            blockers.push("graph_route_relationship_property_pruning_evidence_not_ready");
+        }
+        if !self.summary_route_relationship_property_pruning_evidence_ready {
+            blockers.push("replacement_summary_relationship_property_pruning_evidence_not_ready");
+        }
+        if !self.route_relationship_property_pruning_evidence_ready_matches {
+            blockers.push("graph_route_relationship_property_pruning_evidence_mismatch");
+        }
+        if !self.relationship_property_pruning_required_count_matches {
+            blockers.push("graph_route_relationship_property_pruning_required_count_mismatch");
+        }
+        if !self.relationship_property_pruning_report_count_matches {
+            blockers.push("graph_route_relationship_property_pruning_report_count_mismatch");
         }
         if !self.primary_ready_routes_match {
             blockers.push("graph_route_primary_ready_routes_mismatch");
@@ -985,6 +1109,36 @@ mod tests {
     }
 
     #[test]
+    fn generated_bundle_detects_graph_route_pruning_summary_mismatch() {
+        let mut inputs = ready_inputs();
+        inputs.replacement_summary.as_mut().unwrap()["bounded_read_evidence"]
+            ["relationship_property_pruning_report_count"] = serde_json::json!(1);
+        inputs.replacement_summary.as_mut().unwrap()["bounded_read_evidence"]
+            ["route_relationship_property_pruning_evidence_ready"] = serde_json::json!(false);
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]["ready"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            bundle["replacement_summary_graph_route_alignment"]["blocker_codes"],
+            serde_json::json!([
+                "replacement_summary_relationship_property_pruning_evidence_not_ready",
+                "graph_route_relationship_property_pruning_evidence_mismatch",
+                "graph_route_relationship_property_pruning_report_count_mismatch"
+            ])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(
+            readiness["failed_checks"],
+            serde_json::json!(["graph_route_readiness_alignment"])
+        );
+    }
+
+    #[test]
     fn generated_bundle_recomputes_graph_route_parity_identity() {
         let mut inputs = ready_inputs();
         inputs.graph_route_readiness.as_mut().unwrap()["routes"][0]["shadow_compare"]
@@ -1164,6 +1318,11 @@ mod tests {
             "ready": true,
             "route_primary_ready": true,
             "primary_ready_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "route_query_plan_evidence_ready": true,
+            "route_query_profile_evidence_ready": true,
+            "relationship_property_pruning_required_count": 0,
+            "relationship_property_pruning_report_count": 0,
+            "route_relationship_property_pruning_evidence_ready": true,
             "mode": "shadow_read_only",
             "max_rows": 512,
             "execution_row_cap": 513,

@@ -741,6 +741,41 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                     bundle,
                     &[
                         "replacement_summary_graph_route_alignment",
+                        "route_query_plan_evidence_ready_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_graph_route_alignment",
+                        "route_query_profile_evidence_ready_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_graph_route_alignment",
+                        "route_relationship_property_pruning_evidence_ready_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_graph_route_alignment",
+                        "relationship_property_pruning_required_count_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_graph_route_alignment",
+                        "relationship_property_pruning_report_count_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_graph_route_alignment",
                         "primary_ready_routes_match",
                     ],
                 ) == Some(true),
@@ -766,6 +801,11 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
                 "replacement_summary_graph_route_alignment.evidence_route_primary_ready",
                 "replacement_summary_graph_route_alignment.summary_route_primary_ready",
                 "replacement_summary_graph_route_alignment.route_primary_ready_matches",
+                "replacement_summary_graph_route_alignment.route_query_plan_evidence_ready_matches",
+                "replacement_summary_graph_route_alignment.route_query_profile_evidence_ready_matches",
+                "replacement_summary_graph_route_alignment.route_relationship_property_pruning_evidence_ready_matches",
+                "replacement_summary_graph_route_alignment.relationship_property_pruning_required_count_matches",
+                "replacement_summary_graph_route_alignment.relationship_property_pruning_report_count_matches",
                 "replacement_summary_graph_route_alignment.primary_ready_routes_match",
                 "replacement_summary_graph_route_alignment.evidence_required_routes_covered",
                 "replacement_summary_graph_route_alignment.summary_required_routes_covered",
@@ -1537,6 +1577,11 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<serde_json::Valu
                 "replacement_summary_graph_route_alignment.evidence_route_primary_ready",
                 "replacement_summary_graph_route_alignment.summary_route_primary_ready",
                 "replacement_summary_graph_route_alignment.route_primary_ready_matches",
+                "replacement_summary_graph_route_alignment.route_query_plan_evidence_ready_matches",
+                "replacement_summary_graph_route_alignment.route_query_profile_evidence_ready_matches",
+                "replacement_summary_graph_route_alignment.route_relationship_property_pruning_evidence_ready_matches",
+                "replacement_summary_graph_route_alignment.relationship_property_pruning_required_count_matches",
+                "replacement_summary_graph_route_alignment.relationship_property_pruning_report_count_matches",
                 "replacement_summary_graph_route_alignment.primary_ready_routes_match",
                 "replacement_summary_graph_route_alignment.blocker_codes",
             ],
@@ -2500,6 +2545,26 @@ fn graph_route_readiness_alignment_ready(bundle: &serde_json::Value) -> bool {
         &[
             "replacement_summary_graph_route_alignment",
             "route_primary_ready_matches",
+        ][..],
+        &[
+            "replacement_summary_graph_route_alignment",
+            "route_query_plan_evidence_ready_matches",
+        ][..],
+        &[
+            "replacement_summary_graph_route_alignment",
+            "route_query_profile_evidence_ready_matches",
+        ][..],
+        &[
+            "replacement_summary_graph_route_alignment",
+            "route_relationship_property_pruning_evidence_ready_matches",
+        ][..],
+        &[
+            "replacement_summary_graph_route_alignment",
+            "relationship_property_pruning_required_count_matches",
+        ][..],
+        &[
+            "replacement_summary_graph_route_alignment",
+            "relationship_property_pruning_report_count_matches",
         ][..],
         &[
             "replacement_summary_graph_route_alignment",
@@ -5373,6 +5438,21 @@ mod tests {
             "evidence_route_primary_ready": true,
             "summary_route_primary_ready": true,
             "route_primary_ready_matches": true,
+            "evidence_route_query_plan_evidence_ready": true,
+            "summary_route_query_plan_evidence_ready": true,
+            "route_query_plan_evidence_ready_matches": true,
+            "evidence_route_query_profile_evidence_ready": true,
+            "summary_route_query_profile_evidence_ready": true,
+            "route_query_profile_evidence_ready_matches": true,
+            "evidence_route_relationship_property_pruning_evidence_ready": true,
+            "summary_route_relationship_property_pruning_evidence_ready": true,
+            "route_relationship_property_pruning_evidence_ready_matches": true,
+            "evidence_relationship_property_pruning_required_count": 0,
+            "summary_relationship_property_pruning_required_count": 0,
+            "relationship_property_pruning_required_count_matches": true,
+            "evidence_relationship_property_pruning_report_count": 0,
+            "summary_relationship_property_pruning_report_count": 0,
+            "relationship_property_pruning_report_count_matches": true,
             "primary_ready_routes_match": true,
             "evidence_required_routes_covered": true,
             "summary_required_routes_covered": true,

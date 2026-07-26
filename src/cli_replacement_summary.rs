@@ -284,6 +284,13 @@ pub fn nowledge_replacement_summary_json_with_options(
             "covered_routes": bounded_read_evidence.covered_routes,
             "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_covered_routes": bounded_read_evidence.missing_covered_routes,
+            "route_primary_ready": bounded_read_evidence.route_primary_ready,
+            "primary_ready_routes": bounded_read_evidence.primary_ready_routes,
+            "route_query_plan_evidence_ready": bounded_read_evidence.route_query_plan_evidence_ready,
+            "route_query_profile_evidence_ready": bounded_read_evidence.route_query_profile_evidence_ready,
+            "relationship_property_pruning_required_count": bounded_read_evidence.relationship_property_pruning_required_count,
+            "relationship_property_pruning_report_count": bounded_read_evidence.relationship_property_pruning_report_count,
+            "route_relationship_property_pruning_evidence_ready": bounded_read_evidence.route_relationship_property_pruning_evidence_ready,
             "blocker_codes": bounded_read_evidence.blocker_codes,
         },
         "query_runtime_preflight": {
@@ -627,6 +634,13 @@ struct BoundedReadEvidenceSummary<'a> {
     blocking_operator_count: Option<u64>,
     covered_routes: Vec<String>,
     missing_covered_routes: Vec<&'static str>,
+    route_primary_ready: Option<bool>,
+    primary_ready_routes: Vec<String>,
+    route_query_plan_evidence_ready: Option<bool>,
+    route_query_profile_evidence_ready: Option<bool>,
+    relationship_property_pruning_required_count: Option<u64>,
+    relationship_property_pruning_report_count: Option<u64>,
+    route_relationship_property_pruning_evidence_ready: Option<bool>,
     blocker_codes: serde_json::Value,
 }
 
@@ -1247,6 +1261,12 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     let blocking_operator_count =
         json_get_u64_path_from_dynamic(bundle, path, "blocking_operator_count");
     let covered_routes = json_get_string_array_path_from_dynamic(bundle, path, "covered_routes");
+    let primary_ready_routes =
+        json_get_string_array_path_from_dynamic(bundle, path, "primary_ready_routes");
+    let primary_ready_route_set = primary_ready_routes
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
     let covered_route_set = covered_routes
         .iter()
         .map(String::as_str)
@@ -1256,6 +1276,28 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         .copied()
         .filter(|route| !covered_route_set.contains(route))
         .collect::<Vec<_>>();
+    let route_primary_ready = json_get_bool_path_from_dynamic(bundle, path, "route_primary_ready");
+    let route_query_plan_evidence_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "route_query_plan_evidence_ready");
+    let route_query_profile_evidence_ready =
+        json_get_bool_path_from_dynamic(bundle, path, "route_query_profile_evidence_ready");
+    let relationship_property_pruning_required_count = json_get_u64_path_from_dynamic(
+        bundle,
+        path,
+        "relationship_property_pruning_required_count",
+    );
+    let relationship_property_pruning_report_count =
+        json_get_u64_path_from_dynamic(bundle, path, "relationship_property_pruning_report_count");
+    let route_relationship_property_pruning_evidence_ready = json_get_bool_path_from_dynamic(
+        bundle,
+        path,
+        "route_relationship_property_pruning_evidence_ready",
+    );
+    let primary_ready_routes_cover_required = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+        .iter()
+        .all(|route| primary_ready_route_set.contains(route));
+    let relationship_property_pruning_counts_match =
+        relationship_property_pruning_required_count == relationship_property_pruning_report_count;
     let ready = present
         && protocol.as_deref() == Some(SKEIN_NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL)
         && mode == Some("shadow_read_only")
@@ -1263,7 +1305,14 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         && execution_row_cap == max_rows.and_then(|value| value.checked_add(1))
         && row_limit_enforced_before_output == Some(true)
         && operator_row_cap_enabled == Some(true)
-        && missing_covered_routes.is_empty();
+        && missing_covered_routes.is_empty()
+        && route_primary_ready == Some(true)
+        && primary_ready_routes_cover_required
+        && route_query_plan_evidence_ready == Some(true)
+        && route_query_profile_evidence_ready == Some(true)
+        && route_relationship_property_pruning_evidence_ready == Some(true)
+        && relationship_property_pruning_required_count.is_some()
+        && relationship_property_pruning_counts_match;
     BoundedReadEvidenceSummary {
         protocol,
         present,
@@ -1277,6 +1326,13 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         blocking_operator_count,
         covered_routes,
         missing_covered_routes,
+        route_primary_ready,
+        primary_ready_routes,
+        route_query_plan_evidence_ready,
+        route_query_profile_evidence_ready,
+        relationship_property_pruning_required_count,
+        relationship_property_pruning_report_count,
+        route_relationship_property_pruning_evidence_ready,
         blocker_codes: json_get_array_path_from_dynamic(bundle, path, "blocker_codes"),
     }
 }
@@ -1713,6 +1769,13 @@ fn nowledge_replacement_next_actions(
                 "bounded_read_evidence.operator_row_cap_enabled",
                 "bounded_read_evidence.blocking_operator_count",
                 "bounded_read_evidence.covered_routes",
+                "bounded_read_evidence.route_primary_ready",
+                "bounded_read_evidence.primary_ready_routes",
+                "bounded_read_evidence.route_query_plan_evidence_ready",
+                "bounded_read_evidence.route_query_profile_evidence_ready",
+                "bounded_read_evidence.relationship_property_pruning_required_count",
+                "bounded_read_evidence.relationship_property_pruning_report_count",
+                "bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
                 "bounded_read_evidence.blocker_codes",
             ],
         ));
@@ -2113,6 +2176,22 @@ mod tests {
         assert_eq!(summary["bounded_read_evidence"]["ready"], true);
         assert_eq!(summary["bounded_read_evidence"]["mode"], "shadow_read_only");
         assert_eq!(summary["bounded_read_evidence"]["execution_row_cap"], 513);
+        assert_eq!(
+            summary["bounded_read_evidence"]["route_primary_ready"],
+            true
+        );
+        assert_eq!(
+            summary["bounded_read_evidence"]["route_query_plan_evidence_ready"],
+            true
+        );
+        assert_eq!(
+            summary["bounded_read_evidence"]["route_query_profile_evidence_ready"],
+            true
+        );
+        assert_eq!(
+            summary["bounded_read_evidence"]["route_relationship_property_pruning_evidence_ready"],
+            true
+        );
         assert_eq!(summary["query_runtime_preflight"]["present"], true);
         assert_eq!(summary["query_runtime_preflight"]["ready"], true);
         assert_eq!(
@@ -3034,6 +3113,44 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_requires_bounded_read_graph_route_summary() {
+        let mut bundle = production_ready_bundle();
+        bundle["bounded_read_evidence"]
+            .as_object_mut()
+            .unwrap()
+            .remove("route_relationship_property_pruning_evidence_ready");
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence_ready"));
+        assert!(summary["next_actions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| {
+                action["action"] == "attach_bounded_read_profile"
+                    && action["evidence_fields"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|field| {
+                            field == "bounded_read_evidence.route_relationship_property_pruning_evidence_ready"
+                        })
+            }));
+    }
+
+    #[test]
     fn replacement_summary_requires_bounded_read_evidence_protocol() {
         let mut bundle = production_ready_bundle();
         bundle["bounded_read_evidence"]["protocol"] = serde_json::json!("handwritten");
@@ -3859,6 +3976,13 @@ mod tests {
                         "bounded_read_evidence.operator_row_cap_enabled",
                         "bounded_read_evidence.blocking_operator_count",
                         "bounded_read_evidence.covered_routes",
+                        "bounded_read_evidence.route_primary_ready",
+                        "bounded_read_evidence.primary_ready_routes",
+                        "bounded_read_evidence.route_query_plan_evidence_ready",
+                        "bounded_read_evidence.route_query_profile_evidence_ready",
+                        "bounded_read_evidence.relationship_property_pruning_required_count",
+                        "bounded_read_evidence.relationship_property_pruning_report_count",
+                        "bounded_read_evidence.route_relationship_property_pruning_evidence_ready",
                         "bounded_read_evidence.blocker_codes"
                     ]
                 },
@@ -4086,6 +4210,29 @@ mod tests {
                 "operator_row_cap_enabled": true,
                 "streaming": false,
                 "blocking_operator_count": 0,
+                "route_primary_ready": true,
+                "primary_ready_routes": [
+                    "/graph/overview",
+                    "/graph/explore",
+                    "/graph/expand/{node_id}",
+                    "/graph/live-preview",
+                    "/graph/live-preview/{node_id}",
+                    "/graph/community-members/{community_id}",
+                    "/library/community/{community_id}/subgraph",
+                    "/library/community/{community_id}/recent-memories",
+                    "/library/community/{community_id}/related",
+                    "/graph/analysis",
+                    "/graph/augmentation/state",
+                    "/graph/augmentation/pagerank/plan",
+                    "/graph/node-details/{node_id}",
+                    "/graph/orphans",
+                    "/graph/shortest-path"
+                ],
+                "route_query_plan_evidence_ready": true,
+                "route_query_profile_evidence_ready": true,
+                "relationship_property_pruning_required_count": 0,
+                "relationship_property_pruning_report_count": 0,
+                "route_relationship_property_pruning_evidence_ready": true,
                 "covered_routes": [
                     "/graph/overview",
                     "/graph/explore",
