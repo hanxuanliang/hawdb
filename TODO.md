@@ -8,17 +8,19 @@ query family, or cutover gate requires them.
 
 ## P0: Production Replacement Gates
 
-- [ ] Cover every production graph read route with shadow parity evidence.
-  - Current route families already gated include overview, explore, expand,
-    live preview, node details, orphans, shortest path, community members,
-    community subgraph, and community recent memories.
-  - Add the remaining route families only after confirming they are still active
-    Nowledge Mem call sites.
+- [ ] Cut active graph reads over without production dual-read compare.
+  - Inventory every active Nowledge Mem REST and MCP graph read route that still
+    calls Kuzu/Ladybug directly.
+  - Route handlers should issue Cypher through the query runtime and select
+    `legacy` or `skein` reads through configuration.
+  - Do not keep request-time old/new read comparison in production paths.
+    Equivalence evidence should come from offline fixtures, preflight bundles,
+    and migration reports.
 - [ ] Move graph read traffic through the query runtime boundary.
   - Mem should dual-write to Kuzu/Ladybug and Skein from the start of the
     migration window, then choose the read engine through configuration.
   - Keep Kuzu/Ladybug as the default read engine until each active route has
-    stable Skein shadow evidence.
+    route-level Skein readiness evidence.
   - Avoid direct hand-written execution paths in application routes when the
     AST, fast-path detector, optimizer, and executor can own the path.
 - [ ] Complete dual-engine cutover readiness.
@@ -27,6 +29,13 @@ query family, or cutover gate requires them.
     missing.
   - Integration readiness must keep legacy Kuzu/Ladybug and LanceDB data
     side-by-side until cutover is proven.
+- [ ] Keep Skein embedded-library first.
+  - Production Mem integration should start and operate Skein through Rust
+    library APIs, similar to SQLite-style embedding.
+  - Do not require production command-line wrappers, environment-driven control
+    planes, or spawned helper processes for normal operation.
+  - Nightly-only import, migration, and diagnostic entrypoints may exist, but
+    they must not be required by the production read/write path.
 - [ ] Keep sensitive paths and data out of readiness artifacts.
   - Default reports must redact local paths and raw parse or I/O errors.
   - Expose raw local diagnostics only behind explicit debug flags.
@@ -65,10 +74,17 @@ query family, or cutover gate requires them.
     summaries should decide whether a segment needs to be read.
   - Bloom or cuckoo filters should be used only for fields where false positives
     are acceptable and false negatives are impossible.
+  - Push eligible `WHERE` predicates down to disk scan planning before loading
+    record payloads into memory.
+  - Store compact per-segment descriptors for fields used by Nowledge filters:
+    `unit_type`, `metadata`, `importance`, `confidence`, lifecycle status, and
+    latest/history timestamps.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow
-    compare work must be deferrable under resource pressure.
+    migration work must be deferrable under resource pressure.
+  - Background work should be scheduled through resource classes and QoS limits;
+    foreground user requests should not be throttled by internal maintenance.
 
 ## P0: Search Projection Replacement
 
@@ -76,9 +92,20 @@ query family, or cutover gate requires them.
   - Canonical facts remain graph/content state, not vector index state.
   - Search projection evidence must prove row count, document identity, embedding
     identity, lifecycle, and incremental watermark parity.
+  - Keep content store replacement out of this milestone unless a search or
+    graph route needs it.
 - [ ] Keep FTS and vector projection maintenance incremental.
   - Full rebuild is a repair path, not the steady-state update mechanism.
   - Background projection updates must respect QoS limits.
+  - Metadata and lifecycle filters should be pushed into search candidate
+    generation before returning rows to Mem.
+- [ ] Replace LanceDB search reads in stages.
+  - First cover metadata-filtered search projection reads that do not require
+    Kuzu joins.
+  - Then cover vector candidate generation, ranking inputs, source chunk
+    identity, fail-soft behavior, and repair/rebuild markers.
+  - Remove LanceDB from a route only after the matching search projection
+    evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
   - Raw float32 or SQ8 remains the safe path.
   - TurboQuant-style compressed projections can be used for cold or constrained
@@ -90,9 +117,15 @@ query family, or cutover gate requires them.
   and background-maintenance blockers.
 - [x] Add stable counters for plan cache hit, miss, admission, eviction, and
   memory pressure.
+- [ ] Add library readiness APIs for Mem integration.
+  - Expose structured readiness, slow-query, blackbox, storage-recovery,
+    background-maintenance, and search-projection reports through Rust APIs.
+  - Keep reports compact and redacted by default so production can keep them on.
+  - CLI tools may wrap library APIs for developer workflows, but must not be the
+    only supported interface.
 - [ ] Add explain output that includes semantic checks, selected fast path,
   optimizer budget, chosen indexes, scan-pruning decisions, and resource class.
-- [ ] Add typed preflight or harness commands for all replacement artifacts
+- [ ] Add typed preflight or harness APIs for all replacement artifacts
   so Python-only validation scripts can be retired from the critical path.
   - `nowledge-query-runtime-preflight` runs JSON-defined probes through the
     read-only query runtime with `EXPLAIN ANALYZE` and emits plan/profile
