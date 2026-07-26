@@ -108,6 +108,7 @@ pub struct AdjacencyGroupStats {
 type CompositePropertyKey = Vec<(String, Value)>;
 type CompositePropertyIndex = BTreeMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
 type FullTextPropertyIndex = BTreeMap<(LabelId, String, String), BTreeSet<NodeId>>;
+type RelationshipPropertyIndex = BTreeMap<(RelTypeId, String, Value), BTreeSet<RelId>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectedNodesCreate {
@@ -495,6 +496,12 @@ pub struct ScanPrunedNodeScan<'a> {
     pub report: ScanPruningReport,
 }
 
+#[derive(Debug, Clone)]
+pub struct ScanPrunedRelationshipScan<'a> {
+    pub relationships: Vec<&'a RelRecord>,
+    pub report: ScanPruningReport,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationSummary {
     pub rows: Vec<BTreeMap<String, Value>>,
@@ -606,6 +613,7 @@ pub struct GraphStore {
     property_index: BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
     composite_property_index: CompositePropertyIndex,
     full_text_property_index: FullTextPropertyIndex,
+    relationship_property_index: RelationshipPropertyIndex,
     projected_graphs: BTreeMap<String, ProjectedGraphDefinition>,
     projected_graph_artifacts: BTreeMap<String, ProjectedGraphArtifact>,
     stable_id_mapping: StoreStableIdMapping,
@@ -629,6 +637,23 @@ impl ScanPruningCandidate {
             strategy,
             exact_empty: node_ids.is_empty(),
             node_ids,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct RelationshipScanPruningCandidate {
+    strategy: ScanPruningStrategy,
+    rel_ids: BTreeSet<RelId>,
+    exact_empty: bool,
+}
+
+impl RelationshipScanPruningCandidate {
+    fn exact(strategy: ScanPruningStrategy, rel_ids: BTreeSet<RelId>) -> Self {
+        Self {
+            strategy,
+            exact_empty: rel_ids.is_empty(),
+            rel_ids,
         }
     }
 }
@@ -747,6 +772,7 @@ impl GraphStore {
             property_index: BTreeMap::new(),
             composite_property_index: BTreeMap::new(),
             full_text_property_index: BTreeMap::new(),
+            relationship_property_index: BTreeMap::new(),
             projected_graphs: BTreeMap::new(),
             projected_graph_artifacts: BTreeMap::new(),
             stable_id_mapping: StoreStableIdMapping::default(),
@@ -4411,6 +4437,7 @@ impl GraphStore {
             property_index: self.property_index.clone(),
             composite_property_index: self.composite_property_index.clone(),
             full_text_property_index: self.full_text_property_index.clone(),
+            relationship_property_index: self.relationship_property_index.clone(),
             projected_graphs: self.projected_graphs.clone(),
             projected_graph_artifacts: self.projected_graph_artifacts.clone(),
             stable_id_mapping: self.stable_id_mapping.clone(),
@@ -4836,6 +4863,8 @@ impl GraphStore {
         self.next_rel_id = self.next_rel_id.max(id.0 + 1);
         if let Some(old_relationship) = self.relationships.remove(&id) {
             self.remove_relationship_from_basic_statistics(&old_relationship);
+            self.remove_relationship_from_property_index(&old_relationship);
+            self.remove_relationship_from_adjacency(&old_relationship);
         }
         self.relationships.insert(
             id,
@@ -4849,6 +4878,7 @@ impl GraphStore {
         );
         if let Some(relationship) = self.relationships.get(&id).cloned() {
             self.add_relationship_to_basic_statistics(&relationship);
+            self.add_relationship_to_property_index(&relationship);
         }
         self.outgoing
             .entry((source, rel_type))
@@ -5520,6 +5550,462 @@ impl GraphStore {
         })
     }
 
+    pub fn scan_relationships_with_filter_pruning<'a>(
+        &'a self,
+        rel_type: Option<RelTypeId>,
+        filter: Option<&PropertyFilter>,
+    ) -> ScanPrunedRelationshipScan<'a> {
+        let candidate =
+            filter.and_then(|filter| self.prune_relationship_candidates(rel_type, filter));
+        let Some(candidate) = candidate else {
+            let candidate_count_before_filter = self.relationship_count_for_type(rel_type);
+            let relationships = self
+                .scan_relationships(rel_type)
+                .filter(|relationship| {
+                    filter
+                        .map(|filter| {
+                            property_filter_matches(
+                                filter,
+                                relationship.id.0,
+                                &relationship.properties,
+                            )
+                        })
+                        .unwrap_or(true)
+                })
+                .collect::<Vec<_>>();
+            let output_count = relationships.len();
+            return ScanPrunedRelationshipScan {
+                relationships,
+                report: ScanPruningReport {
+                    label_id: None,
+                    strategy: ScanPruningStrategy::FullLabelScan,
+                    pruned: false,
+                    exact_empty: false,
+                    candidate_count_before_pruning: candidate_count_before_filter,
+                    pruned_candidate_count: 0,
+                    candidate_count_before_filter,
+                    output_count,
+                    filtered_out_count: candidate_count_before_filter.saturating_sub(output_count),
+                },
+            };
+        };
+
+        let candidate_count_before_pruning = self.relationship_count_for_type(rel_type);
+        let candidate_count_before_filter = candidate.rel_ids.len();
+        let relationships = candidate
+            .rel_ids
+            .iter()
+            .filter_map(|rel_id| self.relationships.get(rel_id))
+            .filter(|relationship| self.relationship_matches_type(relationship, rel_type))
+            .filter(|relationship| {
+                filter
+                    .map(|filter| {
+                        property_filter_matches(filter, relationship.id.0, &relationship.properties)
+                    })
+                    .unwrap_or(true)
+            })
+            .collect::<Vec<_>>();
+        let output_count = relationships.len();
+        ScanPrunedRelationshipScan {
+            relationships,
+            report: ScanPruningReport {
+                label_id: None,
+                strategy: candidate.strategy,
+                pruned: true,
+                exact_empty: candidate.exact_empty,
+                candidate_count_before_pruning,
+                pruned_candidate_count: candidate_count_before_pruning
+                    .saturating_sub(candidate_count_before_filter),
+                candidate_count_before_filter,
+                output_count,
+                filtered_out_count: candidate_count_before_filter.saturating_sub(output_count),
+            },
+        }
+    }
+
+    pub fn relationship_count_for_type(&self, rel_type: Option<RelTypeId>) -> usize {
+        self.relationships
+            .values()
+            .filter(|relationship| self.relationship_matches_type(relationship, rel_type))
+            .count()
+    }
+
+    fn relationship_matches_type(
+        &self,
+        relationship: &RelRecord,
+        rel_type: Option<RelTypeId>,
+    ) -> bool {
+        rel_type
+            .map(|rel_type| relationship.rel_type == rel_type)
+            .unwrap_or(true)
+    }
+
+    fn prune_relationship_candidates(
+        &self,
+        rel_type: Option<RelTypeId>,
+        filter: &PropertyFilter,
+    ) -> Option<RelationshipScanPruningCandidate> {
+        match filter {
+            PropertyFilter::And(filters) => {
+                self.prune_and_relationship_candidates(rel_type, filters)
+            }
+            PropertyFilter::Or(filters) => self.prune_or_relationship_candidates(rel_type, filters),
+            PropertyFilter::Not(_) => None,
+            PropertyFilter::IdEq { value } => Some(RelationshipScanPruningCandidate::exact(
+                ScanPruningStrategy::IdEq,
+                self.rel_ids_for_id_values(rel_type, std::slice::from_ref(value)),
+            )),
+            PropertyFilter::IdNotEq { .. } => None,
+            PropertyFilter::IdRange { lower, upper } => {
+                if lower.is_none() && upper.is_none() {
+                    return None;
+                }
+                Some(RelationshipScanPruningCandidate::exact(
+                    ScanPruningStrategy::IdRange,
+                    self.rel_ids_for_id_range(rel_type, lower.as_ref(), upper.as_ref()),
+                ))
+            }
+            PropertyFilter::IdIn { values } => Some(RelationshipScanPruningCandidate::exact(
+                if values.is_empty() {
+                    ScanPruningStrategy::Empty
+                } else {
+                    ScanPruningStrategy::IdIn
+                },
+                self.rel_ids_for_id_values(rel_type, values),
+            )),
+            PropertyFilter::Eq { property, value } => {
+                Some(RelationshipScanPruningCandidate::exact(
+                    ScanPruningStrategy::PropertyEq {
+                        property: property.clone(),
+                    },
+                    self.rel_ids_for_property_values(
+                        rel_type,
+                        property,
+                        std::slice::from_ref(value),
+                    ),
+                ))
+            }
+            PropertyFilter::NotEq { property, value } => {
+                Some(RelationshipScanPruningCandidate::exact(
+                    ScanPruningStrategy::PropertyNotEq {
+                        property: property.clone(),
+                    },
+                    self.rel_ids_for_property_not_in_values(
+                        rel_type,
+                        property,
+                        std::slice::from_ref(value),
+                    ),
+                ))
+            }
+            PropertyFilter::IsNull { property } => Some(RelationshipScanPruningCandidate::exact(
+                ScanPruningStrategy::PropertyMissingOrNull {
+                    property: property.clone(),
+                },
+                self.rel_ids_for_property_missing_or_null(rel_type, property),
+            )),
+            PropertyFilter::IsNotNull { property } => {
+                Some(RelationshipScanPruningCandidate::exact(
+                    ScanPruningStrategy::PropertyExists {
+                        property: property.clone(),
+                    },
+                    self.rel_ids_for_property_exists(rel_type, property),
+                ))
+            }
+            PropertyFilter::ListContains { .. }
+            | PropertyFilter::Contains { .. }
+            | PropertyFilter::StartsWith { .. }
+            | PropertyFilter::EndsWith { .. }
+            | PropertyFilter::RegexMatch { .. } => None,
+            PropertyFilter::DefaultIfNullOrEq {
+                property,
+                empty,
+                default,
+                value,
+                negated,
+            } => {
+                let strategy = if *negated {
+                    ScanPruningStrategy::PropertyDefaultIfNullNotEq {
+                        property: property.clone(),
+                    }
+                } else {
+                    ScanPruningStrategy::PropertyDefaultIfNullEq {
+                        property: property.clone(),
+                    }
+                };
+                let rel_ids = if *negated {
+                    self.rel_ids_for_default_if_null_not_eq(
+                        rel_type, property, empty, default, value,
+                    )
+                } else {
+                    self.rel_ids_for_default_if_null_eq(rel_type, property, empty, default, value)
+                };
+                Some(RelationshipScanPruningCandidate::exact(strategy, rel_ids))
+            }
+            PropertyFilter::In { property, values } => {
+                Some(RelationshipScanPruningCandidate::exact(
+                    if values.is_empty() {
+                        ScanPruningStrategy::Empty
+                    } else {
+                        ScanPruningStrategy::PropertyIn {
+                            property: property.clone(),
+                        }
+                    },
+                    self.rel_ids_for_property_values(rel_type, property, values),
+                ))
+            }
+            PropertyFilter::Range {
+                property,
+                lower,
+                upper,
+            } => {
+                if lower.is_none() && upper.is_none() {
+                    return None;
+                }
+                Some(RelationshipScanPruningCandidate::exact(
+                    ScanPruningStrategy::PropertyRange {
+                        property: property.clone(),
+                    },
+                    self.rel_ids_for_property_range(
+                        rel_type,
+                        property,
+                        lower.as_ref(),
+                        upper.as_ref(),
+                    ),
+                ))
+            }
+        }
+    }
+
+    fn prune_and_relationship_candidates(
+        &self,
+        rel_type: Option<RelTypeId>,
+        filters: &[PropertyFilter],
+    ) -> Option<RelationshipScanPruningCandidate> {
+        let mut best: Option<RelationshipScanPruningCandidate> = None;
+        for filter in filters {
+            let Some(candidate) = self.prune_relationship_candidates(rel_type, filter) else {
+                continue;
+            };
+            if candidate.exact_empty {
+                return Some(candidate);
+            }
+            if best
+                .as_ref()
+                .map(|best| candidate.rel_ids.len() < best.rel_ids.len())
+                .unwrap_or(true)
+            {
+                best = Some(candidate);
+            }
+        }
+        best
+    }
+
+    fn prune_or_relationship_candidates(
+        &self,
+        rel_type: Option<RelTypeId>,
+        filters: &[PropertyFilter],
+    ) -> Option<RelationshipScanPruningCandidate> {
+        if filters.is_empty() {
+            return Some(RelationshipScanPruningCandidate {
+                strategy: ScanPruningStrategy::Empty,
+                rel_ids: BTreeSet::new(),
+                exact_empty: true,
+            });
+        }
+
+        let mut rel_ids = BTreeSet::new();
+        for filter in filters {
+            let candidate = self.prune_relationship_candidates(rel_type, filter)?;
+            rel_ids.extend(candidate.rel_ids);
+        }
+        Some(RelationshipScanPruningCandidate::exact(
+            ScanPruningStrategy::OrUnion,
+            rel_ids,
+        ))
+    }
+
+    fn rel_ids_for_id_values(
+        &self,
+        rel_type: Option<RelTypeId>,
+        values: &[Value],
+    ) -> BTreeSet<RelId> {
+        values
+            .iter()
+            .filter_map(|value| match value {
+                Value::Int(value) => u64::try_from(*value).ok().map(RelId),
+                _ => None,
+            })
+            .filter(|rel_id| {
+                self.relationships
+                    .get(rel_id)
+                    .map(|relationship| self.relationship_matches_type(relationship, rel_type))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn rel_ids_for_type(&self, rel_type: Option<RelTypeId>) -> BTreeSet<RelId> {
+        self.relationships
+            .values()
+            .filter(|relationship| self.relationship_matches_type(relationship, rel_type))
+            .map(|relationship| relationship.id)
+            .collect()
+    }
+
+    fn rel_ids_for_id_range(
+        &self,
+        rel_type: Option<RelTypeId>,
+        lower: Option<&(Value, bool)>,
+        upper: Option<&(Value, bool)>,
+    ) -> BTreeSet<RelId> {
+        self.relationships
+            .keys()
+            .copied()
+            .filter(|rel_id| range_bounds_match(&Value::Int(rel_id.0 as i64), lower, upper))
+            .filter(|rel_id| {
+                self.relationships
+                    .get(rel_id)
+                    .map(|relationship| self.relationship_matches_type(relationship, rel_type))
+                    .unwrap_or(false)
+            })
+            .collect()
+    }
+
+    fn rel_ids_for_property_values(
+        &self,
+        rel_type: Option<RelTypeId>,
+        property: &str,
+        values: &[Value],
+    ) -> BTreeSet<RelId> {
+        if values.is_empty() {
+            return BTreeSet::new();
+        }
+        let values = values.iter().collect::<BTreeSet<_>>();
+        self.relationship_property_index
+            .iter()
+            .filter(|((candidate_rel_type, candidate_property, value), _)| {
+                rel_type
+                    .map(|rel_type| *candidate_rel_type == rel_type)
+                    .unwrap_or(true)
+                    && candidate_property == property
+                    && values.contains(value)
+            })
+            .flat_map(|(_, rel_ids)| rel_ids.iter().copied())
+            .collect()
+    }
+
+    fn rel_ids_for_property_not_in_values(
+        &self,
+        rel_type: Option<RelTypeId>,
+        property: &str,
+        values: &[Value],
+    ) -> BTreeSet<RelId> {
+        let values = values.iter().collect::<BTreeSet<_>>();
+        self.relationship_property_index
+            .iter()
+            .filter(|((candidate_rel_type, candidate_property, value), _)| {
+                rel_type
+                    .map(|rel_type| *candidate_rel_type == rel_type)
+                    .unwrap_or(true)
+                    && candidate_property == property
+                    && !values.contains(value)
+            })
+            .flat_map(|(_, rel_ids)| rel_ids.iter().copied())
+            .collect()
+    }
+
+    fn rel_ids_for_property_exists(
+        &self,
+        rel_type: Option<RelTypeId>,
+        property: &str,
+    ) -> BTreeSet<RelId> {
+        self.relationship_property_index
+            .iter()
+            .filter(|((candidate_rel_type, candidate_property, value), _)| {
+                rel_type
+                    .map(|rel_type| *candidate_rel_type == rel_type)
+                    .unwrap_or(true)
+                    && candidate_property == property
+                    && value != &Value::Null
+            })
+            .flat_map(|(_, rel_ids)| rel_ids.iter().copied())
+            .collect()
+    }
+
+    fn rel_ids_for_property_missing_or_null(
+        &self,
+        rel_type: Option<RelTypeId>,
+        property: &str,
+    ) -> BTreeSet<RelId> {
+        let non_null = self.rel_ids_for_property_exists(rel_type, property);
+        self.relationships
+            .values()
+            .filter(|relationship| self.relationship_matches_type(relationship, rel_type))
+            .filter(|relationship| !non_null.contains(&relationship.id))
+            .map(|relationship| relationship.id)
+            .collect()
+    }
+
+    fn rel_ids_for_default_if_null_eq(
+        &self,
+        rel_type: Option<RelTypeId>,
+        property: &str,
+        empty: &Value,
+        default: &Value,
+        value: &Value,
+    ) -> BTreeSet<RelId> {
+        if value == default {
+            let mut rel_ids = self.rel_ids_for_property_missing_or_null(rel_type, property);
+            let mut values = vec![empty.clone()];
+            if value != empty {
+                values.push(value.clone());
+            }
+            rel_ids.extend(self.rel_ids_for_property_values(rel_type, property, &values));
+            return rel_ids;
+        }
+
+        if value == empty || value == &Value::Null {
+            return BTreeSet::new();
+        }
+        self.rel_ids_for_property_values(rel_type, property, std::slice::from_ref(value))
+    }
+
+    fn rel_ids_for_default_if_null_not_eq(
+        &self,
+        rel_type: Option<RelTypeId>,
+        property: &str,
+        empty: &Value,
+        default: &Value,
+        value: &Value,
+    ) -> BTreeSet<RelId> {
+        let equal_rel_ids =
+            self.rel_ids_for_default_if_null_eq(rel_type, property, empty, default, value);
+        self.rel_ids_for_type(rel_type)
+            .difference(&equal_rel_ids)
+            .copied()
+            .collect()
+    }
+
+    fn rel_ids_for_property_range(
+        &self,
+        rel_type: Option<RelTypeId>,
+        property: &str,
+        lower: Option<&(Value, bool)>,
+        upper: Option<&(Value, bool)>,
+    ) -> BTreeSet<RelId> {
+        self.relationship_property_index
+            .iter()
+            .filter(|((candidate_rel_type, candidate_property, value), _)| {
+                rel_type
+                    .map(|rel_type| *candidate_rel_type == rel_type)
+                    .unwrap_or(true)
+                    && candidate_property == property
+                    && range_bounds_match(value, lower, upper)
+            })
+            .flat_map(|(_, rel_ids)| rel_ids.iter().copied())
+            .collect()
+    }
+
     pub fn relationship(&self, id: RelId) -> Option<&RelRecord> {
         self.relationships.get(&id)
     }
@@ -5775,7 +6261,23 @@ impl GraphStore {
         let Some(relationship) = self.relationships.get_mut(&id) else {
             return;
         };
-        relationship.properties.insert(property, value);
+        let rel_type = relationship.rel_type;
+        let old_value = relationship
+            .properties
+            .insert(property.clone(), value.clone());
+        if let Some(old_value) = old_value {
+            let key = (rel_type, property.clone(), old_value);
+            if let Some(ids) = self.relationship_property_index.get_mut(&key) {
+                ids.remove(&id);
+                if ids.is_empty() {
+                    self.relationship_property_index.remove(&key);
+                }
+            }
+        }
+        self.relationship_property_index
+            .entry((rel_type, property, value))
+            .or_default()
+            .insert(id);
     }
 
     fn validate_constraints_for_ops(&self, catalog: &Catalog, ops: &[WalOp]) -> Result<()> {
@@ -5873,18 +6375,44 @@ impl GraphStore {
             return;
         };
         self.remove_relationship_from_basic_statistics(&relationship);
+        self.remove_relationship_from_property_index(&relationship);
+        self.remove_relationship_from_adjacency(&relationship);
+    }
+
+    fn remove_relationship_from_adjacency(&mut self, relationship: &RelRecord) {
         let outgoing_key = (relationship.source, relationship.rel_type);
         if let Some(ids) = self.outgoing.get_mut(&outgoing_key) {
-            ids.remove(&id);
+            ids.remove(&relationship.id);
             if ids.is_empty() {
                 self.outgoing.remove(&outgoing_key);
             }
         }
         let incoming_key = (relationship.target, relationship.rel_type);
         if let Some(ids) = self.incoming.get_mut(&incoming_key) {
-            ids.remove(&id);
+            ids.remove(&relationship.id);
             if ids.is_empty() {
                 self.incoming.remove(&incoming_key);
+            }
+        }
+    }
+
+    fn add_relationship_to_property_index(&mut self, relationship: &RelRecord) {
+        for (property, value) in &relationship.properties {
+            self.relationship_property_index
+                .entry((relationship.rel_type, property.clone(), value.clone()))
+                .or_default()
+                .insert(relationship.id);
+        }
+    }
+
+    fn remove_relationship_from_property_index(&mut self, relationship: &RelRecord) {
+        for (property, value) in &relationship.properties {
+            let key = (relationship.rel_type, property.clone(), value.clone());
+            if let Some(ids) = self.relationship_property_index.get_mut(&key) {
+                ids.remove(&relationship.id);
+                if ids.is_empty() {
+                    self.relationship_property_index.remove(&key);
+                }
             }
         }
     }
@@ -11005,6 +11533,151 @@ mod tests {
         assert_eq!(date_scan.report.candidate_count_before_filter, 2);
         assert_eq!(date_scan.report.candidate_count_before_pruning, 3);
         assert_eq!(date_scan.report.pruned_candidate_count, 1);
+    }
+
+    #[test]
+    fn relationship_scan_pruning_uses_property_equality_and_in_list() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let target = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+            .unwrap();
+        for state in ["active", "deleted", "archived"] {
+            store
+                .create_relationship(
+                    &mut catalog,
+                    source,
+                    target,
+                    "RELATES_TO",
+                    properties([("lifecycle_state", Value::String(state.to_string()))]),
+                )
+                .unwrap();
+        }
+        let rel_type = catalog.rel_type_id("RELATES_TO").unwrap();
+
+        let eq_scan = store.scan_relationships_with_filter_pruning(
+            Some(rel_type),
+            Some(&PropertyFilter::Eq {
+                property: "lifecycle_state".to_string(),
+                value: Value::String("active".to_string()),
+            }),
+        );
+        assert_eq!(eq_scan.relationships.len(), 1);
+        assert_eq!(
+            eq_scan.report.strategy,
+            ScanPruningStrategy::PropertyEq {
+                property: "lifecycle_state".to_string()
+            }
+        );
+        assert_eq!(eq_scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(eq_scan.report.candidate_count_before_filter, 1);
+        assert_eq!(eq_scan.report.pruned_candidate_count, 2);
+
+        let in_scan = store.scan_relationships_with_filter_pruning(
+            Some(rel_type),
+            Some(&PropertyFilter::In {
+                property: "lifecycle_state".to_string(),
+                values: vec![
+                    Value::String("active".to_string()),
+                    Value::String("archived".to_string()),
+                ],
+            }),
+        );
+        assert_eq!(in_scan.relationships.len(), 2);
+        assert_eq!(
+            in_scan.report.strategy,
+            ScanPruningStrategy::PropertyIn {
+                property: "lifecycle_state".to_string()
+            }
+        );
+        assert_eq!(in_scan.report.candidate_count_before_filter, 2);
+        assert_eq!(in_scan.report.pruned_candidate_count, 1);
+    }
+
+    #[test]
+    fn relationship_scan_pruning_uses_property_range_and_tracks_updates() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(1))]))
+            .unwrap();
+        let target = store
+            .create_node(&mut catalog, "Memory", properties([("id", Value::Int(2))]))
+            .unwrap();
+        let old = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.2))]),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.7))]),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.9))]),
+            )
+            .unwrap();
+        let rel_type = catalog.rel_type_id("MENTIONS").unwrap();
+
+        let range_scan = store.scan_relationships_with_filter_pruning(
+            Some(rel_type),
+            Some(&PropertyFilter::Range {
+                property: "confidence".to_string(),
+                lower: Some((Value::Float(0.5), true)),
+                upper: Some((Value::Float(0.8), true)),
+            }),
+        );
+        assert_eq!(range_scan.relationships.len(), 1);
+        assert_eq!(
+            range_scan.report.strategy,
+            ScanPruningStrategy::PropertyRange {
+                property: "confidence".to_string()
+            }
+        );
+        assert_eq!(range_scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(range_scan.report.candidate_count_before_filter, 1);
+        assert_eq!(range_scan.report.pruned_candidate_count, 2);
+
+        store.apply_set_relationship_property(old, "confidence".to_string(), Value::Float(0.75));
+        let updated_scan = store.scan_relationships_with_filter_pruning(
+            Some(rel_type),
+            Some(&PropertyFilter::Range {
+                property: "confidence".to_string(),
+                lower: Some((Value::Float(0.5), true)),
+                upper: Some((Value::Float(0.8), true)),
+            }),
+        );
+        assert_eq!(updated_scan.relationships.len(), 2);
+        assert_eq!(updated_scan.report.candidate_count_before_filter, 2);
+
+        store.apply_delete_relationship(old);
+        let deleted_scan = store.scan_relationships_with_filter_pruning(
+            Some(rel_type),
+            Some(&PropertyFilter::Eq {
+                property: "confidence".to_string(),
+                value: Value::Float(0.75),
+            }),
+        );
+        assert!(deleted_scan.relationships.is_empty());
+        assert_eq!(deleted_scan.report.candidate_count_before_filter, 0);
+        assert_eq!(deleted_scan.report.pruned_candidate_count, 2);
     }
 
     #[test]

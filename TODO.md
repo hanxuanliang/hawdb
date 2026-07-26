@@ -91,6 +91,10 @@ query family, or cutover gate requires them.
       `$source_space_id` with `EXPLAIN ANALYZE` scan-pruning evidence.
     - [x] Push parameterized normalized default inequality predicates such as
       `$target_space_id` through exact scan pruning for thread move reads.
+  - [x] Maintain an in-memory relationship-property scan-pruning index for
+    exact equality, enum/in-list, missing/null, existence, normalized default,
+    and range filters so relationship payload scans can be narrowed before row
+    filtering.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow
