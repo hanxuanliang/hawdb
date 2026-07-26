@@ -579,12 +579,14 @@ impl ExternalShadowCommand {
             ExternalShadowStdoutRead::Line(response) => response,
             ExternalShadowStdoutRead::Closed => {
                 let status = self.shadow_child_status_after_stdout_close();
+                self.stderr.finish_reading();
                 let message = format!("shadow engine '{}' closed stdout{status}", self.name);
                 self.trace_error(trace_sequence, &message);
                 return Err(self.request_error(message));
             }
             ExternalShadowStdoutRead::Timeout => {
                 let status = self.kill_shadow_child_status();
+                self.stderr.finish_reading();
                 let message = format!(
                     "shadow engine '{}' did not return a response within {} ms{status}",
                     self.name,
@@ -930,6 +932,12 @@ impl ExternalShadowStderr {
             None
         } else {
             Some(tail.to_string())
+        }
+    }
+
+    fn finish_reading(&mut self) {
+        if let Some(join) = self.join.take() {
+            let _ = join.join();
         }
     }
 }
