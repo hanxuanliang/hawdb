@@ -149,6 +149,8 @@ where
 #[cfg(test)]
 mod tests {
     use super::LfuCache;
+    use std::sync::{Arc, Barrier, Mutex};
+    use std::thread;
 
     #[test]
     fn lfu_cache_evicts_least_frequently_used_entry() {
@@ -215,5 +217,38 @@ mod tests {
         assert_eq!(cache.stats().admissions, 2);
         assert_eq!(cache.stats().memory_pressure_events, 0);
         assert_eq!(cache.stats().evictions, 0);
+    }
+
+    #[test]
+    fn cache_remains_bounded_under_mutex_protected_concurrent_access() {
+        let cache = Arc::new(Mutex::new(LfuCache::new(Some(8))));
+        let start = Arc::new(Barrier::new(4));
+
+        let handles = (0..4)
+            .map(|worker| {
+                let cache = Arc::clone(&cache);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    for offset in 0..64 {
+                        let key = format!("key-{}", (worker + offset) % 16);
+                        let mut cache = cache.lock().unwrap();
+                        cache.insert(key.clone(), worker * 100 + offset);
+                        let _ = cache.get(&key);
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let stats = cache.lock().unwrap().stats();
+        assert_eq!(stats.entries, 8);
+        assert_eq!(stats.admissions, 256);
+        assert!(stats.hits > 0);
+        assert!(stats.evictions > 0);
+        assert!(stats.memory_pressure_events > 0);
     }
 }
