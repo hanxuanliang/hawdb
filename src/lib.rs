@@ -19,6 +19,7 @@ pub mod qos;
 pub mod query_family_evidence;
 pub mod replacement_summary;
 pub mod search;
+pub mod storage_recovery_evidence;
 pub mod store;
 
 mod regex_cache;
@@ -215,6 +216,10 @@ pub use search_projection_evidence::NowledgeSearchProjectionEvidenceReport;
 pub use skein_optimizer::{
     Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,
     PhysicalProperties, RequiredProperties,
+};
+pub use storage_recovery_evidence::{
+    nowledge_storage_recovery_evidence_json, nowledge_storage_recovery_evidence_usage,
+    run_nowledge_storage_recovery_evidence,
 };
 pub use store::{
     AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,
