@@ -4580,6 +4580,9 @@ fn scan_pruning_strategy_json(strategy: &skein::store::ScanPruningStrategy) -> s
         skein::store::ScanPruningStrategy::PropertyNotEq { property } => {
             serde_json::json!({"kind": "property_not_eq", "property": property})
         }
+        skein::store::ScanPruningStrategy::PropertyExists { property } => {
+            serde_json::json!({"kind": "property_exists", "property": property})
+        }
         skein::store::ScanPruningStrategy::PropertyIn { property } => {
             serde_json::json!({"kind": "property_in", "property": property})
         }

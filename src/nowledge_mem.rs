@@ -2422,6 +2422,9 @@ fn scan_pruning_strategy_json(strategy: &ScanPruningStrategy) -> serde_json::Val
         ScanPruningStrategy::PropertyNotEq { property } => {
             serde_json::json!({"kind": "property_not_eq", "property": property})
         }
+        ScanPruningStrategy::PropertyExists { property } => {
+            serde_json::json!({"kind": "property_exists", "property": property})
+        }
         ScanPruningStrategy::PropertyIn { property } => {
             serde_json::json!({"kind": "property_in", "property": property})
         }

@@ -37005,6 +37005,9 @@ fn scan_pruning_strategy_value(strategy: &ScanPruningStrategy) -> Value {
         ScanPruningStrategy::PropertyNotEq { property } => {
             scan_pruning_property_strategy_value("property_not_eq", property)
         }
+        ScanPruningStrategy::PropertyExists { property } => {
+            scan_pruning_property_strategy_value("property_exists", property)
+        }
         ScanPruningStrategy::PropertyIn { property } => {
             scan_pruning_property_strategy_value("property_in", property)
         }

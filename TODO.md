@@ -79,6 +79,8 @@ query family, or cutover gate requires them.
   - Store compact per-segment descriptors for fields used by Nowledge filters:
     `unit_type`, `metadata`, `importance`, `confidence`, lifecycle status, and
     latest/history timestamps.
+  - [x] Push exact graph `IS NOT NULL` property-existence predicates through
+    scan planning using the property index before row payload filtering.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow
