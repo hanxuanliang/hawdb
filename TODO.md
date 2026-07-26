@@ -177,6 +177,8 @@ query family, or cutover gate requires them.
     library APIs and keep the CLI as a thin wrapper.
   - [x] Expose search-candidate shadow evidence parsing through Rust library
     APIs and keep the CLI as a thin wrapper.
+  - [x] Expose search-projection probe and evidence command plumbing through
+    Rust library APIs and keep the CLI as a thin wrapper.
   - Do not add new query-shape-specific typed APIs unless they are required for
     compatibility with an existing caller during migration.
 

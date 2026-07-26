@@ -234,7 +234,13 @@ pub use search_candidate_shadow_evidence::{
     nowledge_search_candidate_shadow_evidence_usage, parse_search_candidate_shadow_probe,
     run_nowledge_search_candidate_shadow_evidence,
 };
-pub use search_projection_evidence::NowledgeSearchProjectionEvidenceReport;
+pub use search_projection_evidence::{
+    nowledge_search_projection_evidence_usage, nowledge_search_projection_probe_contract_json,
+    nowledge_search_projection_probe_contract_usage,
+    nowledge_search_projection_shadow_evidence_usage, run_nowledge_search_projection_evidence,
+    run_nowledge_search_projection_shadow_evidence, run_skein_search_projection_probe,
+    skein_search_projection_probe_usage, NowledgeSearchProjectionEvidenceReport,
+};
 pub use skein_optimizer::{
     Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,
     PhysicalProperties, RequiredProperties,
