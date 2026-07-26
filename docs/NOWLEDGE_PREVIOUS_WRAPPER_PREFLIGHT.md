@@ -57,7 +57,7 @@ export NOWLEDGE_WRAPPER_IDENTITY="nowledge-previous-wrapper:local-copy"
 
 Use the checked-in bundle runner for release preflight. It runs the full
 contract, adapter smoke, storage recovery, background maintenance, migration
-gate, replacement summary, query runtime preflight, and final preflight
+gate, query runtime preflight, replacement summary, and final preflight
 verifier in the fail-closed order documented below:
 
 ```bash
@@ -66,6 +66,7 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --nowledge-root /Users/hawkingrei/devel/nowledge/mem \
   --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
   --require-integration-readiness \
+  --search-candidate-shadow-evidence-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-evidence.json" \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
   --query-runtime-probe-json "$NMEM_PREFLIGHT_ROOT/query-runtime-probes.json" \
   --integration-submodule-path vendor/skein \
@@ -229,10 +230,21 @@ jq -e '
 
 ## 6. Produce The Replacement Summary
 
+Generate `query-runtime-preflight.json` before this step. The replacement
+summary is fail-closed and must consume the same bounded-read, query-family,
+search projection, search candidate, and query-runtime evidence that the final
+preflight bundle will later verify.
+
 ```bash
 cargo run --quiet --bin skein -- \
   nowledge-replacement-summary \
   --require-production-ready \
+  --query-family-evidence-json "$NMEM_PREFLIGHT_ROOT/query-family-evidence.json" \
+  --bounded-read-evidence-json "$NMEM_PREFLIGHT_ROOT/bounded-read-evidence.json" \
+  --query-runtime-preflight-json "$NMEM_PREFLIGHT_ROOT/query-runtime-preflight.json" \
+  --search-projection-evidence-json "$NMEM_PREFLIGHT_ROOT/search-projection-evidence.json" \
+  --search-projection-shadow-evidence-json "$NMEM_PREFLIGHT_ROOT/search-projection-shadow-evidence.json" \
+  --search-candidate-shadow-evidence-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-evidence.json" \
   "$NMEM_PREFLIGHT_ROOT/migration-gate.json" \
   > "$NMEM_PREFLIGHT_ROOT/replacement-summary.json"
 ```
@@ -520,6 +532,7 @@ cargo run --quiet --bin skein -- \
   --bounded-read-evidence-json "$NMEM_PREFLIGHT_ROOT/bounded-read-evidence.json" \
   --graph-route-readiness-json "$NMEM_PREFLIGHT_ROOT/graph-route-readiness.json" \
   --query-runtime-preflight-json "$NMEM_PREFLIGHT_ROOT/query-runtime-preflight.json" \
+  --search-candidate-shadow-evidence-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-evidence.json" \
   --library-readiness-json "$NMEM_PREFLIGHT_ROOT/library-readiness.json" \
   > "$NMEM_PREFLIGHT_ROOT/integration-bundle.json"
 ```

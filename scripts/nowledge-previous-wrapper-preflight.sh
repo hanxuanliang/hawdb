@@ -14,6 +14,7 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--shadow-timeout-ms <ms>] \
   [--search-projection-evidence-json <path>] \
   [--search-projection-shadow-evidence-json <path>] \
+  [--search-candidate-shadow-evidence-json <path>] \
   [--bounded-read-evidence-json <path>] \
   [--bounded-read-report-json <path>] \
   [--bounded-read-database <path>] \
@@ -55,6 +56,7 @@ wrapper_identity=
 shadow_timeout_ms=
 search_projection_evidence_json=
 search_projection_shadow_evidence_json=
+search_candidate_shadow_evidence_json=
 bounded_read_evidence_json=
 bounded_read_report_json=
 bounded_read_database=
@@ -107,6 +109,10 @@ while (($# > 0)); do
       ;;
     --search-projection-shadow-evidence-json)
       search_projection_shadow_evidence_json="${2:-}"
+      shift 2
+      ;;
+    --search-candidate-shadow-evidence-json)
+      search_candidate_shadow_evidence_json="${2:-}"
       shift 2
       ;;
     --bounded-read-evidence-json)
@@ -250,6 +256,7 @@ fi
 for evidence_path in \
   "$search_projection_evidence_json" \
   "$search_projection_shadow_evidence_json" \
+  "$search_candidate_shadow_evidence_json" \
   "$bounded_read_evidence_json" \
   "$bounded_read_report_json" \
   "$library_readiness_json" \
@@ -321,6 +328,10 @@ if [[ "$require_integration_readiness" == true ]]; then
   fi
   if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" ]]; then
     echo "--require-integration-readiness requires --query-runtime-preflight-json or --query-runtime-probe-json" >&2
+    exit 2
+  fi
+  if [[ -z "$search_candidate_shadow_evidence_json" ]]; then
+    echo "--require-integration-readiness requires --search-candidate-shadow-evidence-json" >&2
     exit 2
   fi
   if [[ -z "$integration_submodule_path" ]]; then
@@ -495,8 +506,21 @@ if [[ -z "$bounded_read_evidence_json" ]]; then
   fi
 fi
 
+if [[ -n "$query_runtime_preflight_json" ]]; then
+  if [[ "$query_runtime_preflight_json" != "$preflight_root/query-runtime-preflight.json" ]]; then
+    cp "$query_runtime_preflight_json" "$preflight_root/query-runtime-preflight.json"
+  fi
+else
+  run_skein nowledge-query-runtime-preflight \
+    --require-ready \
+    --probe-json "$query_runtime_probe_json" \
+    "${query_runtime_database:-$skein_preflight_db}" \
+    > "$preflight_root/query-runtime-preflight.json"
+fi
+
 replacement_summary_evidence_args=(
   --query-family-evidence-json "$preflight_root/query-family-evidence.json"
+  --query-runtime-preflight-json "$preflight_root/query-runtime-preflight.json"
 )
 if [[ -n "$search_projection_evidence_json" ]]; then
   replacement_summary_evidence_args+=(
@@ -506,6 +530,11 @@ fi
 if [[ -n "$search_projection_shadow_evidence_json" ]]; then
   replacement_summary_evidence_args+=(
     --search-projection-shadow-evidence-json "$search_projection_shadow_evidence_json"
+  )
+fi
+if [[ -n "$search_candidate_shadow_evidence_json" ]]; then
+  replacement_summary_evidence_args+=(
+    --search-candidate-shadow-evidence-json "$search_candidate_shadow_evidence_json"
   )
 fi
 if [[ -n "$bounded_read_evidence_json" ]]; then
@@ -555,18 +584,6 @@ else
     > "$preflight_root/library-readiness.json"
 fi
 
-if [[ -n "$query_runtime_preflight_json" ]]; then
-  if [[ "$query_runtime_preflight_json" != "$preflight_root/query-runtime-preflight.json" ]]; then
-    cp "$query_runtime_preflight_json" "$preflight_root/query-runtime-preflight.json"
-  fi
-else
-  run_skein nowledge-query-runtime-preflight \
-    --require-ready \
-    --probe-json "$query_runtime_probe_json" \
-    "${query_runtime_database:-$skein_preflight_db}" \
-    > "$preflight_root/query-runtime-preflight.json"
-fi
-
 run_skein nowledge-previous-wrapper-preflight-check \
   --require-ready \
   --wrapper-identity "$wrapper_identity" \
@@ -585,6 +602,7 @@ if [[ "$require_integration_readiness" == true ]]; then
     --bounded-read-evidence-json "$bounded_read_evidence_json"
     --graph-route-readiness-json "$graph_route_readiness_json"
     --query-runtime-preflight-json "$preflight_root/query-runtime-preflight.json"
+    --search-candidate-shadow-evidence-json "$search_candidate_shadow_evidence_json"
     --library-readiness-json "$preflight_root/library-readiness.json"
   )
   if [[ "$integration_legacy_data_retained" == true ]]; then
