@@ -128,6 +128,8 @@ pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-rep
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-search-candidate-report-v1";
+pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_READINESS_PROTOCOL: &str =
+    "skein-nowledge-mem-search-candidate-readiness-v1";
 pub const NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-slow-query-report-v1";
 pub const NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL: &str =
     "skein-nowledge-mem-readiness-dashboard-v1";
@@ -1725,6 +1727,172 @@ pub struct NowledgeMemSearchCandidateOutput {
     pub report: NowledgeMemSearchCandidateReport,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSearchCandidateReadinessOptions {
+    pub require_hits: bool,
+    pub require_metadata_pushdown: bool,
+    pub require_segment_descriptor: bool,
+    pub require_text_retriever: bool,
+    pub require_vector_retriever: bool,
+    pub require_source_chunk_identity: bool,
+    pub require_fail_soft_observation: bool,
+    pub require_projection_marker_status: bool,
+}
+
+impl Default for NowledgeMemSearchCandidateReadinessOptions {
+    fn default() -> Self {
+        Self {
+            require_hits: true,
+            require_metadata_pushdown: false,
+            require_segment_descriptor: false,
+            require_text_retriever: false,
+            require_vector_retriever: false,
+            require_source_chunk_identity: false,
+            require_fail_soft_observation: false,
+            require_projection_marker_status: true,
+        }
+    }
+}
+
+impl NowledgeMemSearchCandidateReadinessOptions {
+    pub fn lancedb_replacement_candidate_read() -> Self {
+        Self {
+            require_metadata_pushdown: true,
+            require_segment_descriptor: true,
+            require_projection_marker_status: true,
+            ..Self::default()
+        }
+    }
+
+    pub fn with_source_chunk_identity(mut self, required: bool) -> Self {
+        self.require_source_chunk_identity = required;
+        self
+    }
+
+    pub fn with_vector_retriever(mut self, required: bool) -> Self {
+        self.require_vector_retriever = required;
+        self
+    }
+
+    pub fn with_text_retriever(mut self, required: bool) -> Self {
+        self.require_text_retriever = required;
+        self
+    }
+
+    pub fn with_fail_soft_observation(mut self, required: bool) -> Self {
+        self.require_fail_soft_observation = required;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemSearchCandidateReadinessReport {
+    pub protocol: String,
+    pub present: bool,
+    pub ready: bool,
+    pub mode: SearchMode,
+    pub blocker_codes: Vec<String>,
+    pub candidate_report: NowledgeMemSearchCandidateReport,
+    pub metadata_pushdown_ready: bool,
+    pub segment_descriptor_ready: bool,
+    pub text_retriever_ready: bool,
+    pub vector_retriever_ready: bool,
+    pub source_chunk_identity_ready: bool,
+    pub fail_soft_observed: bool,
+    pub projection_marker_status_visible: bool,
+}
+
+impl NowledgeMemSearchCandidateReadinessReport {
+    pub fn from_candidate_report(
+        candidate_report: NowledgeMemSearchCandidateReport,
+        options: &NowledgeMemSearchCandidateReadinessOptions,
+    ) -> Self {
+        let metadata_pushdown_ready = candidate_report.metadata_filter_count > 0
+            && candidate_report.pushed_predicate_count >= candidate_report.metadata_filter_count
+            && candidate_report.residual_predicate_count == 0;
+        let segment_descriptor_ready = candidate_report.persisted_segment_descriptor_used;
+        let text_retriever_ready = candidate_report
+            .retriever_available
+            .get("text")
+            .copied()
+            .unwrap_or(false);
+        let vector_retriever_ready = candidate_report
+            .retriever_available
+            .get("vector")
+            .copied()
+            .unwrap_or(false);
+        let source_chunk_identity_ready = candidate_report
+            .returned_kind_counts
+            .get("source_chunk")
+            .copied()
+            .unwrap_or_default()
+            > 0
+            && candidate_report.returned_missing_external_id_count == 0
+            && candidate_report.returned_missing_source_id_count == 0;
+        let fail_soft_observed = !candidate_report.fallback_reason_codes.is_empty()
+            && candidate_report.returned_hit_count > 0;
+        let projection_marker_status_visible =
+            candidate_report.protocol == NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL;
+        let blocker_codes = search_candidate_readiness_blocker_codes(
+            &candidate_report,
+            options,
+            metadata_pushdown_ready,
+            segment_descriptor_ready,
+            text_retriever_ready,
+            vector_retriever_ready,
+            source_chunk_identity_ready,
+            fail_soft_observed,
+            projection_marker_status_visible,
+        );
+
+        Self {
+            protocol: NOWLEDGE_MEM_SEARCH_CANDIDATE_READINESS_PROTOCOL.to_string(),
+            present: true,
+            ready: blocker_codes.is_empty(),
+            mode: candidate_report.mode,
+            blocker_codes,
+            candidate_report,
+            metadata_pushdown_ready,
+            segment_descriptor_ready,
+            text_retriever_ready,
+            vector_retriever_ready,
+            source_chunk_identity_ready,
+            fail_soft_observed,
+            projection_marker_status_visible,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "present": self.present,
+            "ready": self.ready,
+            "mode": search_mode_name(self.mode),
+            "blocker_codes": self.blocker_codes,
+            "candidate_report": self.candidate_report.json(),
+            "metadata_pushdown_ready": self.metadata_pushdown_ready,
+            "segment_descriptor_ready": self.segment_descriptor_ready,
+            "text_retriever_ready": self.text_retriever_ready,
+            "vector_retriever_ready": self.vector_retriever_ready,
+            "source_chunk_identity_ready": self.source_chunk_identity_ready,
+            "fail_soft_observed": self.fail_soft_observed,
+            "projection_marker_status_visible": self.projection_marker_status_visible,
+        })
+    }
+}
+
+impl NowledgeMemSearchCandidateOutput {
+    pub fn readiness_report(
+        &self,
+        options: &NowledgeMemSearchCandidateReadinessOptions,
+    ) -> NowledgeMemSearchCandidateReadinessReport {
+        NowledgeMemSearchCandidateReadinessReport::from_candidate_report(
+            self.report.clone(),
+            options,
+        )
+    }
+}
+
 impl NowledgeMemGraph {
     pub fn open(path: impl AsRef<Path>, mode: NowledgeMemGraphMode) -> Result<Self> {
         let db = Database::open_with_config(path, nowledge_mem_graph_config(mode))?;
@@ -1967,6 +2135,15 @@ impl NowledgeMemSearchProjection {
         let report = nowledge_mem_search_candidate_report(request, &result);
         NowledgeMemSearchCandidateOutput { result, report }
     }
+
+    pub fn search_candidate_readiness(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+        options: &NowledgeMemSearchCandidateReadinessOptions,
+    ) -> NowledgeMemSearchCandidateReadinessReport {
+        self.search_candidates_with_report(request)
+            .readiness_report(options)
+    }
 }
 
 #[derive(Debug)]
@@ -2056,6 +2233,15 @@ impl NowledgeMemEmbeddedStoreHandle {
         request: &NowledgeMemSearchCandidateRequest,
     ) -> Result<NowledgeMemSearchCandidateOutput> {
         self.lock_store()?.search_candidates(request)
+    }
+
+    pub fn search_candidate_readiness(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+        options: &NowledgeMemSearchCandidateReadinessOptions,
+    ) -> Result<NowledgeMemSearchCandidateReadinessReport> {
+        self.lock_store()?
+            .search_candidate_readiness(request, options)
     }
 
     pub fn slow_query_report(&self) -> Result<NowledgeMemSlowQueryReport> {
@@ -2274,6 +2460,16 @@ impl NowledgeMemEmbeddedStore {
         Ok(self
             .require_search_projection()?
             .search_candidates_with_report(request))
+    }
+
+    pub fn search_candidate_readiness(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+        options: &NowledgeMemSearchCandidateReadinessOptions,
+    ) -> Result<NowledgeMemSearchCandidateReadinessReport> {
+        Ok(self
+            .require_search_projection()?
+            .search_candidate_readiness(request, options))
     }
 
     pub fn retrieve_knowledge(
@@ -3427,6 +3623,62 @@ fn nowledge_mem_search_candidate_report(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn search_candidate_readiness_blocker_codes(
+    candidate_report: &NowledgeMemSearchCandidateReport,
+    options: &NowledgeMemSearchCandidateReadinessOptions,
+    metadata_pushdown_ready: bool,
+    segment_descriptor_ready: bool,
+    text_retriever_ready: bool,
+    vector_retriever_ready: bool,
+    source_chunk_identity_ready: bool,
+    fail_soft_observed: bool,
+    projection_marker_status_visible: bool,
+) -> Vec<String> {
+    let mut blockers = BTreeSet::new();
+
+    if candidate_report.protocol != NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL {
+        blockers.insert("search_candidate_report_protocol_mismatch");
+    }
+    if options.require_hits && candidate_report.returned_hit_count == 0 {
+        blockers.insert("search_candidate_no_hits");
+    }
+    if options.require_metadata_pushdown {
+        if candidate_report.metadata_filter_count == 0 {
+            blockers.insert("search_candidate_metadata_filter_missing");
+        }
+        if !metadata_pushdown_ready {
+            blockers.insert("search_candidate_metadata_filter_not_fully_pushed");
+        }
+    }
+    if candidate_report.residual_predicate_count > 0 {
+        blockers.insert("search_candidate_metadata_filter_residual");
+    }
+    if options.require_segment_descriptor && !segment_descriptor_ready {
+        blockers.insert("search_candidate_segment_descriptor_not_used");
+    }
+    if options.require_text_retriever && !text_retriever_ready {
+        blockers.insert("search_candidate_text_retriever_unavailable");
+    }
+    if options.require_vector_retriever && !vector_retriever_ready {
+        blockers.insert("search_candidate_vector_retriever_unavailable");
+    }
+    if options.require_source_chunk_identity && !source_chunk_identity_ready {
+        blockers.insert("search_candidate_source_chunk_identity_missing");
+    }
+    if options.require_fail_soft_observation && !fail_soft_observed {
+        blockers.insert("search_candidate_fail_soft_not_observed");
+    }
+    if options.require_projection_marker_status && !projection_marker_status_visible {
+        blockers.insert("search_candidate_projection_marker_status_missing");
+    }
+
+    blockers
+        .into_iter()
+        .map(std::string::ToString::to_string)
+        .collect()
+}
+
 fn search_candidate_returned_kind_counts(
     hits: &[crate::search::SearchHit],
 ) -> BTreeMap<String, usize> {
@@ -3658,15 +3910,16 @@ mod tests {
         NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions,
         NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessAreaSummary,
         NowledgeMemReadinessDashboard, NowledgeMemReadinessOptions,
-        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateRequest,
-        NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
-        NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
-        NowledgeQueryRuntimePreflightProbe, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL,
-        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateReadinessOptions,
+        NowledgeMemSearchCandidateRequest, NowledgeMemSearchCandidateShadowAccumulator,
+        NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
+        NowledgeMemStorageRecoveryReport, NowledgeQueryRuntimePreflightProbe,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_READINESS_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
@@ -5498,6 +5751,118 @@ mod tests {
             .json()
             .to_string()
             .contains("source chunk identity candidate read"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_candidate_readiness_reports_lancedb_replacement_ready_shape() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_readiness_ready");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::SourceChunk,
+                    external_id: "chunk-ready".to_string(),
+                    title: "Ready source chunk".to_string(),
+                    body: "ready candidate replacement body".to_string(),
+                    embedding: None,
+                    source_id: Some("source-ready".to_string()),
+                    metadata: BTreeMap::from([
+                        ("space_id".to_string(), "default".to_string()),
+                        ("lifecycle_state".to_string(), "active".to_string()),
+                    ]),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let handle = NowledgeMemEmbeddedStoreHandle::new(NowledgeMemEmbeddedStore::new(
+            graph,
+            Some(projection),
+        ));
+        let request = NowledgeMemSearchCandidateRequest::text("ready source chunk", 10)
+            .with_metadata_filters(BTreeMap::from([(
+                "kind__in".to_string(),
+                r#"["source_chunk"]"#.to_string(),
+            )]));
+        let options =
+            NowledgeMemSearchCandidateReadinessOptions::lancedb_replacement_candidate_read()
+                .with_text_retriever(true)
+                .with_source_chunk_identity(true);
+
+        let readiness = handle
+            .search_candidate_readiness(&request, &options)
+            .unwrap();
+
+        assert!(readiness.ready);
+        assert!(readiness.present);
+        assert_eq!(
+            readiness.protocol,
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_READINESS_PROTOCOL
+        );
+        assert!(readiness.metadata_pushdown_ready);
+        assert!(readiness.segment_descriptor_ready);
+        assert!(readiness.text_retriever_ready);
+        assert!(readiness.source_chunk_identity_ready);
+        assert!(readiness.projection_marker_status_visible);
+        assert!(readiness.blocker_codes.is_empty());
+        assert_eq!(
+            readiness
+                .candidate_report
+                .returned_kind_counts
+                .get("source_chunk"),
+            Some(&1)
+        );
+        assert!(!readiness
+            .json()
+            .to_string()
+            .contains("ready candidate replacement body"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_candidate_readiness_blocks_missing_source_chunk_identity() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_readiness_blocked");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "memory-only".to_string(),
+                    title: "Memory only candidate".to_string(),
+                    body: "memory only candidate replacement body".to_string(),
+                    embedding: None,
+                    source_id: Some("source-memory".to_string()),
+                    metadata: BTreeMap::from([
+                        ("space_id".to_string(), "default".to_string()),
+                        ("lifecycle_state".to_string(), "active".to_string()),
+                    ]),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let request = NowledgeMemSearchCandidateRequest::text("memory only candidate", 10);
+        let options =
+            NowledgeMemSearchCandidateReadinessOptions::default().with_source_chunk_identity(true);
+
+        let readiness = projection.search_candidate_readiness(&request, &options);
+
+        assert!(!readiness.ready);
+        assert_eq!(readiness.candidate_report.returned_hit_count, 1);
+        assert!(!readiness.source_chunk_identity_ready);
+        assert!(readiness
+            .blocker_codes
+            .iter()
+            .any(|code| code == "search_candidate_source_chunk_identity_missing"));
+        assert!(!readiness
+            .json()
+            .to_string()
+            .contains("memory only candidate replacement body"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

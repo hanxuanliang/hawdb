@@ -136,6 +136,10 @@ query family, or cutover gate requires them.
     - [x] Cover repair/rebuild markers in the same compact candidate report,
       including no-hit responses, without copying marker reasons or document
       bodies into reports.
+    - [x] Expose typed search candidate replacement readiness through Rust
+      library APIs so Mem can fail closed on missing pushdown, retriever,
+      source-chunk identity, fail-soft, or projection-marker evidence without
+      shelling out to CLI probes.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
@@ -173,6 +177,8 @@ query family, or cutover gate requires them.
     library APIs while preserving redacted JSON output.
   - [x] Expose replacement summary gate generation through Rust library APIs
     and keep the CLI as a thin wrapper.
+  - [x] Expose typed search candidate replacement readiness through Rust
+    library APIs for route-level LanceDB replacement gates.
   - Keep reports compact and redacted by default so production can keep them on.
   - CLI tools may wrap library APIs for developer workflows, but must not be the
     only supported interface.
