@@ -20,6 +20,7 @@ pub mod qos;
 pub mod query_family_evidence;
 pub mod replacement_summary;
 pub mod search;
+pub mod search_candidate_shadow_evidence;
 pub mod storage_recovery_evidence;
 pub mod store;
 
@@ -218,6 +219,10 @@ pub use search::{
     SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow, SearchRebuildOptions,
     SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
     SearchTruncationReasonCode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+};
+pub use search_candidate_shadow_evidence::{
+    nowledge_search_candidate_shadow_evidence_usage, parse_search_candidate_shadow_probe,
+    run_nowledge_search_candidate_shadow_evidence,
 };
 pub use search_projection_evidence::NowledgeSearchProjectionEvidenceReport;
 pub use skein_optimizer::{
