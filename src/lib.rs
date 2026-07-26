@@ -18,6 +18,7 @@ pub mod planner;
 pub mod previous_wrapper_preflight;
 pub mod qos;
 pub mod query_family_evidence;
+pub mod query_runtime_preflight;
 pub mod replacement_summary;
 pub mod search;
 pub mod search_candidate_shadow_evidence;
@@ -200,6 +201,10 @@ pub use qos::{
 pub use query_family_evidence::{
     nowledge_query_family_evidence_json, nowledge_query_family_evidence_usage,
     run_nowledge_query_family_evidence,
+};
+pub use query_runtime_preflight::{
+    nowledge_query_runtime_preflight_usage, parse_query_runtime_preflight_probes,
+    query_runtime_preflight_json, run_nowledge_query_runtime_preflight,
 };
 pub use replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,

@@ -153,6 +153,8 @@ query family, or cutover gate requires them.
     evidence without rows, parameters, or local paths.
   - [x] Expose typed query-runtime preflight probes and reports through the
     embedded Mem library facade.
+  - [x] Route query-runtime preflight command plumbing through the embedded Mem
+    library facade so CLI and in-process callers use the same execution path.
   - [x] Expose previous-wrapper preflight checks as typed Rust library reports
     and keep the CLI as a thin wrapper.
   - [x] Expose Nowledge Mem integration readiness as a typed Rust library gate
