@@ -117,6 +117,11 @@ query family, or cutover gate requires them.
   and background-maintenance blockers.
 - [x] Add stable counters for plan cache hit, miss, admission, eviction, and
   memory pressure.
+- [ ] Add concurrency model and race-oriented tests for shared library state.
+  - [x] Cover bounded LFU plan cache invariants with a feature-gated Loom model
+    in CI.
+  - Add model or sanitizer coverage for slow-query ring and background
+    maintenance admission queues before they become heavily shared Mem paths.
 - [ ] Add library readiness APIs for Mem integration.
   - Expose structured readiness, slow-query, blackbox, storage-recovery,
     background-maintenance, and search-projection reports through Rust APIs.

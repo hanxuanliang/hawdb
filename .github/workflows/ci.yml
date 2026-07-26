@@ -598,3 +598,16 @@ jobs:
           grep -q '"eligible": false' "$root/gate.json"
           grep -q '"shadow_ready"' "$root/gate.json"
           grep -q "nowledge migration gate is blocked" "$root/gate.err"
+
+  concurrency-model:
+    name: Concurrency Model
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Loom plan cache model
+        run: cargo test -p skein-plan-cache --features loom-tests loom_tests

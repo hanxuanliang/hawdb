@@ -252,3 +252,44 @@ mod tests {
         assert!(stats.memory_pressure_events > 0);
     }
 }
+
+#[cfg(all(test, feature = "loom-tests"))]
+mod loom_tests {
+    use super::LfuCache;
+    use loom::sync::{Arc, Mutex};
+    use loom::thread;
+
+    #[test]
+    fn lfu_cache_preserves_bounds_under_modeled_concurrent_access() {
+        loom::model(|| {
+            let cache = Arc::new(Mutex::new(LfuCache::new(Some(2))));
+
+            let writer = {
+                let cache = Arc::clone(&cache);
+                thread::spawn(move || {
+                    let mut cache = cache.lock().unwrap();
+                    cache.insert("first", 1);
+                    cache.insert("second", 2);
+                })
+            };
+
+            let reader_writer = {
+                let cache = Arc::clone(&cache);
+                thread::spawn(move || {
+                    let mut cache = cache.lock().unwrap();
+                    let _ = cache.get(&"first");
+                    cache.insert("third", 3);
+                })
+            };
+
+            writer.join().unwrap();
+            reader_writer.join().unwrap();
+
+            let stats = cache.lock().unwrap().stats();
+            assert!(stats.entries <= 2);
+            assert!(stats.admissions <= 3);
+            assert!(stats.evictions <= 1);
+            assert_eq!(stats.max_entries, Some(2));
+        });
+    }
+}
