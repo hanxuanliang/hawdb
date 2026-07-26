@@ -12,6 +12,7 @@ mod cli_query_family_evidence;
 mod cli_query_runtime_preflight;
 mod cli_replacement_summary;
 mod cli_search_candidate_shadow_evidence;
+mod cli_search_projection_evidence;
 mod cli_storage_recovery_evidence;
 
 use cli_background_maintenance_evidence::run_nowledge_background_maintenance_evidence;
@@ -33,13 +34,13 @@ use cli_replacement_summary::{
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
 use cli_search_candidate_shadow_evidence::run_nowledge_search_candidate_shadow_evidence;
-use cli_storage_recovery_evidence::run_nowledge_storage_recovery_evidence;
-use skein::nowledge_inventory::background_maintenance_summary_to_json;
-use skein::search_projection_evidence::{
+use cli_search_projection_evidence::{
     nowledge_search_projection_probe_contract_json,
     nowledge_search_projection_probe_contract_usage, run_nowledge_search_projection_evidence,
     run_nowledge_search_projection_shadow_evidence, run_skein_search_projection_probe,
 };
+use cli_storage_recovery_evidence::run_nowledge_storage_recovery_evidence;
+use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::{
     background_maintenance_evidence_health_from_bundle, external_shadow_ready_missing_capabilities,
     external_shadow_trace_health_from_bundle, external_shadow_trace_report_json,

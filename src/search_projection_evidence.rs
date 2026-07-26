@@ -1,9 +1,5 @@
-use skein::{
-    Result, SearchIndex, SearchProjectionProbeOptions, SkeinError,
-    NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
-};
+use crate::NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS;
 use std::collections::BTreeSet;
-use std::path::Path;
 
 const REQUIRED_TABLES: &[&str] = &[
     "memories_index",
@@ -24,26 +20,7 @@ const VECTOR_TABLES: &[&str] = &[
 
 const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
     "skein_search_projection_segment_descriptor_fields_missing";
-const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-cli";
-
-pub fn nowledge_search_projection_evidence_usage() -> String {
-    "nowledge-search-projection-evidence requires [--require-ready] <search-projection-probe-json>"
-        .to_string()
-}
-
-pub fn skein_search_projection_probe_usage() -> String {
-    "skein-search-projection-probe requires [--active-model <model>] [--active-dimension <dimension>] <search-index-dir>"
-        .to_string()
-}
-
-pub fn nowledge_search_projection_shadow_evidence_usage() -> String {
-    "nowledge-search-projection-shadow-evidence requires [--require-ready] --primary-probe-json <path> --shadow-probe-json <path>"
-        .to_string()
-}
-
-pub fn nowledge_search_projection_probe_contract_usage() -> String {
-    "nowledge-search-projection-probe-contract requires no arguments".to_string()
-}
+const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
 
 pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
     serde_json::json!({
@@ -128,105 +105,6 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
         "example_primary_probe": ready_probe_template("lancedb"),
         "example_skein_probe": ready_probe_template("skein"),
     })
-}
-
-pub fn run_nowledge_search_projection_evidence(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(serde_json::Value, bool)> {
-    let mut require_ready = false;
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "--require-ready" => {
-                require_ready = true;
-            }
-            path => {
-                if args.next().is_some() {
-                    return Err(SkeinError::Semantic(
-                        nowledge_search_projection_evidence_usage(),
-                    ));
-                }
-                let probe = read_json_file(Path::new(path))?;
-                return Ok((
-                    nowledge_search_projection_evidence_json(&probe),
-                    require_ready,
-                ));
-            }
-        }
-    }
-    Err(SkeinError::Semantic(
-        nowledge_search_projection_evidence_usage(),
-    ))
-}
-
-pub fn run_skein_search_projection_probe(
-    mut args: impl Iterator<Item = String>,
-) -> Result<serde_json::Value> {
-    let mut options = SearchProjectionProbeOptions::default();
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "--active-model" => {
-                options.active_embedding_model =
-                    Some(args.next().ok_or_else(|| {
-                        SkeinError::Semantic(skein_search_projection_probe_usage())
-                    })?);
-            }
-            "--active-dimension" => {
-                let raw_dimension = args
-                    .next()
-                    .ok_or_else(|| SkeinError::Semantic(skein_search_projection_probe_usage()))?;
-                options.active_embedding_dimension =
-                    Some(parse_positive_usize("--active-dimension", &raw_dimension)?);
-            }
-            path => {
-                if args.next().is_some() {
-                    return Err(SkeinError::Semantic(skein_search_projection_probe_usage()));
-                }
-                let index = SearchIndex::open(path)?;
-                return Ok(index.nowledge_search_projection_probe_json(options));
-            }
-        }
-    }
-    Err(SkeinError::Semantic(skein_search_projection_probe_usage()))
-}
-
-pub fn run_nowledge_search_projection_shadow_evidence(
-    mut args: impl Iterator<Item = String>,
-) -> Result<(serde_json::Value, bool)> {
-    let mut require_ready = false;
-    let mut primary_probe = None;
-    let mut shadow_probe = None;
-    while let Some(flag) = args.next() {
-        match flag.as_str() {
-            "--require-ready" => {
-                require_ready = true;
-            }
-            "--primary-probe-json" => {
-                let path = args.next().ok_or_else(|| {
-                    SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage())
-                })?;
-                primary_probe = Some(read_json_file(Path::new(&path))?);
-            }
-            "--shadow-probe-json" => {
-                let path = args.next().ok_or_else(|| {
-                    SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage())
-                })?;
-                shadow_probe = Some(read_json_file(Path::new(&path))?);
-            }
-            _ => {
-                return Err(SkeinError::Semantic(
-                    nowledge_search_projection_shadow_evidence_usage(),
-                ));
-            }
-        }
-    }
-    let primary_probe = primary_probe
-        .ok_or_else(|| SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
-    let shadow_probe = shadow_probe
-        .ok_or_else(|| SkeinError::Semantic(nowledge_search_projection_shadow_evidence_usage()))?;
-    Ok((
-        nowledge_search_projection_shadow_evidence_json(&primary_probe, &shadow_probe),
-        require_ready,
-    ))
 }
 
 pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> serde_json::Value {
@@ -958,31 +836,6 @@ fn find_table<'a>(probe: &'a serde_json::Value, name: &str) -> Option<&'a serde_
         .find(|table| str_path(table, &["name"]) == Some(name))
 }
 
-fn read_json_file(path: &Path) -> Result<serde_json::Value> {
-    let content = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to read search projection evidence JSON: {error}"
-        ))
-    })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse search projection evidence JSON: {error}"
-        ))
-    })
-}
-
-fn parse_positive_usize(flag: &str, value: &str) -> Result<usize> {
-    let parsed = value.parse::<usize>().map_err(|error| {
-        SkeinError::Semantic(format!("invalid {flag} value '{value}': {error}"))
-    })?;
-    if parsed == 0 {
-        return Err(SkeinError::Semantic(format!(
-            "invalid {flag} value '{value}': expected a positive integer"
-        )));
-    }
-    Ok(parsed)
-}
-
 fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a serde_json::Value> {
     let mut current = value;
     for key in path {
@@ -1018,10 +871,10 @@ fn array_path(value: &serde_json::Value, path: &[&str]) -> Option<Vec<String>> {
 mod tests {
     use super::{
         nowledge_search_projection_evidence_json, nowledge_search_projection_probe_contract_json,
-        nowledge_search_projection_shadow_evidence_json, run_skein_search_projection_probe,
+        nowledge_search_projection_shadow_evidence_json,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
     };
-    use skein::{
+    use crate::{
         SearchEmbeddingManifest, SearchIndex, SearchProjectionDelta, SearchProjectionKind,
         SearchProjectionRow,
     };
@@ -1286,18 +1139,12 @@ mod tests {
             index.checkpoint().unwrap();
         }
 
-        let probe = run_skein_search_projection_probe(
-            [
-                "--active-model",
-                "bge-m3",
-                "--active-dimension",
-                "8",
-                path.to_str().unwrap(),
-            ]
-            .into_iter()
-            .map(str::to_string),
-        )
-        .unwrap();
+        let probe = SearchIndex::open(&path)
+            .unwrap()
+            .nowledge_search_projection_probe_json(crate::SearchProjectionProbeOptions {
+                active_embedding_model: Some("bge-m3".to_string()),
+                active_embedding_dimension: Some(8),
+            });
         let evidence = nowledge_search_projection_evidence_json(&probe);
 
         assert_eq!(probe["protocol"], "skein-nowledge-search-projection-probe");
@@ -1339,7 +1186,7 @@ mod tests {
         let report = nowledge_search_projection_shadow_evidence_json(&primary, &shadow);
 
         assert_eq!(report["ready"], true);
-        assert_eq!(report["evidence_source"], "skein-rust-cli");
+        assert_eq!(report["evidence_source"], "skein-rust-library");
         assert_eq!(report["primary_ready"], true);
         assert_eq!(report["shadow_ready"], true);
         assert_eq!(report["document_count_parity"], true);
@@ -1478,15 +1325,6 @@ mod tests {
             .unwrap()
             .iter()
             .any(|code| code == "document_identity_mismatch"));
-    }
-
-    #[test]
-    fn search_projection_evidence_read_errors_do_not_echo_paths() {
-        let path = PathBuf::from("missing-search-projection-evidence-redaction.json");
-
-        let error = super::read_json_file(&path).unwrap_err();
-
-        assert!(!error.to_string().contains("missing-search-projection"));
     }
 
     fn ready_probe() -> serde_json::Value {
