@@ -1,7 +1,9 @@
 pub mod analytics;
 pub mod api;
+pub mod blackbox;
 pub mod compat;
 pub mod cypher;
+pub mod embedded;
 pub mod executor;
 pub mod nowledge_inventory;
 pub mod nowledge_mem;
@@ -55,8 +57,13 @@ pub use api::{
     KnowledgeTruncationReasonCode, NowledgeGraphAdapter, NowledgeGraphExplainOutput,
     NowledgeGraphStatement, NowledgeGraphTransactionOutput, PlanCacheBypassReason, PlanCacheLookup,
     PlanCacheStats, QueryOutput, QuerySystemVariables, RankedBackgroundMaintenance,
-    SearchProjectionGraphDeltaRequest, GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION,
-    GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    SearchProjectionGraphDeltaRequest, SlowQueryLogExportOptions,
+    GRAPH_LIGHTNING_BOOTSTRAP_PROTOCOL_VERSION, GRAPH_LIGHTNING_GRAPH_STREAM_FORMAT_VERSION,
+    SLOW_QUERY_LOG_EVENT_PROTOCOL,
+};
+pub use blackbox::{
+    blackbox_report_json, write_blackbox_report, BlackboxReportOptions, BlackboxRunStatus,
+    BLACKBOX_EVENT_PROTOCOL, BLACKBOX_REPORT_PROTOCOL,
 };
 pub use compat::{
     assess_compatibility_cutover, assess_compatibility_cypher_migration_gate_bundle,
@@ -88,6 +95,7 @@ pub use compat::{
     REQUIRED_EXTERNAL_SHADOW_CAPABILITIES,
 };
 pub use cypher::RelationshipDirection;
+pub use embedded::{SkeinEmbedded, SkeinEmbeddedOpenOptions};
 pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
 pub use nowledge_inventory::{

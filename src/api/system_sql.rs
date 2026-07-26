@@ -151,6 +151,53 @@ impl SlowQueryLog {
     }
 }
 
+pub(crate) fn slow_query_log_jsonl(
+    records: &[SlowQueryRecord],
+    include_query_text: bool,
+) -> Result<String> {
+    let mut jsonl = String::new();
+    for record in records {
+        let line = serde_json::to_string(&slow_query_record_json(record, include_query_text))
+            .map_err(|error| {
+                SkeinError::Execution(format!("slow query log JSON error: {error}"))
+            })?;
+        jsonl.push_str(&line);
+        jsonl.push('\n');
+    }
+    Ok(jsonl)
+}
+
+fn slow_query_record_json(record: &SlowQueryRecord, include_query_text: bool) -> serde_json::Value {
+    let mut object = serde_json::json!({
+        "protocol": super::SLOW_QUERY_LOG_EVENT_PROTOCOL,
+        "protocol_version": 1,
+        "sequence": record.sequence,
+        "query_language": record.query_language,
+        "query_digest": statement_digest(
+            &record.query_language,
+            "unknown",
+            &record.query_text
+        ),
+        "started_unix_micros": record.started_unix_micros,
+        "elapsed_micros": record.elapsed_micros,
+        "row_count": record.row_count,
+        "success": record.success,
+        "slow_log_candidate": record.slow_log_candidate,
+        "redaction": {
+            "query_text_copied": include_query_text,
+            "parameters_copied": false
+        }
+    });
+    if include_query_text {
+        object["query_text"] = serde_json::Value::String(record.query_text.clone());
+    }
+    if let Some(error) = &record.error {
+        object["error"] =
+            serde_json::Value::String(truncate_utf8(error, MAX_STATEMENT_ERROR_BYTES));
+    }
+    object
+}
+
 impl StatementExecution {
     pub(crate) fn completed(
         query_language: &str,

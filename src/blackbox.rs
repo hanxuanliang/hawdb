@@ -1,12 +1,12 @@
-use skein::{Result, SkeinError};
+use crate::{Result, SkeinError};
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const BLACKBOX_REPORT_PROTOCOL: &str = "skein-blackbox-report-v1";
-const BLACKBOX_EVENT_PROTOCOL: &str = "skein-blackbox-event-v1";
+pub const BLACKBOX_REPORT_PROTOCOL: &str = "skein-blackbox-report-v1";
+pub const BLACKBOX_EVENT_PROTOCOL: &str = "skein-blackbox-event-v1";
 
 const KNOWN_ARTIFACTS: &[&str] = &[
     "contract.json",
@@ -38,90 +38,68 @@ const KNOWN_ARTIFACTS: &[&str] = &[
     "integration-bundle.json",
 ];
 
-pub fn nowledge_blackbox_report_usage() -> String {
-    "nowledge-blackbox-report requires --artifact-dir <dir> --output-dir <dir> [--run-id <id>] [--run-status completed|failed|running] [--exit-code <n>]".to_string()
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlackboxReportOptions {
+    pub artifact_dir: PathBuf,
+    pub output_dir: PathBuf,
+    pub run_id: Option<String>,
+    pub run_status: BlackboxRunStatus,
+    pub exit_code: Option<i64>,
 }
 
-pub fn run_nowledge_blackbox_report(
-    args: impl IntoIterator<Item = String>,
-) -> Result<serde_json::Value> {
-    let mut artifact_dir = None;
-    let mut output_dir = None;
-    let mut run_id = None;
-    let mut run_status = "completed".to_string();
-    let mut exit_code = None;
-    let mut iter = args.into_iter();
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--artifact-dir" => {
-                artifact_dir =
-                    Some(PathBuf::from(iter.next().ok_or_else(|| {
-                        SkeinError::Semantic(nowledge_blackbox_report_usage())
-                    })?));
-            }
-            "--output-dir" => {
-                output_dir =
-                    Some(PathBuf::from(iter.next().ok_or_else(|| {
-                        SkeinError::Semantic(nowledge_blackbox_report_usage())
-                    })?));
-            }
-            "--run-id" => {
-                run_id = Some(
-                    iter.next()
-                        .ok_or_else(|| SkeinError::Semantic(nowledge_blackbox_report_usage()))?,
-                );
-            }
-            "--run-status" => {
-                run_status = iter
-                    .next()
-                    .ok_or_else(|| SkeinError::Semantic(nowledge_blackbox_report_usage()))?;
-                if !matches!(run_status.as_str(), "completed" | "failed" | "running") {
-                    return Err(SkeinError::Semantic(nowledge_blackbox_report_usage()));
-                }
-            }
-            "--exit-code" => {
-                let raw = iter
-                    .next()
-                    .ok_or_else(|| SkeinError::Semantic(nowledge_blackbox_report_usage()))?;
-                exit_code = Some(
-                    raw.parse::<i64>()
-                        .map_err(|_| SkeinError::Semantic(nowledge_blackbox_report_usage()))?,
-                );
-            }
-            "--help" | "-h" => {
-                return Err(SkeinError::Semantic(nowledge_blackbox_report_usage()));
-            }
-            _ => return Err(SkeinError::Semantic(nowledge_blackbox_report_usage())),
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlackboxRunStatus {
+    Completed,
+    Failed,
+    Running,
+}
+
+impl BlackboxRunStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Running => "running",
         }
     }
+}
 
-    let artifact_dir =
-        artifact_dir.ok_or_else(|| SkeinError::Semantic(nowledge_blackbox_report_usage()))?;
-    let output_dir =
-        output_dir.ok_or_else(|| SkeinError::Semantic(nowledge_blackbox_report_usage()))?;
-    if !artifact_dir.is_dir() {
+impl std::str::FromStr for BlackboxRunStatus {
+    type Err = SkeinError;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "completed" => Ok(Self::Completed),
+            "failed" => Ok(Self::Failed),
+            "running" => Ok(Self::Running),
+            _ => Err(SkeinError::Semantic(
+                "blackbox run status must be completed, failed, or running".to_string(),
+            )),
+        }
+    }
+}
+
+pub fn blackbox_report_json(options: &BlackboxReportOptions) -> Result<serde_json::Value> {
+    if !options.artifact_dir.is_dir() {
         return Err(SkeinError::Semantic(
-            "--artifact-dir does not exist or is not a directory".to_string(),
+            "blackbox artifact_dir does not exist or is not a directory".to_string(),
         ));
     }
-    fs::create_dir_all(&output_dir)?;
-
     let generated_unix_seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| SkeinError::Execution(format!("system clock before unix epoch: {error}")))?
         .as_secs();
-    let run_id = run_id.unwrap_or_else(|| format!("skein-blackbox-{generated_unix_seconds}"));
-    let artifacts = collect_blackbox_artifacts(&artifact_dir)?;
-
-    let events_path = output_dir.join("events.jsonl");
-    write_blackbox_events(&events_path, &run_id, &artifacts)?;
-
-    let manifest = serde_json::json!({
+    let run_id = options
+        .run_id
+        .clone()
+        .unwrap_or_else(|| format!("skein-blackbox-{generated_unix_seconds}"));
+    let artifacts = collect_blackbox_artifacts(&options.artifact_dir)?;
+    Ok(serde_json::json!({
         "protocol": BLACKBOX_REPORT_PROTOCOL,
         "protocol_version": 1,
         "run_id": run_id,
-        "run_status": run_status,
-        "exit_code": exit_code,
+        "run_status": options.run_status.as_str(),
+        "exit_code": options.exit_code,
         "generated_unix_seconds": generated_unix_seconds,
         "artifact_dir_present": true,
         "artifact_count": artifacts.len(),
@@ -133,11 +111,28 @@ pub fn run_nowledge_blackbox_report(
             "raw_artifact_payloads_copied": false,
             "artifact_paths_are_relative": true
         }
-    });
-    let manifest_path = output_dir.join("manifest.json");
+    }))
+}
+
+pub fn write_blackbox_report(options: &BlackboxReportOptions) -> Result<serde_json::Value> {
+    fs::create_dir_all(&options.output_dir)?;
+    let manifest = blackbox_report_json(options)?;
+    let artifacts = manifest
+        .get("artifacts")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    write_blackbox_events(
+        &options.output_dir.join("events.jsonl"),
+        manifest
+            .get("run_id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("unknown"),
+        &artifacts,
+    )?;
     let manifest_bytes = serde_json::to_vec_pretty(&manifest)
         .map_err(|error| SkeinError::Execution(format!("blackbox manifest JSON error: {error}")))?;
-    fs::write(&manifest_path, manifest_bytes)?;
+    fs::write(options.output_dir.join("manifest.json"), manifest_bytes)?;
     Ok(manifest)
 }
 
@@ -316,18 +311,13 @@ mod tests {
         )
         .unwrap();
 
-        let manifest = run_nowledge_blackbox_report(vec![
-            "--artifact-dir".to_string(),
-            artifact_dir.display().to_string(),
-            "--output-dir".to_string(),
-            output_dir.display().to_string(),
-            "--run-id".to_string(),
-            "run-1".to_string(),
-            "--run-status".to_string(),
-            "failed".to_string(),
-            "--exit-code".to_string(),
-            "7".to_string(),
-        ])
+        let manifest = write_blackbox_report(&BlackboxReportOptions {
+            artifact_dir,
+            output_dir: output_dir.clone(),
+            run_id: Some("run-1".to_string()),
+            run_status: BlackboxRunStatus::Failed,
+            exit_code: Some(7),
+        })
         .unwrap();
 
         assert_eq!(manifest["protocol"], BLACKBOX_REPORT_PROTOCOL);

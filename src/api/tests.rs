@@ -27753,6 +27753,28 @@ fn sql_reads_completed_slow_query_ring() {
 }
 
 #[test]
+fn slow_query_jsonl_export_is_redacted_by_default() {
+    let mut db = Database::new_with_config(DatabaseConfig {
+        slow_query_log_threshold_micros: 0,
+        slow_query_log_capacity: 8,
+        ..DatabaseConfig::default()
+    });
+
+    db.query("CREATE (:Memory {id: 'secret-id', title: 'Sensitive title'})")
+        .unwrap();
+    db.query("MATCH (m:Memory {id: 'secret-id'}) RETURN m.title AS title")
+        .unwrap();
+
+    let jsonl = db.slow_query_log_jsonl().unwrap();
+
+    assert!(jsonl.contains("skein-slow-query-log-event-v1"));
+    assert!(jsonl.contains("query_digest"));
+    assert!(!jsonl.contains("MATCH"));
+    assert!(!jsonl.contains("secret-id"));
+    assert!(!jsonl.contains("Sensitive title"));
+}
+
+#[test]
 fn failed_cypher_queries_do_not_enter_slow_query_ring() {
     let mut db = Database::new_with_config(DatabaseConfig {
         read_only: true,

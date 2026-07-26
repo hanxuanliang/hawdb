@@ -1,5 +1,4 @@
 mod cli_background_maintenance_evidence;
-mod cli_blackbox_report;
 mod cli_bounded_read_evidence;
 mod cli_fixture_contract;
 mod cli_fixture_contract_check;
@@ -16,7 +15,6 @@ mod cli_search_candidate_shadow_evidence;
 mod cli_storage_recovery_evidence;
 
 use cli_background_maintenance_evidence::run_nowledge_background_maintenance_evidence;
-use cli_blackbox_report::run_nowledge_blackbox_report;
 use cli_bounded_read_evidence::run_nowledge_bounded_read_evidence;
 use cli_fixture_contract::{nowledge_fixture_contract_json, nowledge_fixture_contract_usage};
 use cli_fixture_contract_check::run_nowledge_fixture_contract_command_check;
@@ -144,11 +142,6 @@ fn main() -> Result<()> {
                     "nowledge graph route evidence is not ready".to_string(),
                 ));
             }
-            return Ok(());
-        }
-        if command == "nowledge-blackbox-report" {
-            let json = run_nowledge_blackbox_report(args)?;
-            println!("{}", serde_json::to_string_pretty(&json).unwrap());
             return Ok(());
         }
         if command == "nowledge-previous-wrapper-preflight-check" {

@@ -55,6 +55,7 @@ pub use skein_api_types::{
 use skein_optimizer::{SearchPredicate, SearchPredicateOp, SearchPredicateSet};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::io::Write;
 use std::path::Path;
 use std::rc::Rc;
 use std::str::FromStr;
@@ -64,6 +65,7 @@ mod plan_cache;
 mod system_sql;
 
 const DEFAULT_SEARCH_PROJECTION_CHANGE_LOG_MAX_ENTRIES: usize = 4096;
+pub const SLOW_QUERY_LOG_EVENT_PROTOCOL: &str = "skein-slow-query-log-event-v1";
 
 pub use artifact_jobs::{
     DerivedArtifactJob, DerivedArtifactJobReport, DerivedArtifactJobStatus,
@@ -216,6 +218,11 @@ impl QuerySystemVariables {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryOutput {
     pub rows: Vec<Row>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SlowQueryLogExportOptions {
+    pub include_query_text: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -5948,6 +5955,35 @@ impl Database {
             &self.slow_query_log.borrow().snapshot(),
             &self.statement_summary.borrow().snapshot(),
         )
+    }
+
+    pub fn slow_query_log_jsonl(&self) -> Result<String> {
+        self.slow_query_log_jsonl_with_options(&SlowQueryLogExportOptions::default())
+    }
+
+    pub fn slow_query_log_jsonl_with_options(
+        &self,
+        options: &SlowQueryLogExportOptions,
+    ) -> Result<String> {
+        system_sql::slow_query_log_jsonl(
+            &self.slow_query_log.borrow().snapshot(),
+            options.include_query_text,
+        )
+    }
+
+    pub fn write_slow_query_log_jsonl(&self, path: impl AsRef<Path>) -> Result<()> {
+        self.write_slow_query_log_jsonl_with_options(path, &SlowQueryLogExportOptions::default())
+    }
+
+    pub fn write_slow_query_log_jsonl_with_options(
+        &self,
+        path: impl AsRef<Path>,
+        options: &SlowQueryLogExportOptions,
+    ) -> Result<()> {
+        let jsonl = self.slow_query_log_jsonl_with_options(options)?;
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(jsonl.as_bytes())?;
+        Ok(())
     }
 
     fn query_read_only_with_params_bounded(
