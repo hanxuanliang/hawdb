@@ -400,6 +400,12 @@ if [[ "$require_integration_readiness" == true ]]; then
     exit 2
   fi
   if [[ -z "$integration_submodule_commit" ]]; then
+    if ! integration_submodule_commit="$(git -C "$integration_submodule_path" rev-parse --short HEAD 2>/dev/null)"; then
+      echo "--require-integration-readiness could not derive --integration-submodule-commit from --integration-submodule-path" >&2
+      exit 2
+    fi
+  fi
+  if [[ -z "$integration_submodule_commit" ]]; then
     echo "--require-integration-readiness requires --integration-submodule-commit" >&2
     exit 2
   fi

@@ -72,7 +72,6 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
   --query-runtime-probe-json "$NMEM_PREFLIGHT_ROOT/query-runtime-probes.json" \
   --integration-submodule-path vendor/skein \
-  --integration-submodule-commit "$(git -C vendor/skein rev-parse --short HEAD)" \
   --integration-legacy-data-retained \
   --integration-coexistence-mode shadow \
   --integration-content-store-present \
@@ -87,6 +86,9 @@ The script prints `integration-bundle.json` on success when
 `preflight-check.json`. It leaves every intermediate artifact under
 `$NMEM_PREFLIGHT_ROOT`. Use the manual steps below when bringing up a new
 wrapper command or debugging a specific failed stage.
+When `--require-integration-readiness` is enabled, the runner derives
+`--integration-submodule-commit` from `--integration-submodule-path` if the
+commit is not passed explicitly. Non-git paths fail closed.
 
 ## 1. Export The Contract
 
