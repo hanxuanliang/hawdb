@@ -153,6 +153,8 @@ query family, or cutover gate requires them.
     embedded Mem library facade.
   - [x] Expose previous-wrapper preflight checks as typed Rust library reports
     and keep the CLI as a thin wrapper.
+  - [x] Expose Nowledge Mem integration readiness as a typed Rust library gate
+    and keep the CLI as a thin wrapper.
   - Do not add new query-shape-specific typed APIs unless they are required for
     compatibility with an existing caller during migration.
 
