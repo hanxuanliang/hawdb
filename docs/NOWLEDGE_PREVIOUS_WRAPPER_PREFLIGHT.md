@@ -73,10 +73,6 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --integration-submodule-path vendor/skein \
   --integration-legacy-data-retained \
   --integration-coexistence-mode shadow \
-  --integration-content-store-present \
-  --integration-content-store-engine sqlite \
-  --integration-content-store-messages-available \
-  --integration-content-store-source-chunks-available \
   -- "$NOWLEDGE_WRAPPER_COMMAND"
 ```
 
@@ -92,6 +88,10 @@ If `--query-runtime-probe-json` is omitted, the runner reuses
 `--graph-route-query-json` as the query-runtime probe source. That route
 inventory must include per-query `query_family`; missing or unknown families
 remain fail-closed.
+The runner also probes `$NMEM_PREFLIGHT_ROOT/content.db` by default and derives
+the content-store boundary flags when the copied SQLite database contains
+`thread_messages` and `source_chunks`. Use `--integration-content-store-path`
+only when the content copy lives elsewhere.
 
 ## 1. Export The Contract
 

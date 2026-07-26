@@ -42,6 +42,7 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--integration-legacy-data-retained] \
   [--integration-legacy-data-deleted] \
   [--integration-coexistence-mode shadow|side_by_side] \
+  [--integration-content-store-path <path>] \
   [--integration-content-store-present] \
   [--integration-content-store-engine <engine>] \
   [--integration-content-store-messages-available] \
@@ -88,6 +89,7 @@ integration_submodule_commit=
 integration_legacy_data_retained=false
 integration_legacy_data_deleted=false
 integration_coexistence_mode=
+integration_content_store_path=
 integration_content_store_present=false
 integration_content_store_engine=
 integration_content_store_messages_available=false
@@ -231,6 +233,10 @@ while (($# > 0)); do
       integration_coexistence_mode="${2:-}"
       shift 2
       ;;
+    --integration-content-store-path)
+      integration_content_store_path="${2:-}"
+      shift 2
+      ;;
     --integration-content-store-present)
       integration_content_store_present=true
       shift
@@ -339,6 +345,11 @@ if [[ -n "$query_runtime_database" && ! -e "$query_runtime_database" ]]; then
   exit 2
 fi
 
+if [[ -n "$integration_content_store_path" && ! -f "$integration_content_store_path" ]]; then
+  echo "--integration-content-store-path does not exist or is not a file" >&2
+  exit 2
+fi
+
 if [[ -n "$query_runtime_preflight_json" && -n "$query_runtime_probe_json" ]]; then
   echo "--query-runtime-preflight-json cannot be combined with --query-runtime-probe-json" >&2
   exit 2
@@ -375,6 +386,25 @@ if [[ -n "$search_candidate_shadow_evidence_json" && -n "$search_candidate_shado
 fi
 
 if [[ "$require_integration_readiness" == true ]]; then
+  if [[ -z "$integration_content_store_path" ]]; then
+    integration_content_store_path="$preflight_root/content.db"
+  fi
+  if [[ -f "$integration_content_store_path" ]]; then
+    integration_content_store_present=true
+    if [[ -z "$integration_content_store_engine" ]]; then
+      integration_content_store_engine=sqlite
+    fi
+    if command -v sqlite3 >/dev/null 2>&1; then
+      if [[ "$integration_content_store_messages_available" != true ]] \
+        && [[ "$(sqlite3 -readonly "$integration_content_store_path" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='thread_messages' LIMIT 1;" 2>/dev/null)" == "1" ]]; then
+        integration_content_store_messages_available=true
+      fi
+      if [[ "$integration_content_store_source_chunks_available" != true ]] \
+        && [[ "$(sqlite3 -readonly "$integration_content_store_path" "SELECT 1 FROM sqlite_master WHERE type='table' AND name='source_chunks' LIMIT 1;" 2>/dev/null)" == "1" ]]; then
+        integration_content_store_source_chunks_available=true
+      fi
+    fi
+  fi
   if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" && -z "$graph_route_query_json" ]]; then
     echo "--require-integration-readiness requires --graph-route-readiness-json, --graph-route-evidence-json, or --graph-route-query-json" >&2
     exit 2
