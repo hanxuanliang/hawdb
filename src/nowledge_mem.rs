@@ -21,6 +21,7 @@ use crate::{
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Instant;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1558,6 +1559,118 @@ pub struct NowledgeMemEmbeddedStore {
     search_projection: Option<NowledgeMemSearchProjection>,
 }
 
+#[derive(Debug, Clone)]
+pub struct NowledgeMemEmbeddedStoreHandle {
+    inner: Arc<Mutex<NowledgeMemEmbeddedStore>>,
+}
+
+impl NowledgeMemEmbeddedStoreHandle {
+    pub fn new(store: NowledgeMemEmbeddedStore) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(store)),
+        }
+    }
+
+    pub fn open_with_options(
+        options: NowledgeMemOpenOptions,
+    ) -> Result<(Self, NowledgeMemOpenReport)> {
+        let (store, report) = NowledgeMemEmbeddedStore::open_with_options(options)?;
+        Ok((Self::new(store), report))
+    }
+
+    pub fn query_with_report(&self, cypher: &str) -> Result<NowledgeMemQueryOutput> {
+        self.lock_store()?.query_with_report(cypher)
+    }
+
+    pub fn query_with_report_options(
+        &self,
+        cypher: &str,
+        options: NowledgeMemQueryReportOptions,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.lock_store()?
+            .query_with_report_options(cypher, options)
+    }
+
+    pub fn query_with_params_with_report(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.lock_store()?
+            .query_with_params_with_report(cypher, parameters)
+    }
+
+    pub fn query_with_params_with_report_options(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: NowledgeMemQueryReportOptions,
+    ) -> Result<NowledgeMemQueryOutput> {
+        self.lock_store()?
+            .query_with_params_with_report_options(cypher, parameters, options)
+    }
+
+    pub fn read_query(
+        &self,
+        cypher: &str,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.lock_store()?.read_query_with_options(cypher, options)
+    }
+
+    pub fn read_query_with_params(
+        &self,
+        cypher: &str,
+        parameters: &BTreeMap<String, Value>,
+        options: &NowledgeMemReadOptions,
+    ) -> Result<NowledgeMemReadOutput> {
+        self.lock_store()?
+            .read_query_with_params(cypher, parameters, options)
+    }
+
+    pub fn slow_query_report(&self) -> Result<NowledgeMemSlowQueryReport> {
+        Ok(self.lock_store()?.slow_query_report())
+    }
+
+    pub fn slow_query_report_json(&self) -> Result<serde_json::Value> {
+        Ok(self.lock_store()?.slow_query_report_json())
+    }
+
+    pub fn library_readiness(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> Result<NowledgeMemLibraryReadinessReport> {
+        Ok(self.lock_store()?.library_readiness(options))
+    }
+
+    pub fn library_readiness_json(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> Result<serde_json::Value> {
+        Ok(self.lock_store()?.library_readiness_json(options))
+    }
+
+    pub fn readiness_dashboard(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> Result<NowledgeMemReadinessDashboard> {
+        Ok(self.lock_store()?.readiness_dashboard(options))
+    }
+
+    pub fn readiness_dashboard_json(
+        &self,
+        options: &NowledgeMemReadinessOptions,
+    ) -> Result<serde_json::Value> {
+        Ok(self.lock_store()?.readiness_dashboard_json(options))
+    }
+
+    fn lock_store(&self) -> Result<MutexGuard<'_, NowledgeMemEmbeddedStore>> {
+        self.inner.lock().map_err(|_| {
+            SkeinError::Execution("nowledge mem embedded store lock poisoned".to_string())
+        })
+    }
+}
+
 impl NowledgeMemEmbeddedStore {
     pub fn new(
         graph: NowledgeMemGraph,
@@ -2656,16 +2769,17 @@ mod tests {
         nowledge_mem_bounded_read_evidence_json_with_route_readiness, nowledge_mem_graph_config,
         nowledge_mem_graph_config_with_search_mode,
         nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemEmbeddedStore,
-        NowledgeMemGraph, NowledgeMemGraphMode, NowledgeMemOpenOptions,
-        NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
-        NowledgeMemReadReport, NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
-        NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
-        NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
-        NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph, NowledgeMemGraphMode,
+        NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions,
+        NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessAreaSummary,
+        NowledgeMemReadinessDashboard, NowledgeMemReadinessOptions,
+        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
+        NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
+        NowledgeMemStorageRecoveryReport, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL,
+        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
@@ -2682,6 +2796,7 @@ mod tests {
         StorageRecoveryReport, WorkClass,
     };
     use std::collections::BTreeMap;
+    use std::thread;
 
     #[test]
     fn graph_config_tracks_shadow_vs_cutover_mode() {
@@ -2972,6 +3087,62 @@ mod tests {
         assert!(!encoded.contains("Slow Secret"));
         assert!(!encoded.contains("slow-secret-id"));
         assert!(!encoded.contains("MATCH (m:Memory"));
+    }
+
+    #[test]
+    fn embedded_store_handle_serializes_shared_library_state() {
+        let db = Database::new_with_config(DatabaseConfig {
+            max_plan_cache_entries: Some(8),
+            slow_query_log_threshold_micros: 0,
+            slow_query_log_capacity: 8,
+            ..DatabaseConfig::default()
+        });
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        store
+            .query_with_report("CREATE (:Memory {id: 'shared-1', title: 'Shared State'})")
+            .unwrap();
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let reader = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                for _ in 0..4 {
+                    let query = handle
+                        .query_with_report(
+                            "MATCH (m:Memory {id: 'shared-1'}) RETURN m.title AS title",
+                        )
+                        .unwrap();
+                    assert_eq!(query.output.rows.len(), 1);
+                    assert!(query.report.plan_cache_cacheable);
+                    assert!(!query.report.plan_cache_bypassed);
+                }
+            })
+        };
+        let observer = {
+            let handle = handle.clone();
+            thread::spawn(move || {
+                for _ in 0..4 {
+                    let slow_query = handle.slow_query_report().unwrap();
+                    assert!(slow_query.ready);
+                    assert!(slow_query.record_count <= slow_query.capacity);
+
+                    let dashboard = handle
+                        .readiness_dashboard(&NowledgeMemReadinessOptions::default())
+                        .unwrap();
+                    assert!(readiness_dashboard_area(&dashboard, "slow_query").ready);
+                    assert!(dashboard.slow_query_record_count <= slow_query.capacity);
+                }
+            })
+        };
+
+        reader.join().unwrap();
+        observer.join().unwrap();
+
+        let final_slow_query = handle.slow_query_report().unwrap();
+        assert!(final_slow_query.ready);
+        assert_eq!(final_slow_query.latest_sequence, Some(5));
+        assert_eq!(final_slow_query.record_count, 5);
     }
 
     #[test]

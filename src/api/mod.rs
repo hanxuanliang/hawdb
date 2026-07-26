@@ -57,8 +57,8 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::Write;
 use std::path::Path;
-use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
 
 mod artifact_jobs;
 mod plan_cache;
@@ -84,7 +84,7 @@ pub struct Database {
     statement_summary: RefCell<system_sql::StatementSummary>,
     config: DatabaseConfig,
     system_variables: QuerySystemVariables,
-    reader_pins: Rc<RefCell<ReaderPins>>,
+    reader_pins: Arc<Mutex<ReaderPins>>,
     next_derived_artifact_job_id: u64,
     derived_artifact_jobs: Vec<DerivedArtifactJob>,
 }
@@ -5616,7 +5616,7 @@ struct ReaderPins {
 #[derive(Debug)]
 struct ReaderPin {
     id: u64,
-    pins: Rc<RefCell<ReaderPins>>,
+    pins: Arc<Mutex<ReaderPins>>,
 }
 
 impl Default for Database {
@@ -5639,7 +5639,7 @@ impl Default for Database {
             )),
             config,
             system_variables: QuerySystemVariables::default(),
-            reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
+            reader_pins: Arc::new(Mutex::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
             derived_artifact_jobs: Vec::new(),
         }
@@ -5670,7 +5670,7 @@ impl Database {
             )),
             config,
             system_variables: QuerySystemVariables::default(),
-            reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
+            reader_pins: Arc::new(Mutex::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
             derived_artifact_jobs: Vec::new(),
         }
@@ -5732,7 +5732,7 @@ impl Database {
             )),
             config,
             system_variables: QuerySystemVariables::default(),
-            reader_pins: Rc::new(RefCell::new(ReaderPins::default())),
+            reader_pins: Arc::new(Mutex::new(ReaderPins::default())),
             next_derived_artifact_job_id: 1,
             derived_artifact_jobs: Vec::new(),
         })
@@ -6076,11 +6076,14 @@ impl Database {
 
     pub fn begin_read_transaction(&self) -> DatabaseReadTransaction {
         let pin = {
-            let mut pins = self.reader_pins.borrow_mut();
+            let mut pins = self
+                .reader_pins
+                .lock()
+                .expect("database reader pins lock should not be poisoned");
             let id = pins.next_reader_id;
             pins.next_reader_id += 1;
             pins.active_epochs.insert(id, self.store.commit_epoch());
-            ReaderPin::new(id, Rc::clone(&self.reader_pins))
+            ReaderPin::new(id, Arc::clone(&self.reader_pins))
         };
         DatabaseReadTransaction {
             catalog: self.catalog.clone(),
@@ -6183,13 +6186,21 @@ impl Database {
 
     pub fn checkpoint(&mut self) -> Result<()> {
         self.ensure_writable()?;
-        let oldest_reader_epoch = self.reader_pins.borrow().oldest_epoch();
+        let oldest_reader_epoch = self
+            .reader_pins
+            .lock()
+            .expect("database reader pins lock should not be poisoned")
+            .oldest_epoch();
         self.store
             .checkpoint_with_reader_epoch(&self.catalog, oldest_reader_epoch)
     }
 
     pub fn storage_reclamation_watermark(&self) -> StorageReclamationWatermark {
-        let oldest_reader_epoch = self.reader_pins.borrow().oldest_epoch();
+        let oldest_reader_epoch = self
+            .reader_pins
+            .lock()
+            .expect("database reader pins lock should not be poisoned")
+            .oldest_epoch();
         self.store
             .storage_reclamation_watermark(oldest_reader_epoch)
     }
@@ -36023,14 +36034,18 @@ impl ReaderPins {
 }
 
 impl ReaderPin {
-    fn new(id: u64, pins: Rc<RefCell<ReaderPins>>) -> Self {
+    fn new(id: u64, pins: Arc<Mutex<ReaderPins>>) -> Self {
         Self { id, pins }
     }
 }
 
 impl Drop for ReaderPin {
     fn drop(&mut self) {
-        self.pins.borrow_mut().active_epochs.remove(&self.id);
+        self.pins
+            .lock()
+            .expect("database reader pins lock should not be poisoned")
+            .active_epochs
+            .remove(&self.id);
     }
 }
 
