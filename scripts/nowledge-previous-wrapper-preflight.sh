@@ -35,6 +35,7 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--require-integration-readiness] \
   [--graph-route-query-json <path>] \
   [--graph-route-database <path>] \
+  [--graph-route-parity-json <path>] \
   [--graph-route-evidence-json <path>] \
   [--graph-route-readiness-json <path>] \
   [--integration-submodule-path <path>] \
@@ -82,6 +83,7 @@ query_runtime_database=
 require_integration_readiness=false
 graph_route_query_json=
 graph_route_database=
+graph_route_parity_json=
 graph_route_evidence_json=
 graph_route_readiness_json=
 integration_submodule_path=
@@ -205,6 +207,10 @@ while (($# > 0)); do
       graph_route_database="${2:-}"
       shift 2
       ;;
+    --graph-route-parity-json)
+      graph_route_parity_json="${2:-}"
+      shift 2
+      ;;
     --graph-route-readiness-json)
       graph_route_readiness_json="${2:-}"
       shift 2
@@ -297,6 +303,7 @@ for evidence_path in \
   "$query_runtime_preflight_json" \
   "$query_runtime_probe_json" \
   "$graph_route_query_json" \
+  "$graph_route_parity_json" \
   "$graph_route_evidence_json" \
   "$graph_route_readiness_json"; do
   if [[ -n "$evidence_path" && ! -f "$evidence_path" ]]; then
@@ -407,6 +414,10 @@ if [[ "$require_integration_readiness" == true ]]; then
   fi
   if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" && -z "$graph_route_query_json" ]]; then
     echo "--require-integration-readiness requires --graph-route-readiness-json, --graph-route-evidence-json, or --graph-route-query-json" >&2
+    exit 2
+  fi
+  if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" && -n "$graph_route_query_json" && -z "$graph_route_parity_json" ]]; then
+    echo "--require-integration-readiness with --graph-route-query-json requires --graph-route-parity-json" >&2
     exit 2
   fi
   if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" && -z "$graph_route_query_json" ]]; then
@@ -543,7 +554,14 @@ run_skein nowledge-query-family-evidence \
   > "$preflight_root/query-family-evidence.json"
 
 if [[ -z "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
+  graph_route_evidence_args=()
+  if [[ -n "$graph_route_parity_json" ]]; then
+    graph_route_evidence_args+=(
+      --route-parity-json "$graph_route_parity_json"
+    )
+  fi
   run_skein nowledge-graph-route-evidence \
+    "${graph_route_evidence_args[@]}" \
     "${graph_route_database:-$skein_preflight_db}" \
     "$graph_route_query_json" \
     > "$preflight_root/graph-route-evidence.json"

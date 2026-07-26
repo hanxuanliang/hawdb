@@ -70,6 +70,7 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --search-projection-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/skein-search-projection-probe.json" \
   --search-candidate-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-probe.json" \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
+  --graph-route-parity-json "$NMEM_PREFLIGHT_ROOT/graph-route-parity.json" \
   --integration-submodule-path vendor/skein \
   --integration-legacy-data-retained \
   --integration-coexistence-mode shadow \
@@ -88,6 +89,11 @@ If `--query-runtime-probe-json` is omitted, the runner reuses
 `--graph-route-query-json` as the query-runtime probe source. That route
 inventory must include per-query `query_family`; missing or unknown families
 remain fail-closed.
+When `--require-integration-readiness` is enabled and the runner generates graph
+route evidence from `--graph-route-query-json`, it also requires
+`--graph-route-parity-json` and forwards it to `nowledge-graph-route-evidence`.
+This keeps production route readiness tied to a real shadow parity artifact;
+route inventory `shadow_compare_ready` fields are bring-up diagnostics only.
 The runner also probes `$NMEM_PREFLIGHT_ROOT/content.db` by default and derives
 the content-store boundary flags when the copied SQLite database contains
 `thread_messages` and `source_chunks`. Use `--integration-content-store-path`
