@@ -122,6 +122,8 @@ query family, or cutover gate requires them.
     background-maintenance, and search-projection reports through Rust APIs.
   - [x] Expose typed library readiness and search-projection evidence summaries
     for embedded Mem callers.
+  - [x] Expose typed storage-recovery readiness summaries through the embedded
+    Mem library facade.
   - Keep reports compact and redacted by default so production can keep them on.
   - CLI tools may wrap library APIs for developer workflows, but must not be the
     only supported interface.

@@ -911,6 +911,105 @@ impl NowledgeMemLibraryReadinessReport {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemStorageRecoveryReport {
+    pub protocol: String,
+    pub present: bool,
+    pub ready: bool,
+    pub durable: bool,
+    pub recovery_mode: RecoveryMode,
+    pub checkpoint_epoch: Option<u64>,
+    pub checkpoint_commit_epoch: Option<u64>,
+    pub wal_present: bool,
+    pub wal_replay_start_lsn: Option<u64>,
+    pub next_lsn_after_replay: Option<u64>,
+    pub replayed_wal_entries: usize,
+    pub max_wal_replay_entries: Option<usize>,
+    pub torn_tail_ignored: bool,
+    pub torn_tail_reason: Option<String>,
+    pub recovered_commit_epoch: u64,
+    pub durable_recovery_observed: bool,
+    pub checkpoint_boundary_present: bool,
+    pub wal_replay_bounded: bool,
+    pub torn_tail_clean: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+impl NowledgeMemStorageRecoveryReport {
+    pub fn from_storage_report(report: &StorageRecoveryReport) -> Self {
+        let durable_recovery_observed = report.durable;
+        let checkpoint_boundary_present =
+            report.checkpoint_epoch.is_some() || report.checkpoint_commit_epoch.is_some();
+        let wal_replay_bounded = report
+            .max_wal_replay_entries
+            .is_some_and(|limit| report.replayed_wal_entries <= limit);
+        let torn_tail_clean = !report.torn_tail_ignored;
+        let mut blocker_codes = Vec::new();
+        if !durable_recovery_observed {
+            blocker_codes.push("durable_recovery_not_observed".to_string());
+        }
+        if !checkpoint_boundary_present {
+            blocker_codes.push("checkpoint_boundary_missing".to_string());
+        }
+        if !wal_replay_bounded {
+            blocker_codes.push("wal_replay_unbounded".to_string());
+        }
+        if !torn_tail_clean {
+            blocker_codes.push("torn_tail_observed".to_string());
+        }
+
+        Self {
+            protocol: "skein-storage-recovery-report".to_string(),
+            present: true,
+            ready: blocker_codes.is_empty(),
+            durable: report.durable,
+            recovery_mode: report.recovery_mode,
+            checkpoint_epoch: report.checkpoint_epoch,
+            checkpoint_commit_epoch: report.checkpoint_commit_epoch,
+            wal_present: report.wal_present,
+            wal_replay_start_lsn: report.wal_replay_start_lsn,
+            next_lsn_after_replay: report.next_lsn_after_replay,
+            replayed_wal_entries: report.replayed_wal_entries,
+            max_wal_replay_entries: report.max_wal_replay_entries,
+            torn_tail_ignored: report.torn_tail_ignored,
+            torn_tail_reason: report.torn_tail_reason.clone(),
+            recovered_commit_epoch: report.recovered_commit_epoch,
+            durable_recovery_observed,
+            checkpoint_boundary_present,
+            wal_replay_bounded,
+            torn_tail_clean,
+            blocker_codes,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "present": self.present,
+            "ready": self.ready,
+            "durable": self.durable,
+            "recovery_mode": recovery_mode_name(self.recovery_mode),
+            "checkpoint_epoch": self.checkpoint_epoch,
+            "checkpoint_commit_epoch": self.checkpoint_commit_epoch,
+            "wal_present": self.wal_present,
+            "wal_replay_start_lsn": self.wal_replay_start_lsn,
+            "next_lsn_after_replay": self.next_lsn_after_replay,
+            "replayed_wal_entries": self.replayed_wal_entries,
+            "max_wal_replay_entries": self.max_wal_replay_entries,
+            "torn_tail_ignored": self.torn_tail_ignored,
+            "torn_tail_reason": self.torn_tail_reason,
+            "recovered_commit_epoch": self.recovered_commit_epoch,
+            "readiness": {
+                "durable_recovery_observed": self.durable_recovery_observed,
+                "checkpoint_boundary_present": self.checkpoint_boundary_present,
+                "wal_replay_bounded": self.wal_replay_bounded,
+                "torn_tail_clean": self.torn_tail_clean,
+            },
+            "blocker_codes": self.blocker_codes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemRetrievalReport {
     pub protocol: String,
     pub mode: NowledgeMemGraphMode,
@@ -1231,6 +1330,16 @@ impl NowledgeMemEmbeddedStore {
         self.search_projection.as_mut()
     }
 
+    pub fn storage_recovery_report(&self) -> NowledgeMemStorageRecoveryReport {
+        NowledgeMemStorageRecoveryReport::from_storage_report(
+            &self.graph.database().storage_recovery_report(),
+        )
+    }
+
+    pub fn storage_recovery_report_json(&self) -> serde_json::Value {
+        self.storage_recovery_report().json()
+    }
+
     pub fn build_search_projection_graph_delta_request_from_freshness(
         &self,
         max_operations: Option<usize>,
@@ -1430,8 +1539,7 @@ impl NowledgeMemEmbeddedStore {
             .bounded_read_evidence
             .clone()
             .unwrap_or_else(|| self.bounded_read_probe_evidence_json(options));
-        let storage_recovery =
-            storage_recovery_report_json(&self.graph.database().storage_recovery_report());
+        let storage_recovery = self.storage_recovery_report_json();
         let background_maintenance =
             background_maintenance_summary_to_json(&self.background_maintenance_summary(
                 &options.qos_policy,
@@ -1765,51 +1873,6 @@ fn is_simple_two_node_lookup(query: &cypher::MatchNodesReturn) -> bool {
     !query.left_properties.is_empty()
         && !query.right_properties.is_empty()
         && query.predicate.is_none()
-}
-
-fn storage_recovery_report_json(report: &StorageRecoveryReport) -> serde_json::Value {
-    let durable_recovery_observed = report.durable;
-    let checkpoint_boundary_present =
-        report.checkpoint_epoch.is_some() || report.checkpoint_commit_epoch.is_some();
-    let wal_replay_bounded = report
-        .max_wal_replay_entries
-        .is_some_and(|limit| report.replayed_wal_entries <= limit);
-    let torn_tail_clean = !report.torn_tail_ignored;
-    let mut blocker_codes = Vec::new();
-    if !durable_recovery_observed {
-        blocker_codes.push("durable_recovery_not_observed");
-    }
-    if !checkpoint_boundary_present {
-        blocker_codes.push("checkpoint_boundary_missing");
-    }
-    if !wal_replay_bounded {
-        blocker_codes.push("wal_replay_unbounded");
-    }
-    if !torn_tail_clean {
-        blocker_codes.push("torn_tail_observed");
-    }
-    serde_json::json!({
-        "protocol": "skein-storage-recovery-report",
-        "present": true,
-        "ready": blocker_codes.is_empty(),
-        "durable": report.durable,
-        "recovery_mode": recovery_mode_name(report.recovery_mode),
-        "checkpoint_epoch": report.checkpoint_epoch,
-        "checkpoint_commit_epoch": report.checkpoint_commit_epoch,
-        "wal_present": report.wal_present,
-        "wal_replay_start_lsn": report.wal_replay_start_lsn,
-        "next_lsn_after_replay": report.next_lsn_after_replay,
-        "replayed_wal_entries": report.replayed_wal_entries,
-        "torn_tail_ignored": report.torn_tail_ignored,
-        "recovered_commit_epoch": report.recovered_commit_epoch,
-        "readiness": {
-            "durable_recovery_observed": durable_recovery_observed,
-            "checkpoint_boundary_present": checkpoint_boundary_present,
-            "wal_replay_bounded": wal_replay_bounded,
-            "torn_tail_clean": torn_tail_clean,
-        },
-        "blocker_codes": blocker_codes,
-    })
 }
 
 fn recovery_mode_name(mode: RecoveryMode) -> &'static str {
@@ -2218,10 +2281,11 @@ mod tests {
         NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
         NowledgeMemReadReport, NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
         NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
-        NowledgeMemSearchProjection, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
-        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
+        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
+        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
@@ -2232,9 +2296,10 @@ mod tests {
     use crate::{
         BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundWorkHint, Database,
         DatabaseConfig, KnowledgeCandidateScoringPolicy, KnowledgeRetrievalRequest, LocalQosPolicy,
-        LocalQosScheduler, LocalQosState, NowledgeGraphStatement, SearchEmbeddingManifest,
-        SearchIndex, SearchMode, SearchProjectionDelta, SearchProjectionKind,
-        SearchProjectionProbeOptions, SearchProjectionRow, WorkClass,
+        LocalQosScheduler, LocalQosState, NowledgeGraphStatement, RecoveryMode,
+        SearchEmbeddingManifest, SearchIndex, SearchMode, SearchProjectionDelta,
+        SearchProjectionKind, SearchProjectionProbeOptions, SearchProjectionRow,
+        StorageRecoveryReport, WorkClass,
     };
     use std::collections::BTreeMap;
 
@@ -3038,6 +3103,65 @@ mod tests {
         assert_eq!(
             json["bounded_read_evidence"]["blocker_codes"],
             serde_json::json!(["bounded_read_probe_missing"])
+        );
+    }
+
+    #[test]
+    fn storage_recovery_report_exposes_typed_readiness_summary() {
+        let report =
+            NowledgeMemStorageRecoveryReport::from_storage_report(&StorageRecoveryReport {
+                durable: true,
+                recovery_mode: RecoveryMode::Strict,
+                max_wal_replay_entries: Some(16),
+                checkpoint_epoch: Some(3),
+                checkpoint_commit_epoch: Some(11),
+                wal_present: true,
+                wal_replay_start_lsn: Some(4),
+                next_lsn_after_replay: Some(7),
+                replayed_wal_entries: 3,
+                torn_tail_ignored: false,
+                torn_tail_reason: None,
+                recovered_commit_epoch: 13,
+            });
+        let json = report.json();
+
+        assert_eq!(report.protocol, "skein-storage-recovery-report");
+        assert!(report.present);
+        assert!(report.ready);
+        assert!(report.durable_recovery_observed);
+        assert!(report.checkpoint_boundary_present);
+        assert!(report.wal_replay_bounded);
+        assert!(report.torn_tail_clean);
+        assert!(report.blocker_codes.is_empty());
+        assert_eq!(json["ready"], true);
+        assert_eq!(json["readiness"]["wal_replay_bounded"], true);
+        assert_eq!(json["max_wal_replay_entries"], 16);
+    }
+
+    #[test]
+    fn embedded_store_exposes_storage_recovery_report_through_library_api() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let report = store.storage_recovery_report();
+        let json = store.storage_recovery_report_json();
+
+        assert_eq!(report.protocol, "skein-storage-recovery-report");
+        assert!(report.present);
+        assert!(!report.ready);
+        assert_eq!(
+            report.blocker_codes,
+            vec![
+                "durable_recovery_not_observed".to_string(),
+                "checkpoint_boundary_missing".to_string(),
+                "wal_replay_unbounded".to_string()
+            ]
+        );
+        assert_eq!(json["ready"], false);
+        assert_eq!(
+            json["blocker_codes"],
+            serde_json::json!(report.blocker_codes)
         );
     }
 
