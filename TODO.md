@@ -77,8 +77,8 @@ query family, or cutover gate requires them.
   - Push eligible `WHERE` predicates down to disk scan planning before loading
     record payloads into memory.
   - Store compact per-segment descriptors for fields used by Nowledge filters:
-    `unit_type`, `metadata`, `importance`, `confidence`, lifecycle status, and
-    latest/history timestamps.
+    `unit_type`, `metadata`, `importance`, `confidence`, `lifecycle_state`,
+    and latest/history timestamps.
   - [x] Push exact graph `IS NOT NULL` property-existence predicates through
     scan planning using the property index before row payload filtering.
   - [x] Push exact graph `IS NULL` missing-or-null predicates through scan
@@ -115,6 +115,9 @@ query family, or cutover gate requires them.
     projection scan-filter fields, including explicit empty summaries for
     missing metadata fields so equality and range filters can be pruned before
     loading row payloads.
+  - [x] Require `lifecycle_state` in the search projection scan-filter
+    descriptor contract so deleted/forgotten filters are covered by readiness
+    evidence.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.

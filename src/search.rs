@@ -45,6 +45,7 @@ pub const NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS: &[&str] = &[
     "source_id",
     "space_id",
     "unit_type",
+    "lifecycle_state",
     "importance",
     "confidence",
     "created_at",
@@ -8057,7 +8058,10 @@ mod tests {
             body: format!("{external_id} body"),
             embedding: Some(vec![1.0, 0.0]),
             source_id: Some("source_1".to_string()),
-            metadata: BTreeMap::from([("space_id".to_string(), "default".to_string())]),
+            metadata: BTreeMap::from([
+                ("space_id".to_string(), "default".to_string()),
+                ("lifecycle_state".to_string(), "active".to_string()),
+            ]),
         }
     }
 
