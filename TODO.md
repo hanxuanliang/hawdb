@@ -111,6 +111,10 @@ query family, or cutover gate requires them.
   - Background projection updates must respect QoS limits.
   - Metadata and lifecycle filters should be pushed into search candidate
     generation before returning rows to Mem.
+  - [x] Persist segment descriptor summaries for the fixed Nowledge search
+    projection scan-filter fields, including explicit empty summaries for
+    missing metadata fields so equality and range filters can be pruned before
+    loading row payloads.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.

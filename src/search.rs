@@ -3199,7 +3199,10 @@ impl SearchSegmentDescriptorEntry {
             .last()
             .map(|document| document.id.clone())
             .unwrap_or_default();
-        let mut metadata = BTreeMap::<String, SearchSegmentFieldSummary>::new();
+        let mut metadata = fields
+            .iter()
+            .map(|field| (field.clone(), SearchSegmentFieldSummary::default()))
+            .collect::<BTreeMap<_, _>>();
         for document in documents {
             for field in fields {
                 let Some(value) = search_document_field_value(document, field) else {
@@ -3326,7 +3329,11 @@ fn search_segment_descriptor_fields(
         .flat_map(|document| document.metadata.keys().cloned())
         .collect::<BTreeSet<_>>();
     fields.insert(SEARCH_DOCUMENT_ID_FIELD.to_string());
-    fields.insert("space_id".to_string());
+    fields.extend(
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            .iter()
+            .map(|field| field.to_string()),
+    );
     fields
 }
 
@@ -7371,6 +7378,124 @@ mod tests {
                 .pruned_segment_count,
             0
         );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn persisted_segment_descriptor_tracks_missing_nowledge_scan_filter_fields() {
+        let path = unique_test_dir("search_segment_descriptor_missing_nowledge_fields");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for id in ["memory:0_without_type", "memory:1_without_type"] {
+                index
+                    .upsert(SearchDocument {
+                        id: id.to_string(),
+                        title: "Graph memory".to_string(),
+                        content: "segment descriptor missing field retrieval".to_string(),
+                        embedding: None,
+                        metadata: BTreeMap::new(),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let descriptor =
+            std::fs::read_to_string(path.join(SEARCH_SEGMENT_DESCRIPTOR_FILE)).unwrap();
+        let descriptor = decode_search_segment_descriptor_text(&descriptor).unwrap();
+        for segment in &descriptor.segments {
+            for field in NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS {
+                assert!(
+                    segment.metadata.contains_key(*field),
+                    "missing summary for {field}"
+                );
+            }
+            assert_eq!(
+                segment
+                    .metadata
+                    .get("unit_type")
+                    .map(|summary| summary.present_count),
+                Some(0)
+            );
+        }
+
+        let index = SearchIndex::open(&path).unwrap();
+        let result = index.search_with_options(
+            "segment descriptor missing field retrieval",
+            None,
+            SearchMode::Text,
+            SearchQueryOptions {
+                limit: 10,
+                rank_window: None,
+                fusion_weights: SearchFusionWeights::default(),
+                metadata_filters: BTreeMap::from([("unit_type".to_string(), "fact".to_string())]),
+                policy_epoch: None,
+            },
+        );
+
+        assert_eq!(result.total_hits, 0);
+        assert!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .persisted_segment_descriptor_used
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .pruned_segment_count,
+            1
+        );
+        assert_eq!(
+            result
+                .candidate_set
+                .metadata_predicate_pushdown
+                .scanned_segment_count,
+            0
+        );
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[test]
+    fn search_projection_probe_reports_required_scan_filter_descriptor_fields() {
+        let path = unique_test_dir("search_projection_probe_scan_filter_fields");
+        {
+            let mut index = SearchIndex::open(&path).unwrap();
+            for row in nowledge_probe_rows() {
+                index.upsert_projection_row(row).unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+
+        let index = SearchIndex::open(&path).unwrap();
+        let probe = index.nowledge_search_projection_probe_json(SearchProjectionProbeOptions {
+            active_embedding_model: None,
+            active_embedding_dimension: Some(2),
+        });
+        let summaries = probe["predicate_pushdown"]["segment_descriptor_field_summaries"]
+            .as_array()
+            .expect("expected descriptor summaries");
+        let fields = summaries
+            .iter()
+            .filter_map(|summary| summary["field"].as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(
+            probe["predicate_pushdown"]["persisted_segment_descriptor_ready"]
+                .as_bool()
+                .unwrap()
+        );
+        for field in NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS {
+            assert!(fields.contains(field), "missing descriptor field {field}");
+        }
         std::fs::remove_dir_all(path).unwrap();
     }
 
