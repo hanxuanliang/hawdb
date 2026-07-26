@@ -1212,6 +1212,9 @@ dependencies = [
 [[package]]
 name = "skein-qos"
 version = "0.1.0"
+dependencies = [
+ "loom",
+]
 
 [[package]]
 name = "skein-sql"

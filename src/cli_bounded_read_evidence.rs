@@ -218,7 +218,10 @@ mod tests {
     use super::run_nowledge_bounded_read_evidence;
     use skein::REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES;
     use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    static TEST_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     #[test]
     fn bounded_read_evidence_command_accepts_ready_read_report() {
@@ -435,6 +438,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}.json", std::process::id()))
+        let counter = TEST_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!(
+            "skein_{name}_{}_{nanos}_{counter}.json",
+            std::process::id()
+        ))
     }
 }

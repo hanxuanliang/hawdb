@@ -1275,3 +1275,84 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, feature = "loom-tests"))]
+mod loom_tests {
+    use super::{
+        LocalQosPolicy, LocalQosScheduler, QosAdmissionCode, WorkClass, WorkRequest,
+        WORK_CLASS_COUNT,
+    };
+    use loom::sync::{Arc, Mutex};
+    use loom::thread;
+
+    #[test]
+    fn scheduler_preserves_background_budget_under_modeled_concurrent_start_finish() {
+        loom::model(|| {
+            let mut class_limits = [None; WORK_CLASS_COUNT];
+            class_limits[WorkClass::Projection.as_index()] = Some(4);
+            let scheduler = Arc::new(Mutex::new(LocalQosScheduler::new(LocalQosPolicy {
+                max_background_operations: Some(4),
+                max_total_background_operations: Some(4),
+                max_background_operations_by_class: class_limits,
+                background_enabled: true,
+            })));
+
+            let first = spawn_projection_worker(Arc::clone(&scheduler));
+            let second = spawn_projection_worker(Arc::clone(&scheduler));
+
+            let first_admitted = first.join().unwrap();
+            let second_admitted = second.join().unwrap();
+
+            let scheduler = scheduler.lock().unwrap();
+            assert!(first_admitted || second_admitted);
+            assert!(scheduler.state().running_background_operations <= 4);
+            assert_eq!(scheduler.state().running_background_operations, 0);
+            assert_eq!(
+                scheduler.state().running_background_operations_by_class
+                    [WorkClass::Projection.as_index()],
+                0
+            );
+        });
+    }
+
+    fn spawn_projection_worker(
+        scheduler: Arc<Mutex<LocalQosScheduler>>,
+    ) -> thread::JoinHandle<bool> {
+        thread::spawn(move || {
+            let admission = {
+                let mut scheduler = scheduler.lock().unwrap();
+                let admission =
+                    scheduler.try_start(WorkRequest::background(WorkClass::Projection, 3));
+                assert!(scheduler.state().running_background_operations <= 4);
+                assert!(
+                    scheduler.state().running_background_operations_by_class
+                        [WorkClass::Projection.as_index()]
+                        <= 4
+                );
+                admission
+            };
+
+            thread::yield_now();
+
+            match admission {
+                Ok(permit) => {
+                    let mut scheduler = scheduler.lock().unwrap();
+                    assert!(scheduler.state().running_background_operations <= 4);
+                    scheduler.finish(permit);
+                    assert!(scheduler.state().running_background_operations <= 4);
+                    true
+                }
+                Err(admission) => {
+                    assert!(matches!(
+                        admission.code(),
+                        Some(
+                            QosAdmissionCode::TotalBackgroundLimitExceeded
+                                | QosAdmissionCode::ClassBackgroundLimitExceeded
+                        )
+                    ));
+                    false
+                }
+            }
+        })
+    }
+}

@@ -611,3 +611,6 @@ jobs:
 
       - name: Loom plan cache model
         run: cargo test -p skein-plan-cache --features loom-tests loom_tests
+
+      - name: Loom QoS scheduler model
+        run: cargo test -p skein-qos --features loom-tests loom_tests
