@@ -379,8 +379,8 @@ if [[ "$require_integration_readiness" == true ]]; then
     echo "--require-integration-readiness requires --graph-route-readiness-json, --graph-route-evidence-json, or --graph-route-query-json" >&2
     exit 2
   fi
-  if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" ]]; then
-    echo "--require-integration-readiness requires --query-runtime-preflight-json or --query-runtime-probe-json" >&2
+  if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" && -z "$graph_route_query_json" ]]; then
+    echo "--require-integration-readiness requires --query-runtime-preflight-json, --query-runtime-probe-json, or --graph-route-query-json" >&2
     exit 2
   fi
   if [[ -z "$search_candidate_shadow_evidence_json" && -z "$search_candidate_shadow_probe_json" ]]; then
@@ -419,8 +419,8 @@ if [[ "$require_integration_readiness" == true ]]; then
   fi
 fi
 
-if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" ]]; then
-  echo "previous-wrapper preflight requires --query-runtime-preflight-json or --query-runtime-probe-json" >&2
+if [[ -z "$query_runtime_preflight_json" && -z "$query_runtime_probe_json" && -z "$graph_route_query_json" ]]; then
+  echo "previous-wrapper preflight requires --query-runtime-preflight-json, --query-runtime-probe-json, or --graph-route-query-json" >&2
   exit 2
 fi
 
@@ -613,7 +613,7 @@ if [[ -n "$query_runtime_preflight_json" ]]; then
 else
   run_skein nowledge-query-runtime-preflight \
     --require-ready \
-    --probe-json "$query_runtime_probe_json" \
+    --probe-json "${query_runtime_probe_json:-$graph_route_query_json}" \
     "${query_runtime_database:-$skein_preflight_db}" \
     > "$preflight_root/query-runtime-preflight.json"
 fi

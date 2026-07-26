@@ -8,7 +8,7 @@ use std::path::Path;
 const QUERY_RUNTIME_PREFLIGHT_PROTOCOL: &str = "skein-nowledge-query-runtime-preflight-v1";
 
 pub fn nowledge_query_runtime_preflight_usage() -> String {
-    "nowledge-query-runtime-preflight requires [--require-ready] --probe-json <path> <database-path>"
+    "nowledge-query-runtime-preflight requires [--require-ready] --probe-json <path> <database-path>; probe JSON may be a probes array or graph route query inventory"
         .to_string()
 }
 
@@ -187,9 +187,6 @@ fn query_runtime_route_coverage(probes: &[QueryRuntimeProbe]) -> QueryRuntimeRou
     }
     if !unknown_routes.is_empty() {
         blocker_codes.push("query_runtime_unknown_routes");
-    }
-    if !duplicate_routes.is_empty() {
-        blocker_codes.push("query_runtime_duplicate_routes");
     }
     let ready = blocker_codes.is_empty();
     QueryRuntimeRouteCoverage {
@@ -392,7 +389,103 @@ fn parse_probe_file(value: &serde_json::Value) -> Result<Vec<QueryRuntimeProbe>>
     if let Some(array) = value.get("probes").and_then(serde_json::Value::as_array) {
         return array.iter().map(parse_probe).collect();
     }
+    if let Some(array) = value.get("routes").and_then(serde_json::Value::as_array) {
+        return parse_route_query_inventory_probes(array);
+    }
     Ok(vec![parse_probe(value)?])
+}
+
+fn parse_route_query_inventory_probes(
+    routes: &[serde_json::Value],
+) -> Result<Vec<QueryRuntimeProbe>> {
+    routes
+        .iter()
+        .flat_map(|route| match parse_route_query_probes(route) {
+            Ok(probes) => probes.into_iter().map(Ok).collect::<Vec<_>>(),
+            Err(error) => vec![Err(error)],
+        })
+        .collect()
+}
+
+fn parse_route_query_probes(value: &serde_json::Value) -> Result<Vec<QueryRuntimeProbe>> {
+    let object = value.as_object().ok_or_else(|| {
+        SkeinError::Semantic("graph route query inventory route must be a JSON object".to_string())
+    })?;
+    let route = object
+        .get("route")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            SkeinError::Semantic(
+                "graph route query inventory field 'route' must be a string".to_string(),
+            )
+        })?
+        .to_string();
+    if route.trim().is_empty() {
+        return Err(SkeinError::Semantic(
+            "graph route query inventory route must be non-empty".to_string(),
+        ));
+    }
+    let queries = object
+        .get("queries")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            SkeinError::Semantic(
+                "graph route query inventory field 'queries' must be an array".to_string(),
+            )
+        })?;
+    queries
+        .iter()
+        .enumerate()
+        .map(|(query_index, query)| parse_route_query_probe(&route, query, query_index))
+        .collect()
+}
+
+fn parse_route_query_probe(
+    route: &str,
+    value: &serde_json::Value,
+    query_index: usize,
+) -> Result<QueryRuntimeProbe> {
+    let object = value.as_object().ok_or_else(|| {
+        SkeinError::Semantic("graph route query inventory query must be a JSON object".to_string())
+    })?;
+    let name =
+        optional_query_name(value).unwrap_or_else(|| format!("{route}:query-{}", query_index + 1));
+    if name.trim().is_empty() {
+        return Err(SkeinError::Semantic(
+            "graph route query inventory query name must be non-empty when provided".to_string(),
+        ));
+    }
+    let cypher = object
+        .get("cypher")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| {
+            SkeinError::Semantic(
+                "graph route query inventory field 'cypher' must be a string".to_string(),
+            )
+        })?
+        .to_string();
+    if cypher.trim().is_empty() {
+        return Err(SkeinError::Semantic(
+            "graph route query inventory field 'cypher' must be non-empty".to_string(),
+        ));
+    }
+    let parameters = object
+        .get("parameters")
+        .map(parse_parameters_json)
+        .transpose()?
+        .unwrap_or_default();
+    let min_scan_pruning_reports = optional_usize(object, "min_scan_pruning_reports")?.unwrap_or(1);
+    Ok(QueryRuntimeProbe {
+        name,
+        route: Some(route.to_string()),
+        query_family: optional_string(object, "query_family")?,
+        cypher,
+        parameters,
+        require_scan_pruning: optional_bool(object, "require_scan_pruning")?.unwrap_or(false),
+        require_pruned: optional_bool(object, "require_pruned")?.unwrap_or(false),
+        min_scan_pruning_reports,
+        max_output_rows: optional_usize(object, "max_output_rows")?,
+    })
 }
 
 fn parse_probe(value: &serde_json::Value) -> Result<QueryRuntimeProbe> {
@@ -428,6 +521,13 @@ fn parse_probe(value: &serde_json::Value) -> Result<QueryRuntimeProbe> {
         min_scan_pruning_reports,
         max_output_rows: optional_usize(object, "max_output_rows")?,
     })
+}
+
+fn optional_query_name(value: &serde_json::Value) -> Option<String> {
+    ["name", "query_id", "id"]
+        .iter()
+        .find_map(|field| value.get(*field).and_then(serde_json::Value::as_str))
+        .map(str::to_string)
 }
 
 fn parse_parameters_json(value: &serde_json::Value) -> Result<BTreeMap<String, Value>> {
@@ -673,6 +773,74 @@ mod tests {
     }
 
     #[test]
+    fn query_runtime_preflight_accepts_graph_route_query_inventory() {
+        let root = unique_test_dir("query-runtime-preflight-route-inventory");
+        let graph_path = root.join("graph");
+        let probe_path = root.join("graph-route-queries.json");
+        std::fs::create_dir_all(&root).unwrap();
+        let mut db = Database::open(&graph_path).unwrap();
+        db.query("CREATE (:Memory {id: 'mem-a', kind: 'note', title: 'A'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'mem-b', kind: 'task', title: 'B'})")
+            .unwrap();
+        drop(db);
+        let routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
+            .iter()
+            .map(|route| {
+                serde_json::json!({
+                    "route": route,
+                    "primary_ready": true,
+                    "queries": [
+                        {
+                            "name": format!("memory-by-kind:{route}"),
+                            "query_family": "memory_lookup",
+                            "cypher": "MATCH (m:Memory) WHERE m.kind = $kind RETURN m.title AS title",
+                            "parameters": {"kind": "note"},
+                            "require_scan_pruning": true,
+                            "require_pruned": true,
+                            "max_output_rows": 1
+                        }
+                    ],
+                    "blocker_codes": []
+                })
+            })
+            .collect::<Vec<_>>();
+        std::fs::write(
+            &probe_path,
+            serde_json::json!({ "routes": routes }).to_string(),
+        )
+        .unwrap();
+
+        let (report, _) = run_nowledge_query_runtime_preflight(
+            [
+                "--probe-json",
+                probe_path.to_str().unwrap(),
+                graph_path.to_str().unwrap(),
+            ]
+            .into_iter()
+            .map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(report["ready"], true);
+        assert_eq!(
+            report["probe_count"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(
+            report["passed_probe_count"],
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
+        );
+        assert_eq!(report["route_coverage_ready"], true);
+        assert_eq!(report["probes"][0]["route"], "/graph/overview");
+        assert_eq!(report["probes"][0]["query_family"], "memory_lookup");
+        assert_eq!(report["probes"][0]["ready"], true);
+        assert!(report["probes"][0].get("rows").is_none());
+        assert!(report["probes"][0].get("parameters").is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn query_runtime_preflight_fails_closed_without_probes() {
         let root = unique_test_dir("query-runtime-preflight-empty");
         let graph_path = root.join("graph");
@@ -761,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn query_runtime_preflight_rejects_duplicate_route_probe() {
+    fn query_runtime_preflight_reports_duplicate_route_probe_without_blocking() {
         let root = unique_test_dir("query-runtime-preflight-duplicate-route");
         let graph_path = root.join("graph");
         let probe_path = root.join("probes.json");
@@ -792,22 +960,18 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(report["ready"], false);
+        assert_eq!(report["ready"], true);
         assert_eq!(report["required_routes_covered"], true);
-        assert_eq!(report["route_coverage_ready"], false);
+        assert_eq!(report["route_coverage_ready"], true);
         assert_eq!(
             report["duplicate_routes"],
             serde_json::json!(["/graph/overview"])
         );
         assert_eq!(
             report["route_coverage_blocker_codes"],
-            serde_json::json!(["query_runtime_duplicate_routes"])
+            serde_json::json!([])
         );
-        assert!(report["blocker_codes"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|code| code == "query_runtime_duplicate_routes"));
+        assert_eq!(report["blocker_codes"], serde_json::json!([]));
         std::fs::remove_dir_all(root).unwrap();
     }
 

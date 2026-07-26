@@ -70,7 +70,6 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --search-projection-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/skein-search-projection-probe.json" \
   --search-candidate-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-probe.json" \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
-  --query-runtime-probe-json "$NMEM_PREFLIGHT_ROOT/query-runtime-probes.json" \
   --integration-submodule-path vendor/skein \
   --integration-legacy-data-retained \
   --integration-coexistence-mode shadow \
@@ -89,6 +88,10 @@ wrapper command or debugging a specific failed stage.
 When `--require-integration-readiness` is enabled, the runner derives
 `--integration-submodule-commit` from `--integration-submodule-path` if the
 commit is not passed explicitly. Non-git paths fail closed.
+If `--query-runtime-probe-json` is omitted, the runner reuses
+`--graph-route-query-json` as the query-runtime probe source. That route
+inventory must include per-query `query_family`; missing or unknown families
+remain fail-closed.
 
 ## 1. Export The Contract
 
@@ -519,7 +522,7 @@ rows, parameters, or local paths:
 ```bash
 cargo run --quiet --bin skein -- \
   nowledge-query-runtime-preflight \
-  --probe-json "$NMEM_PREFLIGHT_ROOT/query-runtime-probes.json" \
+  --probe-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
   "$NMEM_PREFLIGHT_GRAPH" \
   > "$NMEM_PREFLIGHT_ROOT/query-runtime-preflight.json"
 ```
@@ -530,6 +533,10 @@ weak probe evidence keeps integration readiness fail-closed. Every probe must
 carry a stable `name`, a required graph read `route`, and a Nowledge replacement
 `query_family`; anonymous probes, stale routes, or unknown query families are
 not accepted as production cutover evidence.
+The command also accepts the graph-route query inventory shape used by
+`nowledge-graph-route-evidence` and flattens each route query into an
+independent runtime probe, so route evidence and runtime preflight can share one
+Mem-owned fixture file.
 Each successful probe must include a selected plan fingerprint, non-empty
 selected plan operator/class counts, optimizer decision count, plan-cache state,
 and `execution_profile.scan_pruning_reports` whose length matches
