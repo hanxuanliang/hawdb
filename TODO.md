@@ -139,6 +139,8 @@ query family, or cutover gate requires them.
     library facade.
   - [x] Expose typed blackbox manifests, artifacts, and events through Rust
     library APIs while preserving redacted JSON output.
+  - [x] Expose replacement summary gate generation through Rust library APIs
+    and keep the CLI as a thin wrapper.
   - Keep reports compact and redacted by default so production can keep them on.
   - CLI tools may wrap library APIs for developer workflows, but must not be the
     only supported interface.

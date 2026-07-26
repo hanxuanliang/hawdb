@@ -12,6 +12,7 @@ pub mod optimizer;
 pub mod planner;
 pub mod previous_wrapper_preflight;
 pub mod qos;
+pub mod replacement_summary;
 pub mod search;
 pub mod store;
 
@@ -162,6 +163,10 @@ pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
     LocalQosPermit, LocalQosPolicy, LocalQosScheduler, LocalQosState, QosAdmission,
     QosAdmissionCode, RankedBackgroundWork, WorkClass, WorkPriority, WorkRequest, WORK_CLASS_COUNT,
+};
+pub use replacement_summary::{
+    nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
+    nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
 pub use schema::{
     BasicGraphStatistics, CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId,
