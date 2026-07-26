@@ -231,6 +231,7 @@ pub struct SearchResultSet {
     pub fusion_weights: SearchFusionWeights,
     pub document_count: usize,
     pub filtered_document_count: usize,
+    pub projection_freshness: SearchProjectionFreshness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1733,6 +1734,7 @@ impl SearchIndex {
             fusion_weights: options.fusion_weights,
             document_count,
             filtered_document_count,
+            projection_freshness,
         }
     }
 

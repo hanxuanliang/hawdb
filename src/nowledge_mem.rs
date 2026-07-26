@@ -1673,7 +1673,11 @@ pub struct NowledgeMemSearchCandidateReport {
     pub retriever_available: BTreeMap<String, bool>,
     pub retriever_candidate_counts: BTreeMap<String, usize>,
     pub fallback_reason_codes: Vec<String>,
+    pub empty_reason_codes: Vec<String>,
     pub truncation_reason_codes: Vec<String>,
+    pub projection_full_reindex_needed: bool,
+    pub projection_metadata_repair_needed: bool,
+    pub projection_source_graph_commit_epoch: Option<u64>,
 }
 
 impl NowledgeMemSearchCandidateReport {
@@ -1706,7 +1710,11 @@ impl NowledgeMemSearchCandidateReport {
             "retriever_available": self.retriever_available,
             "retriever_candidate_counts": self.retriever_candidate_counts,
             "fallback_reason_codes": self.fallback_reason_codes,
+            "empty_reason_codes": self.empty_reason_codes,
             "truncation_reason_codes": self.truncation_reason_codes,
+            "projection_full_reindex_needed": self.projection_full_reindex_needed,
+            "projection_metadata_repair_needed": self.projection_metadata_repair_needed,
+            "projection_source_graph_commit_epoch": self.projection_source_graph_commit_epoch,
         })
     }
 }
@@ -3403,11 +3411,19 @@ fn nowledge_mem_search_candidate_report(
             .iter()
             .map(|code| code.as_str().to_string())
             .collect(),
+        empty_reason_codes: result
+            .empty_reason_codes
+            .iter()
+            .map(|code| code.as_str().to_string())
+            .collect(),
         truncation_reason_codes: result
             .truncation_reason_codes
             .iter()
             .map(|code| code.as_str().to_string())
             .collect(),
+        projection_full_reindex_needed: result.projection_freshness.full_reindex_needed,
+        projection_metadata_repair_needed: result.projection_freshness.metadata_repair_needed,
+        projection_source_graph_commit_epoch: result.projection_freshness.source_graph_commit_epoch,
     }
 }
 
@@ -5482,6 +5498,140 @@ mod tests {
             .json()
             .to_string()
             .contains("source chunk identity candidate read"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_projection_candidate_api_reports_fail_soft_vector_fallback() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_api_fail_soft");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .apply_embedding_manifest(SearchEmbeddingManifest {
+                    model: "bge-m3".to_string(),
+                    version: None,
+                    dimension: 2,
+                })
+                .unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "mem-fallback".to_string(),
+                    title: "Fallback candidate".to_string(),
+                    body: "hybrid fallback candidate read".to_string(),
+                    embedding: Some(vec![1.0, 0.0]),
+                    source_id: Some("source-fallback".to_string()),
+                    metadata: BTreeMap::from([
+                        ("space_id".to_string(), "default".to_string()),
+                        ("lifecycle_state".to_string(), "active".to_string()),
+                    ]),
+                })
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let request =
+            NowledgeMemSearchCandidateRequest::hybrid("hybrid fallback", vec![1.0, 0.0, 0.0], 10);
+
+        let output = store.search_candidates(&request).unwrap();
+
+        assert_eq!(output.result.total_hits, 1);
+        assert_eq!(output.result.hits[0].id, "memory:mem-fallback");
+        assert_eq!(output.report.mode, SearchMode::Hybrid);
+        assert_eq!(output.report.query_embedding_dimension, Some(3));
+        assert_eq!(
+            output.report.retriever_available.get("vector"),
+            Some(&false)
+        );
+        assert_eq!(output.report.retriever_available.get("text"), Some(&true));
+        assert_eq!(
+            output.report.retriever_candidate_counts.get("text"),
+            Some(&1)
+        );
+        assert!(output
+            .report
+            .fallback_reason_codes
+            .iter()
+            .any(|code| code == "vector_dimension_mismatch"));
+        assert!(output.report.empty_reason_codes.is_empty());
+        assert_eq!(
+            output.report.json()["fallback_reason_codes"],
+            serde_json::json!(["vector_dimension_mismatch"])
+        );
+        assert!(!output
+            .report
+            .json()
+            .to_string()
+            .contains("hybrid fallback candidate read"));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn search_projection_candidate_api_reports_repair_markers_without_hits() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_api_repair_markers");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            index
+                .upsert_projection_row(SearchProjectionRow {
+                    kind: SearchProjectionKind::Memory,
+                    external_id: "mem-marker".to_string(),
+                    title: "Marker candidate".to_string(),
+                    body: "repair marker candidate read".to_string(),
+                    embedding: None,
+                    source_id: Some("source-marker".to_string()),
+                    metadata: BTreeMap::from([
+                        ("space_id".to_string(), "default".to_string()),
+                        ("lifecycle_state".to_string(), "active".to_string()),
+                    ]),
+                })
+                .unwrap();
+            index.mark_full_reindex_needed("stale projection").unwrap();
+            index
+                .mark_metadata_repair_needed("missing metadata")
+                .unwrap();
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let request = NowledgeMemSearchCandidateRequest::text("not present", 10);
+
+        let output = store.search_candidates(&request).unwrap();
+
+        assert_eq!(output.result.total_hits, 0);
+        assert!(output.report.projection_full_reindex_needed);
+        assert!(output.report.projection_metadata_repair_needed);
+        assert!(output
+            .report
+            .empty_reason_codes
+            .iter()
+            .any(|code| code == "retriever_no_hits"));
+        assert_eq!(output.report.json()["projection_full_reindex_needed"], true);
+        assert_eq!(
+            output.report.json()["projection_metadata_repair_needed"],
+            true
+        );
+        assert!(!output
+            .report
+            .json()
+            .to_string()
+            .contains("stale projection"));
+        assert!(!output
+            .report
+            .json()
+            .to_string()
+            .contains("missing metadata"));
+        assert!(!output
+            .report
+            .json()
+            .to_string()
+            .contains("repair marker candidate read"));
 
         std::fs::remove_dir_all(root).unwrap();
     }

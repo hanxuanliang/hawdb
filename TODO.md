@@ -130,7 +130,12 @@ query family, or cutover gate requires them.
     - [x] Cover source chunk identity through the same typed embedded-library
       API and compact diagnostics, preserving `kind`, `external_id`, and
       `source_id` without copying document bodies into reports.
-  - Then cover fail-soft behavior and repair/rebuild markers.
+    - [x] Cover fail-soft candidate behavior through compact fallback and empty
+      reason codes so Mem can distinguish retriever leg failures from empty
+      result sets without parsing error strings.
+    - [x] Cover repair/rebuild markers in the same compact candidate report,
+      including no-hit responses, without copying marker reasons or document
+      bodies into reports.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
