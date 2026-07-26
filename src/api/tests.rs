@@ -27831,6 +27831,61 @@ fn explain_analyze_pushes_relationship_conjunct_from_mixed_where_to_scan_pruning
 }
 
 #[test]
+fn explain_analyze_pushes_nowledge_status_timestamp_relationship_filter_to_scan_pruning() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'source'})").unwrap();
+    for (id, status, created_at, updated_at) in [
+        ("stale", "active", 1, 1),
+        ("created", "active", 10, 1),
+        ("updated", "active", 1, 11),
+        ("deleted", "deleted", 12, 12),
+        ("archived", "active", 2, 2),
+    ] {
+        db.query(&format!("CREATE (:Memory {{id: '{id}'}})"))
+            .unwrap();
+        db.query(&format!(
+            "MATCH (source:Memory {{id: 'source'}}), (target:Memory {{id: '{id}'}}) \
+             CREATE (source)-[:MEMORY_RELATES_TO {{status: '{status}', created_at: {created_at}, updated_at: {updated_at}}}]->(target)"
+        ))
+        .unwrap();
+    }
+
+    let output = db
+        .explain_analyze_query(
+            "MATCH (source:Memory)-[r:MEMORY_RELATES_TO]->(target:Memory) \
+             WHERE r.status = 'active' AND (r.created_at > 8 OR r.updated_at > 8) \
+             RETURN target.id AS id ORDER BY id ASC",
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 2);
+    assert_eq!(
+        output
+            .output
+            .rows
+            .iter()
+            .map(|row| row.get("id").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String("created".to_string()),
+            Value::String("updated".to_string()),
+        ]
+    );
+    let relationship_scan = output
+        .execution_profile
+        .scan_pruning_reports
+        .iter()
+        .find(|scan| scan.strategy == crate::store::ScanPruningStrategy::OrUnion)
+        .expect("status plus timestamp relationship scan pruning report");
+    assert!(relationship_scan.pruned);
+    assert_eq!(relationship_scan.label_id, None);
+    assert_eq!(relationship_scan.candidate_count_before_pruning, 5);
+    assert_eq!(relationship_scan.candidate_count_before_filter, 3);
+    assert_eq!(relationship_scan.pruned_candidate_count, 2);
+    assert_eq!(relationship_scan.output_count, 2);
+}
+
+#[test]
 fn cypher_explain_returns_structured_plan_row() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Explain row'})")
