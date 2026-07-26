@@ -48,6 +48,8 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--integration-content-store-engine <engine>] \
   [--integration-content-store-messages-available] \
   [--integration-content-store-source-chunks-available] \
+  [--blackbox-dir <dir>] \
+  [--blackbox-run-id <id>] \
   -- <wrapper-command> [args...]
 
 Runs the Skein-side Nowledge previous-wrapper production preflight bundle.
@@ -96,6 +98,8 @@ integration_content_store_present=false
 integration_content_store_engine=
 integration_content_store_messages_available=false
 integration_content_store_source_chunks_available=false
+blackbox_dir=
+blackbox_run_id=
 
 while (($# > 0)); do
   case "$1" in
@@ -259,6 +263,14 @@ while (($# > 0)); do
       integration_content_store_source_chunks_available=true
       shift
       ;;
+    --blackbox-dir)
+      blackbox_dir="${2:-}"
+      shift 2
+      ;;
+    --blackbox-run-id)
+      blackbox_run_id="${2:-}"
+      shift 2
+      ;;
     --help|-h)
       usage
       exit 0
@@ -281,6 +293,11 @@ fi
 
 if [[ "$preflight_root" == "/" || "$preflight_root" == "." ]]; then
   echo "refusing unsafe --preflight-root '$preflight_root'" >&2
+  exit 2
+fi
+
+if [[ "$blackbox_dir" == "/" || "$blackbox_dir" == "." ]]; then
+  echo "refusing unsafe --blackbox-dir '$blackbox_dir'" >&2
   exit 2
 fi
 
@@ -470,6 +487,32 @@ mkdir -p "$preflight_root"
 run_skein() {
   cargo run --quiet --bin skein -- "$@"
 }
+
+emit_blackbox_report() {
+  local exit_code="$1"
+  if [[ -z "$blackbox_dir" || -z "$preflight_root" || ! -d "$preflight_root" ]]; then
+    return
+  fi
+  local run_status=completed
+  if [[ "$exit_code" -ne 0 ]]; then
+    run_status=failed
+  fi
+  local blackbox_args=(
+    nowledge-blackbox-report
+    --artifact-dir "$preflight_root"
+    --output-dir "$blackbox_dir"
+    --run-status "$run_status"
+    --exit-code "$exit_code"
+  )
+  if [[ -n "$blackbox_run_id" ]]; then
+    blackbox_args+=(--run-id "$blackbox_run_id")
+  fi
+  run_skein "${blackbox_args[@]}" >/dev/null 2>/dev/null || true
+}
+
+if [[ -n "$blackbox_dir" ]]; then
+  trap 'exit_code=$?; emit_blackbox_report "$exit_code"; exit "$exit_code"' EXIT
+fi
 
 shadow_timeout_args=()
 adapter_timeout_args=()

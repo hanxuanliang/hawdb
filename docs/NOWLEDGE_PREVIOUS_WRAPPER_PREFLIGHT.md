@@ -71,6 +71,7 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --search-candidate-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-probe.json" \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
   --graph-route-parity-json "$NMEM_PREFLIGHT_ROOT/graph-route-parity.json" \
+  --blackbox-dir "$NMEM_PREFLIGHT_ROOT/blackbox" \
   --integration-submodule-path vendor/skein \
   --integration-legacy-data-retained \
   --integration-coexistence-mode shadow \
@@ -98,6 +99,18 @@ The runner also probes `$NMEM_PREFLIGHT_ROOT/content.db` by default and derives
 the content-store boundary flags when the copied SQLite database contains
 `thread_messages` and `source_chunks`. Use `--integration-content-store-path`
 only when the content copy lives elsewhere.
+`--blackbox-dir` enables production-safe diagnostics for successful and failed
+runs. The runner writes a redacted `manifest.json` plus line-oriented
+`events.jsonl` under that directory through `nowledge-blackbox-report`; the
+report records artifact names, byte lengths, checksums, protocol/ready state,
+blocker codes, missing evidence, failed checks, and JSONL line counts. It does
+not copy raw artifact payloads, Cypher text, query parameters, or absolute
+artifact paths. Nightly jobs can keep this directory longer or upload it as a
+debug artifact, while regular releases can enable it with shorter retention.
+The report also recognizes `slow-query-log.jsonl` and `skein-log.jsonl` when a
+runtime places them in the artifact directory, so production slow logs and
+Skein runtime logs can share the same redacted blackbox manifest without
+coupling the logger to the preflight script.
 
 ## 1. Export The Contract
 
