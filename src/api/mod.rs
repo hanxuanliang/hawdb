@@ -226,6 +226,18 @@ pub struct SlowQueryLogExportOptions {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlowQueryLogRecordSummary {
+    pub sequence: u64,
+    pub query_language: String,
+    pub query_digest: String,
+    pub started_unix_micros: i64,
+    pub elapsed_micros: i64,
+    pub row_count: i64,
+    pub success: bool,
+    pub slow_log_candidate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundedReadQueryOutput {
     pub output: QueryOutput,
     pub execution_profile: executor::ReadExecutionProfile,
@@ -5969,6 +5981,15 @@ impl Database {
             &self.slow_query_log.borrow().snapshot(),
             options.include_query_text,
         )
+    }
+
+    pub fn slow_query_log_snapshot(&self) -> Vec<SlowQueryLogRecordSummary> {
+        self.slow_query_log
+            .borrow()
+            .snapshot()
+            .iter()
+            .map(system_sql::slow_query_record_summary)
+            .collect()
     }
 
     pub fn write_slow_query_log_jsonl(&self, path: impl AsRef<Path>) -> Result<()> {

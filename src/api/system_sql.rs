@@ -167,6 +167,21 @@ pub(crate) fn slow_query_log_jsonl(
     Ok(jsonl)
 }
 
+pub(crate) fn slow_query_record_summary(
+    record: &SlowQueryRecord,
+) -> super::SlowQueryLogRecordSummary {
+    super::SlowQueryLogRecordSummary {
+        sequence: record.sequence,
+        query_language: record.query_language.clone(),
+        query_digest: statement_digest(&record.query_language, "unknown", &record.query_text),
+        started_unix_micros: record.started_unix_micros,
+        elapsed_micros: record.elapsed_micros,
+        row_count: record.row_count,
+        success: record.success,
+        slow_log_candidate: record.slow_log_candidate,
+    }
+}
+
 fn slow_query_record_json(record: &SlowQueryRecord, include_query_text: bool) -> serde_json::Value {
     let mut object = serde_json::json!({
         "protocol": super::SLOW_QUERY_LOG_EVENT_PROTOCOL,

@@ -9,7 +9,8 @@ use crate::{
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
     NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
     SearchIndex, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError, Value,
+    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError,
+    SlowQueryLogRecordSummary, Value,
 };
 use crate::{
     nowledge_inventory::{
@@ -121,6 +122,7 @@ pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-rep
 pub const NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
+pub const NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-slow-query-report-v1";
 pub const NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-mem-bounded-read-evidence-v1";
 pub const NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL: &str = "skein-nowledge-mem-library-readiness-v1";
@@ -847,6 +849,108 @@ pub struct NowledgeMemQueryReportOptions {
     pub slow_log_threshold_micros: Option<u128>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSlowQueryRecord {
+    pub sequence: u64,
+    pub query_language: String,
+    pub query_digest: String,
+    pub started_unix_micros: i64,
+    pub elapsed_micros: i64,
+    pub row_count: i64,
+    pub success: bool,
+    pub slow_log_candidate: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemSlowQueryReport {
+    pub protocol: String,
+    pub mode: NowledgeMemGraphMode,
+    pub present: bool,
+    pub ready: bool,
+    pub capacity: usize,
+    pub threshold_micros: u128,
+    pub record_count: usize,
+    pub latest_sequence: Option<u64>,
+    pub max_elapsed_micros: Option<i64>,
+    pub total_row_count: i64,
+    pub records: Vec<NowledgeMemSlowQueryRecord>,
+}
+
+impl NowledgeMemSlowQueryReport {
+    fn from_summaries(
+        mode: NowledgeMemGraphMode,
+        capacity: usize,
+        threshold_micros: u128,
+        records: Vec<SlowQueryLogRecordSummary>,
+    ) -> Self {
+        let records = records
+            .into_iter()
+            .map(|record| NowledgeMemSlowQueryRecord {
+                sequence: record.sequence,
+                query_language: record.query_language,
+                query_digest: record.query_digest,
+                started_unix_micros: record.started_unix_micros,
+                elapsed_micros: record.elapsed_micros,
+                row_count: record.row_count,
+                success: record.success,
+                slow_log_candidate: record.slow_log_candidate,
+            })
+            .collect::<Vec<_>>();
+        let latest_sequence = records.iter().map(|record| record.sequence).max();
+        let max_elapsed_micros = records.iter().map(|record| record.elapsed_micros).max();
+        let total_row_count = records
+            .iter()
+            .map(|record| record.row_count)
+            .fold(0i64, i64::saturating_add);
+
+        Self {
+            protocol: NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL.to_string(),
+            mode,
+            present: true,
+            ready: true,
+            capacity,
+            threshold_micros,
+            record_count: records.len(),
+            latest_sequence,
+            max_elapsed_micros,
+            total_row_count,
+            records,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "mode": self.mode.as_str(),
+            "present": self.present,
+            "ready": self.ready,
+            "capacity": self.capacity,
+            "threshold_micros": self.threshold_micros,
+            "record_count": self.record_count,
+            "latest_sequence": self.latest_sequence,
+            "max_elapsed_micros": self.max_elapsed_micros,
+            "total_row_count": self.total_row_count,
+            "redaction": {
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            },
+            "records": self.records.iter().map(|record| {
+                serde_json::json!({
+                    "sequence": record.sequence,
+                    "query_language": record.query_language,
+                    "query_digest": record.query_digest,
+                    "started_unix_micros": record.started_unix_micros,
+                    "elapsed_micros": record.elapsed_micros,
+                    "row_count": record.row_count,
+                    "success": record.success,
+                    "slow_log_candidate": record.slow_log_candidate,
+                })
+            }).collect::<Vec<_>>(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct NowledgeMemReadinessOptions {
     pub bounded_read_probe: Option<NowledgeGraphStatement>,
@@ -1250,6 +1354,20 @@ impl NowledgeMemGraph {
         Ok(NowledgeMemQueryOutput { output, report })
     }
 
+    pub fn slow_query_report(&self) -> NowledgeMemSlowQueryReport {
+        let config = self.db.config();
+        NowledgeMemSlowQueryReport::from_summaries(
+            self.mode,
+            config.slow_query_log_capacity,
+            config.slow_query_log_threshold_micros,
+            self.db.slow_query_log_snapshot(),
+        )
+    }
+
+    pub fn slow_query_report_json(&self) -> serde_json::Value {
+        self.slow_query_report().json()
+    }
+
     pub fn read_query(&mut self, cypher: &str) -> Result<NowledgeMemReadOutput> {
         self.read_query_with_params(cypher, &BTreeMap::new(), &NowledgeMemReadOptions::default())
     }
@@ -1569,6 +1687,14 @@ impl NowledgeMemEmbeddedStore {
     ) -> Result<NowledgeMemQueryOutput> {
         self.graph
             .query_with_params_with_report_options(cypher, parameters, options)
+    }
+
+    pub fn slow_query_report(&self) -> NowledgeMemSlowQueryReport {
+        self.graph.slow_query_report()
+    }
+
+    pub fn slow_query_report_json(&self) -> serde_json::Value {
+        self.slow_query_report().json()
     }
 
     pub fn read_query_with_options(
@@ -2389,8 +2515,8 @@ mod tests {
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
-        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
-        REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+        NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
     };
     use crate::search::CompressedVectorSearchMode;
     use crate::search::SearchFusionWeights;
@@ -2648,6 +2774,51 @@ mod tests {
             serde_json::Value::Null
         );
         assert_eq!(query.report.json()["plan_cache"]["cacheable"], false);
+    }
+
+    #[test]
+    fn embedded_store_exposes_redacted_typed_slow_query_report() {
+        let db = Database::new_with_config(DatabaseConfig {
+            slow_query_log_threshold_micros: 0,
+            slow_query_log_capacity: 4,
+            ..DatabaseConfig::default()
+        });
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::ShadowReadOnly);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        store
+            .query_with_report("CREATE (:Memory {id: 'slow-secret-id', title: 'Slow Secret'})")
+            .unwrap();
+        store
+            .query_with_report("MATCH (m:Memory {id: 'slow-secret-id'}) RETURN m.title AS title")
+            .unwrap();
+
+        let report = store.slow_query_report();
+        let json = report.json();
+        let encoded = json.to_string();
+
+        assert_eq!(report.protocol, NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL);
+        assert_eq!(report.mode, NowledgeMemGraphMode::ShadowReadOnly);
+        assert!(report.present);
+        assert!(report.ready);
+        assert_eq!(report.capacity, 4);
+        assert_eq!(report.threshold_micros, 0);
+        assert_eq!(report.record_count, 2);
+        assert_eq!(report.latest_sequence, Some(2));
+        assert_eq!(report.records.len(), 2);
+        assert!(report.records.iter().all(|record| record.success));
+        assert!(report
+            .records
+            .iter()
+            .all(|record| record.slow_log_candidate));
+        assert_eq!(json["protocol"], NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL);
+        assert_eq!(json["record_count"], 2);
+        assert_eq!(json["redaction"]["query_text_copied"], false);
+        assert_eq!(json["redaction"]["parameters_copied"], false);
+        assert!(json["records"][0].get("query_digest").is_some());
+        assert!(!encoded.contains("Slow Secret"));
+        assert!(!encoded.contains("slow-secret-id"));
+        assert!(!encoded.contains("MATCH (m:Memory"));
     }
 
     #[test]
