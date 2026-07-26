@@ -66,6 +66,8 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --nowledge-root /Users/hawkingrei/devel/nowledge/mem \
   --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
   --require-integration-readiness \
+  --search-projection-shadow-primary-probe-json "$NMEM_PREFLIGHT_ROOT/lancedb-search-projection-probe.json" \
+  --search-projection-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/skein-search-projection-probe.json" \
   --search-candidate-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-probe.json" \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
   --query-runtime-probe-json "$NMEM_PREFLIGHT_ROOT/query-runtime-probes.json" \
@@ -235,10 +237,23 @@ summary is fail-closed and must consume the same bounded-read, query-family,
 search projection, search candidate, and query-runtime evidence that the final
 preflight bundle will later verify.
 
-If you have a raw candidate probe instead of precompiled evidence, generate it
-first:
+If you have raw probes instead of precompiled evidence, generate the evidence
+files first:
 
 ```bash
+cargo run --quiet --bin skein -- \
+  nowledge-search-projection-evidence \
+  --require-ready \
+  "$NMEM_PREFLIGHT_ROOT/skein-search-projection-probe.json" \
+  > "$NMEM_PREFLIGHT_ROOT/search-projection-evidence.json"
+
+cargo run --quiet --bin skein -- \
+  nowledge-search-projection-shadow-evidence \
+  --require-ready \
+  --primary-probe-json "$NMEM_PREFLIGHT_ROOT/lancedb-search-projection-probe.json" \
+  --shadow-probe-json "$NMEM_PREFLIGHT_ROOT/skein-search-projection-probe.json" \
+  > "$NMEM_PREFLIGHT_ROOT/search-projection-shadow-evidence.json"
+
 cargo run --quiet --bin skein -- \
   nowledge-search-candidate-shadow-evidence \
   --require-ready \
@@ -301,6 +316,13 @@ When using the bundle runner, an existing `library-readiness.json` can be
 provided with `--library-readiness-json`; otherwise the runner generates it
 from the preflight graph and the already materialized bounded-read,
 query-family, search-projection, and search-projection-shadow evidence files.
+The runner can also materialize those search-projection evidence files from
+`--search-projection-probe-json` or from the paired
+`--search-projection-shadow-primary-probe-json` and
+`--search-projection-shadow-probe-json` inputs. When both a standalone
+projection probe and a shadow probe are present, the standalone probe is used
+for `search-projection-evidence.json`; otherwise the shadow probe is used as
+the Skein-side projection evidence source.
 Automatic generation also needs `--library-readiness-search-projection` to
 point at an existing Skein search projection so `open_report` can prove that
 the embedded library opened both graph and search projection state.

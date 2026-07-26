@@ -13,7 +13,10 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   --wrapper-identity <id> \
   [--shadow-timeout-ms <ms>] \
   [--search-projection-evidence-json <path>] \
+  [--search-projection-probe-json <path>] \
   [--search-projection-shadow-evidence-json <path>] \
+  [--search-projection-shadow-primary-probe-json <path>] \
+  [--search-projection-shadow-probe-json <path>] \
   [--search-candidate-shadow-evidence-json <path>] \
   [--search-candidate-shadow-probe-json <path>] \
   [--bounded-read-evidence-json <path>] \
@@ -56,7 +59,10 @@ nowledge_root=
 wrapper_identity=
 shadow_timeout_ms=
 search_projection_evidence_json=
+search_projection_probe_json=
 search_projection_shadow_evidence_json=
+search_projection_shadow_primary_probe_json=
+search_projection_shadow_probe_json=
 search_candidate_shadow_evidence_json=
 search_candidate_shadow_probe_json=
 bounded_read_evidence_json=
@@ -109,8 +115,20 @@ while (($# > 0)); do
       search_projection_evidence_json="${2:-}"
       shift 2
       ;;
+    --search-projection-probe-json)
+      search_projection_probe_json="${2:-}"
+      shift 2
+      ;;
     --search-projection-shadow-evidence-json)
       search_projection_shadow_evidence_json="${2:-}"
+      shift 2
+      ;;
+    --search-projection-shadow-primary-probe-json)
+      search_projection_shadow_primary_probe_json="${2:-}"
+      shift 2
+      ;;
+    --search-projection-shadow-probe-json)
+      search_projection_shadow_probe_json="${2:-}"
       shift 2
       ;;
     --search-candidate-shadow-evidence-json)
@@ -261,7 +279,10 @@ fi
 
 for evidence_path in \
   "$search_projection_evidence_json" \
+  "$search_projection_probe_json" \
   "$search_projection_shadow_evidence_json" \
+  "$search_projection_shadow_primary_probe_json" \
+  "$search_projection_shadow_probe_json" \
   "$search_candidate_shadow_evidence_json" \
   "$search_candidate_shadow_probe_json" \
   "$bounded_read_evidence_json" \
@@ -328,6 +349,26 @@ if [[ -n "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
   exit 2
 fi
 
+if [[ -n "$search_projection_evidence_json" && -n "$search_projection_probe_json" ]]; then
+  echo "--search-projection-evidence-json cannot be combined with --search-projection-probe-json" >&2
+  exit 2
+fi
+
+if [[ -n "$search_projection_shadow_evidence_json" && ( -n "$search_projection_shadow_primary_probe_json" || -n "$search_projection_shadow_probe_json" ) ]]; then
+  echo "--search-projection-shadow-evidence-json cannot be combined with search projection shadow probe inputs" >&2
+  exit 2
+fi
+
+if [[ -n "$search_projection_shadow_primary_probe_json" && -z "$search_projection_shadow_probe_json" ]]; then
+  echo "--search-projection-shadow-primary-probe-json requires --search-projection-shadow-probe-json" >&2
+  exit 2
+fi
+
+if [[ -n "$search_projection_shadow_probe_json" && -z "$search_projection_shadow_primary_probe_json" ]]; then
+  echo "--search-projection-shadow-probe-json requires --search-projection-shadow-primary-probe-json" >&2
+  exit 2
+fi
+
 if [[ -n "$search_candidate_shadow_evidence_json" && -n "$search_candidate_shadow_probe_json" ]]; then
   echo "--search-candidate-shadow-evidence-json cannot be combined with --search-candidate-shadow-probe-json" >&2
   exit 2
@@ -344,6 +385,14 @@ if [[ "$require_integration_readiness" == true ]]; then
   fi
   if [[ -z "$search_candidate_shadow_evidence_json" && -z "$search_candidate_shadow_probe_json" ]]; then
     echo "--require-integration-readiness requires --search-candidate-shadow-evidence-json or --search-candidate-shadow-probe-json" >&2
+    exit 2
+  fi
+  if [[ -z "$search_projection_evidence_json" && -z "$search_projection_probe_json" && -z "$search_projection_shadow_probe_json" ]]; then
+    echo "--require-integration-readiness requires --search-projection-evidence-json, --search-projection-probe-json, or --search-projection-shadow-probe-json" >&2
+    exit 2
+  fi
+  if [[ -z "$search_projection_shadow_evidence_json" && ( -z "$search_projection_shadow_primary_probe_json" || -z "$search_projection_shadow_probe_json" ) ]]; then
+    echo "--require-integration-readiness requires --search-projection-shadow-evidence-json or search projection shadow probe inputs" >&2
     exit 2
   fi
   if [[ -z "$integration_submodule_path" ]]; then
@@ -516,6 +565,31 @@ if [[ -z "$bounded_read_evidence_json" ]]; then
       > "$preflight_root/bounded-read-evidence.json"
     bounded_read_evidence_json="$preflight_root/bounded-read-evidence.json"
   fi
+fi
+
+if [[ -z "$search_projection_evidence_json" ]]; then
+  if [[ -n "$search_projection_probe_json" ]]; then
+    run_skein nowledge-search-projection-evidence \
+      --require-ready \
+      "$search_projection_probe_json" \
+      > "$preflight_root/search-projection-evidence.json"
+    search_projection_evidence_json="$preflight_root/search-projection-evidence.json"
+  elif [[ -n "$search_projection_shadow_probe_json" ]]; then
+    run_skein nowledge-search-projection-evidence \
+      --require-ready \
+      "$search_projection_shadow_probe_json" \
+      > "$preflight_root/search-projection-evidence.json"
+    search_projection_evidence_json="$preflight_root/search-projection-evidence.json"
+  fi
+fi
+
+if [[ -z "$search_projection_shadow_evidence_json" && -n "$search_projection_shadow_primary_probe_json" ]]; then
+  run_skein nowledge-search-projection-shadow-evidence \
+    --require-ready \
+    --primary-probe-json "$search_projection_shadow_primary_probe_json" \
+    --shadow-probe-json "$search_projection_shadow_probe_json" \
+    > "$preflight_root/search-projection-shadow-evidence.json"
+  search_projection_shadow_evidence_json="$preflight_root/search-projection-shadow-evidence.json"
 fi
 
 if [[ -z "$search_candidate_shadow_evidence_json" && -n "$search_candidate_shadow_probe_json" ]]; then
