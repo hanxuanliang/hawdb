@@ -95,6 +95,9 @@ query family, or cutover gate requires them.
     exact equality, enum/in-list, missing/null, existence, normalized default,
     and range filters so relationship payload scans can be narrowed before row
     filtering.
+  - [x] Push single-relationship-variable `WHERE` predicates that can be
+    represented as exact relationship `PropertyFilter`s into relationship scan
+    pruning while preserving the original residual predicate evaluation.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow

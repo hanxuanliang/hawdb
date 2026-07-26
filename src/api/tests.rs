@@ -27717,6 +27717,60 @@ fn explain_analyze_reports_relationship_property_scan_pruning_profile() {
 }
 
 #[test]
+fn explain_analyze_pushes_relationship_where_predicate_to_scan_pruning() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'source'})").unwrap();
+    for (id, created_at) in [("old", 7), ("newer", 9), ("newest", 10)] {
+        db.query(&format!("CREATE (:Entity {{id: '{id}'}})"))
+            .unwrap();
+        db.query(&format!(
+            "MATCH (m:Memory {{id: 'source'}}), (e:Entity {{id: '{id}'}}) \
+             CREATE (m)-[:MENTIONS {{created_at: {created_at}}}]->(e)"
+        ))
+        .unwrap();
+    }
+
+    let output = db
+        .explain_analyze_query(
+            "MATCH (m:Memory)-[r:MENTIONS]->(e:Entity) \
+             WHERE r.created_at > 8 \
+             RETURN e.id AS id ORDER BY id ASC",
+        )
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 2);
+    assert_eq!(
+        output
+            .output
+            .rows
+            .iter()
+            .map(|row| row.get("id").cloned().unwrap())
+            .collect::<Vec<_>>(),
+        vec![
+            Value::String("newer".to_string()),
+            Value::String("newest".to_string()),
+        ]
+    );
+    let relationship_scan = output
+        .execution_profile
+        .scan_pruning_reports
+        .iter()
+        .find(|scan| {
+            scan.strategy
+                == crate::store::ScanPruningStrategy::PropertyRange {
+                    property: "created_at".to_string(),
+                }
+        })
+        .expect("relationship where predicate scan pruning report");
+    assert!(relationship_scan.pruned);
+    assert_eq!(relationship_scan.label_id, None);
+    assert_eq!(relationship_scan.candidate_count_before_pruning, 3);
+    assert_eq!(relationship_scan.candidate_count_before_filter, 2);
+    assert_eq!(relationship_scan.pruned_candidate_count, 1);
+    assert_eq!(relationship_scan.output_count, 2);
+}
+
+#[test]
 fn cypher_explain_returns_structured_plan_row() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Explain row'})")

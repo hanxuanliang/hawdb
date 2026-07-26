@@ -2047,108 +2047,8 @@ fn execute_bindings_with_limit(
                 })
                 .collect())
         }
-        PhysicalPlan::AdjacencyExpandExec {
-            source_variable,
-            source_label: _,
-            rel_variable,
-            rel_type,
-            rel_properties,
-            direction,
-            target_variable,
-            target_label,
-            min_hops,
-            max_hops,
-            optional,
-            input,
-        } => {
-            let input = execute_bindings(input, catalog, store)?;
-            let rel_type_id = if rel_type.is_empty() {
-                None
-            } else {
-                let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
-                    return Ok(Vec::new());
-                };
-                Some(rel_type_id)
-            };
-            let target_label_ids = label_ids_for_pattern(catalog, target_label);
-            let mut output = Vec::new();
-            for binding in input {
-                let source = binding.nodes.get(source_variable).ok_or_else(|| {
-                    SkeinError::Execution(format!(
-                        "missing variable '{source_variable}' during expand"
-                    ))
-                })?;
-                let output_len_before = output.len();
-                if rel_variable.is_some()
-                    || !rel_properties.is_empty()
-                    || *direction != RelationshipDirection::Outgoing
-                {
-                    let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
-                    for (relationship, target) in one_hop_relationships(
-                        store,
-                        source.id,
-                        rel_type_id,
-                        target_label_ids.as_deref(),
-                        rel_properties,
-                        *direction,
-                    ) {
-                        if bound_target_id.is_some_and(|node_id| node_id != target.id) {
-                            continue;
-                        }
-                        let mut nodes = binding.nodes.clone();
-                        nodes.insert(target_variable.clone(), target.clone());
-                        let mut relationships = binding.relationships.clone();
-                        if let Some(rel_variable) = rel_variable {
-                            relationships.insert(rel_variable.clone(), relationship.clone());
-                        }
-                        output.push(Binding {
-                            values: binding.values.clone(),
-                            nodes,
-                            relationships,
-                        });
-                        if execution_limit.is_reached(output.len()) {
-                            return Ok(output);
-                        }
-                    }
-                } else {
-                    let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
-                    for target in bounded_expand_targets(
-                        store,
-                        source.id,
-                        rel_type_id.expect("typed bounded expand checked by planner"),
-                        target_label_ids.as_deref(),
-                        *min_hops,
-                        *max_hops,
-                    ) {
-                        if bound_target_id.is_some_and(|node_id| node_id != target.id) {
-                            continue;
-                        }
-                        let mut nodes = binding.nodes.clone();
-                        nodes.insert(target_variable.clone(), target.clone());
-                        output.push(Binding {
-                            values: binding.values.clone(),
-                            nodes,
-                            relationships: binding.relationships.clone(),
-                        });
-                        if execution_limit.is_reached(output.len()) {
-                            return Ok(output);
-                        }
-                    }
-                }
-                if *optional && output.len() == output_len_before {
-                    let mut nodes = binding.nodes.clone();
-                    nodes.insert(target_variable.clone(), null_lookup_node());
-                    output.push(Binding {
-                        values: binding.values,
-                        nodes,
-                        relationships: binding.relationships,
-                    });
-                    if execution_limit.is_reached(output.len()) {
-                        return Ok(output);
-                    }
-                }
-            }
-            Ok(output)
+        PhysicalPlan::AdjacencyExpandExec { input, .. } => {
+            execute_adjacency_expand(plan, input, catalog, store, execution_limit, None)
         }
         PhysicalPlan::OptionalDegreeExec {
             source_variable,
@@ -2190,6 +2090,7 @@ fn execute_bindings_with_limit(
                         rel_type_id,
                         target_label_ids.as_deref(),
                         rel_properties,
+                        None,
                         *direction,
                     )
                     .into_iter()
@@ -2284,6 +2185,35 @@ fn execute_bindings_with_limit(
                         store,
                         execution_limit,
                     );
+                }
+            }
+            if let PhysicalPlan::AdjacencyExpandExec {
+                rel_variable: Some(rel_variable),
+                input: expand_input,
+                ..
+            } = input.as_ref()
+            {
+                if predicate_references_only_variable(predicate, rel_variable) {
+                    if let Ok(filter) = property_filter_from_predicate(predicate) {
+                        let input = execute_adjacency_expand(
+                            input,
+                            expand_input,
+                            catalog,
+                            store,
+                            execution_limit,
+                            Some(&filter),
+                        )?;
+                        let mut output = Vec::new();
+                        for binding in input {
+                            if evaluate_predicate(predicate, catalog, store, &binding) {
+                                output.push(binding);
+                                if execution_limit.is_reached(output.len()) {
+                                    return Ok(output);
+                                }
+                            }
+                        }
+                        return Ok(output);
+                    }
                 }
             }
             let input = execute_bindings(input, catalog, store)?;
@@ -2405,6 +2335,126 @@ fn exact_scan_label_id(catalog: &Catalog, label: &str) -> Option<Option<crate::s
         return None;
     }
     catalog.label_id(label).map(Some)
+}
+
+fn execute_adjacency_expand(
+    plan: &PhysicalPlan,
+    input: &PhysicalPlan,
+    catalog: &mut Catalog,
+    store: &mut GraphStore,
+    execution_limit: ExecutionLimit,
+    relationship_scan_filter: Option<&PropertyFilter>,
+) -> Result<Vec<Binding>> {
+    let PhysicalPlan::AdjacencyExpandExec {
+        source_variable,
+        source_label: _,
+        rel_variable,
+        rel_type,
+        rel_properties,
+        direction,
+        target_variable,
+        target_label,
+        min_hops,
+        max_hops,
+        optional,
+        ..
+    } = plan
+    else {
+        return Err(SkeinError::Execution(
+            "expected adjacency expand plan".to_string(),
+        ));
+    };
+
+    let input = execute_bindings(input, catalog, store)?;
+    let rel_type_id = if rel_type.is_empty() {
+        None
+    } else {
+        let Some(rel_type_id) = catalog.rel_type_id(rel_type) else {
+            return Ok(Vec::new());
+        };
+        Some(rel_type_id)
+    };
+    let target_label_ids = label_ids_for_pattern(catalog, target_label);
+    let mut output = Vec::new();
+    for binding in input {
+        let source = binding.nodes.get(source_variable).ok_or_else(|| {
+            SkeinError::Execution(format!(
+                "missing variable '{source_variable}' during expand"
+            ))
+        })?;
+        let output_len_before = output.len();
+        if rel_variable.is_some()
+            || !rel_properties.is_empty()
+            || relationship_scan_filter.is_some()
+            || *direction != RelationshipDirection::Outgoing
+        {
+            let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
+            for (relationship, target) in one_hop_relationships(
+                store,
+                source.id,
+                rel_type_id,
+                target_label_ids.as_deref(),
+                rel_properties,
+                relationship_scan_filter,
+                *direction,
+            ) {
+                if bound_target_id.is_some_and(|node_id| node_id != target.id) {
+                    continue;
+                }
+                let mut nodes = binding.nodes.clone();
+                nodes.insert(target_variable.clone(), target.clone());
+                let mut relationships = binding.relationships.clone();
+                if let Some(rel_variable) = rel_variable {
+                    relationships.insert(rel_variable.clone(), relationship.clone());
+                }
+                output.push(Binding {
+                    values: binding.values.clone(),
+                    nodes,
+                    relationships,
+                });
+                if execution_limit.is_reached(output.len()) {
+                    return Ok(output);
+                }
+            }
+        } else {
+            let bound_target_id = binding.nodes.get(target_variable).map(|node| node.id);
+            for target in bounded_expand_targets(
+                store,
+                source.id,
+                rel_type_id.expect("typed bounded expand checked by planner"),
+                target_label_ids.as_deref(),
+                *min_hops,
+                *max_hops,
+            ) {
+                if bound_target_id.is_some_and(|node_id| node_id != target.id) {
+                    continue;
+                }
+                let mut nodes = binding.nodes.clone();
+                nodes.insert(target_variable.clone(), target.clone());
+                output.push(Binding {
+                    values: binding.values.clone(),
+                    nodes,
+                    relationships: binding.relationships.clone(),
+                });
+                if execution_limit.is_reached(output.len()) {
+                    return Ok(output);
+                }
+            }
+        }
+        if *optional && output.len() == output_len_before {
+            let mut nodes = binding.nodes.clone();
+            nodes.insert(target_variable.clone(), null_lookup_node());
+            output.push(Binding {
+                values: binding.values,
+                nodes,
+                relationships: binding.relationships,
+            });
+            if execution_limit.is_reached(output.len()) {
+                return Ok(output);
+            }
+        }
+    }
+    Ok(output)
 }
 
 fn execute_aggregate(
@@ -3106,6 +3156,7 @@ fn all_shortest_paths(
             rel_type_id,
             None,
             &BTreeMap::new(),
+            None,
             direction,
         ) {
             if path.contains(&next.id) {
@@ -3161,12 +3212,17 @@ fn one_hop_relationships<'a>(
     rel_type_id: Option<crate::schema::RelTypeId>,
     target_label_ids: Option<&[crate::schema::LabelId]>,
     rel_properties: &BTreeMap<String, Value>,
+    relationship_scan_filter: Option<&PropertyFilter>,
     direction: RelationshipDirection,
 ) -> Vec<(&'a RelRecord, &'a NodeRecord)> {
     let mut matches = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
-    if let Some(filter) = property_filter_from_properties(rel_properties) {
-        let scan = store.scan_relationships_with_filter_pruning(rel_type_id, Some(&filter));
+    let relationship_filter = combine_property_filters(
+        property_filter_from_properties(rel_properties),
+        relationship_scan_filter.cloned(),
+    );
+    if let Some(filter) = relationship_filter.as_ref() {
+        let scan = store.scan_relationships_with_filter_pruning(rel_type_id, Some(filter));
         record_scan_pruning_report(scan.report.clone());
         collect_one_hop_relationships(
             scan.relationships.into_iter().filter(|relationship| {
@@ -3297,6 +3353,7 @@ fn relationship_count_sum_leg(
         rel_type_id,
         None,
         &BTreeMap::new(),
+        None,
         leg.direction,
     )
     .into_iter()
@@ -3375,6 +3432,7 @@ fn thread_repair_stats_rows(
                         Some(rel_type_id),
                         message_label_ids.as_deref(),
                         &BTreeMap::new(),
+                        None,
                         RelationshipDirection::Outgoing,
                     )
                     .len()
@@ -3388,6 +3446,7 @@ fn thread_repair_stats_rows(
                         Some(rel_type_id),
                         memory_label_ids.as_deref(),
                         &BTreeMap::new(),
+                        None,
                         RelationshipDirection::Outgoing,
                     )
                     .len()
@@ -3914,6 +3973,7 @@ fn relationship_exists(
         rel_type_id,
         target_label_ids.as_deref(),
         &BTreeMap::new(),
+        None,
         direction,
     )
     .is_empty()
@@ -4104,6 +4164,67 @@ fn property_filter_from_predicate(predicate: &Predicate) -> Result<PropertyFilte
             property: property.clone(),
             values: values.clone(),
         }),
+    }
+}
+
+fn predicate_references_only_variable(predicate: &Predicate, variable: &str) -> bool {
+    match predicate {
+        Predicate::And(predicates) | Predicate::Or(predicates) => predicates
+            .iter()
+            .all(|predicate| predicate_references_only_variable(predicate, variable)),
+        Predicate::Not(predicate) => predicate_references_only_variable(predicate, variable),
+        Predicate::IdEq {
+            variable: current, ..
+        }
+        | Predicate::IdNotEq {
+            variable: current, ..
+        }
+        | Predicate::IdCompare {
+            variable: current, ..
+        }
+        | Predicate::IdIn {
+            variable: current, ..
+        }
+        | Predicate::PropertyEq {
+            variable: current, ..
+        }
+        | Predicate::PropertyNotEq {
+            variable: current, ..
+        }
+        | Predicate::PropertyCompare {
+            variable: current, ..
+        }
+        | Predicate::PropertyListContains {
+            variable: current, ..
+        }
+        | Predicate::PropertyContains {
+            variable: current, ..
+        }
+        | Predicate::PropertyStartsWith {
+            variable: current, ..
+        }
+        | Predicate::PropertyEndsWith {
+            variable: current, ..
+        }
+        | Predicate::PropertyRegexMatch {
+            variable: current, ..
+        }
+        | Predicate::PropertyIsNull {
+            variable: current, ..
+        }
+        | Predicate::PropertyIsNotNull {
+            variable: current, ..
+        }
+        | Predicate::PropertyIn {
+            variable: current, ..
+        } => current == variable,
+        Predicate::ConstantBool(_)
+        | Predicate::RelationshipExists { .. }
+        | Predicate::BoundRelationshipExists { .. }
+        | Predicate::ExpressionEq { .. }
+        | Predicate::ExpressionNotEq { .. }
+        | Predicate::ExpressionCompare { .. }
+        | Predicate::ExpressionContains { .. } => false,
     }
 }
 
