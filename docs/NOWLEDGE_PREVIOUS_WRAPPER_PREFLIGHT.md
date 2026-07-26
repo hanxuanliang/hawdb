@@ -66,7 +66,7 @@ scripts/nowledge-previous-wrapper-preflight.sh \
   --nowledge-root /Users/hawkingrei/devel/nowledge/mem \
   --wrapper-identity "$NOWLEDGE_WRAPPER_IDENTITY" \
   --require-integration-readiness \
-  --search-candidate-shadow-evidence-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-evidence.json" \
+  --search-candidate-shadow-probe-json "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-probe.json" \
   --graph-route-query-json "$NMEM_PREFLIGHT_ROOT/graph-route-queries.json" \
   --query-runtime-probe-json "$NMEM_PREFLIGHT_ROOT/query-runtime-probes.json" \
   --integration-submodule-path vendor/skein \
@@ -234,6 +234,17 @@ Generate `query-runtime-preflight.json` before this step. The replacement
 summary is fail-closed and must consume the same bounded-read, query-family,
 search projection, search candidate, and query-runtime evidence that the final
 preflight bundle will later verify.
+
+If you have a raw candidate probe instead of precompiled evidence, generate it
+first:
+
+```bash
+cargo run --quiet --bin skein -- \
+  nowledge-search-candidate-shadow-evidence \
+  --require-ready \
+  "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-probe.json" \
+  > "$NMEM_PREFLIGHT_ROOT/search-candidate-shadow-evidence.json"
+```
 
 ```bash
 cargo run --quiet --bin skein -- \

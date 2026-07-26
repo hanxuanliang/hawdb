@@ -673,6 +673,46 @@ For multi-request bridge runs, prefer
 once per LanceDB/Skein candidate comparison and emit `accumulator.json()` at
 the end. Use `record_compare` only for count-only diagnostics; final
 integration readiness requires candidate identity evidence.
+CLI-based harnesses can emit the same evidence from a minimal probe:
+
+```text
+skein nowledge-search-candidate-shadow-evidence \
+  --require-ready \
+  search-candidate-shadow-probe.json > search-candidate-shadow-evidence.json
+```
+
+The probe schema is:
+
+```json
+{
+  "requests": [
+    {
+      "primary_candidate_ids": ["mem_1", "mem_2"],
+      "shadow_candidate_ids": ["mem_1", "mem_2"]
+    }
+  ],
+  "filter_pushdown": {
+    "pushed_predicate_count": 1,
+    "fields": [
+      "kind",
+      "external_id",
+      "source_id",
+      "space_id",
+      "unit_type",
+      "importance",
+      "confidence",
+      "created_at",
+      "updated_at",
+      "event_start",
+      "event_end",
+      "is_latest"
+    ]
+  }
+}
+```
+
+The CLI does not execute search; it only compiles already-observed LanceDB and
+Skein candidate IDs plus filter-pushdown fields into fail-closed evidence.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
 error unless `cutover_evidence.eligible` is true. Use it for production cutover

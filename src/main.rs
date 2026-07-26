@@ -11,6 +11,7 @@ mod cli_previous_wrapper_preflight;
 mod cli_query_family_evidence;
 mod cli_query_runtime_preflight;
 mod cli_replacement_summary;
+mod cli_search_candidate_shadow_evidence;
 mod cli_storage_recovery_evidence;
 
 use cli_background_maintenance_evidence::run_nowledge_background_maintenance_evidence;
@@ -31,6 +32,7 @@ use cli_replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, NowledgeReplacementSummaryOptions,
 };
+use cli_search_candidate_shadow_evidence::run_nowledge_search_candidate_shadow_evidence;
 use cli_storage_recovery_evidence::run_nowledge_storage_recovery_evidence;
 use skein::nowledge_inventory::background_maintenance_summary_to_json;
 use skein::search_projection_evidence::{
@@ -223,6 +225,17 @@ fn main() -> Result<()> {
             {
                 return Err(SkeinError::Execution(
                     "nowledge search projection shadow evidence is not ready".to_string(),
+                ));
+            }
+            return Ok(());
+        }
+        if command == "nowledge-search-candidate-shadow-evidence" {
+            let (json, require_ready) = run_nowledge_search_candidate_shadow_evidence(args)?;
+            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            if require_ready && json.get("ready").and_then(serde_json::Value::as_bool) != Some(true)
+            {
+                return Err(SkeinError::Execution(
+                    "nowledge search candidate shadow evidence is not ready".to_string(),
                 ));
             }
             return Ok(());

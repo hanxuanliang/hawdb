@@ -15,6 +15,7 @@ usage: scripts/nowledge-previous-wrapper-preflight.sh \
   [--search-projection-evidence-json <path>] \
   [--search-projection-shadow-evidence-json <path>] \
   [--search-candidate-shadow-evidence-json <path>] \
+  [--search-candidate-shadow-probe-json <path>] \
   [--bounded-read-evidence-json <path>] \
   [--bounded-read-report-json <path>] \
   [--bounded-read-database <path>] \
@@ -57,6 +58,7 @@ shadow_timeout_ms=
 search_projection_evidence_json=
 search_projection_shadow_evidence_json=
 search_candidate_shadow_evidence_json=
+search_candidate_shadow_probe_json=
 bounded_read_evidence_json=
 bounded_read_report_json=
 bounded_read_database=
@@ -113,6 +115,10 @@ while (($# > 0)); do
       ;;
     --search-candidate-shadow-evidence-json)
       search_candidate_shadow_evidence_json="${2:-}"
+      shift 2
+      ;;
+    --search-candidate-shadow-probe-json)
+      search_candidate_shadow_probe_json="${2:-}"
       shift 2
       ;;
     --bounded-read-evidence-json)
@@ -257,6 +263,7 @@ for evidence_path in \
   "$search_projection_evidence_json" \
   "$search_projection_shadow_evidence_json" \
   "$search_candidate_shadow_evidence_json" \
+  "$search_candidate_shadow_probe_json" \
   "$bounded_read_evidence_json" \
   "$bounded_read_report_json" \
   "$library_readiness_json" \
@@ -321,6 +328,11 @@ if [[ -n "$graph_route_evidence_json" && -n "$graph_route_query_json" ]]; then
   exit 2
 fi
 
+if [[ -n "$search_candidate_shadow_evidence_json" && -n "$search_candidate_shadow_probe_json" ]]; then
+  echo "--search-candidate-shadow-evidence-json cannot be combined with --search-candidate-shadow-probe-json" >&2
+  exit 2
+fi
+
 if [[ "$require_integration_readiness" == true ]]; then
   if [[ -z "$graph_route_readiness_json" && -z "$graph_route_evidence_json" && -z "$graph_route_query_json" ]]; then
     echo "--require-integration-readiness requires --graph-route-readiness-json, --graph-route-evidence-json, or --graph-route-query-json" >&2
@@ -330,8 +342,8 @@ if [[ "$require_integration_readiness" == true ]]; then
     echo "--require-integration-readiness requires --query-runtime-preflight-json or --query-runtime-probe-json" >&2
     exit 2
   fi
-  if [[ -z "$search_candidate_shadow_evidence_json" ]]; then
-    echo "--require-integration-readiness requires --search-candidate-shadow-evidence-json" >&2
+  if [[ -z "$search_candidate_shadow_evidence_json" && -z "$search_candidate_shadow_probe_json" ]]; then
+    echo "--require-integration-readiness requires --search-candidate-shadow-evidence-json or --search-candidate-shadow-probe-json" >&2
     exit 2
   fi
   if [[ -z "$integration_submodule_path" ]]; then
@@ -504,6 +516,14 @@ if [[ -z "$bounded_read_evidence_json" ]]; then
       > "$preflight_root/bounded-read-evidence.json"
     bounded_read_evidence_json="$preflight_root/bounded-read-evidence.json"
   fi
+fi
+
+if [[ -z "$search_candidate_shadow_evidence_json" && -n "$search_candidate_shadow_probe_json" ]]; then
+  run_skein nowledge-search-candidate-shadow-evidence \
+    --require-ready \
+    "$search_candidate_shadow_probe_json" \
+    > "$preflight_root/search-candidate-shadow-evidence.json"
+  search_candidate_shadow_evidence_json="$preflight_root/search-candidate-shadow-evidence.json"
 fi
 
 if [[ -n "$query_runtime_preflight_json" ]]; then
