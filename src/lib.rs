@@ -155,6 +155,7 @@ pub use search::{
     SearchRebuildSummary, SearchResultSet, SearchRetrieverCandidateSetReport,
     SearchTruncationReasonCode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
 };
+pub use search_projection_evidence::NowledgeSearchProjectionEvidenceReport;
 pub use skein_optimizer::{
     Distribution, GroupId, Memo as OptimizerMemo, MemoGroup as OptimizerMemoGroup,
     PhysicalProperties, RequiredProperties,

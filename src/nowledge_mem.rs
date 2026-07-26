@@ -1,6 +1,7 @@
 use crate::search::{CompressedVectorSearchMode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS};
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
+    NowledgeSearchProjectionEvidenceReport,
 };
 use crate::{
     cypher, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
@@ -1154,6 +1155,13 @@ impl NowledgeMemSearchProjection {
         nowledge_search_projection_evidence_json(&self.probe_json(options))
     }
 
+    pub fn evidence_report(
+        &self,
+        options: SearchProjectionProbeOptions,
+    ) -> NowledgeSearchProjectionEvidenceReport {
+        NowledgeSearchProjectionEvidenceReport::from_probe(&self.probe_json(options))
+    }
+
     pub fn shadow_evidence_json(
         &self,
         primary_probe: &serde_json::Value,
@@ -1296,6 +1304,13 @@ impl NowledgeMemEmbeddedStore {
         options: SearchProjectionProbeOptions,
     ) -> Result<serde_json::Value> {
         Ok(self.require_search_projection()?.evidence_json(options))
+    }
+
+    pub fn search_projection_evidence_report(
+        &self,
+        options: SearchProjectionProbeOptions,
+    ) -> Result<NowledgeSearchProjectionEvidenceReport> {
+        Ok(self.require_search_projection()?.evidence_report(options))
     }
 
     pub fn search_projection_shadow_evidence_json(
@@ -3159,6 +3174,57 @@ mod tests {
         assert_eq!(evidence["incremental_update_ready"], true);
         #[cfg(feature = "turbovec")]
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn embedded_store_exposes_typed_search_projection_replacement_evidence() {
+        let mut index = SearchIndex::in_memory();
+        index
+            .apply_embedding_manifest(SearchEmbeddingManifest {
+                model: "bge-m3".to_string(),
+                version: None,
+                dimension: 8,
+            })
+            .unwrap();
+        index
+            .apply_projection_delta(SearchProjectionDelta {
+                upserts: nowledge_projection_evidence_rows(),
+                deletes: Vec::new(),
+                max_operations: None,
+                source_graph_commit_epoch: Some(17),
+            })
+            .unwrap();
+        let projection = NowledgeMemSearchProjection::from_index(index);
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+
+        let report = store
+            .search_projection_evidence_report(SearchProjectionProbeOptions {
+                active_embedding_model: Some("bge-m3".to_string()),
+                active_embedding_dimension: Some(8),
+            })
+            .unwrap();
+
+        assert_eq!(report.protocol, "skein-nowledge-search-projection-evidence");
+        #[cfg(feature = "turbovec")]
+        assert!(report.ready);
+        #[cfg(not(feature = "turbovec"))]
+        {
+            assert!(!report.ready);
+            assert!(!report.compressed_vector_projection_ready);
+            assert!(report
+                .blocker_codes
+                .iter()
+                .any(|code| code == "compressed_vector_projection_not_ready"));
+        }
+        assert!(report.derived_projection);
+        assert!(report.all_tables_covered);
+        assert_eq!(report.covered_table_count, 6);
+        assert_eq!(report.required_table_count, 6);
+        assert!(report.source_chunk_ready);
+        assert!(report.incremental_update_ready);
+        assert_eq!(report.json()["covered_table_count"], 6);
     }
 
     #[test]

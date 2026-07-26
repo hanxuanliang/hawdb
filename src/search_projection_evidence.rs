@@ -22,6 +22,87 @@ const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
     "skein_search_projection_segment_descriptor_fields_missing";
 const SKEIN_SEARCH_PROJECTION_SHADOW_EVIDENCE_SOURCE: &str = "skein-rust-library";
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeSearchProjectionEvidenceReport {
+    pub protocol: String,
+    pub ready: bool,
+    pub derived_projection: bool,
+    pub all_tables_covered: bool,
+    pub covered_table_count: u64,
+    pub required_table_count: u64,
+    pub fts_ready: bool,
+    pub vector_ready: bool,
+    pub document_identity_ready: bool,
+    pub embedding_identity_ready: bool,
+    pub fail_soft_ready: bool,
+    pub rebuild_marker_ready: bool,
+    pub metadata_repair_marker_ready: bool,
+    pub incremental_update_ready: bool,
+    pub source_chunk_ready: bool,
+    pub predicate_pushdown_ready: bool,
+    pub skein_predicate_pushdown_ready: bool,
+    pub compressed_vector_projection_required: bool,
+    pub compressed_vector_projection_ready: bool,
+    pub blocker_codes: Vec<String>,
+    evidence: serde_json::Value,
+}
+
+impl NowledgeSearchProjectionEvidenceReport {
+    pub fn from_probe(probe: &serde_json::Value) -> Self {
+        Self::from_evidence(nowledge_search_projection_evidence_json(probe))
+    }
+
+    pub fn from_evidence(evidence: serde_json::Value) -> Self {
+        Self {
+            protocol: str_path(&evidence, &["protocol"])
+                .unwrap_or("skein-nowledge-search-projection-evidence")
+                .to_string(),
+            ready: bool_path(&evidence, &["ready"]).unwrap_or(false),
+            derived_projection: bool_path(&evidence, &["derived_projection"]).unwrap_or(false),
+            all_tables_covered: bool_path(&evidence, &["all_tables_covered"]).unwrap_or(false),
+            covered_table_count: u64_path(&evidence, &["covered_table_count"]).unwrap_or(0),
+            required_table_count: u64_path(&evidence, &["required_table_count"])
+                .unwrap_or(REQUIRED_TABLES.len() as u64),
+            fts_ready: bool_path(&evidence, &["fts_ready"]).unwrap_or(false),
+            vector_ready: bool_path(&evidence, &["vector_ready"]).unwrap_or(false),
+            document_identity_ready: bool_path(&evidence, &["document_identity_ready"])
+                .unwrap_or(false),
+            embedding_identity_ready: bool_path(&evidence, &["embedding_identity_ready"])
+                .unwrap_or(false),
+            fail_soft_ready: bool_path(&evidence, &["fail_soft_ready"]).unwrap_or(false),
+            rebuild_marker_ready: bool_path(&evidence, &["rebuild_marker_ready"]).unwrap_or(false),
+            metadata_repair_marker_ready: bool_path(&evidence, &["metadata_repair_marker_ready"])
+                .unwrap_or(false),
+            incremental_update_ready: bool_path(&evidence, &["incremental_update_ready"])
+                .unwrap_or(false),
+            source_chunk_ready: bool_path(&evidence, &["source_chunk_ready"]).unwrap_or(false),
+            predicate_pushdown_ready: bool_path(&evidence, &["predicate_pushdown_ready"])
+                .unwrap_or(false),
+            skein_predicate_pushdown_ready: bool_path(
+                &evidence,
+                &["skein_predicate_pushdown_ready"],
+            )
+            .unwrap_or(false),
+            compressed_vector_projection_required: bool_path(
+                &evidence,
+                &["compressed_vector_projection_required"],
+            )
+            .unwrap_or(false),
+            compressed_vector_projection_ready: bool_path(
+                &evidence,
+                &["compressed_vector_projection_ready"],
+            )
+            .unwrap_or(false),
+            blocker_codes: array_path(&evidence, &["blocker_codes"]).unwrap_or_default(),
+            evidence,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        self.evidence.clone()
+    }
+}
+
 pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
     serde_json::json!({
         "protocol": "skein-nowledge-search-projection-probe-contract-v1",
@@ -871,7 +952,7 @@ fn array_path(value: &serde_json::Value, path: &[&str]) -> Option<Vec<String>> {
 mod tests {
     use super::{
         nowledge_search_projection_evidence_json, nowledge_search_projection_probe_contract_json,
-        nowledge_search_projection_shadow_evidence_json,
+        nowledge_search_projection_shadow_evidence_json, NowledgeSearchProjectionEvidenceReport,
         SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING,
     };
     use crate::{
@@ -904,6 +985,33 @@ mod tests {
         assert_eq!(report["compressed_vector_projection_required"], true);
         assert_eq!(report["compressed_vector_projection_ready"], true);
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn search_projection_evidence_report_exposes_typed_summary() {
+        let report = NowledgeSearchProjectionEvidenceReport::from_probe(&ready_probe());
+
+        assert_eq!(report.protocol, "skein-nowledge-search-projection-evidence");
+        assert!(report.ready);
+        assert!(report.derived_projection);
+        assert!(report.all_tables_covered);
+        assert_eq!(report.covered_table_count, 6);
+        assert_eq!(report.required_table_count, 6);
+        assert!(report.fts_ready);
+        assert!(report.vector_ready);
+        assert!(report.document_identity_ready);
+        assert!(report.embedding_identity_ready);
+        assert!(report.fail_soft_ready);
+        assert!(report.rebuild_marker_ready);
+        assert!(report.metadata_repair_marker_ready);
+        assert!(report.incremental_update_ready);
+        assert!(report.source_chunk_ready);
+        assert!(report.predicate_pushdown_ready);
+        assert!(report.skein_predicate_pushdown_ready);
+        assert!(report.compressed_vector_projection_required);
+        assert!(report.compressed_vector_projection_ready);
+        assert!(report.blocker_codes.is_empty());
+        assert_eq!(report.json()["ready"], true);
     }
 
     #[test]
