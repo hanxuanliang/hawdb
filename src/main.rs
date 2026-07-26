@@ -4586,6 +4586,9 @@ fn scan_pruning_strategy_json(strategy: &skein::store::ScanPruningStrategy) -> s
         skein::store::ScanPruningStrategy::PropertyExists { property } => {
             serde_json::json!({"kind": "property_exists", "property": property})
         }
+        skein::store::ScanPruningStrategy::PropertyDefaultIfNullEq { property } => {
+            serde_json::json!({"kind": "property_default_if_null_eq", "property": property})
+        }
         skein::store::ScanPruningStrategy::PropertyIn { property } => {
             serde_json::json!({"kind": "property_in", "property": property})
         }

@@ -84,6 +84,9 @@ query family, or cutover gate requires them.
   - [x] Push exact graph `IS NULL` missing-or-null predicates through scan
     planning by subtracting non-null property-index candidates before row
     payload filtering.
+  - [x] Push exact graph normalized default equality predicates such as
+    `CASE WHEN space_id IS NULL OR space_id = '' THEN 'default' ELSE space_id END`
+    through scan planning when the comparison is an equality.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow

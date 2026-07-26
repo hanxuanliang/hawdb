@@ -469,6 +469,7 @@ pub enum ScanPruningStrategy {
     PropertyNotEq { property: String },
     PropertyMissingOrNull { property: String },
     PropertyExists { property: String },
+    PropertyDefaultIfNullEq { property: String },
     PropertyIn { property: String },
     PropertyRange { property: String },
     OrUnion,
@@ -5007,8 +5008,24 @@ impl GraphStore {
             | PropertyFilter::Contains { .. }
             | PropertyFilter::StartsWith { .. }
             | PropertyFilter::EndsWith { .. }
-            | PropertyFilter::RegexMatch { .. }
-            | PropertyFilter::DefaultIfNullOrEq { .. } => None,
+            | PropertyFilter::RegexMatch { .. } => None,
+            PropertyFilter::DefaultIfNullOrEq {
+                property,
+                empty,
+                default,
+                value,
+                negated,
+            } => {
+                if *negated {
+                    return None;
+                }
+                Some(ScanPruningCandidate::exact(
+                    ScanPruningStrategy::PropertyDefaultIfNullEq {
+                        property: property.clone(),
+                    },
+                    self.node_ids_for_default_if_null_eq(label_id, property, empty, default, value),
+                ))
+            }
             PropertyFilter::In { property, values } => Some(ScanPruningCandidate::exact(
                 if values.is_empty() {
                     ScanPruningStrategy::Empty
@@ -5202,6 +5219,30 @@ impl GraphStore {
             .filter(|node| !non_null.contains(&node.id))
             .map(|node| node.id)
             .collect()
+    }
+
+    fn node_ids_for_default_if_null_eq(
+        &self,
+        label_id: Option<LabelId>,
+        property: &str,
+        empty: &Value,
+        default: &Value,
+        value: &Value,
+    ) -> BTreeSet<NodeId> {
+        if value == default {
+            let mut node_ids = self.node_ids_for_property_missing_or_null(label_id, property);
+            let mut values = vec![empty.clone()];
+            if value != empty {
+                values.push(value.clone());
+            }
+            node_ids.extend(self.node_ids_for_property_values(label_id, property, &values));
+            return node_ids;
+        }
+
+        if value == empty || value == &Value::Null {
+            return BTreeSet::new();
+        }
+        self.node_ids_for_property_values(label_id, property, std::slice::from_ref(value))
     }
 
     fn node_ids_for_property_range(
@@ -10613,6 +10654,61 @@ mod tests {
         assert!(!scan.report.exact_empty);
         assert_eq!(scan.report.candidate_count_before_filter, 2);
         assert_eq!(scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(scan.report.pruned_candidate_count, 1);
+        assert_eq!(scan.report.filtered_out_count, 0);
+    }
+
+    #[test]
+    fn scan_pruning_uses_default_if_null_eq_for_normalized_default_filter() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(&mut catalog, "Thread", properties([]))
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Thread",
+                properties([("space_id", Value::String(String::new()))]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Thread",
+                properties([("space_id", Value::String("default".to_string()))]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Thread",
+                properties([("space_id", Value::String("team".to_string()))]),
+            )
+            .unwrap();
+
+        let label = catalog.label_id("Thread").unwrap();
+        let scan = store.scan_nodes_with_filter_pruning(
+            Some(label),
+            Some(&PropertyFilter::DefaultIfNullOrEq {
+                property: "space_id".to_string(),
+                empty: Value::String(String::new()),
+                default: Value::String("default".to_string()),
+                value: Value::String("default".to_string()),
+                negated: false,
+            }),
+        );
+
+        assert_eq!(scan.nodes.len(), 3);
+        assert_eq!(
+            scan.report.strategy,
+            ScanPruningStrategy::PropertyDefaultIfNullEq {
+                property: "space_id".to_string()
+            }
+        );
+        assert!(scan.report.pruned);
+        assert_eq!(scan.report.candidate_count_before_filter, 3);
+        assert_eq!(scan.report.candidate_count_before_pruning, 4);
         assert_eq!(scan.report.pruned_candidate_count, 1);
         assert_eq!(scan.report.filtered_out_count, 0);
     }
