@@ -1,4 +1,7 @@
-use crate::search::{CompressedVectorSearchMode, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS};
+use crate::search::{
+    CompressedVectorSearchMode, SearchCandidateSetReport, SearchFusionWeights, SearchMode,
+    SearchQueryOptions, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
+};
 use crate::search_projection_evidence::{
     nowledge_search_projection_evidence_json, nowledge_search_projection_shadow_evidence_json,
     NowledgeSearchProjectionEvidenceReport,
@@ -9,7 +12,7 @@ use crate::{
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
     NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
     SearchIndex, SearchProjectionDeltaReport, SearchProjectionFreshness,
-    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SkeinError,
+    SearchProjectionGraphDeltaRequest, SearchProjectionProbeOptions, SearchResultSet, SkeinError,
     SlowQueryLogRecordSummary, Value,
 };
 use crate::{
@@ -123,6 +126,8 @@ pub const NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL: &str = "skein-nowledge-mem-open-rep
 pub const NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-query-report-v1";
 pub const NOWLEDGE_MEM_READ_REPORT_PROTOCOL: &str = "skein-nowledge-mem-read-report";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
+pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-search-candidate-report-v1";
 pub const NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL: &str = "skein-nowledge-mem-slow-query-report-v1";
 pub const NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL: &str =
     "skein-nowledge-mem-readiness-dashboard-v1";
@@ -1563,6 +1568,107 @@ pub struct NowledgeMemRetrievalOutput {
     pub report: NowledgeMemRetrievalReport,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemSearchCandidateRequest {
+    pub query_text: String,
+    pub query_embedding: Option<Vec<f32>>,
+    pub mode: SearchMode,
+    pub limit: usize,
+    pub rank_window: Option<usize>,
+    pub fusion_weights: SearchFusionWeights,
+    pub metadata_filters: BTreeMap<String, String>,
+    pub compressed_vector_search_mode: CompressedVectorSearchMode,
+}
+
+impl NowledgeMemSearchCandidateRequest {
+    pub fn text(query_text: impl Into<String>, limit: usize) -> Self {
+        Self {
+            query_text: query_text.into(),
+            query_embedding: None,
+            mode: SearchMode::Text,
+            limit,
+            rank_window: None,
+            fusion_weights: SearchFusionWeights::default(),
+            metadata_filters: BTreeMap::new(),
+            compressed_vector_search_mode: CompressedVectorSearchMode::Disabled,
+        }
+    }
+
+    pub fn with_metadata_filters(mut self, metadata_filters: BTreeMap<String, String>) -> Self {
+        self.metadata_filters = metadata_filters;
+        self
+    }
+
+    pub fn with_compressed_vector_search_mode(
+        mut self,
+        compressed_vector_search_mode: CompressedVectorSearchMode,
+    ) -> Self {
+        self.compressed_vector_search_mode = compressed_vector_search_mode;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemSearchCandidateReport {
+    pub protocol: String,
+    pub compressed_vector_search_mode: CompressedVectorSearchMode,
+    pub mode: SearchMode,
+    pub limit: usize,
+    pub rank_window: Option<usize>,
+    pub document_count: usize,
+    pub filtered_document_count: usize,
+    pub total_hits: usize,
+    pub returned_hit_count: usize,
+    pub truncated: bool,
+    pub candidate_set: SearchCandidateSetReport,
+    pub filtered_out_count: usize,
+    pub metadata_filter_count: usize,
+    pub pushed_predicate_count: usize,
+    pub residual_predicate_count: usize,
+    pub segment_count: usize,
+    pub pruned_segment_count: usize,
+    pub scanned_segment_count: usize,
+    pub persisted_segment_descriptor_used: bool,
+    pub retriever_backends: BTreeMap<String, String>,
+    pub fallback_reason_codes: Vec<String>,
+    pub truncation_reason_codes: Vec<String>,
+}
+
+impl NowledgeMemSearchCandidateReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "compressed_vector_search_mode": self.compressed_vector_search_mode.as_str(),
+            "mode": search_mode_name(self.mode),
+            "limit": self.limit,
+            "rank_window": self.rank_window,
+            "document_count": self.document_count,
+            "filtered_document_count": self.filtered_document_count,
+            "total_hits": self.total_hits,
+            "returned_hit_count": self.returned_hit_count,
+            "truncated": self.truncated,
+            "candidate_set": search_candidate_set_report_json(&self.candidate_set),
+            "filtered_out_count": self.filtered_out_count,
+            "metadata_filter_count": self.metadata_filter_count,
+            "pushed_predicate_count": self.pushed_predicate_count,
+            "residual_predicate_count": self.residual_predicate_count,
+            "segment_count": self.segment_count,
+            "pruned_segment_count": self.pruned_segment_count,
+            "scanned_segment_count": self.scanned_segment_count,
+            "persisted_segment_descriptor_used": self.persisted_segment_descriptor_used,
+            "retriever_backends": self.retriever_backends,
+            "fallback_reason_codes": self.fallback_reason_codes,
+            "truncation_reason_codes": self.truncation_reason_codes,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemSearchCandidateOutput {
+    pub result: SearchResultSet,
+    pub report: NowledgeMemSearchCandidateReport,
+}
+
 impl NowledgeMemGraph {
     pub fn open(path: impl AsRef<Path>, mode: NowledgeMemGraphMode) -> Result<Self> {
         let db = Database::open_with_config(path, nowledge_mem_graph_config(mode))?;
@@ -1775,6 +1881,36 @@ impl NowledgeMemSearchProjection {
     pub fn freshness(&self) -> SearchProjectionFreshness {
         self.index.projection_freshness()
     }
+
+    pub fn search_candidates(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> SearchResultSet {
+        self.search_candidates_with_report(request).result
+    }
+
+    pub fn search_candidates_with_report(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> NowledgeMemSearchCandidateOutput {
+        let result = self
+            .index
+            .search_with_options_compressed_vector_projection_mode(
+                &request.query_text,
+                request.query_embedding.as_deref(),
+                request.mode,
+                SearchQueryOptions {
+                    limit: request.limit,
+                    rank_window: request.rank_window,
+                    fusion_weights: request.fusion_weights,
+                    metadata_filters: request.metadata_filters.clone(),
+                    policy_epoch: None,
+                },
+                request.compressed_vector_search_mode,
+            );
+        let report = nowledge_mem_search_candidate_report(request, &result);
+        NowledgeMemSearchCandidateOutput { result, report }
+    }
 }
 
 #[derive(Debug)]
@@ -1850,6 +1986,20 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<NowledgeMemReadOutput> {
         self.lock_store()?
             .read_query_with_params(cypher, parameters, options)
+    }
+
+    pub fn search_candidates(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> Result<SearchResultSet> {
+        Ok(self.lock_store()?.search_candidates(request)?.result)
+    }
+
+    pub fn search_candidates_with_report(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> Result<NowledgeMemSearchCandidateOutput> {
+        self.lock_store()?.search_candidates(request)
     }
 
     pub fn slow_query_report(&self) -> Result<NowledgeMemSlowQueryReport> {
@@ -2059,6 +2209,15 @@ impl NowledgeMemEmbeddedStore {
         Ok(self
             .require_search_projection()?
             .shadow_evidence_json(primary_probe, options))
+    }
+
+    pub fn search_candidates(
+        &self,
+        request: &NowledgeMemSearchCandidateRequest,
+    ) -> Result<NowledgeMemSearchCandidateOutput> {
+        Ok(self
+            .require_search_projection()?
+            .search_candidates_with_report(request))
     }
 
     pub fn retrieve_knowledge(
@@ -3136,6 +3295,104 @@ fn readiness_dashboard_area_from_json(
     }
 }
 
+fn nowledge_mem_search_candidate_report(
+    request: &NowledgeMemSearchCandidateRequest,
+    result: &SearchResultSet,
+) -> NowledgeMemSearchCandidateReport {
+    let pushdown = &result.candidate_set.metadata_predicate_pushdown;
+    NowledgeMemSearchCandidateReport {
+        protocol: NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL.to_string(),
+        compressed_vector_search_mode: request.compressed_vector_search_mode,
+        mode: request.mode,
+        limit: result.limit,
+        rank_window: result.rank_window,
+        document_count: result.document_count,
+        filtered_document_count: result.filtered_document_count,
+        total_hits: result.total_hits,
+        returned_hit_count: result.hits.len(),
+        truncated: result.truncated,
+        candidate_set: result.candidate_set.clone(),
+        filtered_out_count: result.candidate_set.filtered_out_count,
+        metadata_filter_count: result.candidate_set.metadata_filters.len(),
+        pushed_predicate_count: pushdown.pushed_predicate_count,
+        residual_predicate_count: pushdown.residual_predicate_count,
+        segment_count: pushdown.segment_count,
+        pruned_segment_count: pushdown.pruned_segment_count,
+        scanned_segment_count: pushdown.scanned_segment_count,
+        persisted_segment_descriptor_used: pushdown.persisted_segment_descriptor_used,
+        retriever_backends: result
+            .retrievers
+            .iter()
+            .map(|retriever| (retriever.name.clone(), retriever.backend.clone()))
+            .collect(),
+        fallback_reason_codes: result
+            .fallback_reason_codes
+            .iter()
+            .map(|code| code.as_str().to_string())
+            .collect(),
+        truncation_reason_codes: result
+            .truncation_reason_codes
+            .iter()
+            .map(|code| code.as_str().to_string())
+            .collect(),
+    }
+}
+
+fn search_candidate_set_report_json(report: &SearchCandidateSetReport) -> serde_json::Value {
+    serde_json::json!({
+        "id_space": report.id_space,
+        "representation": report.representation,
+        "cardinality": report.cardinality,
+        "exact": report.exact,
+        "snapshot_source_graph_commit_epoch": report.snapshot_source_graph_commit_epoch,
+        "policy_epoch": report.policy_epoch,
+        "filtered_out_count": report.filtered_out_count,
+        "metadata_filters": report.metadata_filters,
+        "metadata_predicate_pushdown": search_predicate_pushdown_report_json(&report.metadata_predicate_pushdown),
+    })
+}
+
+fn search_predicate_pushdown_report_json(
+    report: &crate::search::SearchPredicatePushdownReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "input_predicate_count": report.input_predicate_count,
+        "pushed_predicate_count": report.pushed_predicate_count,
+        "residual_predicate_count": report.residual_predicate_count,
+        "unsatisfiable": report.unsatisfiable,
+        "parse_error": report.parse_error,
+        "segment_count": report.segment_count,
+        "pruned_segment_count": report.pruned_segment_count,
+        "scanned_segment_count": report.scanned_segment_count,
+        "persisted_segment_descriptor_used": report.persisted_segment_descriptor_used,
+        "field_summaries": report.field_summaries.iter().map(search_predicate_field_pruning_report_json).collect::<Vec<_>>(),
+    })
+}
+
+fn search_predicate_field_pruning_report_json(
+    report: &crate::search::SearchPredicateFieldPruningReport,
+) -> serde_json::Value {
+    serde_json::json!({
+        "field": report.field,
+        "value_kind": report.value_kind,
+        "operation_kinds": report.operation_kinds,
+        "segment_count": report.segment_count,
+        "pruned_segment_count": report.pruned_segment_count,
+        "scanned_segment_count": report.scanned_segment_count,
+        "numeric_range_summary_used": report.numeric_range_summary_used,
+        "timestamp_range_summary_used": report.timestamp_range_summary_used,
+        "value_summary_used": report.value_summary_used,
+    })
+}
+
+fn search_mode_name(mode: SearchMode) -> &'static str {
+    match mode {
+        SearchMode::Hybrid => "hybrid",
+        SearchMode::Vector => "vector",
+        SearchMode::Text => "text",
+    }
+}
+
 fn nowledge_mem_retrieval_report(
     mode: NowledgeMemGraphMode,
     compressed_vector_search_mode: CompressedVectorSearchMode,
@@ -3301,14 +3558,16 @@ mod tests {
         NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions,
         NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessAreaSummary,
         NowledgeMemReadinessDashboard, NowledgeMemReadinessOptions,
-        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateShadowAccumulator,
-        NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
-        NowledgeMemStorageRecoveryReport, NowledgeQueryRuntimePreflightProbe,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-        NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
-        NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateRequest,
+        NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
+        NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
+        NowledgeQueryRuntimePreflightProbe, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL,
+        NOWLEDGE_MEM_READ_REPORT_PROTOCOL, NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL, NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
@@ -4928,6 +5187,67 @@ mod tests {
             report.json()["protocol"],
             NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL
         );
+    }
+
+    #[test]
+    fn search_projection_candidate_api_reports_metadata_pushdown() {
+        let root = unique_nowledge_mem_test_dir("search_candidate_api_pushdown");
+        {
+            let mut index = SearchIndex::open(&root).unwrap();
+            for (external_id, lifecycle_state) in [
+                ("deleted", "deleted"),
+                ("forgotten", "forgotten"),
+                ("active", "active"),
+            ] {
+                index
+                    .upsert_projection_row(SearchProjectionRow {
+                        kind: SearchProjectionKind::Memory,
+                        external_id: external_id.to_string(),
+                        title: format!("{external_id} candidate"),
+                        body: "metadata filtered candidate read".to_string(),
+                        embedding: None,
+                        source_id: Some("source-1".to_string()),
+                        metadata: BTreeMap::from([
+                            ("space_id".to_string(), "default".to_string()),
+                            ("lifecycle_state".to_string(), lifecycle_state.to_string()),
+                        ]),
+                    })
+                    .unwrap();
+            }
+            index.checkpoint().unwrap();
+        }
+        let projection = NowledgeMemSearchProjection::open(&root).unwrap();
+        let graph =
+            NowledgeMemGraph::from_database(Database::new(), NowledgeMemGraphMode::ShadowReadOnly);
+        let store = NowledgeMemEmbeddedStore::new(graph, Some(projection));
+        let request = NowledgeMemSearchCandidateRequest::text("candidate read", 10)
+            .with_metadata_filters(BTreeMap::from([(
+                "lifecycle_state__not_in".to_string(),
+                r#"["deleted","forgotten"]"#.to_string(),
+            )]));
+
+        let output = store.search_candidates(&request).unwrap();
+
+        assert_eq!(output.result.total_hits, 1);
+        assert_eq!(output.result.hits[0].id, "memory:active");
+        assert_eq!(
+            output.report.protocol,
+            NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL
+        );
+        assert_eq!(output.report.metadata_filter_count, 1);
+        assert_eq!(output.report.pushed_predicate_count, 1);
+        assert_eq!(output.report.residual_predicate_count, 0);
+        assert_eq!(output.report.segment_count, 2);
+        assert_eq!(output.report.pruned_segment_count, 1);
+        assert_eq!(output.report.scanned_segment_count, 1);
+        assert!(output.report.persisted_segment_descriptor_used);
+        assert_eq!(output.report.filtered_out_count, 2);
+        assert_eq!(
+            output.report.json()["candidate_set"]["metadata_predicate_pushdown"]["field_summaries"]
+                [0]["field"],
+            "lifecycle_state"
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

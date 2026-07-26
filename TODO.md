@@ -121,6 +121,9 @@ query family, or cutover gate requires them.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.
+    - [x] Expose a typed embedded-library search candidate API that returns
+      `SearchResultSet` plus compact predicate-pushdown and segment-pruning
+      report data without requiring graph context expansion.
   - Then cover vector candidate generation, ranking inputs, source chunk
     identity, fail-soft behavior, and repair/rebuild markers.
   - Remove LanceDB from a route only after the matching search projection
