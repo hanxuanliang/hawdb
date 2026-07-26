@@ -2496,7 +2496,15 @@ fn distinct_bindings(input: Vec<Binding>) -> Vec<Binding> {
 }
 
 fn project_value(item: &Projection, catalog: &Catalog, binding: &Binding) -> Result<Value> {
-    match &item.expression {
+    evaluate_projection_expression(&item.expression, catalog, binding)
+}
+
+fn evaluate_projection_expression(
+    expression: &ProjectionExpression,
+    catalog: &Catalog,
+    binding: &Binding,
+) -> Result<Value> {
+    match expression {
         ProjectionExpression::Variable { variable } => binding_value(binding, catalog, variable)
             .ok_or_else(|| {
                 SkeinError::Execution(format!("missing variable '{variable}' during projection"))
@@ -2809,14 +2817,7 @@ fn project_expression_value(
     catalog: &Catalog,
     binding: &Binding,
 ) -> Result<Value> {
-    project_value(
-        &Projection {
-            expression: expression.clone(),
-            name: String::new(),
-        },
-        catalog,
-        binding,
-    )
+    evaluate_projection_expression(expression, catalog, binding)
 }
 
 fn coalesce_difference(
@@ -4171,5 +4172,33 @@ fn range_bounds_from_comparison(op: ComparisonOp, value: Value) -> ValueRangeBou
         ComparisonOp::Lte => (None, Some((value, true))),
         ComparisonOp::Gt => (Some((value, false)), None),
         ComparisonOp::Gte => (Some((value, true)), None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evaluates_nested_projection_expression_without_rebuilding_projection() {
+        let expression = ProjectionExpression::Coalesce(vec![
+            ProjectionExpression::Literal(Value::Null),
+            ProjectionExpression::Lower(Box::new(ProjectionExpression::Left {
+                expression: Box::new(ProjectionExpression::Literal(Value::String(
+                    "SKEIN".to_string(),
+                ))),
+                length: 3,
+            })),
+        ]);
+        let binding = Binding {
+            values: BTreeMap::new(),
+            nodes: BTreeMap::new(),
+            relationships: BTreeMap::new(),
+        };
+
+        let value = evaluate_projection_expression(&expression, &Catalog::default(), &binding)
+            .expect("nested projection expression should evaluate");
+
+        assert_eq!(value, Value::String("ske".to_string()));
     }
 }
