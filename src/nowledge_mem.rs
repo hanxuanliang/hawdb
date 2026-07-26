@@ -4,8 +4,8 @@ use crate::search_projection_evidence::{
     NowledgeSearchProjectionEvidenceReport,
 };
 use crate::{
-    cypher, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary, BackgroundWorkHint,
-    BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
+    cypher, BackgroundMaintenanceKind, BackgroundMaintenanceOptions, BackgroundMaintenanceSummary,
+    BackgroundWorkHint, BackgroundWorkPlan, Database, DatabaseConfig, KnowledgeRetrievalOutput,
     KnowledgeRetrievalRequest, LocalQosPolicy, LocalQosScheduler, LocalQosState,
     NowledgeGraphStatement, PlanCacheLookup, QueryOutput, ReadExecutionProfile, Result,
     SearchIndex, SearchProjectionDeltaReport, SearchProjectionFreshness,
@@ -1009,6 +1009,87 @@ impl NowledgeMemStorageRecoveryReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemBackgroundMaintenanceReport {
+    pub protocol: String,
+    pub present: bool,
+    pub ready: bool,
+    pub total_candidates: usize,
+    pub admitted_count: usize,
+    pub deferred_count: usize,
+    pub rejected_count: usize,
+    pub total_estimated_operations: usize,
+    pub admitted_estimated_operations: usize,
+    pub deferred_estimated_operations: usize,
+    pub rejected_estimated_operations: usize,
+    pub executable_search_projection_graph_delta_count: usize,
+    pub admitted_search_projection_graph_delta_count: usize,
+    pub deferred_search_projection_graph_delta_count: usize,
+    pub rejected_search_projection_graph_delta_count: usize,
+    pub executable_search_projection_graph_delta_operations: usize,
+    pub admitted_search_projection_graph_delta_operations: usize,
+    pub max_search_projection_graph_delta_complete_through_graph_commit_epoch: Option<u64>,
+    pub top_admitted_kind: Option<BackgroundMaintenanceKind>,
+    pub top_admitted_name: Option<String>,
+    pub ranked_count: u64,
+    pub foreground_ranked_count: u64,
+    pub unknown_admission_count: u64,
+    pub blocker_codes: Vec<String>,
+    summary: serde_json::Value,
+}
+
+impl NowledgeMemBackgroundMaintenanceReport {
+    pub fn from_summary(summary: &BackgroundMaintenanceSummary) -> Self {
+        let mut json = background_maintenance_summary_to_json(summary);
+        if let Some(object) = json.as_object_mut() {
+            object.insert(
+                "protocol".to_string(),
+                serde_json::Value::String("skein-background-maintenance-report".to_string()),
+            );
+        }
+        let health = background_maintenance_evidence_health(Some(&json), true);
+
+        Self {
+            protocol: "skein-background-maintenance-report".to_string(),
+            present: true,
+            ready: health.ready,
+            total_candidates: summary.total_candidates,
+            admitted_count: summary.admitted_count,
+            deferred_count: summary.deferred_count,
+            rejected_count: summary.rejected_count,
+            total_estimated_operations: summary.total_estimated_operations,
+            admitted_estimated_operations: summary.admitted_estimated_operations,
+            deferred_estimated_operations: summary.deferred_estimated_operations,
+            rejected_estimated_operations: summary.rejected_estimated_operations,
+            executable_search_projection_graph_delta_count: summary
+                .executable_search_projection_graph_delta_count,
+            admitted_search_projection_graph_delta_count: summary
+                .admitted_search_projection_graph_delta_count,
+            deferred_search_projection_graph_delta_count: summary
+                .deferred_search_projection_graph_delta_count,
+            rejected_search_projection_graph_delta_count: summary
+                .rejected_search_projection_graph_delta_count,
+            executable_search_projection_graph_delta_operations: summary
+                .executable_search_projection_graph_delta_operations,
+            admitted_search_projection_graph_delta_operations: summary
+                .admitted_search_projection_graph_delta_operations,
+            max_search_projection_graph_delta_complete_through_graph_commit_epoch: summary
+                .max_search_projection_graph_delta_complete_through_graph_commit_epoch,
+            top_admitted_kind: summary.top_admitted_kind,
+            top_admitted_name: summary.top_admitted_name.clone(),
+            ranked_count: health.ranked_count.unwrap_or_default(),
+            foreground_ranked_count: health.foreground_ranked_count,
+            unknown_admission_count: health.unknown_admission_count,
+            blocker_codes: health.blocker_codes,
+            summary: json,
+        }
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        self.summary.clone()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemRetrievalReport {
     pub protocol: String,
@@ -1524,6 +1605,27 @@ impl NowledgeMemEmbeddedStore {
         )
     }
 
+    pub fn background_maintenance_report(
+        &self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: BackgroundMaintenanceOptions,
+    ) -> NowledgeMemBackgroundMaintenanceReport {
+        NowledgeMemBackgroundMaintenanceReport::from_summary(
+            &self.background_maintenance_summary(policy, state, options),
+        )
+    }
+
+    pub fn background_maintenance_report_json(
+        &self,
+        policy: &LocalQosPolicy,
+        state: &LocalQosState,
+        options: BackgroundMaintenanceOptions,
+    ) -> serde_json::Value {
+        self.background_maintenance_report(policy, state, options)
+            .json()
+    }
+
     pub fn library_readiness_json(
         &mut self,
         options: &NowledgeMemReadinessOptions,
@@ -1540,12 +1642,11 @@ impl NowledgeMemEmbeddedStore {
             .clone()
             .unwrap_or_else(|| self.bounded_read_probe_evidence_json(options));
         let storage_recovery = self.storage_recovery_report_json();
-        let background_maintenance =
-            background_maintenance_summary_to_json(&self.background_maintenance_summary(
-                &options.qos_policy,
-                &options.qos_state,
-                options.background_maintenance_options.clone(),
-            ));
+        let background_maintenance = self.background_maintenance_report_json(
+            &options.qos_policy,
+            &options.qos_state,
+            options.background_maintenance_options.clone(),
+        );
         let query_family_evidence = query_family_replacement_evidence_json(
             options.replacement_readiness_by_query_family.as_ref(),
         );
@@ -3816,6 +3917,64 @@ mod tests {
         assert_eq!(
             item.search_projection_graph_delta_delete_document_count,
             Some(0)
+        );
+
+        let report = store.background_maintenance_report(
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            BackgroundMaintenanceOptions {
+                include_schema_maintenance: false,
+                include_property_index_projection: false,
+                include_search_projection_rebuild: false,
+                include_search_projection_metadata_repair: false,
+                include_graph_lightning_bootstrap_export: false,
+                include_external_content_artifact_jobs: false,
+                ..BackgroundMaintenanceOptions::default()
+            },
+        );
+        let json = report.json();
+
+        assert_eq!(report.protocol, "skein-background-maintenance-report");
+        assert!(report.present);
+        assert!(report.ready);
+        assert_eq!(report.total_candidates, 1);
+        assert_eq!(report.ranked_count, 1);
+        assert_eq!(report.foreground_ranked_count, 0);
+        assert_eq!(report.unknown_admission_count, 0);
+        assert_eq!(report.executable_search_projection_graph_delta_count, 1);
+        assert_eq!(report.admitted_search_projection_graph_delta_count, 1);
+        assert!(report.blocker_codes.is_empty());
+        assert_eq!(json["protocol"], "skein-background-maintenance-report");
+        assert_eq!(json["ranked"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn embedded_store_background_maintenance_report_fails_closed_without_work() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let store = NowledgeMemEmbeddedStore::new(graph, None);
+
+        let report = store.background_maintenance_report(
+            &LocalQosPolicy::default(),
+            &LocalQosState::default(),
+            BackgroundMaintenanceOptions {
+                include_schema_maintenance: false,
+                include_property_index_projection: false,
+                include_search_projection_graph_delta_freshness: false,
+                include_search_projection_rebuild: false,
+                include_search_projection_metadata_repair: false,
+                include_graph_lightning_bootstrap_export: false,
+                include_external_content_artifact_jobs: false,
+                ..BackgroundMaintenanceOptions::default()
+            },
+        );
+
+        assert!(!report.ready);
+        assert_eq!(report.total_candidates, 0);
+        assert_eq!(report.ranked_count, 0);
+        assert_eq!(
+            report.blocker_codes,
+            vec!["no_candidates".to_string(), "no_ranked_work".to_string()]
         );
     }
 
