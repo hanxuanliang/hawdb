@@ -81,6 +81,9 @@ query family, or cutover gate requires them.
     latest/history timestamps.
   - [x] Push exact graph `IS NOT NULL` property-existence predicates through
     scan planning using the property index before row payload filtering.
+  - [x] Push exact graph `IS NULL` missing-or-null predicates through scan
+    planning by subtracting non-null property-index candidates before row
+    payload filtering.
 - [ ] Keep memory use bounded by default.
   - User foreground reads are admitted first.
   - Internal background import, projection, compaction, analytics, and shadow

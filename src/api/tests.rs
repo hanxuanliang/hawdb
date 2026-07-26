@@ -27514,6 +27514,35 @@ fn explain_analyze_reports_property_exists_scan_pruning_profile() {
 }
 
 #[test]
+fn explain_analyze_reports_property_missing_or_null_scan_pruning_profile() {
+    let mut db = Database::new();
+    db.query("CREATE (:Memory {id: 'mem-latest-1', latest_at: 10})")
+        .unwrap();
+    db.query("CREATE (:Memory {id: 'mem-latest-2'})").unwrap();
+    db.query("CREATE (:Memory {id: 'mem-latest-3', latest_at: null})")
+        .unwrap();
+
+    let output = db
+        .explain_analyze_query("MATCH (m:Memory) WHERE m.latest_at IS NULL RETURN m.id AS id")
+        .unwrap();
+
+    assert_eq!(output.output.rows.len(), 2);
+    assert_eq!(output.execution_profile.scan_pruning_reports.len(), 1);
+    let scan = &output.execution_profile.scan_pruning_reports[0];
+    assert!(scan.pruned);
+    assert_eq!(scan.candidate_count_before_pruning, 3);
+    assert_eq!(scan.candidate_count_before_filter, 2);
+    assert_eq!(scan.pruned_candidate_count, 1);
+    assert_eq!(scan.output_count, 2);
+    assert_eq!(
+        scan.strategy,
+        crate::store::ScanPruningStrategy::PropertyMissingOrNull {
+            property: "latest_at".to_string()
+        }
+    );
+}
+
+#[test]
 fn cypher_explain_returns_structured_plan_row() {
     let mut db = Database::new();
     db.query("CREATE (:Memory {id: 1, title: 'Explain row'})")

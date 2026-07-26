@@ -467,6 +467,7 @@ pub enum ScanPruningStrategy {
     IdRange,
     PropertyEq { property: String },
     PropertyNotEq { property: String },
+    PropertyMissingOrNull { property: String },
     PropertyExists { property: String },
     PropertyIn { property: String },
     PropertyRange { property: String },
@@ -4990,7 +4991,12 @@ impl GraphStore {
                     std::slice::from_ref(value),
                 ),
             )),
-            PropertyFilter::IsNull { .. } => None,
+            PropertyFilter::IsNull { property } => Some(ScanPruningCandidate::exact(
+                ScanPruningStrategy::PropertyMissingOrNull {
+                    property: property.clone(),
+                },
+                self.node_ids_for_property_missing_or_null(label_id, property),
+            )),
             PropertyFilter::IsNotNull { property } => Some(ScanPruningCandidate::exact(
                 ScanPruningStrategy::PropertyExists {
                     property: property.clone(),
@@ -5181,6 +5187,20 @@ impl GraphStore {
                     && value != &Value::Null
             })
             .flat_map(|(_, node_ids)| node_ids.iter().copied())
+            .collect()
+    }
+
+    fn node_ids_for_property_missing_or_null(
+        &self,
+        label_id: Option<LabelId>,
+        property: &str,
+    ) -> BTreeSet<NodeId> {
+        let non_null = self.node_ids_for_property_exists(label_id, property);
+        self.nodes
+            .values()
+            .filter(|node| self.node_matches_label(node, label_id))
+            .filter(|node| !non_null.contains(&node.id))
+            .map(|node| node.id)
             .collect()
     }
 
@@ -10549,6 +10569,51 @@ mod tests {
         assert_eq!(scan.report.candidate_count_before_filter, 1);
         assert_eq!(scan.report.candidate_count_before_pruning, 3);
         assert_eq!(scan.report.pruned_candidate_count, 2);
+        assert_eq!(scan.report.filtered_out_count, 0);
+    }
+
+    #[test]
+    fn scan_pruning_uses_property_missing_or_null_for_null_filter() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("latest_at", Value::Int(10))]),
+            )
+            .unwrap();
+        store
+            .create_node(&mut catalog, "Memory", properties([]))
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("latest_at", Value::Null)]),
+            )
+            .unwrap();
+
+        let label = catalog.label_id("Memory").unwrap();
+        let scan = store.scan_nodes_with_filter_pruning(
+            Some(label),
+            Some(&PropertyFilter::IsNull {
+                property: "latest_at".to_string(),
+            }),
+        );
+
+        assert_eq!(scan.nodes.len(), 2);
+        assert_eq!(
+            scan.report.strategy,
+            ScanPruningStrategy::PropertyMissingOrNull {
+                property: "latest_at".to_string()
+            }
+        );
+        assert!(scan.report.pruned);
+        assert!(!scan.report.exact_empty);
+        assert_eq!(scan.report.candidate_count_before_filter, 2);
+        assert_eq!(scan.report.candidate_count_before_pruning, 3);
+        assert_eq!(scan.report.pruned_candidate_count, 1);
         assert_eq!(scan.report.filtered_out_count, 0);
     }
 
