@@ -149,6 +149,8 @@ query family, or cutover gate requires them.
     evidence without rows, parameters, or local paths.
   - [x] Expose typed query-runtime preflight probes and reports through the
     embedded Mem library facade.
+  - [x] Expose previous-wrapper preflight checks as typed Rust library reports
+    and keep the CLI as a thin wrapper.
   - Do not add new query-shape-specific typed APIs unless they are required for
     compatibility with an existing caller during migration.
 

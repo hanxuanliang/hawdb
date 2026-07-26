@@ -9,6 +9,7 @@ pub mod nowledge_inventory;
 pub mod nowledge_mem;
 pub mod optimizer;
 pub mod planner;
+pub mod previous_wrapper_preflight;
 pub mod qos;
 pub mod search;
 pub mod store;
@@ -140,6 +141,12 @@ pub use nowledge_mem::{
     NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE, NOWLEDGE_MEM_SLOW_QUERY_REPORT_PROTOCOL,
     NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+};
+pub use previous_wrapper_preflight::{
+    nowledge_previous_wrapper_preflight_check, nowledge_previous_wrapper_preflight_check_json,
+    IntoNowledgePreviousWrapperPreflightInputs, NowledgePreviousWrapperPreflightCheckReport,
+    NowledgePreviousWrapperPreflightInputs, NowledgePreviousWrapperPreflightReport,
+    NOWLEDGE_PREVIOUS_WRAPPER_PREFLIGHT_PROTOCOL,
 };
 pub use qos::{
     BackgroundWorkDecision, BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode,
