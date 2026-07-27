@@ -205,11 +205,11 @@ fn invalid_field(field: &str, expected: &str) -> SkeinError {
 }
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
-    let content = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!("failed to read bounded read report JSON: {error}"))
+    let content = std::fs::read_to_string(path).map_err(|_| {
+        SkeinError::Execution("failed to read bounded read report JSON: io_error".to_string())
     })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!("failed to parse bounded read report JSON: {error}"))
+    serde_json::from_str(&content).map_err(|_| {
+        SkeinError::Semantic("failed to parse bounded read report JSON: invalid_json".to_string())
     })
 }
 
@@ -270,6 +270,38 @@ mod tests {
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
         std::fs::remove_file(report_path).unwrap();
         std::fs::remove_file(route_readiness_path).unwrap();
+    }
+
+    #[test]
+    fn bounded_read_input_errors_are_redacted_by_default() {
+        let missing_path = unique_test_file("bounded_read_secret_path_do_not_emit");
+
+        let read_error = super::read_json_file(&missing_path)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            read_error,
+            "execution error: failed to read bounded read report JSON: io_error"
+        );
+        assert!(!read_error.contains("bounded_read_secret_path_do_not_emit"));
+
+        let parse_path = unique_test_file("bounded_read_parse_secret_path_do_not_emit");
+        std::fs::write(
+            &parse_path,
+            "{ \"query_text\": \"secret-bounded-query-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let parse_error = super::read_json_file(&parse_path).unwrap_err().to_string();
+
+        assert_eq!(
+            parse_error,
+            "semantic error: failed to parse bounded read report JSON: invalid_json"
+        );
+        assert!(!parse_error.contains("bounded_read_parse_secret_path_do_not_emit"));
+        assert!(!parse_error.contains("secret-bounded-query-do-not-emit"));
+        std::fs::remove_file(parse_path).unwrap();
     }
 
     #[test]
