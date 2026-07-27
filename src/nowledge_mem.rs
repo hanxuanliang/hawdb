@@ -150,6 +150,18 @@ pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE: &str = "skein";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE: &str = "skein-shadow";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE: &str = "lancedb";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE: &str = "skein";
+const NOWLEDGE_SEARCH_CANDIDATE_VALUE_SUMMARY_FIELDS: &[&str] = &[
+    "kind",
+    "external_id",
+    "source_id",
+    "space_id",
+    "unit_type",
+    "lifecycle_state",
+    "is_latest",
+];
+const NOWLEDGE_SEARCH_CANDIDATE_NUMERIC_RANGE_FIELDS: &[&str] = &["importance", "confidence"];
+const NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS: &[&str] =
+    &["created_at", "updated_at", "event_start", "event_end"];
 const NOWLEDGE_SEARCH_PROJECTION_EVIDENCE_PROTOCOL: &str =
     "skein-nowledge-search-projection-evidence";
 const NOWLEDGE_SEARCH_PROJECTION_SHADOW_EVIDENCE_PROTOCOL: &str =
@@ -810,6 +822,21 @@ pub struct NowledgeMemSearchCandidateFilterPushdownEvidence {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemSearchCandidateFieldSummary {
     pub field: String,
+    pub source: String,
+    pub value_summary_used: bool,
+    pub numeric_range_summary_used: bool,
+    pub timestamp_range_summary_used: bool,
+}
+
+impl NowledgeMemSearchCandidateFieldSummary {
+    fn merge_capabilities(&mut self, other: &Self) {
+        self.value_summary_used |= other.value_summary_used;
+        self.numeric_range_summary_used |= other.numeric_range_summary_used;
+        self.timestamp_range_summary_used |= other.timestamp_range_summary_used;
+        if self.source != other.source {
+            self.source = "merged".to_string();
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -893,30 +920,78 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
                 .unwrap_or(true),
             field_summaries: observed_fields
                 .into_iter()
-                .map(|field| NowledgeMemSearchCandidateFieldSummary { field })
+                .map(|field| {
+                    nowledge_mem_search_candidate_descriptor_contract_field_summary(&field)
+                })
                 .collect(),
         });
     }
 
     pub fn record_filter_pushdown_report(&mut self, report: &NowledgeMemSearchCandidateReport) {
-        let fields = if report.persisted_segment_descriptor_used {
-            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.to_vec()
+        let field_summaries = if report.persisted_segment_descriptor_used {
+            NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+                .iter()
+                .map(|field| nowledge_mem_search_candidate_descriptor_contract_field_summary(field))
+                .collect::<Vec<_>>()
         } else {
             report
                 .candidate_set
                 .metadata_predicate_pushdown
                 .field_summaries
                 .iter()
-                .map(|summary| summary.field.as_str())
+                .map(nowledge_mem_search_candidate_field_summary_from_pruning_report)
                 .collect::<Vec<_>>()
         };
-        self.record_filter_pushdown_fields(report.pushed_predicate_count as u64, fields);
+        self.record_filter_pushdown_summaries(
+            report.pushed_predicate_count as u64,
+            true,
+            field_summaries,
+        );
         if !report.persisted_segment_descriptor_used {
             self.add_blocker_code("search_candidate_segment_descriptor_not_used");
         }
         if report.residual_predicate_count > 0 {
             self.add_blocker_code("search_candidate_metadata_filter_residual");
         }
+    }
+
+    fn record_filter_pushdown_summaries(
+        &mut self,
+        pushed_predicate_count: u64,
+        shadow_scan_present: bool,
+        summaries: Vec<NowledgeMemSearchCandidateFieldSummary>,
+    ) {
+        let mut observed = self
+            .filter_pushdown
+            .as_ref()
+            .map(|filter| {
+                filter
+                    .field_summaries
+                    .iter()
+                    .map(|summary| (summary.field.clone(), summary.clone()))
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        for summary in summaries {
+            observed
+                .entry(summary.field.clone())
+                .and_modify(|existing| existing.merge_capabilities(&summary))
+                .or_insert(summary);
+        }
+        self.filter_pushdown = Some(NowledgeMemSearchCandidateFilterPushdownEvidence {
+            pushed_predicate_count: self
+                .filter_pushdown
+                .as_ref()
+                .map(|filter| filter.pushed_predicate_count)
+                .unwrap_or_default()
+                .saturating_add(pushed_predicate_count),
+            shadow_scan_present: self
+                .filter_pushdown
+                .as_ref()
+                .map(|filter| filter.shadow_scan_present && shadow_scan_present)
+                .unwrap_or(shadow_scan_present),
+            field_summaries: observed.into_values().collect(),
+        });
     }
 
     pub fn record_compare_candidate_ids(
@@ -1116,6 +1191,21 @@ fn nowledge_mem_search_candidate_filter_pushdown_json(
     let blocker_codes = nowledge_mem_search_candidate_filter_pushdown_blockers(evidence);
     let missing_required_fields =
         nowledge_mem_search_candidate_missing_filter_fields(evidence.filter_pushdown.as_ref());
+    let missing_value_summary_fields = nowledge_mem_search_candidate_missing_capability_fields(
+        evidence.filter_pushdown.as_ref(),
+        NOWLEDGE_SEARCH_CANDIDATE_VALUE_SUMMARY_FIELDS,
+        CandidateFieldCapability::Value,
+    );
+    let missing_numeric_range_fields = nowledge_mem_search_candidate_missing_capability_fields(
+        evidence.filter_pushdown.as_ref(),
+        NOWLEDGE_SEARCH_CANDIDATE_NUMERIC_RANGE_FIELDS,
+        CandidateFieldCapability::NumericRange,
+    );
+    let missing_timestamp_range_fields = nowledge_mem_search_candidate_missing_capability_fields(
+        evidence.filter_pushdown.as_ref(),
+        NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS,
+        CandidateFieldCapability::TimestampRange,
+    );
     let field_summaries = evidence
         .filter_pushdown
         .as_ref()
@@ -1126,6 +1216,10 @@ fn nowledge_mem_search_candidate_filter_pushdown_json(
                 .map(|summary| {
                     serde_json::json!({
                         "field": summary.field,
+                        "source": summary.source,
+                        "value_summary_used": summary.value_summary_used,
+                        "numeric_range_summary_used": summary.numeric_range_summary_used,
+                        "timestamp_range_summary_used": summary.timestamp_range_summary_used,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1143,6 +1237,12 @@ fn nowledge_mem_search_candidate_filter_pushdown_json(
             .map(|filter| filter.shadow_scan_present),
         "required_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "missing_required_fields": missing_required_fields,
+        "missing_value_summary_fields": missing_value_summary_fields,
+        "missing_numeric_range_fields": missing_numeric_range_fields,
+        "missing_timestamp_range_fields": missing_timestamp_range_fields,
+        "field_capabilities_ready": missing_value_summary_fields.is_empty()
+            && missing_numeric_range_fields.is_empty()
+            && missing_timestamp_range_fields.is_empty(),
         "field_summary_count": field_summaries.len(),
         "field_summaries": field_summaries,
         "blocker_codes": blocker_codes,
@@ -1167,6 +1267,27 @@ fn nowledge_mem_search_candidate_filter_pushdown_blockers(
     if !missing_required_fields.is_empty() {
         blockers.insert("search_candidate_field_pruning_missing".to_string());
     }
+    let missing_value_summary_fields = nowledge_mem_search_candidate_missing_capability_fields(
+        Some(filter_pushdown),
+        NOWLEDGE_SEARCH_CANDIDATE_VALUE_SUMMARY_FIELDS,
+        CandidateFieldCapability::Value,
+    );
+    let missing_numeric_range_fields = nowledge_mem_search_candidate_missing_capability_fields(
+        Some(filter_pushdown),
+        NOWLEDGE_SEARCH_CANDIDATE_NUMERIC_RANGE_FIELDS,
+        CandidateFieldCapability::NumericRange,
+    );
+    let missing_timestamp_range_fields = nowledge_mem_search_candidate_missing_capability_fields(
+        Some(filter_pushdown),
+        NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS,
+        CandidateFieldCapability::TimestampRange,
+    );
+    if !missing_value_summary_fields.is_empty()
+        || !missing_numeric_range_fields.is_empty()
+        || !missing_timestamp_range_fields.is_empty()
+    {
+        blockers.insert("search_candidate_field_pruning_capability_missing".to_string());
+    }
     blockers.into_iter().collect()
 }
 
@@ -1187,6 +1308,71 @@ fn nowledge_mem_search_candidate_missing_filter_fields(
         .copied()
         .filter(|field| !observed_fields.contains(field))
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateFieldCapability {
+    Value,
+    NumericRange,
+    TimestampRange,
+}
+
+fn nowledge_mem_search_candidate_missing_capability_fields(
+    filter_pushdown: Option<&NowledgeMemSearchCandidateFilterPushdownEvidence>,
+    required_fields: &'static [&'static str],
+    capability: CandidateFieldCapability,
+) -> Vec<&'static str> {
+    let summaries = filter_pushdown
+        .map(|filter| filter.field_summaries.as_slice())
+        .unwrap_or(&[]);
+    required_fields
+        .iter()
+        .copied()
+        .filter(|field| {
+            !summaries.iter().any(|summary| {
+                summary.field == *field && candidate_field_has_capability(summary, capability)
+            })
+        })
+        .collect()
+}
+
+fn candidate_field_has_capability(
+    summary: &NowledgeMemSearchCandidateFieldSummary,
+    capability: CandidateFieldCapability,
+) -> bool {
+    match capability {
+        CandidateFieldCapability::Value => summary.value_summary_used,
+        CandidateFieldCapability::NumericRange => summary.numeric_range_summary_used,
+        CandidateFieldCapability::TimestampRange => {
+            summary.timestamp_range_summary_used || summary.numeric_range_summary_used
+        }
+    }
+}
+
+fn nowledge_mem_search_candidate_descriptor_contract_field_summary(
+    field: &str,
+) -> NowledgeMemSearchCandidateFieldSummary {
+    NowledgeMemSearchCandidateFieldSummary {
+        field: field.to_string(),
+        source: "persisted_segment_descriptor_contract".to_string(),
+        value_summary_used: NOWLEDGE_SEARCH_CANDIDATE_VALUE_SUMMARY_FIELDS.contains(&field),
+        numeric_range_summary_used: NOWLEDGE_SEARCH_CANDIDATE_NUMERIC_RANGE_FIELDS.contains(&field)
+            || NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS.contains(&field),
+        timestamp_range_summary_used: NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS
+            .contains(&field),
+    }
+}
+
+fn nowledge_mem_search_candidate_field_summary_from_pruning_report(
+    report: &crate::search::SearchPredicateFieldPruningReport,
+) -> NowledgeMemSearchCandidateFieldSummary {
+    NowledgeMemSearchCandidateFieldSummary {
+        field: report.field.clone(),
+        source: "search_predicate_pruning_report".to_string(),
+        value_summary_used: report.value_summary_used,
+        numeric_range_summary_used: report.numeric_range_summary_used,
+        timestamp_range_summary_used: report.timestamp_range_summary_used,
+    }
 }
 
 fn update_search_candidate_identity_checksum(
@@ -5230,9 +5416,32 @@ mod tests {
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
         assert_eq!(evidence["filter_pushdown"]["pushed_predicate_count"], 2);
         assert_eq!(
+            evidence["filter_pushdown"]["field_capabilities_ready"],
+            true
+        );
+        assert_eq!(
+            evidence["filter_pushdown"]["missing_value_summary_fields"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            evidence["filter_pushdown"]["missing_numeric_range_fields"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            evidence["filter_pushdown"]["missing_timestamp_range_fields"],
+            serde_json::json!([])
+        );
+        assert_eq!(
             evidence["filter_pushdown"]["field_summary_count"],
             serde_json::json!(NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len())
         );
+        assert!(evidence["filter_pushdown"]["field_summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|summary| summary["field"] == "importance"
+                && summary["source"] == "persisted_segment_descriptor_contract"
+                && summary["numeric_range_summary_used"] == true));
         assert!(evidence["candidate_identity"]
             .get("candidate_ids")
             .is_none());
@@ -6476,6 +6685,10 @@ mod tests {
         assert_eq!(evidence["candidate_identity"]["ready"], true);
         assert_eq!(evidence["filter_pushdown"]["ready"], true);
         assert_eq!(
+            evidence["filter_pushdown"]["field_capabilities_ready"],
+            true
+        );
+        assert_eq!(
             evidence["filter_pushdown"]["field_summary_count"],
             NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len()
         );
@@ -6487,7 +6700,14 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .any(|summary| summary["field"] == "lifecycle_state"));
+            .any(|summary| summary["field"] == "lifecycle_state"
+                && summary["source"] == "persisted_segment_descriptor_contract"));
+        assert!(evidence["filter_pushdown"]["field_summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|summary| summary["field"] == "confidence"
+                && summary["numeric_range_summary_used"] == true));
 
         let direct_evidence = store
             .search_candidate_shadow_evidence_json(&request, ["memory:active"])
@@ -6499,6 +6719,10 @@ mod tests {
         );
         assert_eq!(direct_evidence["candidate_identity"]["ready"], true);
         assert_eq!(direct_evidence["filter_pushdown"]["ready"], true);
+        assert_eq!(
+            direct_evidence["filter_pushdown"]["field_capabilities_ready"],
+            true
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 
