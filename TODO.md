@@ -212,6 +212,9 @@ contract.
   - [x] Require final previous-wrapper preflight to validate query-runtime
     route catalog version and digest so stale route coverage cannot pass the
     final cutover gate.
+  - [x] Require final previous-wrapper preflight to validate replacement
+    summary route catalog metadata for bounded-read, graph-route, and
+    query-runtime evidence.
 - [ ] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.

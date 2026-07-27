@@ -846,6 +846,27 @@ pub fn nowledge_previous_wrapper_preflight_check(
             ),
         ),
         preflight_check(
+            "replacement_summary_route_catalog",
+            [
+                route_catalog_metadata_ready(&replacement_summary, &["bounded_read_evidence"]),
+                route_catalog_metadata_ready(&replacement_summary, &["graph_route_readiness"]),
+                route_catalog_metadata_ready(&replacement_summary, &["query_runtime_preflight"]),
+            ],
+            [
+                "replacement_summary.bounded_read_evidence.route_catalog",
+                "replacement_summary.graph_route_readiness.route_catalog",
+                "replacement_summary.query_runtime_preflight.route_catalog",
+            ],
+            blocker_codes(
+                &replacement_summary,
+                &[
+                    &["bounded_read_evidence", "blocker_codes"][..],
+                    &["graph_route_readiness", "blocker_codes"][..],
+                    &["query_runtime_preflight", "blocker_codes"][..],
+                ],
+            ),
+        ),
+        preflight_check(
             "query_runtime_preflight",
             [
                 str_path(&query_runtime_preflight, &["protocol"])
@@ -1879,6 +1900,16 @@ fn query_runtime_preflight_counts_match(value: &serde_json::Value) -> bool {
     probe_count > 0 && passed_probe_count == probe_count && failed_probe_count == 0
 }
 
+fn route_catalog_metadata_ready(value: &serde_json::Value, path: &[&str]) -> bool {
+    let Some(value) = value_path(value, path) else {
+        return false;
+    };
+    str_path(value, &["route_catalog_version"])
+        == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION)
+        && str_path(value, &["route_catalog_digest"])
+            == Some(nowledge_mem_graph_read_route_catalog_digest().as_str())
+}
+
 fn query_runtime_preflight_probe_details_ready(value: &serde_json::Value) -> bool {
     let Some(probes) = value
         .get("probes")
@@ -2299,7 +2330,11 @@ mod tests {
         assert_eq!(report["ready"], false);
         assert_eq!(
             report["failed_checks"],
-            serde_json::json!(["background_maintenance", "replacement_summary"])
+            serde_json::json!([
+                "background_maintenance",
+                "replacement_summary",
+                "replacement_summary_route_catalog"
+            ])
         );
         assert_eq!(
             check_by_name(&report, "background_maintenance")["failed_evidence_fields"],
@@ -2970,6 +3005,26 @@ mod tests {
     }
 
     #[test]
+    fn preflight_check_rejects_stale_replacement_summary_route_catalog() {
+        let mut inputs = ready_inputs();
+        let replacement_summary = inputs.replacement_summary.as_mut().unwrap();
+        replacement_summary["graph_route_readiness"]["route_catalog_digest"] =
+            serde_json::json!("fnv1a64:stale");
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["replacement_summary_route_catalog"])
+        );
+        assert_eq!(
+            check_by_name(&report, "replacement_summary_route_catalog")["failed_evidence_fields"],
+            serde_json::json!(["replacement_summary.graph_route_readiness.route_catalog"])
+        );
+    }
+
+    #[test]
     fn preflight_check_rejects_query_runtime_preflight_with_unknown_route() {
         let mut inputs = ready_inputs();
         let preflight = inputs.query_runtime_preflight.as_mut().unwrap();
@@ -3254,11 +3309,22 @@ mod tests {
                 },
                 "search_projection_evidence": ready_search_projection_evidence(),
                 "search_projection_shadow_evidence": ready_search_projection_shadow_evidence(),
-                "search_candidate_shadow_evidence": ready_search_candidate_shadow_evidence()
+                "search_candidate_shadow_evidence": ready_search_candidate_shadow_evidence(),
+                "bounded_read_evidence": ready_route_catalog_metadata(),
+                "graph_route_readiness": ready_route_catalog_metadata(),
+                "query_runtime_preflight": ready_route_catalog_metadata()
             })),
             query_runtime_preflight: Some(ready_query_runtime_preflight()),
             library_readiness: Some(ready_library_readiness()),
         }
+    }
+
+    fn ready_route_catalog_metadata() -> serde_json::Value {
+        serde_json::json!({
+            "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+            "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
+            "blocker_codes": []
+        })
     }
 
     fn ready_query_runtime_preflight() -> serde_json::Value {
