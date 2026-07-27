@@ -277,6 +277,7 @@ pub struct LibraryReadinessCutoverReadiness {
     pub search_projection_ready: bool,
     pub search_projection_shadow_ready: bool,
     pub search_candidate_shadow_ready: bool,
+    pub workload_fixture_ready: bool,
     pub blocker_codes: Vec<String>,
 }
 
@@ -588,6 +589,7 @@ impl LibraryReadinessCutoverReadiness {
             && self.search_projection_ready
             && self.search_projection_shadow_ready
             && self.search_candidate_shadow_ready
+            && self.workload_fixture_ready
     }
 }
 
@@ -4476,6 +4478,7 @@ pub fn library_readiness_cutover_readiness(
             bundle,
             "search_candidate_shadow",
         ),
+        workload_fixture_ready: library_readiness_area_ready(bundle, "workload_fixture"),
         blocker_codes: blocker_codes(
             bundle,
             &[
@@ -4532,6 +4535,12 @@ pub fn library_readiness_cutover_readiness(
                     "library_readiness",
                     "readiness_by_area",
                     "search_candidate_shadow",
+                    "blocker_codes",
+                ][..],
+                &[
+                    "library_readiness",
+                    "readiness_by_area",
+                    "workload_fixture",
                     "blocker_codes",
                 ][..],
             ],
@@ -4597,6 +4606,10 @@ fn library_readiness_cutover_conditions(
         (
             "library_readiness.readiness_by_area.search_candidate_shadow.ready",
             readiness.search_candidate_shadow_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.workload_fixture.ready",
+            readiness.workload_fixture_ready,
         ),
     ]
 }
@@ -8270,7 +8283,8 @@ mod tests {
                 "library_readiness.readiness_by_area.graph_route.ready",
                 "library_readiness.readiness_by_area.search_projection.ready",
                 "library_readiness.readiness_by_area.search_projection_shadow.ready",
-                "library_readiness.readiness_by_area.search_candidate_shadow.ready"
+                "library_readiness.readiness_by_area.search_candidate_shadow.ready",
+                "library_readiness.readiness_by_area.workload_fixture.ready"
             ])
         );
         assert!(report["next_actions"]
@@ -8391,6 +8405,64 @@ mod tests {
                 "library_readiness.ready",
                 "library_readiness.blocked_area_count",
                 "library_readiness.readiness_by_area.graph_route.ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_blocked_library_workload_fixture_readiness_area() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["ready_area_count"] = serde_json::json!(9);
+        bundle["library_readiness"]["blocked_area_count"] = serde_json::json!(1);
+        bundle["library_readiness"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_evidence_not_ready"]);
+        bundle["library_readiness"]["readiness_by_area"]["workload_fixture"]["ready"] =
+            serde_json::json!(false);
+        bundle["library_readiness"]["readiness_by_area"]["workload_fixture"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_search_metadata_not_ready"]);
+
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.present);
+        assert!(!typed.ready);
+        assert!(!typed.blocked_area_count_zero);
+        assert!(!typed.workload_fixture_ready);
+        assert_eq!(
+            typed.blocker_codes,
+            vec![
+                "workload_fixture_evidence_not_ready".to_string(),
+                "workload_fixture_search_metadata_not_ready".to_string()
+            ]
+        );
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!([
+                "workload_fixture_evidence_not_ready",
+                "workload_fixture_search_metadata_not_ready"
+            ])
+        );
+        let library_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(
+            library_check["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.readiness_by_area.workload_fixture.ready"
             ])
         );
     }
@@ -9256,7 +9328,7 @@ mod tests {
             "present": true,
             "ready": true,
             "mode": "shadow_read_only",
-            "ready_area_count": 8,
+            "ready_area_count": 10,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "open_report": {
@@ -9307,6 +9379,10 @@ mod tests {
                     "blocker_codes": []
                 },
                 "search_candidate_shadow": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "workload_fixture": {
                     "ready": true,
                     "blocker_codes": []
                 }

@@ -2100,7 +2100,7 @@ mod tests {
             "protocol": "skein-nowledge-mem-library-readiness-v1",
             "present": true,
             "ready": true,
-            "ready_area_count": 8,
+            "ready_area_count": 10,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "open_report": {
@@ -2116,7 +2116,8 @@ mod tests {
                 "graph_route": {"ready": true, "blocker_codes": []},
                 "search_projection": {"ready": true, "blocker_codes": []},
                 "search_projection_shadow": {"ready": true, "blocker_codes": []},
-                "search_candidate_shadow": {"ready": true, "blocker_codes": []}
+                "search_candidate_shadow": {"ready": true, "blocker_codes": []},
+                "workload_fixture": {"ready": true, "blocker_codes": []}
             }
         })
     }

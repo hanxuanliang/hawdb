@@ -1107,6 +1107,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 library_readiness_area_ready(&library_readiness, "search_projection"),
                 library_readiness_area_ready(&library_readiness, "search_projection_shadow"),
                 library_readiness_area_ready(&library_readiness, "search_candidate_shadow"),
+                library_readiness_area_ready(&library_readiness, "workload_fixture"),
             ],
             [
                 "library_readiness.protocol",
@@ -1125,6 +1126,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "library_readiness.readiness_by_area.search_projection.ready",
                 "library_readiness.readiness_by_area.search_projection_shadow.ready",
                 "library_readiness.readiness_by_area.search_candidate_shadow.ready",
+                "library_readiness.readiness_by_area.workload_fixture.ready",
             ],
             blocker_codes(
                 &library_readiness,
@@ -1145,6 +1147,11 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &[
                         "readiness_by_area",
                         "search_candidate_shadow",
+                        "blocker_codes",
+                    ][..],
+                    &[
+                        "readiness_by_area",
+                        "workload_fixture",
                         "blocker_codes",
                     ][..],
                 ],
@@ -2867,7 +2874,7 @@ mod tests {
         );
         assert_release_summary_field(summary, "query_runtime_preflight_failed_probe_count", 0);
         assert_release_summary_field(summary, "library_readiness_ready", true);
-        assert_release_summary_field(summary, "library_readiness_ready_area_count", 8);
+        assert_release_summary_field(summary, "library_readiness_ready_area_count", 10);
         assert_release_summary_field(summary, "library_readiness_blocked_area_count", 0);
         assert_release_summary_field(summary, "library_readiness_graph_opened", true);
         assert_release_summary_field(summary, "library_readiness_search_projection_opened", true);
@@ -3516,6 +3523,44 @@ mod tests {
             serde_json::json!([
                 "graph_route_readiness_missing",
                 "graph_route_readiness_not_ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_library_workload_fixture_readiness_area() {
+        let mut inputs = ready_inputs();
+        let library_readiness = inputs.library_readiness.as_mut().unwrap();
+        library_readiness["ready"] = serde_json::json!(false);
+        library_readiness["ready_area_count"] = serde_json::json!(9);
+        library_readiness["blocked_area_count"] = serde_json::json!(1);
+        library_readiness["blocker_codes"] =
+            serde_json::json!(["workload_fixture_evidence_not_ready"]);
+        library_readiness["readiness_by_area"]["workload_fixture"]["ready"] =
+            serde_json::json!(false);
+        library_readiness["readiness_by_area"]["workload_fixture"]["blocker_codes"] =
+            serde_json::json!(["workload_fixture_bounded_expansion_not_ready"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.blocked_area_count",
+                "library_readiness.readiness_by_area.workload_fixture.ready"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "library_readiness")["blocker_codes"],
+            serde_json::json!([
+                "workload_fixture_bounded_expansion_not_ready",
+                "workload_fixture_evidence_not_ready"
             ])
         );
     }
@@ -4204,7 +4249,7 @@ mod tests {
             "present": true,
             "ready": true,
             "mode": "shadow_read_only",
-            "ready_area_count": 8,
+            "ready_area_count": 10,
             "blocked_area_count": 0,
             "blocker_codes": [],
             "open_report": {
@@ -4247,6 +4292,10 @@ mod tests {
                     "blocker_codes": []
                 },
                 "search_candidate_shadow": {
+                    "ready": true,
+                    "blocker_codes": []
+                },
+                "workload_fixture": {
                     "ready": true,
                     "blocker_codes": []
                 }

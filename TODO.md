@@ -328,6 +328,10 @@ contract.
   - [x] Add an in-process library integration test that initializes Skein,
     produces typed library readiness, and feeds the final cutover preflight
     without invoking CLI tools.
+  - [x] Require Mem integration readiness and final cutover preflight to consume
+    the typed workload-fixture library readiness area, so graph route, bounded
+    expansion, and metadata-filtered search workload evidence cannot be omitted
+    from cutover gates.
 - [x] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration
