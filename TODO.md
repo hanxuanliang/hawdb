@@ -503,6 +503,8 @@ contract.
       vector retriever legs are both observed before LanceDB read cutover.
     - [x] Require search-candidate shadow probe inputs to carry typed text and
       vector retriever-leg evidence instead of producing weak ready probes.
+    - [x] Require final previous-wrapper preflight to validate search-candidate
+      retriever-leg and top-k overlap evidence fields from replacement summary.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
