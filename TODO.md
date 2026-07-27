@@ -516,6 +516,9 @@ contract.
   - [x] Redact background-maintenance evidence JSON parse failures by default
     so local artifact paths and QoS payload fragments are not copied into
     command errors.
+  - [x] Apply incremental search projection deltas in place after fail-fast
+    validation, avoiding a full document-map clone on steady-state background
+    maintenance updates.
 
 ## P0: Search Projection Replacement
 
@@ -553,6 +556,9 @@ contract.
   - [x] Redact search-projection evidence JSON read and parse failures by
     default so local paths and document identity payload fragments are not
     copied into command errors.
+  - [x] Keep steady-state projection delta application incremental in memory by
+    validating operation limits and embedding dimensions before mutating rows,
+    then applying deletes/upserts without cloning the whole projection.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.

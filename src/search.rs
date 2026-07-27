@@ -746,26 +746,30 @@ impl SearchIndex {
             }
         }
 
+        let SearchProjectionDelta {
+            upserts,
+            deletes,
+            max_operations: _,
+            source_graph_commit_epoch,
+        } = delta;
         let before_document_count = self.documents.len();
         let source_graph_commit_epoch_before = self.source_graph_commit_epoch;
-        let mut next_documents = self.documents.clone();
         let mut deleted_documents = 0;
-        for id in delta.deletes {
-            if next_documents.remove(&id).is_some() {
+        for id in deletes {
+            if self.documents.remove(&id).is_some() {
                 deleted_documents += 1;
             }
         }
-        let upserted_documents = delta.upserts.len();
-        for row in delta.upserts {
+        let upserted_documents = upserts.len();
+        for row in upserts {
             let document = row.into_document();
-            next_documents.insert(document.id.clone(), document);
+            self.documents.insert(document.id.clone(), document);
         }
 
-        self.documents = next_documents;
         self.segment_descriptor = None;
         self.embedding_dimension = next_embedding_dimension;
-        let source_graph_commit_epoch_updated = delta.source_graph_commit_epoch.is_some();
-        if let Some(epoch) = delta.source_graph_commit_epoch {
+        let source_graph_commit_epoch_updated = source_graph_commit_epoch.is_some();
+        if let Some(epoch) = source_graph_commit_epoch {
             self.source_graph_commit_epoch = Some(epoch);
         }
         let source_graph_commit_epoch_after = self.source_graph_commit_epoch;
