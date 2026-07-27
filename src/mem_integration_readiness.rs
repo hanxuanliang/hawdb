@@ -95,6 +95,30 @@ impl NowledgeMemIntegrationReadinessReport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StorageRecoveryCutoverReadiness {
+    pub required: bool,
+    pub ready: bool,
+    pub protocol_matches: bool,
+    pub durable: bool,
+    pub checkpoint_boundary_present: bool,
+    pub wal_replay_bounded: bool,
+    pub torn_tail_clean: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+impl StorageRecoveryCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.required
+            && self.ready
+            && self.protocol_matches
+            && self.durable
+            && self.checkpoint_boundary_present
+            && self.wal_replay_bounded
+            && self.torn_tail_clean
+    }
+}
+
 pub fn nowledge_mem_integration_readiness_usage() -> String {
     "nowledge-mem-integration-readiness requires [--require-ready] <integration-bundle-json>"
         .to_string()
@@ -139,6 +163,7 @@ pub fn nowledge_mem_integration_readiness(
         .get("blackbox_manifest")
         .unwrap_or(&serde_json::Value::Null);
     let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
+    let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let checks = vec![
         check(
             "integration_bundle_protocol",
@@ -1569,54 +1594,13 @@ pub fn nowledge_mem_integration_readiness(
         check(
             "storage_recovery_evidence",
             [
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "storage_recovery_required",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "cutover_evidence", "storage_recovery_ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "storage_recovery_protocol_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary", "cutover_evidence", "storage_recovery_durable"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "storage_recovery_checkpoint_boundary_present",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "storage_recovery_wal_replay_bounded",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "storage_recovery_torn_tail_clean",
-                    ],
-                ) == Some(true),
+                storage_recovery_readiness.required,
+                storage_recovery_readiness.ready,
+                storage_recovery_readiness.protocol_matches,
+                storage_recovery_readiness.durable,
+                storage_recovery_readiness.checkpoint_boundary_present,
+                storage_recovery_readiness.wal_replay_bounded,
+                storage_recovery_readiness.torn_tail_clean,
             ],
             [
                 "replacement_summary.cutover_evidence.storage_recovery_required",
@@ -1627,21 +1611,7 @@ pub fn nowledge_mem_integration_readiness(
                 "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded",
                 "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
             ],
-            blocker_codes(
-                bundle,
-                &[
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "storage_recovery_blocker_codes",
-                    ][..],
-                    &[
-                        "replacement_summary",
-                        "cutover_evidence",
-                        "storage_recovery_blockers",
-                    ][..],
-                ],
-            ),
+            storage_recovery_readiness.blocker_codes.clone(),
         ),
         check(
             "blackbox_redaction",
@@ -1702,7 +1672,12 @@ pub fn nowledge_mem_integration_readiness(
         failed_checks,
         checks,
         blocker_codes,
-        next_actions: next_actions(bundle, ready, &blackbox_readiness),
+        next_actions: next_actions(
+            bundle,
+            ready,
+            &blackbox_readiness,
+            &storage_recovery_readiness,
+        ),
     }
 }
 
@@ -1735,6 +1710,7 @@ fn next_actions(
     bundle: &serde_json::Value,
     ready: bool,
     blackbox_readiness: &BlackboxReadinessReport,
+    storage_recovery_readiness: &StorageRecoveryCutoverReadiness,
 ) -> Vec<NowledgeMemIntegrationNextAction> {
     if ready {
         return Vec::new();
@@ -2066,7 +2042,7 @@ fn next_actions(
             ],
         ));
     }
-    if !replacement_summary_storage_recovery_ready(bundle) {
+    if !storage_recovery_readiness.evidence_ready() {
         actions.push(next_action(
             "attach_storage_recovery_report",
             "storage recovery evidence must prove durable bounded WAL replay before Mem cutover",
@@ -3252,46 +3228,82 @@ fn library_readiness_area_ready(bundle: &serde_json::Value, area: &str) -> bool 
         == Some(true)
 }
 
-fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {
-    [
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_required",
-        ][..],
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_ready",
-        ][..],
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_protocol_matches",
-        ][..],
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_durable",
-        ][..],
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_checkpoint_boundary_present",
-        ][..],
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_wal_replay_bounded",
-        ][..],
-        &[
-            "replacement_summary",
-            "cutover_evidence",
-            "storage_recovery_torn_tail_clean",
-        ][..],
-    ]
-    .iter()
-    .all(|path| bool_path(bundle, path) == Some(true))
+pub fn storage_recovery_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> StorageRecoveryCutoverReadiness {
+    StorageRecoveryCutoverReadiness {
+        required: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_required",
+            ],
+        ) == Some(true),
+        ready: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_ready",
+            ],
+        ) == Some(true),
+        protocol_matches: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_protocol_matches",
+            ],
+        ) == Some(true),
+        durable: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_durable",
+            ],
+        ) == Some(true),
+        checkpoint_boundary_present: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_checkpoint_boundary_present",
+            ],
+        ) == Some(true),
+        wal_replay_bounded: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_wal_replay_bounded",
+            ],
+        ) == Some(true),
+        torn_tail_clean: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_torn_tail_clean",
+            ],
+        ) == Some(true),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &[
+                    "replacement_summary",
+                    "cutover_evidence",
+                    "storage_recovery_blocker_codes",
+                ][..],
+                &[
+                    "replacement_summary",
+                    "cutover_evidence",
+                    "storage_recovery_blockers",
+                ][..],
+            ],
+        ),
+    }
 }
 
 fn bounded_read_execution_cap_matches(bundle: &serde_json::Value) -> bool {
@@ -5981,6 +5993,16 @@ mod tests {
         bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_blocker_codes"] =
             serde_json::json!(["wal_replay_unbounded"]);
 
+        let typed = super::storage_recovery_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.required);
+        assert!(!typed.ready);
+        assert!(!typed.wal_replay_bounded);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["wal_replay_unbounded".to_string()]
+        );
+
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
         assert_eq!(report["ready"], false);
@@ -6021,6 +6043,13 @@ mod tests {
             ["storage_recovery_checkpoint_boundary_present"] = serde_json::json!(false);
         bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_torn_tail_clean"] =
             serde_json::json!(false);
+
+        let typed = super::storage_recovery_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(typed.ready);
+        assert!(!typed.durable);
+        assert!(!typed.checkpoint_boundary_present);
+        assert!(!typed.torn_tail_clean);
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
 
