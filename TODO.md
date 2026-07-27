@@ -615,6 +615,10 @@ contract.
       errors.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
+    - [x] Require route ownership cutover readiness to reject a Skein-owned
+      `/graph/search` route unless search projection replacement evidence is
+      present, while leaving readiness details to the dedicated search
+      projection gate.
 - [ ] Add retrieval projection options behind advisor gates.
   - Raw float32 or SQ8 remains the safe path.
   - TurboQuant-style compressed projections can be used for cold or constrained

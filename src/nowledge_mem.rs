@@ -391,12 +391,13 @@ e.confidence AS confidence, \
 e.pagerank_score AS pagerank_score \
 ORDER BY e.id ASC \
 LIMIT $limit";
+pub const NOWLEDGE_MEM_SEARCH_ROUTE: &str = "/graph/search";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/communities",
     "/communities/{community_id}",
     "/graph/overview",
     "/graph/sample",
-    "/graph/search",
+    NOWLEDGE_MEM_SEARCH_ROUTE,
     "/graph/explore",
     "/graph/expand/{node_id}",
     "/graph/live-preview",
@@ -496,7 +497,7 @@ pub const NOWLEDGE_MEM_GRAPH_READ_ROUTE_SPECS: &[NowledgeMemGraphReadRouteSpec] 
     read_batch_route("/communities/{community_id}"),
     graph_route("/graph/overview"),
     graph_route("/graph/sample"),
-    search_route("/graph/search"),
+    search_route(NOWLEDGE_MEM_SEARCH_ROUTE),
     graph_route("/graph/explore"),
     graph_route("/graph/expand/{node_id}"),
     graph_route("/graph/live-preview"),
@@ -584,7 +585,7 @@ pub fn nowledge_mem_required_query_families_for_route(route: &str) -> &'static [
         | "/entities"
         | "/entities/{entity_id}/relationships"
         | "/agent/evolves" => &["label_stats_read"],
-        "/graph/search" => &["search_projection"],
+        NOWLEDGE_MEM_SEARCH_ROUTE => &["search_projection"],
         "/graph/overview"
         | "/graph/sample"
         | "/graph/live-preview"

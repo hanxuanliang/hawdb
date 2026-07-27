@@ -8,7 +8,7 @@ use crate::{
     NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
     NOWLEDGE_MEM_ROUTE_OWNERSHIP_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_SEARCH_ROUTE,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -491,6 +491,7 @@ pub struct RouteOwnershipCutoverReadiness {
     pub skein_not_ready_routes_empty: bool,
     pub route_readiness_present: bool,
     pub route_readiness_ready: bool,
+    pub search_route_projection_evidence_present: bool,
     pub route_catalog_version_matches: bool,
     pub route_catalog_digest_matches: bool,
     pub blocker_codes_empty: bool,
@@ -812,6 +813,7 @@ impl RouteOwnershipCutoverReadiness {
             && self.skein_not_ready_routes_empty
             && self.route_readiness_present
             && self.route_readiness_ready
+            && self.search_route_projection_evidence_present
             && self.route_catalog_version_matches
             && self.route_catalog_digest_matches
             && self.blocker_codes_empty
@@ -1417,6 +1419,10 @@ fn route_ownership_cutover_conditions(
             readiness.route_readiness_ready,
         ),
         (
+            "route_ownership.search_route_projection_evidence_present",
+            readiness.search_route_projection_evidence_present,
+        ),
+        (
             "route_ownership.route_catalog_version",
             readiness.route_catalog_version_matches,
         ),
@@ -2000,6 +2006,10 @@ pub fn route_ownership_cutover_readiness(
     let route_ownership =
         json_get_path(bundle, &["route_ownership"]).unwrap_or(&serde_json::Value::Null);
     let route_count_summary = route_ownership_count_summary(route_ownership);
+    let search_route_skein_owned =
+        route_ownership_skein_route_present(route_ownership, NOWLEDGE_MEM_SEARCH_ROUTE);
+    let search_route_projection_evidence_present =
+        !search_route_skein_owned || search_projection_replacement_evidence_present(bundle);
     RouteOwnershipCutoverReadiness {
         protocol_matches: str_path(bundle, &["route_ownership", "protocol"])
             == Some(NOWLEDGE_MEM_ROUTE_OWNERSHIP_PROTOCOL),
@@ -2053,6 +2063,7 @@ pub fn route_ownership_cutover_readiness(
             == Some(true),
         route_readiness_ready: bool_path(bundle, &["route_ownership", "route_readiness_ready"])
             == Some(true),
+        search_route_projection_evidence_present,
         route_catalog_version_matches: str_path(
             bundle,
             &["route_ownership", "route_catalog_version"],
@@ -2067,6 +2078,31 @@ pub fn route_ownership_cutover_readiness(
             .is_empty(),
         blocker_codes: blocker_codes(bundle, &[&["route_ownership", "blocker_codes"][..]]),
     }
+}
+
+fn route_ownership_skein_route_present(route_ownership: &serde_json::Value, route: &str) -> bool {
+    route_ownership
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .is_some_and(|routes| {
+            routes.iter().any(|entry| {
+                str_path(entry, &["route"]) == Some(route)
+                    && str_path(entry, &["read_engine"]) == Some("skein")
+            })
+        })
+}
+
+fn search_projection_replacement_evidence_present(bundle: &serde_json::Value) -> bool {
+    json_get_path(
+        bundle,
+        &["replacement_summary", "search_projection_evidence"],
+    )
+    .is_some()
+        && json_get_path(
+            bundle,
+            &["replacement_summary", "search_projection_shadow_evidence"],
+        )
+        .is_some()
 }
 
 #[derive(Debug, Default)]
@@ -5658,6 +5694,32 @@ mod tests {
             typed.blocker_codes,
             vec!["route_ownership_legacy_routes_remaining".to_string()]
         );
+    }
+
+    #[test]
+    fn route_ownership_rejects_skein_search_route_without_projection_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]
+            .as_object_mut()
+            .unwrap()
+            .remove("search_projection_evidence");
+
+        let typed = super::route_ownership_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.search_route_projection_evidence_present);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "route_ownership")
+            .unwrap();
+        assert!(check["failed_evidence_fields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|field| field == "route_ownership.search_route_projection_evidence_present"));
     }
 
     #[test]
