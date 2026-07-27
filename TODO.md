@@ -40,6 +40,71 @@ query family, or cutover gate requires them.
   - Default reports must redact local paths and raw parse or I/O errors.
   - Expose raw local diagnostics only behind explicit debug flags.
 
+## P0: Concrete Cutover Blockers
+
+These items are the current kernel and integration gaps that block declaring
+Skein a production replacement for Nowledge Mem's Kuzu/Ladybug graph layer and
+LanceDB search projection. They do not block incremental development, but they
+must block default cutover.
+
+- [ ] Complete route-by-route production read ownership.
+  - Every active Mem graph/search read route must select `legacy` or `skein`
+    through the embedded Rust library runtime.
+  - Each route must have route-level execution evidence tied to the shared
+    covered-route catalog.
+  - Request-time dual-read compare must stay out of production handlers; parity
+    belongs to dedicated readiness, preflight, or migration endpoints.
+  - Completion evidence: replacement summary rejects stale or missing route
+    evidence, and Mem can run the route with `skein` selected without direct
+    Kuzu/Ladybug reads.
+- [ ] Close the LanceDB search projection replacement loop.
+  - Candidate reads must prove FTS, vector, source chunk identity, embedding
+    identity, lifecycle filtering, metadata predicate pushdown, fail-soft
+    behavior, rebuild markers, repair markers, and incremental watermarks.
+  - Metadata filters for `unit_type`, lifecycle state, `importance`,
+    `confidence`, timestamps, and required metadata keys must prune before rows
+    are returned to Mem.
+  - Completion evidence: search projection, search candidate, and Rust-bridge
+    shadow evidence all pass fail-closed replacement gates without CLI-only
+    glue.
+- [ ] Finish exact storage scan pruning for production filters.
+  - Segment descriptors must cover equality, enum/in-list, numeric range,
+    date/time range, null/missing, existence, normalized default equality, and
+    unique-key filters used by Nowledge.
+  - Scan planning must decide whether to read a segment before loading row
+    payloads into memory.
+  - Bloom or cuckoo filters may only be used where false positives are safe and
+    false negatives are impossible.
+  - Completion evidence: `EXPLAIN ANALYZE` and readiness reports show payload
+    read avoidance for graph and search projection filters.
+- [ ] Prove storage recovery under real mutation shapes.
+  - WAL replay must recover whole committed batches or nothing.
+  - Torn WAL tails, checkpoint boundaries, and replay markers must be detected
+    and surfaced through typed readiness APIs.
+  - Completion evidence: storage recovery readiness fails closed on missing or
+    contradictory WAL/checkpoint evidence and passes replay fixtures that match
+    Mem writes.
+- [ ] Make resource control a cutover gate.
+  - Foreground user reads should be admitted ahead of background import,
+    projection, compaction, analytics, and migration tasks.
+  - Background work must be bounded by resource class, memory budget, and QoS
+    limits on consumer hardware.
+  - Completion evidence: background-maintenance readiness and blackbox reports
+    show admission, deferral, memory-pressure behavior, and slow-query signals.
+- [ ] Keep the Mem integration library-only on the production path.
+  - Mem must start and operate Skein in-process through Rust APIs.
+  - Production readiness, route evidence, search projection evidence, slow log,
+    blackbox, storage recovery, and maintenance reports must all have typed Rust
+    API entrypoints.
+  - CLI tools may remain thin developer wrappers, but no production route or
+    gate may require shelling out.
+- [ ] Preserve replacement boundaries.
+  - Kuzu/Ladybug graph and LanceDB search projection are the replacement scope.
+  - SQLite content store and large blob/value storage remain external unless a
+    Nowledge graph/search route requires a narrower value-store API.
+  - Completion evidence: replacement summary distinguishes graph replacement,
+    search projection replacement, and out-of-scope content storage.
+
 ## P0: Graph Kernel Compatibility
 
 - [ ] Finish the Nowledge-used Cypher subset.
@@ -147,6 +212,19 @@ query family, or cutover gate requires them.
       library APIs so Mem can fail closed on missing pushdown, retriever,
       source-chunk identity, fail-soft, or projection-marker evidence without
       shelling out to CLI probes.
+    - [x] Expose a library helper that turns legacy primary candidate IDs plus
+      Skein candidate output into Rust-bridge shadow evidence, so Mem does not
+      need to hand-build cutover JSON for candidate reads.
+    - [x] Expose embedded-store and search-projection library APIs that run the
+      Skein candidate read and return Rust-bridge shadow evidence in one call.
+    - [x] Require Rust-bridge search candidate shadow evidence in replacement
+      summary before reporting production cutover readiness.
+    - [x] Require Rust-bridge search candidate shadow evidence in final
+      previous-wrapper preflight before treating LanceDB candidate replacement
+      as production-ready.
+    - [x] Recompute search projection and search projection shadow raw fields
+      in embedded-library readiness so forged `ready=true` evidence cannot
+      bypass LanceDB replacement gates.
   - Remove LanceDB from a route only after the matching search projection
     evidence is present in replacement summary.
 - [ ] Add retrieval projection options behind advisor gates.
@@ -186,6 +264,15 @@ query family, or cutover gate requires them.
     and keep the CLI as a thin wrapper.
   - [x] Expose typed search candidate replacement readiness through Rust
     library APIs for route-level LanceDB replacement gates.
+  - [x] Include search-candidate shadow evidence as a first-class
+    embedded-library readiness area so Mem fails closed before LanceDB candidate
+    read cutover.
+  - [x] Recompute search-candidate shadow evidence raw fields in library
+    readiness instead of trusting `ready=true`.
+  - [x] Recompute search-projection and search-projection-shadow raw fields in
+    library readiness instead of trusting `ready=true`.
+  - [x] Include graph-route readiness as a first-class embedded-library
+    readiness area so production callers fail closed before graph read cutover.
   - Keep reports compact and redacted by default so production can keep them on.
   - CLI tools may wrap library APIs for developer workflows, but must not be the
     only supported interface.
