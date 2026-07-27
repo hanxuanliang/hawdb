@@ -1620,6 +1620,10 @@ mod tests {
                 "pushdown_evidence": {
                     "ready": true,
                     "shadow_segment_descriptor_scan_filter_fields_ready": true,
+                    "shadow_segment_document_pruning_ready": true,
+                    "shadow_segment_pruning_candidate_document_count": 4,
+                    "shadow_segment_pruned_document_count": 2,
+                    "shadow_segment_scanned_document_count": 2,
                     "primary_scan_filter_fields": scan_filter_fields_json(),
                     "shadow_scan_filter_fields": scan_filter_fields_json(),
                     "shadow_segment_descriptor_field_summaries": scan_filter_field_summaries_json()

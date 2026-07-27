@@ -445,6 +445,41 @@ pub fn nowledge_mem_integration_readiness(
                         "shadow_segment_descriptor_scan_filter_fields_ready",
                     ],
                 ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "shadow_segment_document_pruning_ready",
+                    ],
+                ) == Some(true),
+                search_projection_segment_pruning_candidate_count_ready(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                    ],
+                ),
+                search_projection_segment_pruning_count_is_positive(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                    ],
+                    "shadow_segment_pruned_document_count",
+                ),
+                search_projection_segment_pruning_count_is_positive(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                    ],
+                    "shadow_segment_scanned_document_count",
+                ),
                 search_projection_scan_filter_fields_cover_required(
                     bundle,
                     &[
@@ -494,6 +529,10 @@ pub fn nowledge_mem_integration_readiness(
                 "replacement_summary.search_projection_shadow_evidence.incremental_watermark_parity",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.ready",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_document_pruning_ready",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_scanned_document_count",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.primary_scan_filter_fields",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_scan_filter_fields",
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries",
@@ -3498,6 +3537,37 @@ fn search_projection_segment_descriptor_summaries_cover_required(
             })
 }
 
+fn search_projection_segment_pruning_candidate_count_ready(
+    value: &serde_json::Value,
+    path: &[&str],
+) -> bool {
+    let mut candidate_path = path.to_vec();
+    candidate_path.push("shadow_segment_pruning_candidate_document_count");
+    let mut pruned_path = path.to_vec();
+    pruned_path.push("shadow_segment_pruned_document_count");
+    let mut scanned_path = path.to_vec();
+    scanned_path.push("shadow_segment_scanned_document_count");
+    matches!(
+        (
+            u64_path(value, &candidate_path),
+            u64_path(value, &pruned_path),
+            u64_path(value, &scanned_path),
+        ),
+        (Some(candidate), Some(pruned), Some(scanned))
+            if candidate > 0 && pruned.checked_add(scanned) == Some(candidate)
+    )
+}
+
+fn search_projection_segment_pruning_count_is_positive(
+    value: &serde_json::Value,
+    path: &[&str],
+    field: &str,
+) -> bool {
+    let mut count_path = path.to_vec();
+    count_path.push(field);
+    u64_path(value, &count_path).is_some_and(|count| count > 0)
+}
+
 fn non_empty_str_path(value: &serde_json::Value, path: &[&str]) -> bool {
     str_path(value, path).is_some_and(|s| !s.trim().is_empty())
 }
@@ -4274,6 +4344,36 @@ mod tests {
             search_check["failed_evidence_fields"],
             serde_json::json!([
                 "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_field_summaries"
+            ])
+        );
+    }
+
+    #[test]
+    fn recomputes_search_projection_shadow_document_pruning_counts() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_document_pruning_ready"] = serde_json::json!(true);
+        bundle["replacement_summary"]["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_pruned_document_count"] = serde_json::json!(0);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["search_projection_replacement_evidence"])
+        );
+        let search_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "search_projection_replacement_evidence")
+            .unwrap();
+        assert_eq!(
+            search_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
+                "replacement_summary.search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count"
             ])
         );
     }
@@ -6130,6 +6230,10 @@ mod tests {
                     "pushdown_evidence": {
                         "ready": true,
                         "shadow_segment_descriptor_scan_filter_fields_ready": true,
+                        "shadow_segment_document_pruning_ready": true,
+                        "shadow_segment_pruning_candidate_document_count": 4,
+                        "shadow_segment_pruned_document_count": 2,
+                        "shadow_segment_scanned_document_count": 2,
                         "primary_scan_filter_fields": scan_filter_fields_json(),
                         "shadow_scan_filter_fields": scan_filter_fields_json(),
                         "shadow_segment_descriptor_field_summaries": scan_filter_field_summaries_json()

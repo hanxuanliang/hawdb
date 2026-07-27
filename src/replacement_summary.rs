@@ -1282,11 +1282,17 @@ fn search_projection_shadow_pushdown_evidence_json(
             );
     let shadow_segment_descriptor_capabilities =
         segment_descriptor_capability_report(&shadow_segment_descriptor_field_summaries);
+    let shadow_segment_document_pruning = segment_document_pruning_report_from_path(
+        bundle,
+        path,
+        &["shadow_evidence", "predicate_pushdown"],
+    );
     let ready = predicate_pushdown_parity
         && primary_predicate_pushdown_ready
         && shadow_predicate_pushdown_ready
         && shadow_persisted_segment_descriptor_ready
-        && shadow_segment_descriptor_scan_filter_fields_ready;
+        && shadow_segment_descriptor_scan_filter_fields_ready
+        && shadow_segment_document_pruning.ready;
     serde_json::json!({
         "ready": ready,
         "predicate_pushdown_parity": predicate_pushdown_parity,
@@ -1295,6 +1301,10 @@ fn search_projection_shadow_pushdown_evidence_json(
         "shadow_persisted_segment_descriptor_ready": shadow_persisted_segment_descriptor_ready,
         "shadow_segment_descriptor_scan_filter_fields_ready": shadow_segment_descriptor_scan_filter_fields_ready,
         "shadow_segment_descriptor_capabilities_ready": shadow_segment_descriptor_capabilities.ready,
+        "shadow_segment_document_pruning_ready": shadow_segment_document_pruning.ready,
+        "shadow_segment_pruning_candidate_document_count": shadow_segment_document_pruning.candidate_document_count,
+        "shadow_segment_pruned_document_count": shadow_segment_document_pruning.pruned_document_count,
+        "shadow_segment_scanned_document_count": shadow_segment_document_pruning.scanned_document_count,
         "missing_value_summary_fields": shadow_segment_descriptor_capabilities.missing_value_summary_fields,
         "missing_numeric_range_fields": shadow_segment_descriptor_capabilities.missing_numeric_range_fields,
         "missing_timestamp_range_fields": shadow_segment_descriptor_capabilities.missing_timestamp_range_fields,
@@ -1325,7 +1335,10 @@ fn search_projection_shadow_pushdown_evidence_with_recomputed_scan_fields(
     let descriptor_fields_ready = reported_descriptor_fields_ready && scan_filter_fields_ready;
     let descriptor_capabilities =
         segment_descriptor_capability_report(&shadow_segment_descriptor_field_summaries);
-    let ready = json_get_bool_path(&pushdown, &["ready"]) == Some(true) && descriptor_fields_ready;
+    let segment_document_pruning = segment_document_pruning_report(&pushdown);
+    let ready = json_get_bool_path(&pushdown, &["ready"]) == Some(true)
+        && descriptor_fields_ready
+        && segment_document_pruning.ready;
 
     let mut object = pushdown.as_object().cloned().unwrap_or_default();
     object.insert("ready".to_string(), serde_json::json!(ready));
@@ -1346,6 +1359,22 @@ fn search_projection_shadow_pushdown_evidence_with_recomputed_scan_fields(
         serde_json::json!(descriptor_capabilities.ready),
     );
     object.insert(
+        "shadow_segment_document_pruning_ready".to_string(),
+        serde_json::json!(segment_document_pruning.ready),
+    );
+    object.insert(
+        "shadow_segment_pruning_candidate_document_count".to_string(),
+        serde_json::json!(segment_document_pruning.candidate_document_count),
+    );
+    object.insert(
+        "shadow_segment_pruned_document_count".to_string(),
+        serde_json::json!(segment_document_pruning.pruned_document_count),
+    );
+    object.insert(
+        "shadow_segment_scanned_document_count".to_string(),
+        serde_json::json!(segment_document_pruning.scanned_document_count),
+    );
+    object.insert(
         "missing_value_summary_fields".to_string(),
         serde_json::json!(descriptor_capabilities.missing_value_summary_fields),
     );
@@ -1358,6 +1387,72 @@ fn search_projection_shadow_pushdown_evidence_with_recomputed_scan_fields(
         serde_json::json!(descriptor_capabilities.missing_timestamp_range_fields),
     );
     serde_json::Value::Object(object)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SegmentDocumentPruningReport {
+    ready: bool,
+    candidate_document_count: Option<u64>,
+    pruned_document_count: Option<u64>,
+    scanned_document_count: Option<u64>,
+}
+
+fn segment_document_pruning_report(pushdown: &serde_json::Value) -> SegmentDocumentPruningReport {
+    let candidate_document_count = json_get_u64_path(
+        pushdown,
+        &["shadow_segment_pruning_candidate_document_count"],
+    );
+    let pruned_document_count =
+        json_get_u64_path(pushdown, &["shadow_segment_pruned_document_count"]);
+    let scanned_document_count =
+        json_get_u64_path(pushdown, &["shadow_segment_scanned_document_count"]);
+    segment_document_pruning_report_from_counts(
+        candidate_document_count,
+        pruned_document_count,
+        scanned_document_count,
+    )
+}
+
+fn segment_document_pruning_report_from_path(
+    bundle: &serde_json::Value,
+    base_path: &[&str],
+    relative_path: &[&str],
+) -> SegmentDocumentPruningReport {
+    let mut candidate_path = base_path.to_vec();
+    candidate_path.extend(relative_path);
+    candidate_path.push("segment_pruning_candidate_document_count");
+    let mut pruned_path = base_path.to_vec();
+    pruned_path.extend(relative_path);
+    pruned_path.push("segment_pruned_document_count");
+    let mut scanned_path = base_path.to_vec();
+    scanned_path.extend(relative_path);
+    scanned_path.push("segment_scanned_document_count");
+    segment_document_pruning_report_from_counts(
+        json_get_u64_path(bundle, &candidate_path),
+        json_get_u64_path(bundle, &pruned_path),
+        json_get_u64_path(bundle, &scanned_path),
+    )
+}
+
+fn segment_document_pruning_report_from_counts(
+    candidate_document_count: Option<u64>,
+    pruned_document_count: Option<u64>,
+    scanned_document_count: Option<u64>,
+) -> SegmentDocumentPruningReport {
+    let ready = matches!(
+        (candidate_document_count, pruned_document_count, scanned_document_count),
+        (Some(candidate), Some(pruned), Some(scanned))
+            if candidate > 0
+                && pruned > 0
+                && scanned > 0
+                && pruned.checked_add(scanned) == Some(candidate)
+    );
+    SegmentDocumentPruningReport {
+        ready,
+        candidate_document_count,
+        pruned_document_count,
+        scanned_document_count,
+    }
 }
 
 fn scan_filter_fields_cover_required(scan_filter_fields: &[String]) -> bool {
@@ -3493,6 +3588,45 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_recomputes_search_projection_shadow_document_pruning() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"] =
+            serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_document_pruning_ready"] = serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_pruned_document_count"] = serde_json::json!(0);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+                ["shadow_segment_document_pruning_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+                ["shadow_segment_pruned_document_count"],
+            0
+        );
+        assert!(
+            summary["search_projection_shadow_evidence"]["blocker_codes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == SEARCH_PROJECTION_SHADOW_PUSHDOWN_NOT_READY)
+        );
+    }
+
+    #[test]
     fn replacement_summary_requires_search_projection_shadow_evidence_protocol() {
         let mut bundle = production_ready_bundle();
         bundle["search_projection_shadow_evidence"]["protocol"] = serde_json::json!("handwritten");
@@ -4887,7 +5021,7 @@ mod tests {
 
     fn production_ready_bundle() -> serde_json::Value {
         let query_runtime_preflight = ready_query_runtime_preflight();
-        serde_json::json!({
+        let mut bundle = serde_json::json!({
             "required_contract_ready": true,
             "full_contract_checked": true,
             "full_contract_ready": true,
@@ -5100,7 +5234,16 @@ mod tests {
                     "replacement_readiness_per_million": 1_000_000
                 }
             ]
-        })
+        });
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_document_pruning_ready"] = serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_pruning_candidate_document_count"] = serde_json::json!(4);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_pruned_document_count"] = serde_json::json!(2);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_scanned_document_count"] = serde_json::json!(2);
+        bundle
     }
 
     fn scan_filter_fields_json() -> serde_json::Value {

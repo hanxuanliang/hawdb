@@ -322,6 +322,9 @@ contract.
     min/max summaries for Nowledge history/latest time filters.
   - [x] Expose typed segment-pruning document counts so search projection
     reports can prove row-payload avoidance for numeric and timestamp filters.
+  - [x] Require replacement and integration readiness to independently
+    validate segment-pruned document counts instead of trusting pushdown
+    `ready=true`.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.
