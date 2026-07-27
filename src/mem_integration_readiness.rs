@@ -261,6 +261,31 @@ pub struct GraphRouteCutoverReadiness {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRouteAlignmentCutoverReadiness {
+    pub ready: bool,
+    pub evidence_protocol_matches: bool,
+    pub evidence_ready: bool,
+    pub evidence_route_primary_ready: bool,
+    pub summary_route_primary_ready: bool,
+    pub route_primary_ready_matches: bool,
+    pub route_query_plan_evidence_ready_matches: bool,
+    pub route_query_profile_evidence_ready_matches: bool,
+    pub route_relationship_property_pruning_evidence_ready_matches: bool,
+    pub relationship_property_pruning_required_count_matches: bool,
+    pub relationship_property_pruning_report_count_matches: bool,
+    pub primary_ready_routes_match: bool,
+    pub evidence_required_routes_covered: bool,
+    pub summary_required_routes_covered: bool,
+    pub evidence_route_catalog_version_ready: bool,
+    pub summary_route_catalog_version_ready: bool,
+    pub evidence_route_catalog_digest_ready: bool,
+    pub summary_route_catalog_digest_ready: bool,
+    pub route_catalog_version_matches: bool,
+    pub route_catalog_digest_matches: bool,
+    pub blocker_codes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueryRuntimePreflightCutoverReadiness {
     pub protocol_matches: bool,
     pub ready: bool,
@@ -438,6 +463,31 @@ impl GraphRouteCutoverReadiness {
     }
 }
 
+impl GraphRouteAlignmentCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.ready
+            && self.evidence_protocol_matches
+            && self.evidence_ready
+            && self.evidence_route_primary_ready
+            && self.summary_route_primary_ready
+            && self.route_primary_ready_matches
+            && self.route_query_plan_evidence_ready_matches
+            && self.route_query_profile_evidence_ready_matches
+            && self.route_relationship_property_pruning_evidence_ready_matches
+            && self.relationship_property_pruning_required_count_matches
+            && self.relationship_property_pruning_report_count_matches
+            && self.primary_ready_routes_match
+            && self.evidence_required_routes_covered
+            && self.summary_required_routes_covered
+            && self.evidence_route_catalog_version_ready
+            && self.summary_route_catalog_version_ready
+            && self.evidence_route_catalog_digest_ready
+            && self.summary_route_catalog_digest_ready
+            && self.route_catalog_version_matches
+            && self.route_catalog_digest_matches
+    }
+}
+
 impl QueryRuntimePreflightCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -555,6 +605,7 @@ pub fn nowledge_mem_integration_readiness(
     let bounded_read_readiness = bounded_read_cutover_readiness(bundle);
     let bounded_read_alignment_readiness = bounded_read_alignment_cutover_readiness(bundle);
     let graph_route_readiness = graph_route_cutover_readiness(bundle);
+    let graph_route_alignment_readiness = graph_route_alignment_cutover_readiness(bundle);
     let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
     let query_runtime_alignment_readiness =
         query_runtime_preflight_alignment_cutover_readiness(bundle);
@@ -738,173 +789,10 @@ pub fn nowledge_mem_integration_readiness(
             graph_route_cutover_conditions(&graph_route_readiness),
             graph_route_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "graph_route_readiness_alignment",
-            [
-                bool_path(
-                    bundle,
-                    &["replacement_summary_graph_route_alignment", "ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "evidence_protocol_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &["replacement_summary_graph_route_alignment", "evidence_ready"],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "evidence_route_primary_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "summary_route_primary_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "route_primary_ready_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "route_query_plan_evidence_ready_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "route_query_profile_evidence_ready_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "route_relationship_property_pruning_evidence_ready_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "relationship_property_pruning_required_count_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "relationship_property_pruning_report_count_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "primary_ready_routes_match",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "evidence_required_routes_covered",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "summary_required_routes_covered",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "evidence_route_catalog_version_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "summary_route_catalog_version_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "evidence_route_catalog_digest_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "summary_route_catalog_digest_ready",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "route_catalog_version_matches",
-                    ],
-                ) == Some(true),
-                bool_path(
-                    bundle,
-                    &[
-                        "replacement_summary_graph_route_alignment",
-                        "route_catalog_digest_matches",
-                    ],
-                ) == Some(true),
-            ],
-            [
-                "replacement_summary_graph_route_alignment.ready",
-                "replacement_summary_graph_route_alignment.evidence_protocol_matches",
-                "replacement_summary_graph_route_alignment.evidence_ready",
-                "replacement_summary_graph_route_alignment.evidence_route_primary_ready",
-                "replacement_summary_graph_route_alignment.summary_route_primary_ready",
-                "replacement_summary_graph_route_alignment.route_primary_ready_matches",
-                "replacement_summary_graph_route_alignment.route_query_plan_evidence_ready_matches",
-                "replacement_summary_graph_route_alignment.route_query_profile_evidence_ready_matches",
-                "replacement_summary_graph_route_alignment.route_relationship_property_pruning_evidence_ready_matches",
-                "replacement_summary_graph_route_alignment.relationship_property_pruning_required_count_matches",
-                "replacement_summary_graph_route_alignment.relationship_property_pruning_report_count_matches",
-                "replacement_summary_graph_route_alignment.primary_ready_routes_match",
-                "replacement_summary_graph_route_alignment.evidence_required_routes_covered",
-                "replacement_summary_graph_route_alignment.summary_required_routes_covered",
-                "replacement_summary_graph_route_alignment.evidence_route_catalog_version_ready",
-                "replacement_summary_graph_route_alignment.summary_route_catalog_version_ready",
-                "replacement_summary_graph_route_alignment.evidence_route_catalog_digest_ready",
-                "replacement_summary_graph_route_alignment.summary_route_catalog_digest_ready",
-                "replacement_summary_graph_route_alignment.route_catalog_version_matches",
-                "replacement_summary_graph_route_alignment.route_catalog_digest_matches",
-            ],
-            blocker_codes(
-                bundle,
-                &[&[
-                    "replacement_summary_graph_route_alignment",
-                    "blocker_codes",
-                ][..]],
-            ),
+            graph_route_alignment_cutover_conditions(&graph_route_alignment_readiness),
+            graph_route_alignment_readiness.blocker_codes.clone(),
         ),
         check(
             "graph_route_parity_alignment",
@@ -1124,6 +1012,7 @@ pub fn nowledge_mem_integration_readiness(
                 bounded_read: &bounded_read_readiness,
                 bounded_read_alignment: &bounded_read_alignment_readiness,
                 graph_route: &graph_route_readiness,
+                graph_route_alignment: &graph_route_alignment_readiness,
                 query_runtime: &query_runtime_readiness,
                 query_runtime_alignment: &query_runtime_alignment_readiness,
                 blackbox: &blackbox_readiness,
@@ -1189,6 +1078,7 @@ struct IntegrationGateReadiness<'a> {
     bounded_read: &'a BoundedReadCutoverReadiness,
     bounded_read_alignment: &'a BoundedReadAlignmentCutoverReadiness,
     graph_route: &'a GraphRouteCutoverReadiness,
+    graph_route_alignment: &'a GraphRouteAlignmentCutoverReadiness,
     query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
     query_runtime_alignment: &'a QueryRuntimePreflightAlignmentCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
@@ -1420,7 +1310,7 @@ fn next_actions(
             ],
         ));
     }
-    if !graph_route_readiness_alignment_ready(bundle) {
+    if !readiness.graph_route_alignment.evidence_ready() {
         actions.push(next_action(
             "regenerate_graph_route_readiness_alignment",
             "live graph route primary-read readiness must match the replacement summary before Mem cutover",
@@ -3009,64 +2899,180 @@ fn graph_route_query_report_has_relationship_property_pruning(report: &serde_jso
         })
 }
 
-fn graph_route_readiness_alignment_ready(bundle: &serde_json::Value) -> bool {
-    [
-        &["replacement_summary_graph_route_alignment", "ready"][..],
-        &[
-            "replacement_summary_graph_route_alignment",
-            "evidence_protocol_matches",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
-            "evidence_ready",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+pub fn graph_route_alignment_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> GraphRouteAlignmentCutoverReadiness {
+    GraphRouteAlignmentCutoverReadiness {
+        ready: graph_route_alignment_bool(bundle, "ready"),
+        evidence_protocol_matches: graph_route_alignment_bool(bundle, "evidence_protocol_matches"),
+        evidence_ready: graph_route_alignment_bool(bundle, "evidence_ready"),
+        evidence_route_primary_ready: graph_route_alignment_bool(
+            bundle,
             "evidence_route_primary_ready",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        summary_route_primary_ready: graph_route_alignment_bool(
+            bundle,
             "summary_route_primary_ready",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        route_primary_ready_matches: graph_route_alignment_bool(
+            bundle,
             "route_primary_ready_matches",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        route_query_plan_evidence_ready_matches: graph_route_alignment_bool(
+            bundle,
             "route_query_plan_evidence_ready_matches",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        route_query_profile_evidence_ready_matches: graph_route_alignment_bool(
+            bundle,
             "route_query_profile_evidence_ready_matches",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        route_relationship_property_pruning_evidence_ready_matches: graph_route_alignment_bool(
+            bundle,
             "route_relationship_property_pruning_evidence_ready_matches",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        relationship_property_pruning_required_count_matches: graph_route_alignment_bool(
+            bundle,
             "relationship_property_pruning_required_count_matches",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        relationship_property_pruning_report_count_matches: graph_route_alignment_bool(
+            bundle,
             "relationship_property_pruning_report_count_matches",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        primary_ready_routes_match: graph_route_alignment_bool(
+            bundle,
             "primary_ready_routes_match",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        evidence_required_routes_covered: graph_route_alignment_bool(
+            bundle,
             "evidence_required_routes_covered",
-        ][..],
-        &[
-            "replacement_summary_graph_route_alignment",
+        ),
+        summary_required_routes_covered: graph_route_alignment_bool(
+            bundle,
             "summary_required_routes_covered",
-        ][..],
+        ),
+        evidence_route_catalog_version_ready: graph_route_alignment_bool(
+            bundle,
+            "evidence_route_catalog_version_ready",
+        ),
+        summary_route_catalog_version_ready: graph_route_alignment_bool(
+            bundle,
+            "summary_route_catalog_version_ready",
+        ),
+        evidence_route_catalog_digest_ready: graph_route_alignment_bool(
+            bundle,
+            "evidence_route_catalog_digest_ready",
+        ),
+        summary_route_catalog_digest_ready: graph_route_alignment_bool(
+            bundle,
+            "summary_route_catalog_digest_ready",
+        ),
+        route_catalog_version_matches: graph_route_alignment_bool(
+            bundle,
+            "route_catalog_version_matches",
+        ),
+        route_catalog_digest_matches: graph_route_alignment_bool(
+            bundle,
+            "route_catalog_digest_matches",
+        ),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[&["replacement_summary_graph_route_alignment", "blocker_codes"][..]],
+        ),
+    }
+}
+
+fn graph_route_alignment_bool(bundle: &serde_json::Value, field: &str) -> bool {
+    bool_path(
+        bundle,
+        &["replacement_summary_graph_route_alignment", field],
+    ) == Some(true)
+}
+
+fn graph_route_alignment_cutover_conditions(
+    readiness: &GraphRouteAlignmentCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "replacement_summary_graph_route_alignment.ready",
+            readiness.ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.evidence_protocol_matches",
+            readiness.evidence_protocol_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.evidence_ready",
+            readiness.evidence_ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.evidence_route_primary_ready",
+            readiness.evidence_route_primary_ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.summary_route_primary_ready",
+            readiness.summary_route_primary_ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.route_primary_ready_matches",
+            readiness.route_primary_ready_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.route_query_plan_evidence_ready_matches",
+            readiness.route_query_plan_evidence_ready_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.route_query_profile_evidence_ready_matches",
+            readiness.route_query_profile_evidence_ready_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.route_relationship_property_pruning_evidence_ready_matches",
+            readiness.route_relationship_property_pruning_evidence_ready_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.relationship_property_pruning_required_count_matches",
+            readiness.relationship_property_pruning_required_count_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.relationship_property_pruning_report_count_matches",
+            readiness.relationship_property_pruning_report_count_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.primary_ready_routes_match",
+            readiness.primary_ready_routes_match,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.evidence_required_routes_covered",
+            readiness.evidence_required_routes_covered,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.summary_required_routes_covered",
+            readiness.summary_required_routes_covered,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.evidence_route_catalog_version_ready",
+            readiness.evidence_route_catalog_version_ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.summary_route_catalog_version_ready",
+            readiness.summary_route_catalog_version_ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.evidence_route_catalog_digest_ready",
+            readiness.evidence_route_catalog_digest_ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.summary_route_catalog_digest_ready",
+            readiness.summary_route_catalog_digest_ready,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.route_catalog_version_matches",
+            readiness.route_catalog_version_matches,
+        ),
+        (
+            "replacement_summary_graph_route_alignment.route_catalog_digest_matches",
+            readiness.route_catalog_digest_matches,
+        ),
     ]
-    .iter()
-    .all(|path| bool_path(bundle, path) == Some(true))
 }
 
 fn graph_route_parity_alignment_ready(bundle: &serde_json::Value) -> bool {
@@ -6426,6 +6432,56 @@ mod tests {
                 "replacement_summary_graph_route_alignment.evidence_protocol_matches",
                 "replacement_summary_graph_route_alignment.evidence_ready"
             ])
+        );
+    }
+
+    #[test]
+    fn exposes_typed_graph_route_alignment_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::graph_route_alignment_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.ready);
+        assert!(typed.evidence_protocol_matches);
+        assert!(typed.evidence_ready);
+        assert!(typed.evidence_route_primary_ready);
+        assert!(typed.summary_route_primary_ready);
+        assert!(typed.route_primary_ready_matches);
+        assert!(typed.route_query_plan_evidence_ready_matches);
+        assert!(typed.route_query_profile_evidence_ready_matches);
+        assert!(typed.route_relationship_property_pruning_evidence_ready_matches);
+        assert!(typed.relationship_property_pruning_required_count_matches);
+        assert!(typed.relationship_property_pruning_report_count_matches);
+        assert!(typed.primary_ready_routes_match);
+        assert!(typed.evidence_required_routes_covered);
+        assert!(typed.summary_required_routes_covered);
+        assert!(typed.evidence_route_catalog_version_ready);
+        assert!(typed.summary_route_catalog_version_ready);
+        assert!(typed.evidence_route_catalog_digest_ready);
+        assert!(typed.summary_route_catalog_digest_ready);
+        assert!(typed.route_catalog_version_matches);
+        assert!(typed.route_catalog_digest_matches);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_graph_route_alignment_detects_stale_route_catalog_metadata() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_graph_route_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_graph_route_alignment"]["route_catalog_digest_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_graph_route_alignment"]["blocker_codes"] =
+            serde_json::json!(["graph_route_catalog_digest_mismatch"]);
+
+        let typed = super::graph_route_alignment_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.ready);
+        assert!(!typed.route_catalog_digest_matches);
+        assert_eq!(
+            typed.blocker_codes,
+            vec!["graph_route_catalog_digest_mismatch".to_string()]
         );
     }
 

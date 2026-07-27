@@ -235,6 +235,9 @@ contract.
   - [x] Expose and consume typed graph-route cutover readiness so Mem can gate
     Kuzu/Ladybug graph read route ownership without duplicating route-profile
     JSON-path checks.
+  - [x] Expose and consume typed graph-route alignment readiness so Mem can
+    reject stale graph route replacement-summary evidence without duplicating
+    alignment JSON-path checks.
   - [x] Expose and consume typed query-runtime preflight readiness so Mem can
     prove library query execution and route coverage without duplicating
     preflight JSON-path checks.
@@ -467,6 +470,8 @@ contract.
     and consume the same result in integration readiness next actions.
   - [x] Expose typed graph-route cutover readiness through Rust library APIs and
     consume the same result in integration readiness next actions.
+  - [x] Expose typed graph-route alignment readiness through Rust library APIs
+    and consume the same result in integration readiness next actions.
   - [x] Expose typed query-runtime preflight readiness through Rust library APIs
     and consume the same result in integration readiness next actions.
   - [x] Expose typed query-runtime preflight alignment readiness through Rust
