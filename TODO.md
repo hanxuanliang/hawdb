@@ -147,6 +147,9 @@ contract.
   - [x] Expose a deterministic library-only query fuzz harness for Nowledge
     graph-read shapes so CI can exercise parser, query runtime, scan pruning,
     plan-cache reporting, and system hints without production dual-read compare.
+  - [x] Add a library-first Skein read runtime entrypoint for the low-risk
+    `/graph/overview` memory ranking shape, returning typed rows and bounded
+    route execution evidence without request-time dual-read compare.
 - [ ] PR 3: Repeat route runtime migration for the remaining graph-first reads.
   - Scope: migrate overview, node details, expansion, shortest path,
     communities, PageRank plan, augmentation state, orphans, and related
