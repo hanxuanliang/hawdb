@@ -136,8 +136,8 @@ pub fn scan_nowledge_query_inventory_with_options(
 
     let mut call_sites = Vec::new();
     for file in files {
-        let content = fs::read_to_string(&file).map_err(|error| {
-            SkeinError::Execution(format!("failed to read '{}': {error}", file.display()))
+        let content = fs::read_to_string(&file).map_err(|_| {
+            SkeinError::Execution("failed to read inventory source file: io_error".to_string())
         })?;
         let relative = file.strip_prefix(root).unwrap_or(&file);
         let source_file = path_to_slash_string(relative);
@@ -1721,8 +1721,8 @@ fn cypher_coverage_key(cypher: &str) -> String {
 }
 
 fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
-    let metadata = fs::metadata(root).map_err(|error| {
-        SkeinError::Execution(format!("failed to stat '{}': {error}", root.display()))
+    let metadata = fs::metadata(root).map_err(|_| {
+        SkeinError::Execution("failed to stat inventory path: io_error".to_string())
     })?;
     if metadata.is_file() {
         if root.extension().and_then(|ext| ext.to_str()) == Some("rs") {
@@ -1731,14 +1731,11 @@ fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
         return Ok(());
     }
 
-    for entry in fs::read_dir(root).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to read directory '{}': {error}",
-            root.display()
-        ))
+    for entry in fs::read_dir(root).map_err(|_| {
+        SkeinError::Execution("failed to read inventory directory: io_error".to_string())
     })? {
-        let entry = entry.map_err(|error| {
-            SkeinError::Execution(format!("failed to read directory entry: {error}"))
+        let entry = entry.map_err(|_| {
+            SkeinError::Execution("failed to read inventory directory entry: io_error".to_string())
         })?;
         let path = entry.path();
         let file_name = path
@@ -1748,9 +1745,9 @@ fn collect_rust_files(root: &Path, output: &mut Vec<PathBuf>) -> Result<()> {
         if file_name == "target" || file_name == ".git" {
             continue;
         }
-        let metadata = entry
-            .metadata()
-            .map_err(|error| SkeinError::Execution(format!("failed to stat entry: {error}")))?;
+        let metadata = entry.metadata().map_err(|_| {
+            SkeinError::Execution("failed to stat inventory directory entry: io_error".to_string())
+        })?;
         if metadata.is_dir() {
             collect_rust_files(&path, output)?;
         } else if metadata.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
@@ -2498,6 +2495,61 @@ mod tests {
         ));
         assert!(scan_source_file("crates/nmem-graph/src/community.rs"));
         assert!(scan_source_file("crates/nmem-server/src/rest_fs.rs"));
+    }
+
+    #[test]
+    fn scanned_inventory_stat_error_redacts_path_and_io_details() {
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-inventory-secret-missing-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+
+        let error = scan_nowledge_query_inventory(&root).unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "execution error: failed to stat inventory path: io_error"
+        );
+        assert!(!message.contains(root.to_str().unwrap()));
+        assert!(!message.contains("secret-missing"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scanned_inventory_source_read_error_redacts_path_and_io_details() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "skein-nowledge-inventory-secret-unreadable-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let source = root.join("secret_source.rs");
+        fs::write(&source, "\"MATCH (m:Memory) RETURN m.secret\"").unwrap();
+        let original_permissions = fs::metadata(&source).unwrap().permissions();
+        let mut unreadable = original_permissions.clone();
+        unreadable.set_mode(0o000);
+        fs::set_permissions(&source, unreadable).unwrap();
+
+        let error = scan_nowledge_query_inventory(&root).unwrap_err();
+        fs::set_permissions(&source, original_permissions).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        let message = error.to_string();
+
+        assert_eq!(
+            message,
+            "execution error: failed to read inventory source file: io_error"
+        );
+        assert!(!message.contains(source.to_str().unwrap()));
+        assert!(!message.contains("secret_source"));
+        assert!(!message.contains("m.secret"));
     }
 
     #[test]
