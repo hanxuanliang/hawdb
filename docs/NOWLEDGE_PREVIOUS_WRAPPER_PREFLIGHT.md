@@ -4,6 +4,12 @@ This runbook turns a Nowledge-owned Kuzu/Ladybug wrapper command into Skein
 production-replacement evidence. It is intentionally evidence-first: a passing
 scanner or a passing protocol smoke is not enough for cutover.
 
+This is not a production serving path. Mem should embed Skein as a Rust library
+and consume typed readiness APIs for startup and read selection. The CLI commands
+used here are quarantined developer/preflight tools and require
+`SKEIN_ENABLE_COMPATIBILITY_TOOLS=1`; the checked-in script sets that variable
+only around the isolated `cargo run --bin skein` calls it owns.
+
 ## Safety Boundary
 
 Never open the live Nowledge Kuzu database from a Skein or ad hoc validation

@@ -468,7 +468,7 @@ fi
 mkdir -p "$preflight_root"
 
 run_skein() {
-  cargo run --quiet --bin skein -- "$@"
+  SKEIN_ENABLE_COMPATIBILITY_TOOLS=1 cargo run --quiet --bin skein -- "$@"
 }
 
 shadow_timeout_args=()

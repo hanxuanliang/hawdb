@@ -304,6 +304,9 @@ contract.
   - Acceptance: production Mem still supports explicit legacy read selection
     during the migration window, but no stale compatibility helper bypasses the
     query runtime or readiness gates.
+  - [x] Quarantine command-backed previous-wrapper and request-time shadow
+    compatibility CLI tools behind an explicit developer/preflight opt-in while
+    keeping production integration on typed Rust library APIs.
 
 ## P0: Graph Kernel Compatibility
 

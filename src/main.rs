@@ -70,6 +70,7 @@ use std::path::Path;
 use std::time::Duration;
 
 const GRAPH_LIGHTNING_STAGING_CATALOG_PROTOCOL_VERSION: u64 = 1;
+const SKEIN_ENABLE_COMPATIBILITY_TOOLS_ENV: &str = "SKEIN_ENABLE_COMPATIBILITY_TOOLS";
 
 fn main() -> Result<()> {
     let mut args = std::env::args().skip(1).peekable();
@@ -414,6 +415,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if command == "external-shadow-adapter-smoke" {
+            require_developer_compatibility_tool(&command)?;
             let mut require_previous_wrapper = false;
             let mut shadow_trace = None;
             let mut shadow_timeout = None;
@@ -490,6 +492,7 @@ fn main() -> Result<()> {
             return Ok(());
         }
         if command == "nowledge-cypher-migration-gate" {
+            require_developer_compatibility_tool(&command)?;
             let mut require_ready = false;
             let mut require_cutover_evidence = false;
             let mut allow_self_shadow = false;
@@ -1282,13 +1285,32 @@ fn main() -> Result<()> {
 }
 
 fn nowledge_cypher_migration_gate_usage() -> String {
-    "nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] [--previous-wrapper-contract-evidence-json <path>] <root> <shadow-name> <program> [args...]"
+    "nowledge-cypher-migration-gate is a developer compatibility tool; set SKEIN_ENABLE_COMPATIBILITY_TOOLS=1. Usage: nowledge-cypher-migration-gate requires [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] [--previous-wrapper-contract-evidence-json <path>] <root> <shadow-name> <program> [args...]"
         .to_string()
 }
 
 fn external_shadow_adapter_smoke_usage() -> String {
-    "external-shadow-adapter-smoke requires [--require-previous-wrapper] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <shadow-name> <program> [args...]"
+    "external-shadow-adapter-smoke is a developer compatibility tool; set SKEIN_ENABLE_COMPATIBILITY_TOOLS=1. Usage: external-shadow-adapter-smoke requires [--require-previous-wrapper] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <shadow-name> <program> [args...]"
         .to_string()
+}
+
+fn require_developer_compatibility_tool(command: &str) -> Result<()> {
+    if compatibility_tools_enabled_from_value(
+        std::env::var(SKEIN_ENABLE_COMPATIBILITY_TOOLS_ENV)
+            .ok()
+            .as_deref(),
+    ) {
+        return Ok(());
+    }
+    Err(SkeinError::Semantic(format!(
+        "{command} is quarantined as a developer compatibility tool; production callers must use Skein library APIs and typed readiness gates. Set {SKEIN_ENABLE_COMPATIBILITY_TOOLS_ENV}=1 only for isolated preflight or CI validation."
+    )))
+}
+
+fn compatibility_tools_enabled_from_value(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .is_some_and(|value| matches!(value, "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"))
 }
 
 fn explain_json_usage() -> String {
@@ -7980,6 +8002,31 @@ mod tests {
     fn validates_graph_lightning_verify_export_usage_text() {
         assert!(graph_lightning_verify_export_usage().contains("<database-path>"));
         assert!(graph_lightning_verify_export_usage().contains("--require-valid"));
+    }
+
+    #[test]
+    fn compatibility_tools_are_opt_in_for_developer_paths() {
+        assert!(!crate::compatibility_tools_enabled_from_value(None));
+        assert!(!crate::compatibility_tools_enabled_from_value(Some("")));
+        assert!(!crate::compatibility_tools_enabled_from_value(Some("0")));
+        assert!(crate::compatibility_tools_enabled_from_value(Some("1")));
+        assert!(crate::compatibility_tools_enabled_from_value(Some("true")));
+        assert!(crate::compatibility_tools_enabled_from_value(Some("YES")));
+        assert!(crate::compatibility_tools_enabled_from_value(Some(" on ")));
+    }
+
+    #[test]
+    fn compatibility_tool_usage_mentions_developer_quarantine() {
+        assert!(
+            crate::external_shadow_adapter_smoke_usage().contains("developer compatibility tool")
+        );
+        assert!(crate::external_shadow_adapter_smoke_usage()
+            .contains(crate::SKEIN_ENABLE_COMPATIBILITY_TOOLS_ENV));
+        assert!(
+            crate::nowledge_cypher_migration_gate_usage().contains("developer compatibility tool")
+        );
+        assert!(crate::nowledge_cypher_migration_gate_usage()
+            .contains(crate::SKEIN_ENABLE_COMPATIBILITY_TOOLS_ENV));
     }
 
     fn test_storage_recovery_report(graph_commit_epoch: u64) -> StorageRecoveryReport {
