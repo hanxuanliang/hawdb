@@ -676,6 +676,9 @@ contract.
   - [x] Expose a typed adjacency consistency report that validates maintained
     incoming/outgoing relationship groups against a full relationship scan
     before adding denser read-optimized layouts.
+  - [x] Expose a compact property-index consistency report that validates
+    maintained node and relationship property indexes against full recompute
+    samples before relying on them for read-heavy scan pruning.
 - [ ] Add workload fixtures based on real Nowledge routes before low-level
   tuning.
   - Benchmark graph reads, bounded expansions, metadata-filtered search, and

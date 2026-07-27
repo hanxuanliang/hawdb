@@ -173,6 +173,28 @@ pub struct DistinctValueStatisticsConsistencyReport {
     pub mismatched_rel_property_keys: Vec<(RelTypeId, String)>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PropertyIndexConsistencyReport {
+    pub ready: bool,
+    pub computed_at_commit_epoch: u64,
+    pub node_index_entry_count: usize,
+    pub recomputed_node_index_entry_count: usize,
+    pub node_index_reference_count: usize,
+    pub recomputed_node_index_reference_count: usize,
+    pub missing_node_key_count: usize,
+    pub extra_node_key_count: usize,
+    pub mismatched_node_key_count: usize,
+    pub relationship_index_entry_count: usize,
+    pub recomputed_relationship_index_entry_count: usize,
+    pub relationship_index_reference_count: usize,
+    pub recomputed_relationship_index_reference_count: usize,
+    pub missing_relationship_key_count: usize,
+    pub extra_relationship_key_count: usize,
+    pub mismatched_relationship_key_count: usize,
+    pub mismatched_node_keys: Vec<(LabelId, String, Value)>,
+    pub mismatched_relationship_keys: Vec<(RelTypeId, String, Value)>,
+}
+
 type CompositePropertyKey = Vec<(String, Value)>;
 type CompositePropertyIndex = BTreeMap<(LabelId, CompositePropertyKey), BTreeSet<NodeId>>;
 type FullTextPropertyIndex = BTreeMap<(LabelId, String, String), BTreeSet<NodeId>>;
@@ -825,6 +847,62 @@ impl DistinctValueStatisticsConsistencyReport {
             recomputed_rel_property_distinct_counts,
             mismatched_property_keys,
             mismatched_rel_property_keys,
+        }
+    }
+}
+
+impl PropertyIndexConsistencyReport {
+    fn new(
+        computed_at_commit_epoch: u64,
+        maintained_node_index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+        recomputed_node_index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+        maintained_relationship_index: &RelationshipPropertyIndex,
+        recomputed_relationship_index: &RelationshipPropertyIndex,
+    ) -> Self {
+        let (
+            missing_node_key_count,
+            extra_node_key_count,
+            mismatched_node_key_count,
+            mismatched_node_keys,
+        ) = property_index_mismatch_summary(maintained_node_index, recomputed_node_index);
+        let (
+            missing_relationship_key_count,
+            extra_relationship_key_count,
+            mismatched_relationship_key_count,
+            mismatched_relationship_keys,
+        ) = relationship_property_index_mismatch_summary(
+            maintained_relationship_index,
+            recomputed_relationship_index,
+        );
+        Self {
+            ready: missing_node_key_count == 0
+                && extra_node_key_count == 0
+                && mismatched_node_key_count == 0
+                && missing_relationship_key_count == 0
+                && extra_relationship_key_count == 0
+                && mismatched_relationship_key_count == 0,
+            computed_at_commit_epoch,
+            node_index_entry_count: maintained_node_index.len(),
+            recomputed_node_index_entry_count: recomputed_node_index.len(),
+            node_index_reference_count: node_property_index_reference_count(maintained_node_index),
+            recomputed_node_index_reference_count: node_property_index_reference_count(
+                recomputed_node_index,
+            ),
+            missing_node_key_count,
+            extra_node_key_count,
+            mismatched_node_key_count,
+            relationship_index_entry_count: maintained_relationship_index.len(),
+            recomputed_relationship_index_entry_count: recomputed_relationship_index.len(),
+            relationship_index_reference_count: relationship_property_index_reference_count(
+                maintained_relationship_index,
+            ),
+            recomputed_relationship_index_reference_count:
+                relationship_property_index_reference_count(recomputed_relationship_index),
+            missing_relationship_key_count,
+            extra_relationship_key_count,
+            mismatched_relationship_key_count,
+            mismatched_node_keys,
+            mismatched_relationship_keys,
         }
     }
 }
@@ -4731,6 +4809,19 @@ impl GraphStore {
                 &self.relationship_property_index,
             ),
             recomputed.rel_property_distinct_counts,
+        )
+    }
+
+    pub fn property_index_consistency_report(&self) -> PropertyIndexConsistencyReport {
+        let recomputed_node_index = recompute_node_property_index(&self.nodes);
+        let recomputed_relationship_index =
+            recompute_relationship_property_index(&self.relationships);
+        PropertyIndexConsistencyReport::new(
+            self.commit_epoch,
+            &self.property_index,
+            &recomputed_node_index,
+            &self.relationship_property_index,
+            &recomputed_relationship_index,
         )
     }
 
@@ -9700,6 +9791,118 @@ fn compute_relationship_property_distinct_counts_from_index(
     counts
 }
 
+fn recompute_node_property_index(
+    nodes: &BTreeMap<NodeId, NodeRecord>,
+) -> BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>> {
+    let mut index = BTreeMap::new();
+    for node in nodes.values() {
+        for label_id in &node.labels {
+            for (property, value) in &node.properties {
+                index
+                    .entry((*label_id, property.clone(), value.clone()))
+                    .or_insert_with(BTreeSet::new)
+                    .insert(node.id);
+            }
+        }
+    }
+    index
+}
+
+fn recompute_relationship_property_index(
+    relationships: &BTreeMap<RelId, RelRecord>,
+) -> RelationshipPropertyIndex {
+    let mut index = BTreeMap::new();
+    for relationship in relationships.values() {
+        for (property, value) in &relationship.properties {
+            index
+                .entry((relationship.rel_type, property.clone(), value.clone()))
+                .or_insert_with(BTreeSet::new)
+                .insert(relationship.id);
+        }
+    }
+    index
+}
+
+fn node_property_index_reference_count(
+    index: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+) -> usize {
+    index.values().map(BTreeSet::len).sum()
+}
+
+fn relationship_property_index_reference_count(index: &RelationshipPropertyIndex) -> usize {
+    index.values().map(BTreeSet::len).sum()
+}
+
+fn property_index_mismatch_summary(
+    maintained: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+    recomputed: &BTreeMap<(LabelId, String, Value), BTreeSet<NodeId>>,
+) -> (usize, usize, usize, Vec<(LabelId, String, Value)>) {
+    let mut missing_key_count = 0usize;
+    let mut extra_key_count = 0usize;
+    let mut mismatched_key_count = 0usize;
+    let mut mismatched_keys = Vec::new();
+    for key in maintained
+        .keys()
+        .chain(recomputed.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+    {
+        match (maintained.get(&key), recomputed.get(&key)) {
+            (Some(left), Some(right)) if left == right => {}
+            (Some(_), Some(_)) => mismatched_key_count += 1,
+            (Some(_), None) => extra_key_count += 1,
+            (None, Some(_)) => missing_key_count += 1,
+            (None, None) => {}
+        }
+        if maintained.get(&key) != recomputed.get(&key)
+            && mismatched_keys.len() < MAX_ADJACENCY_CONSISTENCY_SAMPLES
+        {
+            mismatched_keys.push(key);
+        }
+    }
+    (
+        missing_key_count,
+        extra_key_count,
+        mismatched_key_count,
+        mismatched_keys,
+    )
+}
+
+fn relationship_property_index_mismatch_summary(
+    maintained: &RelationshipPropertyIndex,
+    recomputed: &RelationshipPropertyIndex,
+) -> (usize, usize, usize, Vec<(RelTypeId, String, Value)>) {
+    let mut missing_key_count = 0usize;
+    let mut extra_key_count = 0usize;
+    let mut mismatched_key_count = 0usize;
+    let mut mismatched_keys = Vec::new();
+    for key in maintained
+        .keys()
+        .chain(recomputed.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+    {
+        match (maintained.get(&key), recomputed.get(&key)) {
+            (Some(left), Some(right)) if left == right => {}
+            (Some(_), Some(_)) => mismatched_key_count += 1,
+            (Some(_), None) => extra_key_count += 1,
+            (None, Some(_)) => missing_key_count += 1,
+            (None, None) => {}
+        }
+        if maintained.get(&key) != recomputed.get(&key)
+            && mismatched_keys.len() < MAX_ADJACENCY_CONSISTENCY_SAMPLES
+        {
+            mismatched_keys.push(key);
+        }
+    }
+    (
+        missing_key_count,
+        extra_key_count,
+        mismatched_key_count,
+        mismatched_keys,
+    )
+}
+
 fn compute_basic_statistics(
     nodes: &BTreeMap<NodeId, NodeRecord>,
     relationships: &BTreeMap<RelId, RelRecord>,
@@ -12887,6 +13090,120 @@ mod tests {
                 .get(&(rel_type, "confidence".to_string())),
             Some(&1)
         );
+    }
+
+    #[test]
+    fn property_index_consistency_report_matches_full_scan_after_mutations() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("id", Value::String("memory:1".to_string())),
+                    ("unit_type", Value::String("note".to_string())),
+                ]),
+            )
+            .unwrap();
+        store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([
+                    ("id", Value::String("memory:2".to_string())),
+                    ("unit_type", Value::String("task".to_string())),
+                ]),
+            )
+            .unwrap();
+        let target = store
+            .create_node(
+                &mut catalog,
+                "Entity",
+                properties([("id", Value::String("entity:1".to_string()))]),
+            )
+            .unwrap();
+        let weak = store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.2))]),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.7))]),
+            )
+            .unwrap();
+
+        let report = store.property_index_consistency_report();
+        assert!(report.ready);
+        assert_eq!(
+            report.node_index_entry_count,
+            report.recomputed_node_index_entry_count
+        );
+        assert_eq!(
+            report.node_index_reference_count,
+            report.recomputed_node_index_reference_count
+        );
+        assert_eq!(
+            report.relationship_index_entry_count,
+            report.recomputed_relationship_index_entry_count
+        );
+        assert_eq!(
+            report.relationship_index_reference_count,
+            report.recomputed_relationship_index_reference_count
+        );
+        assert_eq!(report.missing_node_key_count, 0);
+        assert_eq!(report.extra_node_key_count, 0);
+        assert_eq!(report.mismatched_node_key_count, 0);
+        assert_eq!(report.missing_relationship_key_count, 0);
+        assert_eq!(report.extra_relationship_key_count, 0);
+        assert_eq!(report.mismatched_relationship_key_count, 0);
+        assert!(report.mismatched_node_keys.is_empty());
+        assert!(report.mismatched_relationship_keys.is_empty());
+
+        store
+            .set_node_property(
+                &mut catalog,
+                "Memory",
+                Some(&PropertyFilter::Eq {
+                    property: "id".to_string(),
+                    value: Value::String("memory:2".to_string()),
+                }),
+                "unit_type",
+                Value::String("note".to_string()),
+            )
+            .unwrap();
+        store.apply_set_relationship_property(weak, "confidence".to_string(), Value::Float(0.7));
+        store.apply_delete_relationship(weak);
+
+        let report = store.property_index_consistency_report();
+        assert!(report.ready);
+        assert_eq!(
+            report.node_index_entry_count,
+            report.recomputed_node_index_entry_count
+        );
+        assert_eq!(
+            report.node_index_reference_count,
+            report.recomputed_node_index_reference_count
+        );
+        assert_eq!(
+            report.relationship_index_entry_count,
+            report.recomputed_relationship_index_entry_count
+        );
+        assert_eq!(
+            report.relationship_index_reference_count,
+            report.recomputed_relationship_index_reference_count
+        );
+        assert!(report.mismatched_node_keys.is_empty());
+        assert!(report.mismatched_relationship_keys.is_empty());
     }
 
     #[test]

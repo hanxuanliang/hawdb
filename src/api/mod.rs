@@ -30,9 +30,10 @@ use crate::store::{
     AdjacencyConsistencyReport, AdjacencyDirection, AdjacencyLayout,
     BasicStatisticsConsistencyReport, DegreeStatisticsConsistencyReport,
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
-    NodeRecord, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction, RecoveryMode,
-    RelRecord, ScanPruningReport, ScanPruningStrategy, SchemaMaintenanceAction,
-    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    NodeRecord, ProjectedGraphStatus, PropertyIndexConsistencyReport,
+    PropertyIndexProjectionRebuildAction, RecoveryMode, RelRecord, ScanPruningReport,
+    ScanPruningStrategy, SchemaMaintenanceAction, StorageReclamationWatermark,
+    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::value::Value;
 use plan_cache::{CachedPlan, PlanCache, PlanCacheKey, DEFAULT_PLAN_CACHE_MAX_ENTRIES};
@@ -6359,6 +6360,10 @@ impl Database {
         &self,
     ) -> DistinctValueStatisticsConsistencyReport {
         self.store.distinct_value_statistics_consistency_report()
+    }
+
+    pub fn property_index_consistency_report(&self) -> PropertyIndexConsistencyReport {
+        self.store.property_index_consistency_report()
     }
 
     pub fn property_indexes(&self) -> Vec<IndexDescriptor> {

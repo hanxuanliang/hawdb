@@ -358,8 +358,8 @@ pub use store::{
     AdjacencyGroupKey, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
     DegreeStatisticsConsistencyReport, DegreeStatisticsEntry, DegreeStatisticsKey,
     DistinctValueStatisticsConsistencyReport, DurabilityPolicy, OrderedAdjacencyEntry,
-    RecoveryMode, StorageReclamationWatermark, StorageRecoveryReport, WalReplayConfig,
-    DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    PropertyIndexConsistencyReport, RecoveryMode, StorageReclamationWatermark,
+    StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 pub use value::Value;
 pub use workload_fixtures::{

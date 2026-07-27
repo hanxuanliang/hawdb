@@ -34297,6 +34297,16 @@ fn exposes_property_index_descriptors_and_statistics() {
         distinct_report.maintained_property_distinct_counts,
         distinct_report.recomputed_property_distinct_counts
     );
+    let property_index_report = db.property_index_consistency_report();
+    assert!(property_index_report.ready);
+    assert_eq!(
+        property_index_report.node_index_entry_count,
+        property_index_report.recomputed_node_index_entry_count
+    );
+    assert_eq!(
+        property_index_report.relationship_index_reference_count,
+        property_index_report.recomputed_relationship_index_reference_count
+    );
 
     let read_tx = db.begin_read_transaction();
     db.query("CREATE (:Memory {id: 4, kind: 'note'})").unwrap();
