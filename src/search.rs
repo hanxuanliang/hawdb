@@ -2200,11 +2200,13 @@ fn search_projection_probe_production_filter_pruning_report(
     let payload_read_avoidance_ready = samples
         .iter()
         .any(|sample| sample.segment_pruned_document_count > 0);
-    let ready = missing_fields.is_empty() && payload_read_avoidance_ready;
+    let explain_analyze_ready = samples.iter().all(|sample| sample.explain_analyze_ready);
+    let ready = missing_fields.is_empty() && payload_read_avoidance_ready && explain_analyze_ready;
     serde_json::json!({
         "ready": ready,
         "persisted_segment_descriptor_used": true,
         "payload_read_avoidance_ready": payload_read_avoidance_ready,
+        "explain_analyze_ready": explain_analyze_ready,
         "sample_count": samples.len(),
         "ready_field_count": samples.len().saturating_sub(missing_fields.len()),
         "required_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
@@ -2234,6 +2236,7 @@ struct SearchProjectionProbeProductionFilterSample<'a> {
     value_summary_used: bool,
     numeric_range_summary_used: bool,
     timestamp_range_summary_used: bool,
+    explain_analyze_ready: bool,
 }
 
 impl SearchProjectionProbeProductionFilterSample<'_> {
@@ -2255,6 +2258,17 @@ impl SearchProjectionProbeProductionFilterSample<'_> {
             "value_summary_used": self.value_summary_used,
             "numeric_range_summary_used": self.numeric_range_summary_used,
             "timestamp_range_summary_used": self.timestamp_range_summary_used,
+            "explain_analyze": {
+                "ready": self.explain_analyze_ready,
+                "operator": "search_projection_segment_scan",
+                "segment_count": self.segment_count,
+                "scanned_segment_count": self.scanned_segment_count,
+                "pruned_segment_count": self.pruned_segment_count,
+                "candidate_document_count": self.segment_pruning_candidate_document_count,
+                "scanned_document_count": self.segment_scanned_document_count,
+                "pruned_document_count": self.segment_pruned_document_count,
+                "payload_read_avoidance": self.segment_pruned_document_count > 0,
+            },
         })
     }
 }
@@ -2292,6 +2306,11 @@ fn search_projection_probe_production_filter_sample<'a>(
         && pruning.segment_pruning_candidate_document_count == descriptor.document_count
         && field_reports.len() == 1
         && capability_ready;
+    let explain_analyze_ready = pruning.persisted_segment_descriptor_used
+        && pruning.segment_count > 0
+        && pruning.segment_pruning_candidate_document_count == descriptor.document_count
+        && pruning.segment_pruned_document_count + pruning.segment_scanned_document_count
+            == descriptor.document_count;
     SearchProjectionProbeProductionFilterSample {
         field,
         operation,
@@ -2309,6 +2328,7 @@ fn search_projection_probe_production_filter_sample<'a>(
         value_summary_used,
         numeric_range_summary_used,
         timestamp_range_summary_used,
+        explain_analyze_ready,
     }
 }
 
@@ -7906,6 +7926,7 @@ mod tests {
             production_filter_pruning["payload_read_avoidance_ready"],
             true
         );
+        assert_eq!(production_filter_pruning["explain_analyze_ready"], true);
         assert_eq!(
             production_filter_pruning["sample_count"],
             NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len()
@@ -7931,6 +7952,12 @@ mod tests {
                 .as_u64()
                 .unwrap_or(0)
                 > 0));
+        assert!(samples
+            .iter()
+            .all(|sample| sample["explain_analyze"]["ready"] == true));
+        assert!(samples.iter().all(
+            |sample| sample["explain_analyze"]["operator"] == "search_projection_segment_scan"
+        ));
         std::fs::remove_dir_all(path).unwrap();
     }
 

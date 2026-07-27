@@ -199,6 +199,7 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "ready",
             "persisted_segment_descriptor_used",
             "payload_read_avoidance_ready",
+            "explain_analyze_ready",
             "sample_count",
             "ready_field_count",
             "required_field_count",
@@ -845,6 +846,7 @@ fn ready_production_filter_pruning_template() -> serde_json::Value {
         "ready": true,
         "persisted_segment_descriptor_used": true,
         "payload_read_avoidance_ready": true,
+        "explain_analyze_ready": true,
         "sample_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
         "ready_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
         "required_field_count": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len(),
@@ -871,6 +873,17 @@ fn ready_production_filter_pruning_template() -> serde_json::Value {
                 "value_summary_used": !matches!(*field, "importance" | "confidence" | "created_at" | "updated_at" | "event_start" | "event_end"),
                 "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
                 "timestamp_range_summary_used": matches!(*field, "created_at" | "updated_at" | "event_start" | "event_end"),
+                "explain_analyze": {
+                    "ready": true,
+                    "operator": "search_projection_segment_scan",
+                    "segment_count": 2,
+                    "scanned_segment_count": 1,
+                    "pruned_segment_count": 1,
+                    "candidate_document_count": 6,
+                    "scanned_document_count": 2,
+                    "pruned_document_count": 4,
+                    "payload_read_avoidance": true,
+                },
             }))
             .collect::<Vec<_>>(),
     })
@@ -1153,6 +1166,7 @@ fn production_filter_pruning_report(probe: &serde_json::Value) -> serde_json::Va
         bool_path(pruning, &["persisted_segment_descriptor_used"]).unwrap_or(false);
     let payload_read_avoidance_ready =
         bool_path(pruning, &["payload_read_avoidance_ready"]).unwrap_or(false);
+    let explain_analyze_ready = bool_path(pruning, &["explain_analyze_ready"]).unwrap_or(false);
     let sample_count = u64_path(pruning, &["sample_count"]).unwrap_or(0);
     let ready_field_count = u64_path(pruning, &["ready_field_count"]).unwrap_or(0);
     let required_field_count = u64_path(pruning, &["required_field_count"])
@@ -1168,11 +1182,13 @@ fn production_filter_pruning_report(probe: &serde_json::Value) -> serde_json::Va
     let ready = ready
         && persisted_segment_descriptor_used
         && payload_read_avoidance_ready
+        && explain_analyze_ready
         && required_fields_ready;
     serde_json::json!({
         "ready": ready,
         "persisted_segment_descriptor_used": persisted_segment_descriptor_used,
         "payload_read_avoidance_ready": payload_read_avoidance_ready,
+        "explain_analyze_ready": explain_analyze_ready,
         "sample_count": sample_count,
         "ready_field_count": ready_field_count,
         "required_field_count": required_field_count,
@@ -1642,6 +1658,25 @@ mod tests {
         assert_eq!(
             report["production_filter_pruning"]["missing_fields"],
             serde_json::json!(["event_end"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["skein_production_filter_pruning_not_ready"])
+        );
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_requires_production_filter_explain_analyze() {
+        let mut probe = ready_probe();
+        probe["production_filter_pruning"]["explain_analyze_ready"] = serde_json::json!(false);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["production_filter_pruning_ready"], false);
+        assert_eq!(
+            report["production_filter_pruning"]["explain_analyze_ready"],
+            false
         );
         assert_eq!(
             report["blocker_codes"],
