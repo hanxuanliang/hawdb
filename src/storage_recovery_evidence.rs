@@ -51,6 +51,7 @@ pub fn nowledge_storage_recovery_evidence_json(
         "durable_recovery_observed": health.durable_recovery_observed,
         "checkpoint_boundary_present": health.checkpoint_boundary_present,
         "wal_replay_bounded": health.wal_replay_bounded,
+        "replay_boundary_consistent": health.replay_boundary_consistent,
         "torn_tail_clean": health.torn_tail_clean,
         "blocker_codes": health.blocker_codes,
         "blockers": health.blockers,
@@ -62,6 +63,7 @@ pub fn nowledge_storage_recovery_evidence_json(
         "storage_recovery_durable_recovery_observed": health.durable_recovery_observed,
         "storage_recovery_checkpoint_boundary_present": health.checkpoint_boundary_present,
         "storage_recovery_wal_replay_bounded": health.wal_replay_bounded,
+        "storage_recovery_replay_boundary_consistent": health.replay_boundary_consistent,
         "storage_recovery_torn_tail_clean": health.torn_tail_clean,
         "storage_recovery_blocker_codes": health.blocker_codes,
         "storage_recovery_blockers": health.blockers,
@@ -115,6 +117,10 @@ mod tests {
             true
         );
         assert_eq!(evidence["storage_recovery_wal_replay_bounded"], true);
+        assert_eq!(
+            evidence["storage_recovery_replay_boundary_consistent"],
+            true
+        );
         assert_eq!(
             evidence["storage_recovery_blocker_codes"],
             serde_json::json!([])
@@ -170,6 +176,8 @@ mod tests {
         report["checkpoint_commit_epoch"] = serde_json::json!(null);
         report["replayed_wal_entries"] = serde_json::json!(2048);
         report["max_wal_replay_entries"] = serde_json::json!(1024);
+        report["next_lsn_after_replay"] = serde_json::json!(42);
+        report["recovered_commit_epoch"] = serde_json::json!(700);
         report["torn_tail_ignored"] = serde_json::json!(true);
         report["torn_tail_reason"] = serde_json::json!("partial wal entry");
         std::fs::write(&path, report.to_string()).unwrap();
@@ -183,14 +191,43 @@ mod tests {
         assert_eq!(evidence["storage_recovery_ready"], false);
         assert_eq!(evidence["checkpoint_boundary_present"], false);
         assert_eq!(evidence["wal_replay_bounded"], false);
+        assert_eq!(evidence["replay_boundary_consistent"], false);
         assert_eq!(evidence["torn_tail_clean"], false);
         assert_eq!(
             evidence["storage_recovery_blocker_codes"],
             serde_json::json!([
                 "checkpoint_boundary_missing",
                 "wal_replay_unbounded",
+                "replay_boundary_inconsistent",
                 "torn_tail_observed"
             ])
+        );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn storage_recovery_evidence_command_rejects_inconsistent_replay_boundary() {
+        let path = unique_test_file("storage_recovery_replay_boundary");
+        let mut report = ready_report();
+        report["next_lsn_after_replay"] = serde_json::json!(12);
+        report["recovered_commit_epoch"] = serde_json::json!(9);
+        std::fs::write(&path, report.to_string()).unwrap();
+
+        let (evidence, _) = run_nowledge_storage_recovery_evidence(
+            [path.to_str().unwrap()].into_iter().map(str::to_string),
+        )
+        .unwrap();
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(evidence["storage_recovery_ready"], false);
+        assert_eq!(evidence["storage_recovery_wal_replay_bounded"], true);
+        assert_eq!(
+            evidence["storage_recovery_replay_boundary_consistent"],
+            false
+        );
+        assert_eq!(
+            evidence["storage_recovery_blocker_codes"],
+            serde_json::json!(["replay_boundary_inconsistent"])
         );
         std::fs::remove_file(path).unwrap();
     }

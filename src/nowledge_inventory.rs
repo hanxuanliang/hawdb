@@ -50,6 +50,7 @@ pub struct StorageRecoveryEvidenceHealth {
     pub durable_recovery_observed: Option<bool>,
     pub checkpoint_boundary_present: Option<bool>,
     pub wal_replay_bounded: Option<bool>,
+    pub replay_boundary_consistent: Option<bool>,
     pub torn_tail_clean: Option<bool>,
     pub blocker_codes: Vec<String>,
     pub blockers: Vec<String>,
@@ -586,6 +587,11 @@ fn insert_cutover_evidence_json(
         &mut evidence,
         "storage_recovery_wal_replay_bounded",
         storage_recovery_health.wal_replay_bounded,
+    );
+    insert_json(
+        &mut evidence,
+        "storage_recovery_replay_boundary_consistent",
+        storage_recovery_health.replay_boundary_consistent,
     );
     insert_json(
         &mut evidence,
@@ -1261,6 +1267,7 @@ pub fn storage_recovery_evidence_health(
             durable_recovery_observed: None,
             checkpoint_boundary_present: None,
             wal_replay_bounded: None,
+            replay_boundary_consistent: None,
             torn_tail_clean: None,
             blocker_codes: if required {
                 vec!["missing_evidence".to_string()]
@@ -1317,6 +1324,10 @@ pub fn storage_recovery_evidence_health(
                 .zip(max_wal_replay_entries)
                 .is_some_and(|(replayed, max)| replayed <= max),
     );
+    let replay_boundary_consistent = Some(storage_recovery_replay_boundary_consistent(
+        storage_recovery,
+        replayed_wal_entries,
+    ));
     let torn_tail_clean = Some(
         readiness_torn_tail_clean == Some(true)
             && storage_recovery
@@ -1345,6 +1356,11 @@ pub fn storage_recovery_evidence_health(
         blocker_codes.push("wal_replay_unbounded".to_string());
         blockers.push("storage recovery evidence lacks bounded WAL replay".to_string());
     }
+    if replay_boundary_consistent != Some(true) {
+        blocker_codes.push("replay_boundary_inconsistent".to_string());
+        blockers
+            .push("storage recovery evidence has inconsistent WAL replay boundaries".to_string());
+    }
     if torn_tail_clean != Some(true) {
         blocker_codes.push("torn_tail_observed".to_string());
         blockers.push("storage recovery evidence observed torn WAL tail".to_string());
@@ -1357,10 +1373,50 @@ pub fn storage_recovery_evidence_health(
         durable_recovery_observed,
         checkpoint_boundary_present,
         wal_replay_bounded,
+        replay_boundary_consistent,
         torn_tail_clean,
         blocker_codes,
         blockers,
     }
+}
+
+fn storage_recovery_replay_boundary_consistent(
+    storage_recovery: &serde_json::Value,
+    replayed_wal_entries: Option<u64>,
+) -> bool {
+    let checkpoint_commit_epoch = storage_recovery
+        .get("checkpoint_commit_epoch")
+        .and_then(serde_json::Value::as_u64);
+    let wal_replay_start_lsn = storage_recovery
+        .get("wal_replay_start_lsn")
+        .and_then(serde_json::Value::as_u64);
+    let next_lsn_after_replay = storage_recovery
+        .get("next_lsn_after_replay")
+        .and_then(serde_json::Value::as_u64);
+    let recovered_commit_epoch = storage_recovery
+        .get("recovered_commit_epoch")
+        .and_then(serde_json::Value::as_u64);
+
+    matches!(
+        (
+            checkpoint_commit_epoch,
+            wal_replay_start_lsn,
+            next_lsn_after_replay,
+            replayed_wal_entries,
+            recovered_commit_epoch,
+        ),
+        (
+            Some(checkpoint_commit_epoch),
+            Some(wal_replay_start_lsn),
+            Some(next_lsn_after_replay),
+            Some(replayed_wal_entries),
+            Some(recovered_commit_epoch),
+        ) if checkpoint_commit_epoch <= recovered_commit_epoch
+            && wal_replay_start_lsn.checked_add(replayed_wal_entries)
+                == Some(next_lsn_after_replay)
+            && checkpoint_commit_epoch.checked_add(replayed_wal_entries)
+                == Some(recovered_commit_epoch)
+    )
 }
 
 fn insert_background_maintenance_summary_json(
@@ -2813,8 +2869,11 @@ mod tests {
                     "durable": true,
                     "checkpoint_epoch": 7,
                     "checkpoint_commit_epoch": 7,
+                    "wal_replay_start_lsn": 8,
+                    "next_lsn_after_replay": 9,
                     "replayed_wal_entries": 1,
                     "max_wal_replay_entries": 1024,
+                    "recovered_commit_epoch": 8,
                     "torn_tail_ignored": false,
                     "torn_tail_reason": null,
                     "readiness": {
@@ -3593,6 +3652,7 @@ mod tests {
                 "durable_recovery_not_observed".to_string(),
                 "checkpoint_boundary_missing".to_string(),
                 "wal_replay_unbounded".to_string(),
+                "replay_boundary_inconsistent".to_string(),
                 "torn_tail_observed".to_string()
             ]
         );
@@ -3605,8 +3665,11 @@ mod tests {
             "durable": true,
             "checkpoint_epoch": 7,
             "checkpoint_commit_epoch": null,
+            "wal_replay_start_lsn": 8,
+            "next_lsn_after_replay": 42,
             "replayed_wal_entries": 3,
             "max_wal_replay_entries": 2,
+            "recovered_commit_epoch": 700,
             "torn_tail_ignored": true,
             "torn_tail_reason": "partial wal entry",
             "readiness": {
@@ -3625,12 +3688,14 @@ mod tests {
         assert_eq!(health.durable_recovery_observed, Some(true));
         assert_eq!(health.checkpoint_boundary_present, Some(false));
         assert_eq!(health.wal_replay_bounded, Some(false));
+        assert_eq!(health.replay_boundary_consistent, Some(false));
         assert_eq!(health.torn_tail_clean, Some(false));
         assert_eq!(
             health.blocker_codes,
             vec![
                 "checkpoint_boundary_missing".to_string(),
                 "wal_replay_unbounded".to_string(),
+                "replay_boundary_inconsistent".to_string(),
                 "torn_tail_observed".to_string()
             ]
         );

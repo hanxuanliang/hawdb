@@ -198,6 +198,7 @@ pub struct StorageRecoveryCutoverReadiness {
     pub durable: bool,
     pub checkpoint_boundary_present: bool,
     pub wal_replay_bounded: bool,
+    pub replay_boundary_consistent: bool,
     pub torn_tail_clean: bool,
     pub blocker_codes: Vec<String>,
 }
@@ -886,6 +887,7 @@ impl StorageRecoveryCutoverReadiness {
             && self.durable
             && self.checkpoint_boundary_present
             && self.wal_replay_bounded
+            && self.replay_boundary_consistent
             && self.torn_tail_clean
     }
 }
@@ -1868,6 +1870,7 @@ fn next_actions(
                 "replacement_summary.cutover_evidence.storage_recovery_durable",
                 "replacement_summary.cutover_evidence.storage_recovery_checkpoint_boundary_present",
                 "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded",
+                "replacement_summary.cutover_evidence.storage_recovery_replay_boundary_consistent",
                 "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
                 "replacement_summary.cutover_evidence.storage_recovery_blocker_codes",
             ],
@@ -4766,6 +4769,14 @@ pub fn storage_recovery_cutover_readiness(
                 "storage_recovery_wal_replay_bounded",
             ],
         ) == Some(true),
+        replay_boundary_consistent: bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "cutover_evidence",
+                "storage_recovery_replay_boundary_consistent",
+            ],
+        ) == Some(true),
         torn_tail_clean: bool_path(
             bundle,
             &[
@@ -4819,6 +4830,10 @@ fn storage_recovery_cutover_conditions(
         (
             "replacement_summary.cutover_evidence.storage_recovery_wal_replay_bounded",
             readiness.wal_replay_bounded,
+        ),
+        (
+            "replacement_summary.cutover_evidence.storage_recovery_replay_boundary_consistent",
+            readiness.replay_boundary_consistent,
         ),
         (
             "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean",
@@ -8954,6 +8969,8 @@ mod tests {
             serde_json::json!(false);
         bundle["replacement_summary"]["cutover_evidence"]
             ["storage_recovery_checkpoint_boundary_present"] = serde_json::json!(false);
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["storage_recovery_replay_boundary_consistent"] = serde_json::json!(false);
         bundle["replacement_summary"]["cutover_evidence"]["storage_recovery_torn_tail_clean"] =
             serde_json::json!(false);
 
@@ -8962,6 +8979,7 @@ mod tests {
         assert!(typed.ready);
         assert!(!typed.durable);
         assert!(!typed.checkpoint_boundary_present);
+        assert!(!typed.replay_boundary_consistent);
         assert!(!typed.torn_tail_clean);
 
         let report = nowledge_mem_integration_readiness_json(&bundle);
@@ -8982,6 +9000,7 @@ mod tests {
             serde_json::json!([
                 "replacement_summary.cutover_evidence.storage_recovery_durable",
                 "replacement_summary.cutover_evidence.storage_recovery_checkpoint_boundary_present",
+                "replacement_summary.cutover_evidence.storage_recovery_replay_boundary_consistent",
                 "replacement_summary.cutover_evidence.storage_recovery_torn_tail_clean"
             ])
         );
@@ -9170,6 +9189,8 @@ mod tests {
                 }
             }
         });
+        bundle["replacement_summary"]["cutover_evidence"]
+            ["storage_recovery_replay_boundary_consistent"] = serde_json::json!(true);
         bundle["replacement_summary"]["cutover_evidence"]
             ["background_maintenance_foreground_admission_probe_ready"] = serde_json::json!(true);
         bundle["replacement_summary"]["cutover_evidence"]

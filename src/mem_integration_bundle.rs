@@ -1693,6 +1693,7 @@ mod tests {
                 "storage_recovery_durable": true,
                 "storage_recovery_checkpoint_boundary_present": true,
                 "storage_recovery_wal_replay_bounded": true,
+                "storage_recovery_replay_boundary_consistent": true,
                 "storage_recovery_torn_tail_clean": true,
                 "storage_recovery_blocker_codes": [],
                 "storage_recovery_blockers": [],

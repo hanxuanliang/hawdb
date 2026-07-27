@@ -441,6 +441,13 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 ) == Some(true),
                 bool_path(
                     &migration_gate,
+                    &[
+                        "cutover_evidence",
+                        "storage_recovery_replay_boundary_consistent",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    &migration_gate,
                     &["cutover_evidence", "storage_recovery_torn_tail_clean"],
                 ) == Some(true),
             ],
@@ -452,6 +459,7 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "cutover_evidence.storage_recovery_durable",
                 "cutover_evidence.storage_recovery_checkpoint_boundary_present",
                 "cutover_evidence.storage_recovery_wal_replay_bounded",
+                "cutover_evidence.storage_recovery_replay_boundary_consistent",
                 "cutover_evidence.storage_recovery_torn_tail_clean",
             ],
             blocker_codes(
@@ -1547,6 +1555,17 @@ fn previous_wrapper_preflight_release_summary(
         bool_path(
             migration_gate,
             &["cutover_evidence", "storage_recovery_wal_replay_bounded"],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "storage_recovery_replay_boundary_consistent",
+        bool_path(
+            migration_gate,
+            &[
+                "cutover_evidence",
+                "storage_recovery_replay_boundary_consistent",
+            ],
         ),
     );
     insert_json_value(
@@ -2813,6 +2832,7 @@ mod tests {
             true,
         );
         assert_release_summary_field(summary, "storage_recovery_wal_replay_bounded", true);
+        assert_release_summary_field(summary, "storage_recovery_replay_boundary_consistent", true);
         assert_release_summary_field(summary, "storage_recovery_torn_tail_clean", true);
         assert_release_summary_field(summary, "background_maintenance_ready", true);
         assert_release_summary_field(
@@ -3528,10 +3548,12 @@ mod tests {
         cutover_evidence["storage_recovery_ready"] = serde_json::json!(true);
         cutover_evidence["storage_recovery_durable"] = serde_json::json!(false);
         cutover_evidence["storage_recovery_checkpoint_boundary_present"] = serde_json::json!(false);
+        cutover_evidence["storage_recovery_replay_boundary_consistent"] = serde_json::json!(false);
         cutover_evidence["storage_recovery_torn_tail_clean"] = serde_json::json!(false);
         cutover_evidence["storage_recovery_blocker_codes"] = serde_json::json!([
             "durable_recovery_not_observed",
             "checkpoint_boundary_missing",
+            "replay_boundary_inconsistent",
             "torn_tail_observed"
         ]);
 
@@ -3547,6 +3569,7 @@ mod tests {
             serde_json::json!([
                 "cutover_evidence.storage_recovery_durable",
                 "cutover_evidence.storage_recovery_checkpoint_boundary_present",
+                "cutover_evidence.storage_recovery_replay_boundary_consistent",
                 "cutover_evidence.storage_recovery_torn_tail_clean"
             ])
         );
@@ -3555,6 +3578,7 @@ mod tests {
             serde_json::json!([
                 "checkpoint_boundary_missing",
                 "durable_recovery_not_observed",
+                "replay_boundary_inconsistent",
                 "torn_tail_observed"
             ])
         );
@@ -4341,6 +4365,7 @@ mod tests {
                     "storage_recovery_durable": true,
                     "storage_recovery_checkpoint_boundary_present": true,
                     "storage_recovery_wal_replay_bounded": true,
+                    "storage_recovery_replay_boundary_consistent": true,
                     "storage_recovery_torn_tail_clean": true,
                     "storage_recovery_blocker_codes": [],
                     "background_maintenance_required": true,
