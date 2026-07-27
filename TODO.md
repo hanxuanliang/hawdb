@@ -167,6 +167,9 @@ contract.
     hand-built cutover JSON.
   - Acceptance: LanceDB candidate replacement gates pass only when all typed
     evidence areas are present and internally consistent.
+  - [x] Allow search-candidate shadow probes to carry structured scan-pruning
+    field summaries and reject declared summary capabilities whose segment
+    counts are zero.
 - [ ] PR 6: Prove WAL and checkpoint recovery with Mem-shaped mutations.
   - Scope: add fixtures for committed batch replay, torn WAL tail handling, and
     checkpoint replay boundaries that match Mem graph/search writes.

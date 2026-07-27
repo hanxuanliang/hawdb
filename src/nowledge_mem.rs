@@ -860,16 +860,30 @@ pub struct NowledgeMemSearchCandidateFilterPushdownEvidence {
 pub struct NowledgeMemSearchCandidateFieldSummary {
     pub field: String,
     pub source: String,
+    pub segment_count: usize,
     pub value_summary_used: bool,
+    pub value_summary_segment_count: usize,
     pub numeric_range_summary_used: bool,
+    pub numeric_range_segment_count: usize,
     pub timestamp_range_summary_used: bool,
+    pub timestamp_range_segment_count: usize,
 }
 
 impl NowledgeMemSearchCandidateFieldSummary {
     fn merge_capabilities(&mut self, other: &Self) {
+        self.segment_count = self.segment_count.max(other.segment_count);
         self.value_summary_used |= other.value_summary_used;
+        self.value_summary_segment_count = self
+            .value_summary_segment_count
+            .max(other.value_summary_segment_count);
         self.numeric_range_summary_used |= other.numeric_range_summary_used;
+        self.numeric_range_segment_count = self
+            .numeric_range_segment_count
+            .max(other.numeric_range_segment_count);
         self.timestamp_range_summary_used |= other.timestamp_range_summary_used;
+        self.timestamp_range_segment_count = self
+            .timestamp_range_segment_count
+            .max(other.timestamp_range_segment_count);
         if self.source != other.source {
             self.source = "merged".to_string();
         }
@@ -992,7 +1006,7 @@ impl NowledgeMemSearchCandidateShadowAccumulator {
         }
     }
 
-    fn record_filter_pushdown_summaries(
+    pub(crate) fn record_filter_pushdown_summaries(
         &mut self,
         pushed_predicate_count: u64,
         shadow_scan_present: bool,
@@ -1254,9 +1268,13 @@ fn nowledge_mem_search_candidate_filter_pushdown_json(
                     serde_json::json!({
                         "field": summary.field,
                         "source": summary.source,
+                        "segment_count": summary.segment_count,
                         "value_summary_used": summary.value_summary_used,
+                        "value_summary_segment_count": summary.value_summary_segment_count,
                         "numeric_range_summary_used": summary.numeric_range_summary_used,
+                        "numeric_range_segment_count": summary.numeric_range_segment_count,
                         "timestamp_range_summary_used": summary.timestamp_range_summary_used,
+                        "timestamp_range_segment_count": summary.timestamp_range_segment_count,
                     })
                 })
                 .collect::<Vec<_>>()
@@ -1378,10 +1396,15 @@ fn candidate_field_has_capability(
     capability: CandidateFieldCapability,
 ) -> bool {
     match capability {
-        CandidateFieldCapability::Value => summary.value_summary_used,
-        CandidateFieldCapability::NumericRange => summary.numeric_range_summary_used,
+        CandidateFieldCapability::Value => {
+            summary.value_summary_used && summary.value_summary_segment_count > 0
+        }
+        CandidateFieldCapability::NumericRange => {
+            summary.numeric_range_summary_used && summary.numeric_range_segment_count > 0
+        }
         CandidateFieldCapability::TimestampRange => {
-            summary.timestamp_range_summary_used || summary.numeric_range_summary_used
+            (summary.timestamp_range_summary_used && summary.timestamp_range_segment_count > 0)
+                || (summary.numeric_range_summary_used && summary.numeric_range_segment_count > 0)
         }
     }
 }
@@ -1392,11 +1415,22 @@ fn nowledge_mem_search_candidate_descriptor_contract_field_summary(
     NowledgeMemSearchCandidateFieldSummary {
         field: field.to_string(),
         source: "persisted_segment_descriptor_contract".to_string(),
+        segment_count: 1,
         value_summary_used: NOWLEDGE_SEARCH_CANDIDATE_VALUE_SUMMARY_FIELDS.contains(&field),
+        value_summary_segment_count: usize::from(
+            NOWLEDGE_SEARCH_CANDIDATE_VALUE_SUMMARY_FIELDS.contains(&field),
+        ),
         numeric_range_summary_used: NOWLEDGE_SEARCH_CANDIDATE_NUMERIC_RANGE_FIELDS.contains(&field)
             || NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS.contains(&field),
+        numeric_range_segment_count: usize::from(
+            NOWLEDGE_SEARCH_CANDIDATE_NUMERIC_RANGE_FIELDS.contains(&field)
+                || NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS.contains(&field),
+        ),
         timestamp_range_summary_used: NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS
             .contains(&field),
+        timestamp_range_segment_count: usize::from(
+            NOWLEDGE_SEARCH_CANDIDATE_TIMESTAMP_RANGE_FIELDS.contains(&field),
+        ),
     }
 }
 
@@ -1406,9 +1440,15 @@ fn nowledge_mem_search_candidate_field_summary_from_pruning_report(
     NowledgeMemSearchCandidateFieldSummary {
         field: report.field.clone(),
         source: "search_predicate_pruning_report".to_string(),
+        segment_count: report.segment_count,
         value_summary_used: report.value_summary_used,
+        value_summary_segment_count: usize::from(report.value_summary_used) * report.segment_count,
         numeric_range_summary_used: report.numeric_range_summary_used,
+        numeric_range_segment_count: usize::from(report.numeric_range_summary_used)
+            * report.segment_count,
         timestamp_range_summary_used: report.timestamp_range_summary_used,
+        timestamp_range_segment_count: usize::from(report.timestamp_range_summary_used)
+            * report.segment_count,
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::{
-    nowledge_mem_search_candidate_shadow_evidence_json,
+    nowledge_mem_search_candidate_shadow_evidence_json, NowledgeMemSearchCandidateFieldSummary,
     NowledgeMemSearchCandidateShadowAccumulator, Result, SkeinError,
 };
 use std::path::Path;
@@ -61,14 +61,60 @@ pub fn parse_search_candidate_shadow_probe(
     let filter_pushdown = value
         .get("filter_pushdown")
         .ok_or_else(|| invalid_field("filter_pushdown", "object"))?;
-    accumulator.record_filter_pushdown_fields(
-        required_u64(filter_pushdown, "pushed_predicate_count")?,
-        required_string_array(filter_pushdown, "fields")?,
-    );
+    let pushed_predicate_count = required_u64(filter_pushdown, "pushed_predicate_count")?;
+    if let Some(summaries) = optional_field_summaries(filter_pushdown)? {
+        accumulator.record_filter_pushdown_summaries(pushed_predicate_count, true, summaries);
+    } else {
+        accumulator.record_filter_pushdown_fields(
+            pushed_predicate_count,
+            required_string_array(filter_pushdown, "fields")?,
+        );
+    }
     for blocker in optional_string_array(value, "blocker_codes")? {
         accumulator.add_blocker_code(blocker);
     }
     Ok(accumulator)
+}
+
+fn optional_field_summaries(
+    value: &serde_json::Value,
+) -> Result<Option<Vec<NowledgeMemSearchCandidateFieldSummary>>> {
+    let Some(items) = value.get("field_summaries") else {
+        return Ok(None);
+    };
+    let items = items
+        .as_array()
+        .ok_or_else(|| invalid_field("field_summaries", "object array"))?;
+    items
+        .iter()
+        .map(parse_field_summary)
+        .collect::<Result<Vec<_>>>()
+        .map(Some)
+}
+
+fn parse_field_summary(
+    value: &serde_json::Value,
+) -> Result<NowledgeMemSearchCandidateFieldSummary> {
+    Ok(NowledgeMemSearchCandidateFieldSummary {
+        field: required_string(value, "field")?,
+        source: value
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("search_candidate_shadow_probe")
+            .to_string(),
+        segment_count: optional_usize(value, "segment_count")?.unwrap_or(1),
+        value_summary_used: optional_bool(value, "value_summary_used")?.unwrap_or(false),
+        value_summary_segment_count: optional_usize(value, "value_summary_segment_count")?
+            .unwrap_or(0),
+        numeric_range_summary_used: optional_bool(value, "numeric_range_summary_used")?
+            .unwrap_or(false),
+        numeric_range_segment_count: optional_usize(value, "numeric_range_segment_count")?
+            .unwrap_or(0),
+        timestamp_range_summary_used: optional_bool(value, "timestamp_range_summary_used")?
+            .unwrap_or(false),
+        timestamp_range_segment_count: optional_usize(value, "timestamp_range_segment_count")?
+            .unwrap_or(0),
+    })
 }
 
 fn required_string_array(value: &serde_json::Value, field: &str) -> Result<Vec<String>> {
@@ -100,11 +146,40 @@ fn string_array_items(items: &[serde_json::Value], field: &str) -> Result<Vec<St
         .collect()
 }
 
+fn required_string(value: &serde_json::Value, field: &str) -> Result<String> {
+    value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| invalid_field(field, "string"))
+}
+
 fn required_u64(value: &serde_json::Value, field: &str) -> Result<u64> {
     value
         .get(field)
         .and_then(serde_json::Value::as_u64)
         .ok_or_else(|| invalid_field(field, "integer"))
+}
+
+fn optional_bool(value: &serde_json::Value, field: &str) -> Result<Option<bool>> {
+    let Some(raw) = value.get(field) else {
+        return Ok(None);
+    };
+    raw.as_bool()
+        .map(Some)
+        .ok_or_else(|| invalid_field(field, "boolean"))
+}
+
+fn optional_usize(value: &serde_json::Value, field: &str) -> Result<Option<usize>> {
+    let Some(raw) = value.get(field) else {
+        return Ok(None);
+    };
+    let raw = raw
+        .as_u64()
+        .ok_or_else(|| invalid_field(field, "integer"))?;
+    usize::try_from(raw)
+        .map(Some)
+        .map_err(|_| invalid_field(field, "usize-sized integer"))
 }
 
 fn invalid_field(field: &str, expected: &str) -> SkeinError {
@@ -187,6 +262,57 @@ mod tests {
     }
 
     #[test]
+    fn search_candidate_shadow_probe_accepts_structured_field_summaries() {
+        let accumulator = parse_search_candidate_shadow_probe(&ready_structured_probe()).unwrap();
+        let evidence = nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence());
+
+        assert_eq!(evidence["ready"], true);
+        assert_eq!(
+            evidence["filter_pushdown"]["field_capabilities_ready"],
+            true
+        );
+        assert!(evidence["filter_pushdown"]["field_summaries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|summary| summary["field"] == "importance"
+                && summary["source"] == "search_candidate_shadow_probe"
+                && summary["numeric_range_segment_count"] == 1));
+    }
+
+    #[test]
+    fn search_candidate_shadow_probe_rejects_zero_summary_counts() {
+        let mut probe = ready_structured_probe();
+        let summaries = probe["filter_pushdown"]["field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        let lifecycle_state = summaries
+            .iter_mut()
+            .find(|summary| summary["field"] == "lifecycle_state")
+            .unwrap();
+        lifecycle_state["value_summary_used"] = serde_json::json!(true);
+        lifecycle_state["value_summary_segment_count"] = serde_json::json!(0);
+
+        let accumulator = parse_search_candidate_shadow_probe(&probe).unwrap();
+        let evidence = nowledge_mem_search_candidate_shadow_evidence_json(&accumulator.evidence());
+
+        assert_eq!(evidence["ready"], false);
+        assert_eq!(
+            evidence["filter_pushdown"]["field_capabilities_ready"],
+            false
+        );
+        assert_eq!(
+            evidence["filter_pushdown"]["missing_value_summary_fields"],
+            serde_json::json!(["lifecycle_state"])
+        );
+        assert!(evidence["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "search_candidate_field_pruning_capability_missing"));
+    }
+
+    #[test]
     fn search_candidate_shadow_evidence_command_fails_closed_for_mismatch() {
         let path = unique_test_file("search_candidate_shadow_probe_mismatch");
         let mut probe = ready_probe();
@@ -221,6 +347,41 @@ mod tests {
                 "fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
             }
         })
+    }
+
+    fn ready_structured_probe() -> serde_json::Value {
+        let field_summaries = NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS
+            .iter()
+            .map(|field| {
+                serde_json::json!({
+                    "field": field,
+                    "source": "search_candidate_shadow_probe",
+                    "segment_count": 1,
+                    "value_summary_used": true,
+                    "value_summary_segment_count": 1,
+                    "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
+                    "numeric_range_segment_count": usize::from(matches!(
+                        *field,
+                        "importance" | "confidence"
+                    )),
+                    "timestamp_range_summary_used": matches!(
+                        *field,
+                        "created_at" | "updated_at" | "event_start" | "event_end"
+                    ),
+                    "timestamp_range_segment_count": usize::from(matches!(
+                        *field,
+                        "created_at" | "updated_at" | "event_start" | "event_end"
+                    )),
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut probe = ready_probe();
+        probe["filter_pushdown"]
+            .as_object_mut()
+            .unwrap()
+            .remove("fields");
+        probe["filter_pushdown"]["field_summaries"] = serde_json::json!(field_summaries);
+        probe
     }
 
     fn unique_test_file(name: &str) -> PathBuf {
