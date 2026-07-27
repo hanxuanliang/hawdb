@@ -4,11 +4,14 @@ use crate::{
     NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
     NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_QUERY,
     NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE,
-    NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
-    NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE, NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY,
-    NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
-    NOWLEDGE_MEM_GRAPH_SAMPLE_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE,
-    REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
+    NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_EDGE_QUERY,
+    NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ENTITY_QUERY,
+    NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY,
+    NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE,
+    NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY,
+    NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE, NOWLEDGE_MEM_GRAPH_SAMPLE_MEMORY_QUERY,
+    NOWLEDGE_MEM_GRAPH_SAMPLE_ROUTE, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+    REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -585,6 +588,75 @@ pub fn nowledge_mem_graph_community_recent_memories_route_query(
     })
 }
 
+pub fn nowledge_mem_graph_community_subgraph_route_query<I, S>(
+    community_id: i64,
+    max_entities: usize,
+    edge_entity_ids: I,
+    max_edges: usize,
+) -> Result<RouteQuery>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    let max_entities = i64::try_from(max_entities).map_err(|_| {
+        SkeinError::Semantic(
+            "graph community subgraph route evidence max_entities exceeds supported range"
+                .to_string(),
+        )
+    })?;
+    let max_edges = i64::try_from(max_edges).map_err(|_| {
+        SkeinError::Semantic(
+            "graph community subgraph route evidence max_edges exceeds supported range".to_string(),
+        )
+    })?;
+    if max_entities <= 0 {
+        return Err(SkeinError::Semantic(
+            "graph community subgraph route evidence max_entities must be greater than zero"
+                .to_string(),
+        ));
+    }
+    if max_edges < 0 {
+        return Err(SkeinError::Semantic(
+            "graph community subgraph route evidence max_edges must not be negative".to_string(),
+        ));
+    }
+    let entity_ids = edge_entity_ids
+        .into_iter()
+        .map(|entity_id| Value::String(entity_id.into()))
+        .collect::<Vec<_>>();
+    Ok(RouteQuery {
+        route: NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE.to_string(),
+        shadow_compare_ready: false,
+        primary_read_routing_enabled: true,
+        primary_ready: false,
+        blocker_codes: Vec::new(),
+        queries: vec![
+            RouteCypherQuery {
+                name: "community-subgraph-entity-ranking".to_string(),
+                query_family: Some("graph_traversal".to_string()),
+                require_scan_pruning: true,
+                require_pruned: false,
+                cypher: NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ENTITY_QUERY.to_string(),
+                parameters: BTreeMap::from([
+                    ("community_id".to_string(), Value::Int(community_id)),
+                    ("max_entities".to_string(), Value::Int(max_entities)),
+                ]),
+            },
+            RouteCypherQuery {
+                name: "community-subgraph-relation-edges".to_string(),
+                query_family: Some("graph_traversal".to_string()),
+                require_scan_pruning: false,
+                require_pruned: false,
+                cypher: NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_EDGE_QUERY.to_string(),
+                parameters: BTreeMap::from([
+                    ("entity_ids".to_string(), Value::List(entity_ids)),
+                    ("max_edges".to_string(), Value::Int(max_edges)),
+                ]),
+            },
+        ],
+    })
+}
+
 pub fn nowledge_mem_graph_orphans_route_query(limit: usize) -> Result<RouteQuery> {
     let limit = i64::try_from(limit).map_err(|_| {
         SkeinError::Semantic(
@@ -967,6 +1039,7 @@ mod tests {
     use super::{
         nowledge_graph_route_evidence_json, nowledge_mem_graph_community_members_route_query,
         nowledge_mem_graph_community_recent_memories_route_query,
+        nowledge_mem_graph_community_subgraph_route_query,
         nowledge_mem_graph_node_details_route_query, nowledge_mem_graph_orphans_route_query,
         nowledge_mem_graph_overview_route_query, nowledge_mem_graph_sample_route_query,
         parse_route_parity_evidence, parse_route_query_inventory, query_requirement_blockers,
@@ -1349,6 +1422,83 @@ mod tests {
             readiness["routes"][0]["query_reports"][0]["scan_pruning_reports_present"],
             true
         );
+    }
+
+    #[test]
+    fn community_subgraph_route_query_helper_feeds_route_execution_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Entity {id: 'community-subgraph-route-alpha', name: 'Alpha Route', entity_type: 'concept', community_id: 3505, confidence: 0.9})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'community-subgraph-route-beta', name: 'Beta Route', entity_type: 'concept', community_id: 3505, confidence: 0.7})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'community-subgraph-route-memory'})")
+            .unwrap();
+        db.query("MATCH (m:Memory {id: 'community-subgraph-route-memory'}), (e:Entity {id: 'community-subgraph-route-alpha'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        db.query("MATCH (a:Entity {id: 'community-subgraph-route-alpha'}), (b:Entity {id: 'community-subgraph-route-beta'}) CREATE (a)-[:RELATES_TO {confidence: 0.77, relation_type: 'related'}]->(b)")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = vec![nowledge_mem_graph_community_subgraph_route_query(
+            3505,
+            5,
+            [
+                "community-subgraph-route-alpha",
+                "community-subgraph-route-beta",
+            ],
+            10,
+        )
+        .unwrap()];
+        let route_parity = ready_route_parity_for(&["/library/community/{community_id}/subgraph"]);
+
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            NowledgeMemQueryReportOptions {
+                capture_physical_plan: true,
+                slow_log_threshold_micros: None,
+            },
+            Some(&route_parity),
+        );
+
+        assert_eq!(
+            evidence["routes"][0]["route"],
+            "/library/community/{community_id}/subgraph"
+        );
+        assert_eq!(evidence["routes"][0]["primary_ready"], true);
+        assert_eq!(
+            evidence["routes"][0]["required_query_families"],
+            serde_json::json!(["graph_traversal"])
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_name"],
+            "community-subgraph-entity-ranking"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][1]["query_name"],
+            "community-subgraph-relation-edges"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_family"],
+            "graph_traversal"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][1]["query_family"],
+            "graph_traversal"
+        );
+        assert!(
+            evidence["routes"][0]["query_reports"][0]["scan_pruning_report_count"]
+                .as_u64()
+                .unwrap_or(0)
+                > 0
+        );
+        assert_eq!(
+            evidence["routes"][0]["blocker_codes"],
+            serde_json::json!([])
+        );
+        let readiness = nowledge_graph_route_readiness_json(&evidence).unwrap();
+        assert_eq!(readiness["routes"][0]["query_runtime_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_plan_evidence_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_profile_evidence_ready"], true);
     }
 
     #[test]

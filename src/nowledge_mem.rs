@@ -136,6 +136,8 @@ pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-community-members-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-community-recent-memories-route-report-v1";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-graph-community-subgraph-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-orphans-route-report-v1";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
@@ -297,6 +299,32 @@ created_at AS created_at, \
 updated_at AS updated_at, \
 is_crystal AS is_crystal, \
 mention_breadth AS mention_breadth";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE: &str =
+    "/library/community/{community_id}/subgraph";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ENTITY_QUERY: &str = "\
+MATCH (e:Entity) \
+WHERE e.community_id = $community_id \
+OPTIONAL MATCH (:Memory)-[r:MENTIONS]->(e) \
+RETURN e.id AS entity_id, \
+id(e) AS node_id, \
+COALESCE(e.name, e.id) AS label, \
+e.name AS name, \
+e.entity_type AS entity_type, \
+e.confidence AS confidence, \
+COUNT(r) AS mention_count \
+ORDER BY mention_count DESC, e.name ASC \
+LIMIT $max_entities";
+pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_EDGE_QUERY: &str = "\
+MATCH (e1:Entity)-[r:RELATES_TO]-(e2:Entity) \
+WHERE e1.id IN $entity_ids \
+AND e2.id IN $entity_ids \
+AND e1.id < e2.id \
+RETURN e1.id AS source_entity_id, \
+e2.id AS target_entity_id, \
+id(r) AS relationship_id, \
+r.confidence AS confidence, \
+r.relation_type AS relation_type \
+LIMIT $max_edges";
 pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE: &str = "/graph/orphans";
 pub const NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY: &str = "\
 MATCH (e:Entity) \
@@ -2021,6 +2049,119 @@ impl NowledgeMemGraphCommunityRecentMemoriesOutput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemGraphCommunitySubgraphOptions {
+    pub community_id: i64,
+    pub max_entities: usize,
+    pub max_edges: usize,
+    pub read_options: NowledgeMemReadOptions,
+}
+
+impl NowledgeMemGraphCommunitySubgraphOptions {
+    pub fn new(community_id: i64, max_entities: usize, max_edges: usize) -> Self {
+        Self {
+            community_id,
+            max_entities,
+            max_edges,
+            read_options: NowledgeMemReadOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunitySubgraphEntityRow {
+    pub entity_id: Option<String>,
+    pub node_id: u64,
+    pub label: Option<String>,
+    pub name: Option<String>,
+    pub entity_type: Option<String>,
+    pub confidence: Option<Value>,
+    pub mention_count: u64,
+}
+
+impl NowledgeMemGraphCommunitySubgraphEntityRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity_id": self.entity_id,
+            "node_id": self.node_id,
+            "label": self.label,
+            "name": self.name,
+            "entity_type": self.entity_type,
+            "confidence": self.confidence.as_ref().map(nowledge_value_json),
+            "mention_count": self.mention_count,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunitySubgraphEdgeRow {
+    pub source_entity_id: Option<String>,
+    pub target_entity_id: Option<String>,
+    pub relationship_id: u64,
+    pub confidence: Option<Value>,
+    pub relation_type: Option<String>,
+}
+
+impl NowledgeMemGraphCommunitySubgraphEdgeRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "source_entity_id": self.source_entity_id,
+            "target_entity_id": self.target_entity_id,
+            "relationship_id": self.relationship_id,
+            "confidence": self.confidence.as_ref().map(nowledge_value_json),
+            "relation_type": self.relation_type,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunitySubgraphRouteReport {
+    pub protocol: String,
+    pub route: String,
+    pub read_engine: crate::route_ownership::NowledgeMemRouteReadEngine,
+    pub route_catalog_version: String,
+    pub route_catalog_digest: String,
+    pub community_id: i64,
+    pub entity_count: usize,
+    pub edge_count: usize,
+    pub entity_read_report: NowledgeMemReadReport,
+    pub edge_read_report: Option<NowledgeMemReadReport>,
+}
+
+impl NowledgeMemGraphCommunitySubgraphRouteReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "route": self.route,
+            "read_engine": self.read_engine.as_str(),
+            "route_catalog_version": self.route_catalog_version,
+            "route_catalog_digest": self.route_catalog_digest,
+            "community_id": self.community_id,
+            "entity_count": self.entity_count,
+            "edge_count": self.edge_count,
+            "entity_read_report": self.entity_read_report.json(),
+            "edge_read_report": self.edge_read_report.as_ref().map(NowledgeMemReadReport::json),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphCommunitySubgraphOutput {
+    pub entities: Vec<NowledgeMemGraphCommunitySubgraphEntityRow>,
+    pub edges: Vec<NowledgeMemGraphCommunitySubgraphEdgeRow>,
+    pub report: NowledgeMemGraphCommunitySubgraphRouteReport,
+}
+
+impl NowledgeMemGraphCommunitySubgraphOutput {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entities": self.entities.iter().map(NowledgeMemGraphCommunitySubgraphEntityRow::json).collect::<Vec<_>>(),
+            "edges": self.edges.iter().map(NowledgeMemGraphCommunitySubgraphEdgeRow::json).collect::<Vec<_>>(),
+            "report": self.report.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NowledgeMemGraphOrphansOptions {
     pub limit: usize,
     pub read_options: NowledgeMemReadOptions,
@@ -3368,6 +3509,89 @@ impl NowledgeMemGraph {
         Ok(NowledgeMemGraphCommunityRecentMemoriesOutput { rows, report })
     }
 
+    pub fn read_graph_community_subgraph(
+        &mut self,
+        options: &NowledgeMemGraphCommunitySubgraphOptions,
+    ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
+        let max_entities = i64::try_from(options.max_entities).map_err(|_| {
+            SkeinError::Semantic(
+                "graph community subgraph max_entities exceeds supported range".to_string(),
+            )
+        })?;
+        let max_edges = i64::try_from(options.max_edges).map_err(|_| {
+            SkeinError::Semantic(
+                "graph community subgraph max_edges exceeds supported range".to_string(),
+            )
+        })?;
+        if max_entities <= 0 {
+            return Err(SkeinError::Semantic(
+                "graph community subgraph max_entities must be greater than zero".to_string(),
+            ));
+        }
+        if max_edges < 0 {
+            return Err(SkeinError::Semantic(
+                "graph community subgraph max_edges must not be negative".to_string(),
+            ));
+        }
+        let entity_parameters = BTreeMap::from([
+            ("community_id".to_string(), Value::Int(options.community_id)),
+            ("max_entities".to_string(), Value::Int(max_entities)),
+        ]);
+        let entity_read = self.read_query_with_params(
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ENTITY_QUERY,
+            &entity_parameters,
+            &graph_community_subgraph_entity_read_options(options),
+        )?;
+        let entities = entity_read
+            .output
+            .rows
+            .iter()
+            .map(decode_graph_community_subgraph_entity_row)
+            .collect::<Result<Vec<_>>>()?;
+        let entity_ids = entities
+            .iter()
+            .filter_map(|entity| entity.entity_id.as_ref())
+            .map(|entity_id| Value::String(entity_id.clone()))
+            .collect::<Vec<_>>();
+        let (edges, edge_read_report) = if entity_ids.is_empty() || options.max_edges == 0 {
+            (Vec::new(), None)
+        } else {
+            let edge_parameters = BTreeMap::from([
+                ("entity_ids".to_string(), Value::List(entity_ids)),
+                ("max_edges".to_string(), Value::Int(max_edges)),
+            ]);
+            let edge_read = self.read_query_with_params(
+                NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_EDGE_QUERY,
+                &edge_parameters,
+                &graph_community_subgraph_edge_read_options(options),
+            )?;
+            let edges = edge_read
+                .output
+                .rows
+                .iter()
+                .map(decode_graph_community_subgraph_edge_row)
+                .collect::<Result<Vec<_>>>()?;
+            (edges, Some(edge_read.report))
+        };
+        let report = NowledgeMemGraphCommunitySubgraphRouteReport {
+            protocol: NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE_REPORT_PROTOCOL.to_string(),
+            route: NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE.to_string(),
+            read_engine: crate::route_ownership::NowledgeMemRouteReadEngine::Skein,
+            route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
+            route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
+            community_id: options.community_id,
+            entity_count: entities.len(),
+            edge_count: edges.len(),
+            entity_read_report: entity_read.report,
+            edge_read_report,
+        };
+        Ok(NowledgeMemGraphCommunitySubgraphOutput {
+            entities,
+            edges,
+            report,
+        })
+    }
+
     pub fn read_graph_orphans(
         &mut self,
         options: &NowledgeMemGraphOrphansOptions,
@@ -3458,6 +3682,28 @@ fn graph_community_recent_memories_read_options(
     read_options
 }
 
+fn graph_community_subgraph_entity_read_options(
+    options: &NowledgeMemGraphCommunitySubgraphOptions,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(options.max_entities),
+        None => options.max_entities,
+    });
+    read_options
+}
+
+fn graph_community_subgraph_edge_read_options(
+    options: &NowledgeMemGraphCommunitySubgraphOptions,
+) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(options.max_edges),
+        None => options.max_edges,
+    });
+    read_options
+}
+
 fn graph_orphans_read_options(options: &NowledgeMemGraphOrphansOptions) -> NowledgeMemReadOptions {
     let mut read_options = options.read_options.clone();
     read_options.max_rows = Some(match read_options.max_rows {
@@ -3527,6 +3773,32 @@ fn decode_graph_community_recent_memory_row(
         updated_at: optional_value_field(row, "updated_at"),
         is_crystal: optional_bool_field(row, "is_crystal")?,
         mention_breadth: required_u64_field(row, "mention_breadth")?,
+    })
+}
+
+fn decode_graph_community_subgraph_entity_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphCommunitySubgraphEntityRow> {
+    Ok(NowledgeMemGraphCommunitySubgraphEntityRow {
+        entity_id: optional_string_field(row, "entity_id")?,
+        node_id: required_u64_field(row, "node_id")?,
+        label: optional_string_field(row, "label")?,
+        name: optional_string_field(row, "name")?,
+        entity_type: optional_string_field(row, "entity_type")?,
+        confidence: optional_value_field(row, "confidence"),
+        mention_count: required_u64_field(row, "mention_count")?,
+    })
+}
+
+fn decode_graph_community_subgraph_edge_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphCommunitySubgraphEdgeRow> {
+    Ok(NowledgeMemGraphCommunitySubgraphEdgeRow {
+        source_entity_id: optional_string_field(row, "source_entity_id")?,
+        target_entity_id: optional_string_field(row, "target_entity_id")?,
+        relationship_id: required_u64_field(row, "relationship_id")?,
+        confidence: optional_value_field(row, "confidence"),
+        relation_type: optional_string_field(row, "relation_type")?,
     })
 }
 
@@ -3840,6 +4112,13 @@ impl NowledgeMemEmbeddedStoreHandle {
     ) -> Result<NowledgeMemGraphCommunityRecentMemoriesOutput> {
         self.lock_store()?
             .read_graph_community_recent_memories(options)
+    }
+
+    pub fn read_graph_community_subgraph(
+        &self,
+        options: &NowledgeMemGraphCommunitySubgraphOptions,
+    ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
+        self.lock_store()?.read_graph_community_subgraph(options)
     }
 
     pub fn read_graph_orphans(
@@ -4258,6 +4537,13 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemGraphCommunityRecentMemoriesOptions,
     ) -> Result<NowledgeMemGraphCommunityRecentMemoriesOutput> {
         self.graph.read_graph_community_recent_memories(options)
+    }
+
+    pub fn read_graph_community_subgraph(
+        &mut self,
+        options: &NowledgeMemGraphCommunitySubgraphOptions,
+    ) -> Result<NowledgeMemGraphCommunitySubgraphOutput> {
+        self.graph.read_graph_community_subgraph(options)
     }
 
     pub fn read_graph_orphans(
@@ -6121,7 +6407,8 @@ mod tests {
         nowledge_mem_search_candidate_shadow_evidence_json, required_u64_field,
         NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
         NowledgeMemGraphCommunityMembersOptions, NowledgeMemGraphCommunityRecentMemoriesOptions,
-        NowledgeMemGraphMode, NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
+        NowledgeMemGraphCommunitySubgraphOptions, NowledgeMemGraphMode,
+        NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
         NowledgeMemGraphOverviewOptions, NowledgeMemGraphSampleOptions, NowledgeMemOpenOptions,
         NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions, NowledgeMemReadOptions,
         NowledgeMemReadReport, NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
@@ -6134,6 +6421,8 @@ mod tests {
         NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_RECENT_MEMORIES_ROUTE_REPORT_PROTOCOL,
+        NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE,
+        NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
         NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE,
         NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
@@ -6556,6 +6845,101 @@ mod tests {
             .unwrap();
         assert!(missing.rows.is_empty());
         assert_eq!(missing.report.row_count, 0);
+    }
+
+    #[test]
+    fn graph_community_subgraph_route_runs_through_bounded_query_runtime() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_community_subgraph(&mut graph);
+
+        let output = graph
+            .read_graph_community_subgraph(&NowledgeMemGraphCommunitySubgraphOptions {
+                community_id: 3505,
+                max_entities: 3,
+                max_edges: 5,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(output.entities.len(), 2);
+        assert_eq!(
+            output.entities[0].entity_id.as_deref(),
+            Some("community-subgraph-alpha")
+        );
+        assert_eq!(output.entities[0].mention_count, 2);
+        assert_eq!(
+            output.entities[1].entity_id.as_deref(),
+            Some("community-subgraph-beta")
+        );
+        assert_eq!(output.entities[1].mention_count, 1);
+        assert_eq!(output.edges.len(), 1);
+        assert_eq!(
+            output.edges[0].source_entity_id.as_deref(),
+            Some("community-subgraph-alpha")
+        );
+        assert_eq!(
+            output.edges[0].target_entity_id.as_deref(),
+            Some("community-subgraph-beta")
+        );
+        assert_eq!(output.edges[0].relation_type.as_deref(), Some("related"));
+        assert_eq!(
+            output.report.protocol,
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE_REPORT_PROTOCOL
+        );
+        assert_eq!(
+            output.report.route,
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE
+        );
+        assert_eq!(output.report.community_id, 3505);
+        assert_eq!(output.report.entity_count, 2);
+        assert_eq!(output.report.edge_count, 1);
+        assert_eq!(output.report.entity_read_report.row_count, 2);
+        assert!(output.report.edge_read_report.is_some());
+        assert_eq!(output.json()["report"]["read_engine"], "skein");
+        assert_eq!(
+            output.json()["entities"][0]["entity_id"],
+            "community-subgraph-alpha"
+        );
+        assert_eq!(
+            output.json()["edges"][0]["target_entity_id"],
+            "community-subgraph-beta"
+        );
+    }
+
+    #[test]
+    fn embedded_store_handle_exposes_graph_community_subgraph_route() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        seed_graph_community_subgraph(store.graph_mut());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let output = handle
+            .read_graph_community_subgraph(&NowledgeMemGraphCommunitySubgraphOptions::new(
+                3505, 1, 5,
+            ))
+            .unwrap();
+
+        assert_eq!(output.entities.len(), 1);
+        assert_eq!(
+            output.entities[0].entity_id.as_deref(),
+            Some("community-subgraph-alpha")
+        );
+        assert!(output.edges.is_empty());
+        assert_eq!(
+            output.report.route,
+            NOWLEDGE_MEM_GRAPH_COMMUNITY_SUBGRAPH_ROUTE
+        );
+
+        let missing = handle
+            .read_graph_community_subgraph(&NowledgeMemGraphCommunitySubgraphOptions::new(
+                4242, 10, 10,
+            ))
+            .unwrap();
+        assert!(missing.entities.is_empty());
+        assert!(missing.edges.is_empty());
+        assert!(missing.report.edge_read_report.is_none());
     }
 
     #[test]
@@ -9442,6 +9826,39 @@ mod tests {
             .unwrap();
         graph
             .query("MATCH (m:Memory {id: 'community-recent-other'}), (e:Entity {id: 'community-recent-entity-other'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+    }
+
+    fn seed_graph_community_subgraph(graph: &mut NowledgeMemGraph) {
+        graph
+            .query("CREATE (:Entity {id: 'community-subgraph-alpha', name: 'Alpha Entity', entity_type: 'concept', community_id: 3505, confidence: 0.9})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'community-subgraph-beta', name: 'Beta Entity', entity_type: 'concept', community_id: 3505, confidence: 0.7})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'community-subgraph-outside', name: 'Outside Entity', entity_type: 'concept', community_id: 9999, confidence: 1.0})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'community-subgraph-memory-a'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'community-subgraph-memory-b'})")
+            .unwrap();
+        graph
+            .query("MATCH (m:Memory {id: 'community-subgraph-memory-a'}), (e:Entity {id: 'community-subgraph-alpha'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        graph
+            .query("MATCH (m:Memory {id: 'community-subgraph-memory-b'}), (e:Entity {id: 'community-subgraph-alpha'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        graph
+            .query("MATCH (m:Memory {id: 'community-subgraph-memory-a'}), (e:Entity {id: 'community-subgraph-beta'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        graph
+            .query("MATCH (a:Entity {id: 'community-subgraph-alpha'}), (b:Entity {id: 'community-subgraph-beta'}) CREATE (a)-[:RELATES_TO {confidence: 0.77, relation_type: 'related'}]->(b)")
+            .unwrap();
+        graph
+            .query("MATCH (a:Entity {id: 'community-subgraph-alpha'}), (b:Entity {id: 'community-subgraph-outside'}) CREATE (a)-[:RELATES_TO {confidence: 0.99, relation_type: 'outside'}]->(b)")
             .unwrap();
     }
 
