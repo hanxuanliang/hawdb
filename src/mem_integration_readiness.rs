@@ -211,6 +211,31 @@ pub struct BoundedReadCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GraphRouteCutoverReadiness {
+    pub protocol_matches: bool,
+    pub evidence_protocol_matches: bool,
+    pub evidence_ready: bool,
+    pub route_count_present: bool,
+    pub required_route_count_matches: bool,
+    pub route_coverage_ready: bool,
+    pub missing_required_routes_empty: bool,
+    pub query_runtime_route_count_matches: bool,
+    pub query_runtime_report_count_ready: bool,
+    pub query_plan_profile_summary_ready: bool,
+    pub relationship_property_pruning_summary_ready: bool,
+    pub missing_query_runtime_routes_empty: bool,
+    pub route_query_runtime_ready: bool,
+    pub route_primary_ready: bool,
+    pub primary_ready_route_count_matches: bool,
+    pub route_primary_blocker_codes_empty: bool,
+    pub evidence_route_coverage_present: bool,
+    pub evidence_route_coverage_matches: bool,
+    pub evidence_route_coverage_blocker_codes_empty: bool,
+    pub route_query_profiles_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
 impl LibraryReadinessCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -300,6 +325,31 @@ impl BoundedReadCutoverReadiness {
     }
 }
 
+impl GraphRouteCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+            && self.evidence_protocol_matches
+            && self.evidence_ready
+            && self.route_count_present
+            && self.required_route_count_matches
+            && self.route_coverage_ready
+            && self.missing_required_routes_empty
+            && self.query_runtime_route_count_matches
+            && self.query_runtime_report_count_ready
+            && self.query_plan_profile_summary_ready
+            && self.relationship_property_pruning_summary_ready
+            && self.missing_query_runtime_routes_empty
+            && self.route_query_runtime_ready
+            && self.route_primary_ready
+            && self.primary_ready_route_count_matches
+            && self.route_primary_blocker_codes_empty
+            && self.evidence_route_coverage_present
+            && self.evidence_route_coverage_matches
+            && self.evidence_route_coverage_blocker_codes_empty
+            && self.route_query_profiles_ready
+    }
+}
+
 impl BackgroundMaintenanceCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.required
@@ -375,6 +425,7 @@ pub fn nowledge_mem_integration_readiness(
     let search_projection_readiness = search_projection_cutover_readiness(bundle);
     let search_candidate_readiness = search_candidate_cutover_readiness(bundle);
     let bounded_read_readiness = bounded_read_cutover_readiness(bundle);
+    let graph_route_readiness = graph_route_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
@@ -681,77 +732,10 @@ pub fn nowledge_mem_integration_readiness(
                 ],
             ),
         ),
-        check(
+        check_named_conditions(
             "graph_route_readiness",
-            [
-                graph_route_protocol_ready(bundle),
-                graph_route_evidence_protocol_ready(bundle),
-                graph_route_evidence_ready(bundle),
-                u64_path(bundle, &["graph_route_readiness", "route_count"])
-                    .is_some_and(|value| value > 0),
-                graph_route_required_route_count_ready(bundle),
-                graph_route_readiness_coverage_ready(bundle),
-                graph_route_missing_required_routes_empty(bundle),
-                u64_path(bundle, &["graph_route_readiness", "query_runtime_route_count"])
-                    == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
-                u64_path(bundle, &["graph_route_readiness", "query_runtime_report_count"])
-                    .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
-                graph_route_query_plan_profile_summary_ready(bundle),
-                graph_route_relationship_property_pruning_summary_ready(bundle),
-                string_array_path_is_empty(
-                    bundle,
-                    &["graph_route_readiness", "missing_query_runtime_routes"],
-                ),
-                graph_route_query_runtime_ready(bundle),
-                graph_route_primary_ready(bundle),
-                graph_route_primary_ready_count_ready(bundle),
-                string_array_path(bundle, &["graph_route_readiness", "route_primary_blocker_codes"])
-                    .is_empty(),
-                graph_route_evidence_route_coverage_present(bundle),
-                graph_route_evidence_route_coverage_matches(bundle),
-                string_array_path(
-                    bundle,
-                    &[
-                        "graph_route_readiness",
-                        "evidence_route_coverage_blocker_codes",
-                    ],
-                )
-                .is_empty(),
-                graph_route_query_profiles_ready(bundle),
-            ],
-            [
-                "graph_route_readiness.protocol",
-                "graph_route_readiness.evidence_protocol",
-                "graph_route_readiness.evidence_ready",
-                "graph_route_readiness.route_count",
-                "graph_route_readiness.required_route_count",
-                "graph_route_readiness.route_coverage",
-                "graph_route_readiness.missing_required_routes",
-                "graph_route_readiness.query_runtime_route_count",
-                "graph_route_readiness.query_runtime_report_count",
-                "graph_route_readiness.query_runtime_plan_profile_counts",
-                "graph_route_readiness.relationship_property_pruning_counts",
-                "graph_route_readiness.missing_query_runtime_routes",
-                "graph_route_readiness.route_query_runtime_ready",
-                "graph_route_readiness.route_primary_ready",
-                "graph_route_readiness.primary_ready_route_count",
-                "graph_route_readiness.route_primary_blocker_codes",
-                "graph_route_readiness.evidence_route_coverage_present",
-                "graph_route_readiness.evidence_route_coverage_matches",
-                "graph_route_readiness.evidence_route_coverage_blocker_codes",
-                "graph_route_readiness.routes",
-            ],
-            blocker_codes(
-                bundle,
-                &[
-                    &["graph_route_readiness", "blocker_codes"][..],
-                    &["graph_route_readiness", "route_primary_blocker_codes"][..],
-                    &[
-                        "graph_route_readiness",
-                        "evidence_route_coverage_blocker_codes",
-                    ][..],
-                ],
-            ),
+            graph_route_cutover_conditions(&graph_route_readiness),
+            graph_route_readiness.blocker_codes.clone(),
         ),
         check(
             "graph_route_readiness_alignment",
@@ -1336,6 +1320,7 @@ pub fn nowledge_mem_integration_readiness(
                 search_projection: &search_projection_readiness,
                 search_candidate: &search_candidate_readiness,
                 bounded_read: &bounded_read_readiness,
+                graph_route: &graph_route_readiness,
                 blackbox: &blackbox_readiness,
                 storage_recovery: &storage_recovery_readiness,
                 background_maintenance: &background_maintenance_readiness,
@@ -1397,6 +1382,7 @@ struct IntegrationGateReadiness<'a> {
     search_projection: &'a SearchProjectionCutoverReadiness,
     search_candidate: &'a SearchCandidateCutoverReadiness,
     bounded_read: &'a BoundedReadCutoverReadiness,
+    graph_route: &'a GraphRouteCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
     storage_recovery: &'a StorageRecoveryCutoverReadiness,
     background_maintenance: &'a BackgroundMaintenanceCutoverReadiness,
@@ -1598,7 +1584,7 @@ fn next_actions(
             ],
         ));
     }
-    if !graph_route_readiness_ready(bundle) {
+    if !readiness.graph_route.evidence_ready() {
         actions.push(next_action(
             "attach_graph_route_readiness_evidence",
             "Nowledge Mem graph cutover requires route-level primary-read readiness evidence",
@@ -2578,49 +2564,149 @@ fn bounded_read_route_coverage_ready(bundle: &serde_json::Value) -> bool {
         .is_empty()
 }
 
-fn graph_route_readiness_ready(bundle: &serde_json::Value) -> bool {
-    graph_route_protocol_ready(bundle)
-        && graph_route_evidence_protocol_ready(bundle)
-        && graph_route_evidence_ready(bundle)
-        && u64_path(bundle, &["graph_route_readiness", "route_count"])
-            .is_some_and(|value| value > 0)
-        && graph_route_required_route_count_ready(bundle)
-        && graph_route_readiness_coverage_ready(bundle)
-        && graph_route_missing_required_routes_empty(bundle)
-        && u64_path(
+pub fn graph_route_cutover_readiness(bundle: &serde_json::Value) -> GraphRouteCutoverReadiness {
+    GraphRouteCutoverReadiness {
+        protocol_matches: graph_route_protocol_ready(bundle),
+        evidence_protocol_matches: graph_route_evidence_protocol_ready(bundle),
+        evidence_ready: graph_route_evidence_ready(bundle),
+        route_count_present: u64_path(bundle, &["graph_route_readiness", "route_count"])
+            .is_some_and(|value| value > 0),
+        required_route_count_matches: graph_route_required_route_count_ready(bundle),
+        route_coverage_ready: graph_route_readiness_coverage_ready(bundle),
+        missing_required_routes_empty: graph_route_missing_required_routes_empty(bundle),
+        query_runtime_route_count_matches: u64_path(
             bundle,
             &["graph_route_readiness", "query_runtime_route_count"],
-        ) == Some(REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
-        && u64_path(
+        ) == Some(
+            REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64,
+        ),
+        query_runtime_report_count_ready: u64_path(
             bundle,
             &["graph_route_readiness", "query_runtime_report_count"],
         )
-        .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64)
-        && graph_route_query_plan_profile_summary_ready(bundle)
-        && graph_route_relationship_property_pruning_summary_ready(bundle)
-        && string_array_path_is_empty(
+        .is_some_and(|value| value >= REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len() as u64),
+        query_plan_profile_summary_ready: graph_route_query_plan_profile_summary_ready(bundle),
+        relationship_property_pruning_summary_ready:
+            graph_route_relationship_property_pruning_summary_ready(bundle),
+        missing_query_runtime_routes_empty: string_array_path_is_empty(
             bundle,
             &["graph_route_readiness", "missing_query_runtime_routes"],
-        )
-        && graph_route_query_runtime_ready(bundle)
-        && graph_route_primary_ready(bundle)
-        && graph_route_primary_ready_count_ready(bundle)
-        && string_array_path(
+        ),
+        route_query_runtime_ready: graph_route_query_runtime_ready(bundle),
+        route_primary_ready: graph_route_primary_ready(bundle),
+        primary_ready_route_count_matches: graph_route_primary_ready_count_ready(bundle),
+        route_primary_blocker_codes_empty: string_array_path(
             bundle,
             &["graph_route_readiness", "route_primary_blocker_codes"],
         )
-        .is_empty()
-        && graph_route_evidence_route_coverage_present(bundle)
-        && graph_route_evidence_route_coverage_matches(bundle)
-        && string_array_path(
+        .is_empty(),
+        evidence_route_coverage_present: graph_route_evidence_route_coverage_present(bundle),
+        evidence_route_coverage_matches: graph_route_evidence_route_coverage_matches(bundle),
+        evidence_route_coverage_blocker_codes_empty: string_array_path(
             bundle,
             &[
                 "graph_route_readiness",
                 "evidence_route_coverage_blocker_codes",
             ],
         )
-        .is_empty()
-        && graph_route_query_profiles_ready(bundle)
+        .is_empty(),
+        route_query_profiles_ready: graph_route_query_profiles_ready(bundle),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["graph_route_readiness", "blocker_codes"][..],
+                &["graph_route_readiness", "route_primary_blocker_codes"][..],
+                &[
+                    "graph_route_readiness",
+                    "evidence_route_coverage_blocker_codes",
+                ][..],
+            ],
+        ),
+    }
+}
+
+fn graph_route_cutover_conditions(
+    readiness: &GraphRouteCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("graph_route_readiness.protocol", readiness.protocol_matches),
+        (
+            "graph_route_readiness.evidence_protocol",
+            readiness.evidence_protocol_matches,
+        ),
+        (
+            "graph_route_readiness.evidence_ready",
+            readiness.evidence_ready,
+        ),
+        (
+            "graph_route_readiness.route_count",
+            readiness.route_count_present,
+        ),
+        (
+            "graph_route_readiness.required_route_count",
+            readiness.required_route_count_matches,
+        ),
+        (
+            "graph_route_readiness.route_coverage",
+            readiness.route_coverage_ready,
+        ),
+        (
+            "graph_route_readiness.missing_required_routes",
+            readiness.missing_required_routes_empty,
+        ),
+        (
+            "graph_route_readiness.query_runtime_route_count",
+            readiness.query_runtime_route_count_matches,
+        ),
+        (
+            "graph_route_readiness.query_runtime_report_count",
+            readiness.query_runtime_report_count_ready,
+        ),
+        (
+            "graph_route_readiness.query_runtime_plan_profile_counts",
+            readiness.query_plan_profile_summary_ready,
+        ),
+        (
+            "graph_route_readiness.relationship_property_pruning_counts",
+            readiness.relationship_property_pruning_summary_ready,
+        ),
+        (
+            "graph_route_readiness.missing_query_runtime_routes",
+            readiness.missing_query_runtime_routes_empty,
+        ),
+        (
+            "graph_route_readiness.route_query_runtime_ready",
+            readiness.route_query_runtime_ready,
+        ),
+        (
+            "graph_route_readiness.route_primary_ready",
+            readiness.route_primary_ready,
+        ),
+        (
+            "graph_route_readiness.primary_ready_route_count",
+            readiness.primary_ready_route_count_matches,
+        ),
+        (
+            "graph_route_readiness.route_primary_blocker_codes",
+            readiness.route_primary_blocker_codes_empty,
+        ),
+        (
+            "graph_route_readiness.evidence_route_coverage_present",
+            readiness.evidence_route_coverage_present,
+        ),
+        (
+            "graph_route_readiness.evidence_route_coverage_matches",
+            readiness.evidence_route_coverage_matches,
+        ),
+        (
+            "graph_route_readiness.evidence_route_coverage_blocker_codes",
+            readiness.evidence_route_coverage_blocker_codes_empty,
+        ),
+        (
+            "graph_route_readiness.routes",
+            readiness.route_query_profiles_ready,
+        ),
+    ]
 }
 
 fn graph_route_readiness_summary(bundle: &serde_json::Value) -> crate::GraphRouteReadinessSummary {
@@ -5531,6 +5617,45 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_graph_route_readiness_evidence"));
+    }
+
+    #[test]
+    fn exposes_typed_graph_route_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::graph_route_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.evidence_protocol_matches);
+        assert!(typed.route_count_present);
+        assert!(typed.required_route_count_matches);
+        assert!(typed.route_coverage_ready);
+        assert!(typed.query_runtime_route_count_matches);
+        assert!(typed.query_runtime_report_count_ready);
+        assert!(typed.query_plan_profile_summary_ready);
+        assert!(typed.relationship_property_pruning_summary_ready);
+        assert!(typed.route_query_runtime_ready);
+        assert!(typed.route_primary_ready);
+        assert!(typed.primary_ready_route_count_matches);
+        assert!(typed.evidence_route_coverage_present);
+        assert!(typed.evidence_route_coverage_matches);
+        assert!(typed.route_query_profiles_ready);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_graph_route_cutover_recomputes_route_profile_details() {
+        let mut bundle = ready_bundle();
+        bundle["graph_route_readiness"]["routes"][0]["query_reports"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("scan_pruning_reports");
+
+        let typed = super::graph_route_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.route_query_profiles_ready);
     }
 
     #[test]
