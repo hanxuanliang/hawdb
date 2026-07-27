@@ -428,6 +428,8 @@ contract.
   - Mutations must recover as whole committed batches or not at all.
   - Torn WAL tails must be detected and bounded.
   - Checkpoint manifests must include replay boundaries.
+  - [x] Redact storage-recovery evidence JSON parse failures by default so WAL
+    paths and recovery payload fragments are not copied into command errors.
 - [x] Add storage-level scan pruning where semantics are exact.
   - Equality, numeric range, date/time range, enum/in-list, and unique-key
     summaries should decide whether a segment needs to be read.

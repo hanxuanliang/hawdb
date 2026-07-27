@@ -75,10 +75,10 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             error.kind()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse storage recovery report JSON: {error}"
-        ))
+    serde_json::from_str(&content).map_err(|_| {
+        SkeinError::Semantic(
+            "failed to parse storage recovery report JSON: invalid_json".to_string(),
+        )
     })
 }
 
@@ -119,6 +119,26 @@ mod tests {
             evidence["storage_recovery_blocker_codes"],
             serde_json::json!([])
         );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn storage_recovery_parse_errors_are_redacted_by_default() {
+        let path = unique_test_file("storage_recovery_secret_path_do_not_emit");
+        std::fs::write(
+            &path,
+            "{ \"wal_path\": \"secret-wal-path-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse storage recovery report JSON: invalid_json"
+        );
+        assert!(!error.contains("storage_recovery_secret_path_do_not_emit"));
+        assert!(!error.contains("secret-wal-path-do-not-emit"));
         std::fs::remove_file(path).unwrap();
     }
 
