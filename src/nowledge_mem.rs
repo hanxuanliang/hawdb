@@ -670,6 +670,7 @@ pub struct NowledgeQueryRuntimePreflightReport {
     pub protocol: String,
     pub ready: bool,
     pub database_opened: bool,
+    pub redaction: NowledgeQueryRuntimePreflightRedactionSummary,
     pub probe_count: usize,
     pub passed_probe_count: usize,
     pub failed_probe_count: usize,
@@ -694,6 +695,7 @@ impl NowledgeQueryRuntimePreflightReport {
             "protocol": self.protocol,
             "ready": self.ready,
             "database_opened": self.database_opened,
+            "redaction": self.redaction.json(),
             "probe_count": self.probe_count,
             "passed_probe_count": self.passed_probe_count,
             "failed_probe_count": self.failed_probe_count,
@@ -710,6 +712,33 @@ impl NowledgeQueryRuntimePreflightReport {
             "route_coverage_blocker_codes": self.route_coverage_blocker_codes,
             "blocker_codes": self.blocker_codes,
             "probes": self.probes.iter().map(NowledgeQueryRuntimePreflightProbeReport::json).collect::<Vec<_>>(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct NowledgeQueryRuntimePreflightRedactionSummary {
+    pub rows_copied: bool,
+    pub parameters_copied: bool,
+    pub local_paths_copied: bool,
+    pub raw_errors_copied: bool,
+}
+
+impl NowledgeQueryRuntimePreflightRedactionSummary {
+    pub fn ready(&self) -> bool {
+        !self.rows_copied
+            && !self.parameters_copied
+            && !self.local_paths_copied
+            && !self.raw_errors_copied
+    }
+
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "ready": self.ready(),
+            "rows_copied": self.rows_copied,
+            "parameters_copied": self.parameters_copied,
+            "local_paths_copied": self.local_paths_copied,
+            "raw_errors_copied": self.raw_errors_copied,
         })
     }
 }
@@ -5742,6 +5771,7 @@ fn nowledge_query_runtime_preflight_report(
         protocol: NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL.to_string(),
         ready: blocker_codes.is_empty(),
         database_opened: true,
+        redaction: NowledgeQueryRuntimePreflightRedactionSummary::default(),
         probe_count: probes.len(),
         passed_probe_count,
         failed_probe_count,
@@ -8417,6 +8447,11 @@ mod tests {
         assert_eq!(report.protocol, NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL);
         assert!(report.ready);
         assert!(report.database_opened);
+        assert!(report.redaction.ready());
+        assert!(!report.redaction.rows_copied);
+        assert!(!report.redaction.parameters_copied);
+        assert!(!report.redaction.local_paths_copied);
+        assert!(!report.redaction.raw_errors_copied);
         assert_eq!(
             report.probe_count,
             REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len()
@@ -8437,6 +8472,11 @@ mod tests {
             .all(|probe| !probe.scan_pruning_reports.is_empty()));
         assert_eq!(json["protocol"], NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL);
         assert_eq!(json["ready"], true);
+        assert_eq!(json["redaction"]["ready"], true);
+        assert_eq!(json["redaction"]["rows_copied"], false);
+        assert_eq!(json["redaction"]["parameters_copied"], false);
+        assert_eq!(json["redaction"]["local_paths_copied"], false);
+        assert_eq!(json["redaction"]["raw_errors_copied"], false);
         assert_eq!(json["probe_count"], probes.len());
         assert_eq!(json["probes"][0]["output_row_count"], 1);
         assert_eq!(
@@ -8465,6 +8505,7 @@ mod tests {
         let encoded = json.to_string();
 
         assert!(!report.ready);
+        assert!(report.redaction.ready());
         assert_eq!(report.failed_probe_count, 1);
         assert_eq!(
             report.probes[0].blocker_codes,
@@ -8472,6 +8513,9 @@ mod tests {
         );
         assert_eq!(json["probes"][0]["success"], false);
         assert_eq!(json["probes"][0]["error_class"], "parse");
+        assert_eq!(json["redaction"]["ready"], true);
+        assert_eq!(json["redaction"]["parameters_copied"], false);
+        assert_eq!(json["redaction"]["raw_errors_copied"], false);
         assert!(!encoded.contains("secret-preflight-id"));
         assert!(!encoded.contains("RETURN missing"));
     }

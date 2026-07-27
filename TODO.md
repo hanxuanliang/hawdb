@@ -43,6 +43,8 @@ query family, or cutover gate requires them.
     parameters, and local paths are not copied into the default report.
   - [x] Require integration readiness to validate library-readiness redaction
     fields so copied query text, parameters, or local paths block cutover.
+  - [x] Require query-runtime preflight redaction evidence so copied rows,
+    parameters, local paths, or raw errors block cutover.
 
 ## P0: Concrete Cutover Blockers
 

@@ -67,6 +67,7 @@ pub fn query_runtime_preflight_json(
                 "protocol": crate::NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL,
                 "ready": false,
                 "database_opened": false,
+                "redaction": query_runtime_preflight_redaction_json(),
                 "probe_count": probes.len(),
                 "passed_probe_count": 0,
                 "failed_probe_count": probes.len(),
@@ -92,6 +93,16 @@ pub fn query_runtime_preflight_json(
     };
     let mut store = NowledgeMemEmbeddedStore::new(graph, None);
     store.query_runtime_preflight_json(probes)
+}
+
+fn query_runtime_preflight_redaction_json() -> serde_json::Value {
+    serde_json::json!({
+        "ready": true,
+        "rows_copied": false,
+        "parameters_copied": false,
+        "local_paths_copied": false,
+        "raw_errors_copied": false,
+    })
 }
 
 fn database_open_blocker_codes(probe_count: usize, failed_probe_count: usize) -> Vec<&'static str> {
@@ -785,6 +796,9 @@ mod tests {
         .unwrap();
 
         assert_eq!(report["ready"], false);
+        assert_eq!(report["redaction"]["ready"], true);
+        assert_eq!(report["redaction"]["parameters_copied"], false);
+        assert_eq!(report["redaction"]["raw_errors_copied"], false);
         assert_eq!(report["probes"][0]["success"], false);
         assert_eq!(report["probes"][0]["error_class"], "parse");
         assert!(!report.to_string().contains("do-not-emit"));

@@ -5955,6 +5955,13 @@ mod tests {
             "protocol": "skein-nowledge-query-runtime-preflight-v1",
             "ready": true,
             "database_opened": true,
+            "redaction": {
+                "ready": true,
+                "rows_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false,
+                "raw_errors_copied": false
+            },
             "probe_count": probes.len(),
             "passed_probe_count": probes.len(),
             "failed_probe_count": 0,

@@ -501,6 +501,11 @@ pub struct QueryRuntimePreflightCutoverReadiness {
     pub protocol_matches: bool,
     pub ready: bool,
     pub database_opened: bool,
+    pub redaction_ready: bool,
+    pub rows_redacted: bool,
+    pub parameters_redacted: bool,
+    pub local_paths_redacted: bool,
+    pub raw_errors_redacted: bool,
     pub probe_count_present: bool,
     pub probe_counts_match: bool,
     pub failed_probe_count_zero: bool,
@@ -817,6 +822,11 @@ impl QueryRuntimePreflightCutoverReadiness {
         self.protocol_matches
             && self.ready
             && self.database_opened
+            && self.redaction_ready
+            && self.rows_redacted
+            && self.parameters_redacted
+            && self.local_paths_redacted
+            && self.raw_errors_redacted
             && self.probe_count_present
             && self.probe_counts_match
             && self.failed_probe_count_zero
@@ -1776,6 +1786,11 @@ fn next_actions(
                 "query_runtime_preflight.protocol",
                 "query_runtime_preflight.ready",
                 "query_runtime_preflight.database_opened",
+                "query_runtime_preflight.redaction.ready",
+                "query_runtime_preflight.redaction.rows_copied",
+                "query_runtime_preflight.redaction.parameters_copied",
+                "query_runtime_preflight.redaction.local_paths_copied",
+                "query_runtime_preflight.redaction.raw_errors_copied",
                 "query_runtime_preflight.probe_count",
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
@@ -4059,6 +4074,24 @@ pub fn query_runtime_preflight_cutover_readiness(
         ready: bool_path(bundle, &["query_runtime_preflight", "ready"]) == Some(true),
         database_opened: bool_path(bundle, &["query_runtime_preflight", "database_opened"])
             == Some(true),
+        redaction_ready: bool_path(bundle, &["query_runtime_preflight", "redaction", "ready"])
+            == Some(true),
+        rows_redacted: bool_path(
+            bundle,
+            &["query_runtime_preflight", "redaction", "rows_copied"],
+        ) == Some(false),
+        parameters_redacted: bool_path(
+            bundle,
+            &["query_runtime_preflight", "redaction", "parameters_copied"],
+        ) == Some(false),
+        local_paths_redacted: bool_path(
+            bundle,
+            &["query_runtime_preflight", "redaction", "local_paths_copied"],
+        ) == Some(false),
+        raw_errors_redacted: bool_path(
+            bundle,
+            &["query_runtime_preflight", "redaction", "raw_errors_copied"],
+        ) == Some(false),
         probe_count_present: u64_path(bundle, &["query_runtime_preflight", "probe_count"])
             .is_some_and(|value| value > 0),
         probe_counts_match: query_runtime_preflight_counts_match(bundle),
@@ -4100,6 +4133,26 @@ fn query_runtime_preflight_cutover_conditions(
         (
             "query_runtime_preflight.database_opened",
             readiness.database_opened,
+        ),
+        (
+            "query_runtime_preflight.redaction.ready",
+            readiness.redaction_ready,
+        ),
+        (
+            "query_runtime_preflight.redaction.rows_copied",
+            readiness.rows_redacted,
+        ),
+        (
+            "query_runtime_preflight.redaction.parameters_copied",
+            readiness.parameters_redacted,
+        ),
+        (
+            "query_runtime_preflight.redaction.local_paths_copied",
+            readiness.local_paths_redacted,
+        ),
+        (
+            "query_runtime_preflight.redaction.raw_errors_copied",
+            readiness.raw_errors_redacted,
         ),
         (
             "query_runtime_preflight.probe_count",
@@ -7220,6 +7273,11 @@ mod tests {
                 "query_runtime_preflight.protocol",
                 "query_runtime_preflight.ready",
                 "query_runtime_preflight.database_opened",
+                "query_runtime_preflight.redaction.ready",
+                "query_runtime_preflight.redaction.rows_copied",
+                "query_runtime_preflight.redaction.parameters_copied",
+                "query_runtime_preflight.redaction.local_paths_copied",
+                "query_runtime_preflight.redaction.raw_errors_copied",
                 "query_runtime_preflight.probe_count",
                 "query_runtime_preflight.passed_probe_count",
                 "query_runtime_preflight.failed_probe_count",
@@ -7246,6 +7304,11 @@ mod tests {
         assert!(typed.protocol_matches);
         assert!(typed.ready);
         assert!(typed.database_opened);
+        assert!(typed.redaction_ready);
+        assert!(typed.rows_redacted);
+        assert!(typed.parameters_redacted);
+        assert!(typed.local_paths_redacted);
+        assert!(typed.raw_errors_redacted);
         assert!(typed.probe_count_present);
         assert!(typed.probe_counts_match);
         assert!(typed.failed_probe_count_zero);
@@ -7268,6 +7331,50 @@ mod tests {
 
         assert!(!typed.evidence_ready());
         assert!(!typed.probe_details_ready);
+    }
+
+    #[test]
+    fn rejects_query_runtime_preflight_that_copies_sensitive_fields() {
+        let mut bundle = ready_bundle();
+        bundle["query_runtime_preflight"]["redaction"]["ready"] = serde_json::json!(false);
+        bundle["query_runtime_preflight"]["redaction"]["rows_copied"] = serde_json::json!(true);
+        bundle["query_runtime_preflight"]["redaction"]["parameters_copied"] =
+            serde_json::json!(true);
+        bundle["query_runtime_preflight"]["redaction"]["local_paths_copied"] =
+            serde_json::json!(true);
+        bundle["query_runtime_preflight"]["redaction"]["raw_errors_copied"] =
+            serde_json::json!(true);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+        let typed = super::query_runtime_preflight_cutover_readiness(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["query_runtime_preflight"])
+        );
+        assert!(!typed.evidence_ready());
+        assert!(!typed.redaction_ready);
+        assert!(!typed.rows_redacted);
+        assert!(!typed.parameters_redacted);
+        assert!(!typed.local_paths_redacted);
+        assert!(!typed.raw_errors_redacted);
+        let check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "query_runtime_preflight")
+            .unwrap();
+        assert_eq!(
+            check["failed_evidence_fields"],
+            serde_json::json!([
+                "query_runtime_preflight.redaction.ready",
+                "query_runtime_preflight.redaction.rows_copied",
+                "query_runtime_preflight.redaction.parameters_copied",
+                "query_runtime_preflight.redaction.local_paths_copied",
+                "query_runtime_preflight.redaction.raw_errors_copied"
+            ])
+        );
     }
 
     #[test]
@@ -9085,6 +9192,13 @@ mod tests {
             "protocol": "skein-nowledge-query-runtime-preflight-v1",
             "ready": true,
             "database_opened": true,
+            "redaction": {
+                "ready": true,
+                "rows_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false,
+                "raw_errors_copied": false
+            },
             "probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "passed_probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "failed_probe_count": 0,
@@ -9346,6 +9460,13 @@ mod tests {
             "present": true,
             "ready": true,
             "database_opened": true,
+            "redaction": {
+                "ready": true,
+                "rows_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false,
+                "raw_errors_copied": false
+            },
             "probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "passed_probe_count": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES.len(),
             "failed_probe_count": 0,
