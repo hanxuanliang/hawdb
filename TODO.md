@@ -130,6 +130,10 @@ contract.
   - [x] Require graph-route scan pruning evidence to carry the real typed
     `target_kind` (`node` or `relationship`) and reject legacy-only
     `record_kind` relationship pruning claims.
+  - [x] Expose a typed route ownership readiness API so Mem can declare each
+    active graph/search read route as `legacy` or `skein`; production cutover
+    fails closed when required routes are missing, duplicated, conflicting,
+    still legacy-owned, or Skein-owned without route readiness evidence.
 - [ ] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
   - Scope: move one existing read route to the embedded query runtime with
     `legacy`/`skein` selection controlled by configuration.

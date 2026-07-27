@@ -22,6 +22,7 @@ pub mod qos;
 pub mod query_family_evidence;
 pub mod query_runtime_preflight;
 pub mod replacement_summary;
+pub mod route_ownership;
 pub mod search;
 pub mod search_candidate_shadow_evidence;
 pub mod storage_recovery_evidence;
@@ -251,6 +252,13 @@ pub use replacement_summary::{
     nowledge_replacement_summary_json, nowledge_replacement_summary_json_with_options,
     nowledge_replacement_summary_usage, GraphRouteReadinessSummary,
     NowledgeReplacementSummaryOptions,
+};
+pub use route_ownership::{
+    nowledge_mem_route_ownership_all_legacy, nowledge_mem_route_ownership_all_skein,
+    nowledge_mem_route_ownership_for_engine, nowledge_mem_route_ownership_readiness,
+    NowledgeMemRouteOwnership, NowledgeMemRouteOwnershipPolicy,
+    NowledgeMemRouteOwnershipReadinessReport, NowledgeMemRouteReadEngine,
+    NOWLEDGE_MEM_ROUTE_OWNERSHIP_PROTOCOL,
 };
 pub use schema::{
     BasicGraphStatistics, CompositeIndexDescriptor, ConstraintDescriptor, ConstraintId,
