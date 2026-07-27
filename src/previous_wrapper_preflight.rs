@@ -484,12 +484,37 @@ pub fn nowledge_previous_wrapper_preflight_check(
                         "background_maintenance_protocol_matches",
                     ],
                 ) == Some(true),
+                replacement_summary_background_maintenance_graph_delta_ready(&replacement_summary),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "cutover_evidence",
+                        "background_maintenance_memory_pressure_ready",
+                    ],
+                ) == Some(true),
+                u64_path(
+                    &replacement_summary,
+                    &["cutover_evidence", "background_maintenance_memory_budget_bytes"],
+                )
+                .is_some_and(|value| value > 0),
+                u64_path(
+                    &replacement_summary,
+                    &[
+                        "cutover_evidence",
+                        "background_maintenance_estimated_memory_bytes",
+                    ],
+                )
+                .is_some(),
             ],
             [
                 "cutover_evidence.background_maintenance_required",
                 "cutover_evidence.background_maintenance_present",
                 "cutover_evidence.background_maintenance_ready",
                 "cutover_evidence.background_maintenance_protocol_matches",
+                "replacement_summary.cutover_evidence.background_maintenance_graph_delta_qos",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes",
+                "replacement_summary.cutover_evidence.background_maintenance_estimated_memory_bytes",
             ],
             blocker_codes(
                 &migration_gate,
@@ -497,7 +522,16 @@ pub fn nowledge_previous_wrapper_preflight_check(
                     &["cutover_evidence", "background_maintenance_blocker_codes"][..],
                     &["cutover_evidence", "background_maintenance_blockers"][..],
                 ],
-            ),
+            )
+            .into_iter()
+            .chain(blocker_codes(
+                &replacement_summary,
+                &[
+                    &["cutover_evidence", "background_maintenance_blocker_codes"][..],
+                    &["cutover_evidence", "background_maintenance_blockers"][..],
+                ],
+            ))
+            .collect::<Vec<_>>(),
         ),
         preflight_check(
             "replacement_summary",
@@ -1657,6 +1691,43 @@ fn u64_path(value: &serde_json::Value, path: &[&str]) -> Option<u64> {
     value_path(value, path).and_then(serde_json::Value::as_u64)
 }
 
+fn replacement_summary_background_maintenance_graph_delta_ready(
+    replacement_summary: &serde_json::Value,
+) -> bool {
+    [
+        &[
+            "cutover_evidence",
+            "background_maintenance_executable_search_projection_graph_delta_count",
+        ][..],
+        &[
+            "cutover_evidence",
+            "background_maintenance_admitted_search_projection_graph_delta_count",
+        ][..],
+        &[
+            "cutover_evidence",
+            "background_maintenance_deferred_search_projection_graph_delta_count",
+        ][..],
+        &[
+            "cutover_evidence",
+            "background_maintenance_rejected_search_projection_graph_delta_count",
+        ][..],
+        &[
+            "cutover_evidence",
+            "background_maintenance_executable_search_projection_graph_delta_operations",
+        ][..],
+        &[
+            "cutover_evidence",
+            "background_maintenance_admitted_search_projection_graph_delta_operations",
+        ][..],
+        &[
+            "cutover_evidence",
+            "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch",
+        ][..],
+    ]
+    .iter()
+    .all(|path| u64_path(replacement_summary, path).is_some())
+}
+
 fn library_readiness_area_ready(value: &serde_json::Value, area: &str) -> bool {
     value_path(value, &["readiness_by_area", area, "ready"]).and_then(serde_json::Value::as_bool)
         == Some(true)
@@ -2215,7 +2286,16 @@ mod tests {
         assert_eq!(report["ready"], false);
         assert_eq!(
             report["failed_checks"],
-            serde_json::json!(["replacement_summary"])
+            serde_json::json!(["background_maintenance", "replacement_summary"])
+        );
+        assert_eq!(
+            check_by_name(&report, "background_maintenance")["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.cutover_evidence.background_maintenance_graph_delta_qos",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes",
+                "replacement_summary.cutover_evidence.background_maintenance_estimated_memory_bytes"
+            ])
         );
         assert_eq!(
             check_by_name(&report, "replacement_summary")["blocker_codes"],
@@ -2314,31 +2394,8 @@ mod tests {
     #[test]
     fn preflight_check_requires_summary_dual_engine_evidence() {
         let mut inputs = ready_inputs();
-        inputs.replacement_summary = Some(serde_json::json!({
-            "production_cutover_ready": true,
-            "production_replacement_per_million": 1_000_000,
-            "blocking_categories": [],
-            "missing_evidence": [],
-            "next_actions": [],
-            "shadow_evidence": {
-                "ready": true,
-                "ready_wrapper_identity": "nowledge-previous-wrapper:test",
-                "contract_wrapper_identity": "nowledge-previous-wrapper:test",
-                "cutover_ready_wrapper_identity": "nowledge-previous-wrapper:test"
-            },
-            "dual_engine_evidence": {
-                "present": true,
-                "ready": false,
-                "consistent": true,
-                "primary_check_count": 2,
-                "shadow_check_count": 2,
-                "matched_check_count": 2,
-                "primary_only_check_count": 0
-            },
-            "search_projection_evidence": ready_search_projection_evidence(),
-            "search_projection_shadow_evidence": ready_search_projection_shadow_evidence(),
-            "search_candidate_shadow_evidence": ready_search_candidate_shadow_evidence()
-        }));
+        inputs.replacement_summary.as_mut().unwrap()["dual_engine_evidence"]["ready"] =
+            serde_json::json!(false);
 
         let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
 
@@ -2580,6 +2637,43 @@ mod tests {
         assert_eq!(
             check_by_name(&report, "background_maintenance")["blocker_codes"],
             serde_json::json!(["missing_evidence"])
+        );
+    }
+
+    #[test]
+    fn preflight_check_requires_background_maintenance_qos_evidence() {
+        let mut inputs = ready_inputs();
+        let cutover_evidence = inputs
+            .replacement_summary
+            .as_mut()
+            .unwrap()
+            .get_mut("cutover_evidence")
+            .unwrap();
+        cutover_evidence["background_maintenance_deferred_search_projection_graph_delta_count"] =
+            serde_json::Value::Null;
+        cutover_evidence["background_maintenance_memory_pressure_ready"] = serde_json::json!(false);
+        cutover_evidence["background_maintenance_memory_budget_bytes"] = serde_json::Value::Null;
+        cutover_evidence["background_maintenance_blocker_codes"] =
+            serde_json::json!(["memory_budget_exceeded"]);
+
+        let report = nowledge_previous_wrapper_preflight_check_json(inputs).unwrap();
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["background_maintenance"])
+        );
+        assert_eq!(
+            check_by_name(&report, "background_maintenance")["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.cutover_evidence.background_maintenance_graph_delta_qos",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_pressure_ready",
+                "replacement_summary.cutover_evidence.background_maintenance_memory_budget_bytes"
+            ])
+        );
+        assert_eq!(
+            check_by_name(&report, "background_maintenance")["blocker_codes"],
+            serde_json::json!(["memory_budget_exceeded"])
         );
     }
 
@@ -3108,7 +3202,10 @@ mod tests {
                     "background_maintenance_rejected_search_projection_graph_delta_count": 0,
                     "background_maintenance_executable_search_projection_graph_delta_operations": 8,
                     "background_maintenance_admitted_search_projection_graph_delta_operations": 3,
-                    "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 42
+                    "background_maintenance_max_search_projection_graph_delta_complete_through_graph_commit_epoch": 42,
+                    "background_maintenance_memory_pressure_ready": true,
+                    "background_maintenance_memory_budget_bytes": 4096,
+                    "background_maintenance_estimated_memory_bytes": 1024
                 },
                 "dual_engine_evidence": {
                     "present": true,

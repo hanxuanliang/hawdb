@@ -200,6 +200,8 @@ contract.
     background QoS summaries before integration readiness can pass.
   - [x] Require bounded-read payload budget evidence in replacement summary,
     integration bundle alignment, and integration readiness.
+  - [x] Require final previous-wrapper preflight to validate background graph
+    delta QoS counts and memory-pressure evidence from replacement summary.
 - [ ] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.
