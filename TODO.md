@@ -325,6 +325,8 @@ contract.
   - [x] Require replacement and integration readiness to independently
     validate segment-pruned document counts instead of trusting pushdown
     `ready=true`.
+  - [x] Carry segment-pruned document counts from real search projection probes
+    through shadow evidence and final preflight reports.
 - [ ] Replace LanceDB search reads in stages.
   - First cover metadata-filtered search projection reads that do not require
     Kuzu joins.

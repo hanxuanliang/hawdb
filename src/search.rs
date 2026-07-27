@@ -2082,11 +2082,24 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
         .segment_descriptor
         .as_ref()
         .is_some_and(|descriptor| descriptor.matches_documents(&index.documents));
-    let segment_descriptor_field_summaries = index
+    let transient_descriptor;
+    let descriptor = match index
         .segment_descriptor
         .as_ref()
         .filter(|descriptor| descriptor.matches_documents(&index.documents))
+    {
+        Some(descriptor) => Some(descriptor),
+        None if !index.documents.is_empty() => {
+            transient_descriptor = SearchSegmentDescriptor::build(&index.documents);
+            Some(&transient_descriptor)
+        }
+        None => None,
+    };
+    let segment_descriptor_field_summaries = descriptor
         .map(search_projection_probe_segment_descriptor_field_summaries)
+        .unwrap_or_default();
+    let segment_document_pruning = descriptor
+        .map(search_projection_probe_segment_document_pruning_report)
         .unwrap_or_default();
     serde_json::json!({
         "ready": true,
@@ -2103,7 +2116,53 @@ fn search_projection_probe_predicate_pushdown_report(index: &SearchIndex) -> ser
         "scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
         "segment_descriptor_field_count": segment_descriptor_field_summaries.len(),
         "segment_descriptor_field_summaries": segment_descriptor_field_summaries,
+        "segment_document_pruning_ready": segment_document_pruning.ready,
+        "segment_pruning_candidate_document_count": segment_document_pruning.candidate_document_count,
+        "segment_pruned_document_count": segment_document_pruning.pruned_document_count,
+        "segment_scanned_document_count": segment_document_pruning.scanned_document_count,
     })
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SearchProjectionProbeSegmentDocumentPruningReport {
+    ready: bool,
+    candidate_document_count: usize,
+    pruned_document_count: usize,
+    scanned_document_count: usize,
+}
+
+fn search_projection_probe_segment_document_pruning_report(
+    descriptor: &SearchSegmentDescriptor,
+) -> SearchProjectionProbeSegmentDocumentPruningReport {
+    let Some(first_segment) = descriptor.segments.first() else {
+        return SearchProjectionProbeSegmentDocumentPruningReport::default();
+    };
+    if first_segment.first_document_id.is_empty() {
+        return SearchProjectionProbeSegmentDocumentPruningReport::default();
+    }
+    let predicates = SearchPredicateSet::new(vec![SearchPredicate::eq(
+        SEARCH_DOCUMENT_ID_FIELD,
+        first_segment.first_document_id.clone(),
+    )]);
+    let mut pruned_document_count = 0;
+    let mut scanned_document_count = 0;
+    for segment in &descriptor.segments {
+        if segment.may_match_predicates(&predicates) {
+            scanned_document_count += segment.document_count;
+        } else {
+            pruned_document_count += segment.document_count;
+        }
+    }
+    let ready = descriptor.document_count > 0
+        && pruned_document_count > 0
+        && scanned_document_count > 0
+        && pruned_document_count + scanned_document_count == descriptor.document_count;
+    SearchProjectionProbeSegmentDocumentPruningReport {
+        ready,
+        candidate_document_count: descriptor.document_count,
+        pruned_document_count,
+        scanned_document_count,
+    }
 }
 
 fn search_projection_probe_segment_descriptor_field_summaries(
@@ -7577,6 +7636,22 @@ mod tests {
                 .as_bool()
                 .unwrap()
         );
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_document_pruning_ready"],
+            true
+        );
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_pruning_candidate_document_count"],
+            6
+        );
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_pruned_document_count"],
+            4
+        );
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_scanned_document_count"],
+            2
+        );
         for field in NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS {
             assert!(fields.contains(field), "missing descriptor field {field}");
         }
@@ -7952,6 +8027,22 @@ mod tests {
         assert_eq!(probe["document_identity"]["document_count"], 6);
         assert!(probe["document_identity"].get("document_ids").is_none());
         assert_eq!(probe["tables"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_document_pruning_ready"],
+            true
+        );
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_pruning_candidate_document_count"],
+            6
+        );
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_pruned_document_count"],
+            4
+        );
+        assert_eq!(
+            probe["predicate_pushdown"]["segment_scanned_document_count"],
+            2
+        );
         assert!(probe["tables"].as_array().unwrap().iter().all(|table| {
             table["present"] == true && table["fts_ready"] == true && table["vector_ready"] == true
         }));

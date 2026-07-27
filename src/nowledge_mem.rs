@@ -2124,6 +2124,9 @@ pub struct NowledgeMemSearchCandidateReport {
     pub segment_count: usize,
     pub pruned_segment_count: usize,
     pub scanned_segment_count: usize,
+    pub segment_pruning_candidate_document_count: usize,
+    pub segment_pruned_document_count: usize,
+    pub segment_scanned_document_count: usize,
     pub persisted_segment_descriptor_used: bool,
     pub retriever_backends: BTreeMap<String, String>,
     pub retriever_available: BTreeMap<String, bool>,
@@ -2161,6 +2164,9 @@ impl NowledgeMemSearchCandidateReport {
             "segment_count": self.segment_count,
             "pruned_segment_count": self.pruned_segment_count,
             "scanned_segment_count": self.scanned_segment_count,
+            "segment_pruning_candidate_document_count": self.segment_pruning_candidate_document_count,
+            "segment_pruned_document_count": self.segment_pruned_document_count,
+            "segment_scanned_document_count": self.segment_scanned_document_count,
             "persisted_segment_descriptor_used": self.persisted_segment_descriptor_used,
             "retriever_backends": self.retriever_backends,
             "retriever_available": self.retriever_available,
@@ -4584,6 +4590,9 @@ fn nowledge_mem_search_candidate_report(
         segment_count: pushdown.segment_count,
         pruned_segment_count: pushdown.pruned_segment_count,
         scanned_segment_count: pushdown.scanned_segment_count,
+        segment_pruning_candidate_document_count: pushdown.segment_pruning_candidate_document_count,
+        segment_pruned_document_count: pushdown.segment_pruned_document_count,
+        segment_scanned_document_count: pushdown.segment_scanned_document_count,
         persisted_segment_descriptor_used: pushdown.persisted_segment_descriptor_used,
         retriever_backends: result
             .retrievers
@@ -4714,6 +4723,9 @@ fn search_predicate_pushdown_report_json(
         "segment_count": report.segment_count,
         "pruned_segment_count": report.pruned_segment_count,
         "scanned_segment_count": report.scanned_segment_count,
+        "segment_pruning_candidate_document_count": report.segment_pruning_candidate_document_count,
+        "segment_pruned_document_count": report.segment_pruned_document_count,
+        "segment_scanned_document_count": report.segment_scanned_document_count,
         "persisted_segment_descriptor_used": report.persisted_segment_descriptor_used,
         "field_summaries": report.field_summaries.iter().map(search_predicate_field_pruning_report_json).collect::<Vec<_>>(),
     })
@@ -6571,6 +6583,22 @@ mod tests {
         assert_eq!(evidence["table_parity"]["ready"], true);
         assert_eq!(evidence["embedding_identity_parity"], true);
         assert_eq!(evidence["incremental_watermark_parity"], true);
+        assert_eq!(
+            evidence["pushdown_evidence"]["shadow_segment_document_pruning_ready"],
+            true
+        );
+        assert_eq!(
+            evidence["pushdown_evidence"]["shadow_segment_pruning_candidate_document_count"],
+            6
+        );
+        assert_eq!(
+            evidence["pushdown_evidence"]["shadow_segment_pruned_document_count"],
+            4
+        );
+        assert_eq!(
+            evidence["pushdown_evidence"]["shadow_segment_scanned_document_count"],
+            2
+        );
         #[cfg(feature = "turbovec")]
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
     }

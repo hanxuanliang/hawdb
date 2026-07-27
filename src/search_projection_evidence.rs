@@ -179,6 +179,10 @@ pub fn nowledge_search_projection_probe_contract_json() -> serde_json::Value {
             "timestamp_min_max_ready",
             "persisted_segment_descriptor_ready",
             "segment_descriptor_scan_filter_fields_ready",
+            "segment_document_pruning_ready",
+            "segment_pruning_candidate_document_count",
+            "segment_pruned_document_count",
+            "segment_scanned_document_count",
             "supported_ops",
             "scan_filter_fields",
             "segment_descriptor_field_count",
@@ -398,7 +402,8 @@ pub fn nowledge_search_projection_evidence_json(probe: &serde_json::Value) -> se
             && bool_path(
                 &predicate_pushdown,
                 &["segment_descriptor_capabilities_ready"],
-            ) == Some(true);
+            ) == Some(true)
+            && bool_path(&predicate_pushdown, &["segment_document_pruning_ready"]) == Some(true);
     let compressed_vector_projection = compressed_vector_projection_report(probe);
     let compressed_vector_projection_required = vector_ready && skein_probe;
     let compressed_vector_projection_ready = !compressed_vector_projection_required
@@ -608,11 +613,17 @@ fn search_projection_shadow_pushdown_evidence(
         ],
     )
     .unwrap_or(false);
+    let shadow_segment_document_pruning_ready = bool_path(
+        shadow_evidence,
+        &["predicate_pushdown", "segment_document_pruning_ready"],
+    )
+    .unwrap_or(false);
     let ready = predicate_pushdown_parity
         && primary_predicate_pushdown_ready
         && shadow_predicate_pushdown_ready
         && shadow_persisted_segment_descriptor_ready
-        && shadow_segment_descriptor_scan_filter_fields_ready;
+        && shadow_segment_descriptor_scan_filter_fields_ready
+        && shadow_segment_document_pruning_ready;
     serde_json::json!({
         "ready": ready,
         "predicate_pushdown_parity": predicate_pushdown_parity,
@@ -620,6 +631,10 @@ fn search_projection_shadow_pushdown_evidence(
         "shadow_predicate_pushdown_ready": shadow_predicate_pushdown_ready,
         "shadow_persisted_segment_descriptor_ready": shadow_persisted_segment_descriptor_ready,
         "shadow_segment_descriptor_scan_filter_fields_ready": shadow_segment_descriptor_scan_filter_fields_ready,
+        "shadow_segment_document_pruning_ready": shadow_segment_document_pruning_ready,
+        "shadow_segment_pruning_candidate_document_count": u64_path(shadow_evidence, &["predicate_pushdown", "segment_pruning_candidate_document_count"]),
+        "shadow_segment_pruned_document_count": u64_path(shadow_evidence, &["predicate_pushdown", "segment_pruned_document_count"]),
+        "shadow_segment_scanned_document_count": u64_path(shadow_evidence, &["predicate_pushdown", "segment_scanned_document_count"]),
         "primary_scan_filter_fields": array_path(primary_evidence, &["predicate_pushdown", "scan_filter_fields"]).unwrap_or_default(),
         "shadow_scan_filter_fields": array_path(shadow_evidence, &["predicate_pushdown", "scan_filter_fields"]).unwrap_or_default(),
         "shadow_segment_descriptor_field_summaries": value_path(shadow_evidence, &["predicate_pushdown", "segment_descriptor_field_summaries"]).cloned().unwrap_or_else(|| serde_json::json!([])),
@@ -775,6 +790,10 @@ fn ready_probe_template(engine: &str) -> serde_json::Value {
             "numeric_min_max_ready": true,
             "timestamp_min_max_ready": true,
             "persisted_segment_descriptor_ready": true,
+            "segment_document_pruning_ready": true,
+            "segment_pruning_candidate_document_count": 6,
+            "segment_pruned_document_count": 4,
+            "segment_scanned_document_count": 2,
             "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
             "scan_filter_fields": NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
             "segment_descriptor_field_summaries": ready_segment_descriptor_field_summaries_template()
@@ -1009,6 +1028,12 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         .as_array()
         .map(Vec::len)
         .unwrap_or_default();
+    let segment_document_pruning_ready =
+        bool_path(predicate, &["segment_document_pruning_ready"]).unwrap_or(false);
+    let segment_pruning_candidate_document_count =
+        u64_path(predicate, &["segment_pruning_candidate_document_count"]);
+    let segment_pruned_document_count = u64_path(predicate, &["segment_pruned_document_count"]);
+    let segment_scanned_document_count = u64_path(predicate, &["segment_scanned_document_count"]);
     let segment_descriptor_scan_filter_fields_ready = segment_descriptor_fields_cover_scan_filters(
         &scan_filter_fields,
         &segment_descriptor_field_summaries,
@@ -1043,6 +1068,10 @@ fn predicate_pushdown_report(probe: &serde_json::Value) -> serde_json::Value {
         "segment_descriptor_field_count": segment_descriptor_field_count,
         "segment_descriptor_scan_filter_fields_ready": segment_descriptor_scan_filter_fields_ready,
         "segment_descriptor_capabilities_ready": segment_descriptor_capabilities.ready,
+        "segment_document_pruning_ready": segment_document_pruning_ready,
+        "segment_pruning_candidate_document_count": segment_pruning_candidate_document_count,
+        "segment_pruned_document_count": segment_pruned_document_count,
+        "segment_scanned_document_count": segment_scanned_document_count,
         "missing_value_summary_fields": segment_descriptor_capabilities.missing_value_summary_fields,
         "missing_numeric_range_fields": segment_descriptor_capabilities.missing_numeric_range_fields,
         "missing_timestamp_range_fields": segment_descriptor_capabilities.missing_timestamp_range_fields,
@@ -1585,6 +1614,22 @@ mod tests {
             report["pushdown_evidence"]["shadow_persisted_segment_descriptor_ready"],
             true
         );
+        assert_eq!(
+            report["pushdown_evidence"]["shadow_segment_document_pruning_ready"],
+            true
+        );
+        assert_eq!(
+            report["pushdown_evidence"]["shadow_segment_pruning_candidate_document_count"],
+            6
+        );
+        assert_eq!(
+            report["pushdown_evidence"]["shadow_segment_pruned_document_count"],
+            4
+        );
+        assert_eq!(
+            report["pushdown_evidence"]["shadow_segment_scanned_document_count"],
+            2
+        );
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
     }
 
@@ -1765,6 +1810,10 @@ mod tests {
                 "numeric_min_max_ready": true,
                 "timestamp_min_max_ready": true,
                 "persisted_segment_descriptor_ready": true,
+                "segment_document_pruning_ready": true,
+                "segment_pruning_candidate_document_count": 6,
+                "segment_pruned_document_count": 4,
+                "segment_scanned_document_count": 2,
                 "supported_ops": ["eq", "in", "not_in", "gt", "gte", "lt", "lte"],
                 "scan_filter_fields": [
                     "kind",

@@ -700,6 +700,25 @@ pub fn nowledge_previous_wrapper_preflight_check(
                         "shadow_segment_descriptor_scan_filter_fields_ready",
                     ],
                 ) == Some(true),
+                bool_path(
+                    &replacement_summary,
+                    &[
+                        "search_projection_shadow_evidence",
+                        "pushdown_evidence",
+                        "shadow_segment_document_pruning_ready",
+                    ],
+                ) == Some(true),
+                search_projection_shadow_segment_pruning_candidate_count_ready(
+                    &replacement_summary,
+                ),
+                search_projection_shadow_segment_pruning_count_is_positive(
+                    &replacement_summary,
+                    "shadow_segment_pruned_document_count",
+                ),
+                search_projection_shadow_segment_pruning_count_is_positive(
+                    &replacement_summary,
+                    "shadow_segment_scanned_document_count",
+                ),
                 str_path(
                     &replacement_summary,
                     &["search_candidate_shadow_evidence", "protocol"],
@@ -816,6 +835,10 @@ pub fn nowledge_previous_wrapper_preflight_check(
                 "search_projection_shadow_evidence.pushdown_evidence.predicate_pushdown_parity",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_persisted_segment_descriptor_ready",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_document_pruning_ready",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_scanned_document_count",
                 "search_candidate_shadow_evidence.protocol",
                 "search_candidate_shadow_evidence.evidence_source",
                 "search_candidate_shadow_evidence.route",
@@ -1689,6 +1712,54 @@ fn previous_wrapper_preflight_release_summary(
     );
     insert_json_value(
         &mut summary,
+        "search_projection_shadow_segment_document_pruning_ready",
+        bool_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_segment_document_pruning_ready",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_segment_pruning_candidate_document_count",
+        u64_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_segment_pruning_candidate_document_count",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_segment_pruned_document_count",
+        u64_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_segment_pruned_document_count",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
+        "search_projection_shadow_segment_scanned_document_count",
+        u64_path(
+            replacement_summary,
+            &[
+                "search_projection_shadow_evidence",
+                "pushdown_evidence",
+                "shadow_segment_scanned_document_count",
+            ],
+        ),
+    );
+    insert_json_value(
+        &mut summary,
         "search_candidate_shadow_evidence_ready",
         bool_path(
             replacement_summary,
@@ -2054,6 +2125,57 @@ fn search_candidate_shadow_counts_ready(value: &serde_json::Value) -> bool {
                 "primary_only_candidate_count",
             ],
         ) == Some(0)
+}
+
+fn search_projection_shadow_segment_pruning_candidate_count_ready(
+    value: &serde_json::Value,
+) -> bool {
+    let Some(candidate_count) = u64_path(
+        value,
+        &[
+            "search_projection_shadow_evidence",
+            "pushdown_evidence",
+            "shadow_segment_pruning_candidate_document_count",
+        ],
+    ) else {
+        return false;
+    };
+    let Some(pruned_count) = u64_path(
+        value,
+        &[
+            "search_projection_shadow_evidence",
+            "pushdown_evidence",
+            "shadow_segment_pruned_document_count",
+        ],
+    ) else {
+        return false;
+    };
+    let Some(scanned_count) = u64_path(
+        value,
+        &[
+            "search_projection_shadow_evidence",
+            "pushdown_evidence",
+            "shadow_segment_scanned_document_count",
+        ],
+    ) else {
+        return false;
+    };
+    candidate_count > 0 && pruned_count.checked_add(scanned_count) == Some(candidate_count)
+}
+
+fn search_projection_shadow_segment_pruning_count_is_positive(
+    value: &serde_json::Value,
+    field: &str,
+) -> bool {
+    u64_path(
+        value,
+        &[
+            "search_projection_shadow_evidence",
+            "pushdown_evidence",
+            field,
+        ],
+    )
+    .is_some_and(|count| count > 0)
 }
 
 fn search_candidate_missing_required_fields_ready(value: &serde_json::Value) -> bool {
@@ -2459,6 +2581,26 @@ mod tests {
             "search_projection_shadow_segment_descriptor_scan_filter_fields_ready",
             true,
         );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_segment_document_pruning_ready",
+            true,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_segment_pruning_candidate_document_count",
+            4,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_segment_pruned_document_count",
+            2,
+        );
+        assert_release_summary_field(
+            summary,
+            "search_projection_shadow_segment_scanned_document_count",
+            2,
+        );
         assert_release_summary_field(summary, "search_candidate_shadow_evidence_ready", true);
         assert_release_summary_field(
             summary,
@@ -2638,6 +2780,10 @@ mod tests {
                 "search_projection_shadow_evidence.pushdown_evidence.predicate_pushdown_parity",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_persisted_segment_descriptor_ready",
                 "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_descriptor_scan_filter_fields_ready",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_document_pruning_ready",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruning_candidate_document_count",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_pruned_document_count",
+                "search_projection_shadow_evidence.pushdown_evidence.shadow_segment_scanned_document_count",
                 "search_candidate_shadow_evidence.protocol",
                 "search_candidate_shadow_evidence.evidence_source",
                 "search_candidate_shadow_evidence.route",
@@ -3839,6 +3985,10 @@ mod tests {
                 "shadow_predicate_pushdown_ready": true,
                 "shadow_persisted_segment_descriptor_ready": true,
                 "shadow_segment_descriptor_scan_filter_fields_ready": true,
+                "shadow_segment_document_pruning_ready": true,
+                "shadow_segment_pruning_candidate_document_count": 4,
+                "shadow_segment_pruned_document_count": 2,
+                "shadow_segment_scanned_document_count": 2,
                 "primary_scan_filter_fields": [
                     "kind",
                     "external_id",
