@@ -170,6 +170,9 @@ contract.
   - [x] Add a library-first `/graph/orphans` orphan Entity runtime and
     route-query evidence helper for Nowledge's relationship-exclusion cleanup
     query shape.
+  - [x] Add a library-first `/graph/sample` deterministic Memory sample runtime
+    and route-query evidence helper backed by shared Cypher and bounded query
+    execution.
 - [ ] PR 4: Add search projection scan-pruning evidence for production filters.
   - Scope: prove search projection segment descriptors prune `unit_type`,
     lifecycle state, metadata keys, `importance`, `confidence`, and timestamps
