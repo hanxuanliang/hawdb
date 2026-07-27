@@ -53,6 +53,9 @@ query family, or cutover gate requires them.
   - [x] Redact integration-readiness bundle input read and parse failures by
     default so final cutover diagnostics do not copy local paths or payload
     fragments.
+  - [x] Redact integration-bundle input read and parse failures by default so
+    bundle assembly does not copy local paths or payload fragments into command
+    errors.
 
 ## P0: Concrete Cutover Blockers
 

@@ -1175,16 +1175,15 @@ fn read_json_arg(args: &mut impl Iterator<Item = String>) -> Result<serde_json::
 }
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
-    let raw = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to read Nowledge Mem integration bundle input: {}",
-            error.kind()
-        ))
+    let raw = std::fs::read_to_string(path).map_err(|_| {
+        SkeinError::Execution(
+            "failed to read Nowledge Mem integration bundle input: io_error".to_string(),
+        )
     })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse Nowledge Mem integration bundle input: {error}"
-        ))
+    serde_json::from_str(&raw).map_err(|_| {
+        SkeinError::Semantic(
+            "failed to parse Nowledge Mem integration bundle input: invalid_json".to_string(),
+        )
     })
 }
 
@@ -1245,6 +1244,8 @@ mod tests {
         NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn generated_bundle_feeds_integration_readiness_gate() {
@@ -1305,6 +1306,43 @@ mod tests {
                 == "skein-background-maintenance-report"));
         assert_eq!(readiness["ready"], true);
         assert_eq!(readiness["failed_checks"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn bundle_input_read_errors_are_redacted_by_default() {
+        let secret_path =
+            unique_test_path("bundle-input-secret-path-do-not-emit").join("missing-secret.json");
+
+        let error = super::read_json_file(&secret_path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "execution error: failed to read Nowledge Mem integration bundle input: io_error"
+        );
+        assert!(!error.contains("bundle-input-secret-path-do-not-emit"));
+        assert!(!error.contains("missing-secret"));
+    }
+
+    #[test]
+    fn bundle_input_parse_errors_are_redacted_by_default() {
+        let root = unique_test_path("bundle-input-parse-redaction");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("secret-bundle-input-path-do-not-emit.json");
+        std::fs::write(
+            &path,
+            "{ \"secret\": \"bundle-input-parse-secret-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse Nowledge Mem integration bundle input: invalid_json"
+        );
+        assert!(!error.contains("secret-bundle-input-path-do-not-emit"));
+        assert!(!error.contains("bundle-input-parse-secret-do-not-emit"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2183,5 +2221,13 @@ mod tests {
                 "artifact_paths_are_relative": true
             }
         })
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein-{name}-{nanos}"))
     }
 }
