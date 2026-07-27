@@ -236,6 +236,21 @@ pub struct GraphRouteCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueryRuntimePreflightCutoverReadiness {
+    pub protocol_matches: bool,
+    pub ready: bool,
+    pub database_opened: bool,
+    pub probe_count_present: bool,
+    pub probe_counts_match: bool,
+    pub failed_probe_count_zero: bool,
+    pub route_coverage_ready: bool,
+    pub route_catalog_version_matches: bool,
+    pub route_catalog_digest_present: bool,
+    pub probe_details_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
 impl LibraryReadinessCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -350,6 +365,21 @@ impl GraphRouteCutoverReadiness {
     }
 }
 
+impl QueryRuntimePreflightCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+            && self.ready
+            && self.database_opened
+            && self.probe_count_present
+            && self.probe_counts_match
+            && self.failed_probe_count_zero
+            && self.route_coverage_ready
+            && self.route_catalog_version_matches
+            && self.route_catalog_digest_present
+            && self.probe_details_ready
+    }
+}
+
 impl BackgroundMaintenanceCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.required
@@ -426,6 +456,7 @@ pub fn nowledge_mem_integration_readiness(
     let search_candidate_readiness = search_candidate_cutover_readiness(bundle);
     let bounded_read_readiness = bounded_read_cutover_readiness(bundle);
     let graph_route_readiness = graph_route_cutover_readiness(bundle);
+    let query_runtime_readiness = query_runtime_preflight_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
@@ -945,43 +976,10 @@ pub fn nowledge_mem_integration_readiness(
                 &[&["graph_route_parity_alignment", "blocker_codes"][..]],
             ),
         ),
-        check(
+        check_named_conditions(
             "query_runtime_preflight",
-            [
-                str_path(bundle, &["query_runtime_preflight", "protocol"])
-                    == Some(SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL),
-                bool_path(bundle, &["query_runtime_preflight", "ready"]) == Some(true),
-                bool_path(bundle, &["query_runtime_preflight", "database_opened"]) == Some(true),
-                u64_path(bundle, &["query_runtime_preflight", "probe_count"])
-                    .is_some_and(|value| value > 0),
-                query_runtime_preflight_counts_match(bundle),
-                u64_path(bundle, &["query_runtime_preflight", "failed_probe_count"]) == Some(0),
-                query_runtime_preflight_route_coverage_ready(bundle),
-                str_path(bundle, &["query_runtime_preflight", "route_catalog_version"])
-                    == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
-                str_path(bundle, &["query_runtime_preflight", "route_catalog_digest"]).is_some(),
-                query_runtime_preflight_probe_details_ready(bundle),
-            ],
-            [
-                "query_runtime_preflight.protocol",
-                "query_runtime_preflight.ready",
-                "query_runtime_preflight.database_opened",
-                "query_runtime_preflight.probe_count",
-                "query_runtime_preflight.passed_probe_count",
-                "query_runtime_preflight.failed_probe_count",
-                "query_runtime_preflight.route_coverage",
-                "query_runtime_preflight.route_catalog_version",
-                "query_runtime_preflight.route_catalog_digest",
-                "query_runtime_preflight.probes",
-            ],
-            blocker_codes(
-                bundle,
-                &[
-                    &["query_runtime_preflight", "blocker_codes"][..],
-                    &["query_runtime_preflight", "failed_checks"][..],
-                    &["query_runtime_preflight", "route_coverage_blocker_codes"][..],
-                ],
-            ),
+            query_runtime_preflight_cutover_conditions(&query_runtime_readiness),
+            query_runtime_readiness.blocker_codes.clone(),
         ),
         check(
             "query_runtime_preflight_alignment",
@@ -1321,6 +1319,7 @@ pub fn nowledge_mem_integration_readiness(
                 search_candidate: &search_candidate_readiness,
                 bounded_read: &bounded_read_readiness,
                 graph_route: &graph_route_readiness,
+                query_runtime: &query_runtime_readiness,
                 blackbox: &blackbox_readiness,
                 storage_recovery: &storage_recovery_readiness,
                 background_maintenance: &background_maintenance_readiness,
@@ -1383,6 +1382,7 @@ struct IntegrationGateReadiness<'a> {
     search_candidate: &'a SearchCandidateCutoverReadiness,
     bounded_read: &'a BoundedReadCutoverReadiness,
     graph_route: &'a GraphRouteCutoverReadiness,
+    query_runtime: &'a QueryRuntimePreflightCutoverReadiness,
     blackbox: &'a BlackboxReadinessReport,
     storage_recovery: &'a StorageRecoveryCutoverReadiness,
     background_maintenance: &'a BackgroundMaintenanceCutoverReadiness,
@@ -1649,7 +1649,7 @@ fn next_actions(
             ],
         ));
     }
-    if !query_runtime_preflight_ready(bundle) {
+    if !readiness.query_runtime.evidence_ready() {
         actions.push(next_action(
             "attach_query_runtime_preflight_evidence",
             "Nowledge Mem cutover requires read-only query runtime EXPLAIN ANALYZE preflight evidence",
@@ -3126,17 +3126,86 @@ fn graph_route_parity_alignment_ready(bundle: &serde_json::Value) -> bool {
         && string_array_path(bundle, &["graph_route_parity_alignment", "blocker_routes"]).is_empty()
 }
 
-fn query_runtime_preflight_ready(bundle: &serde_json::Value) -> bool {
-    str_path(bundle, &["query_runtime_preflight", "protocol"])
-        == Some(SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL)
-        && bool_path(bundle, &["query_runtime_preflight", "ready"]) == Some(true)
-        && bool_path(bundle, &["query_runtime_preflight", "database_opened"]) == Some(true)
-        && u64_path(bundle, &["query_runtime_preflight", "probe_count"])
-            .is_some_and(|value| value > 0)
-        && query_runtime_preflight_counts_match(bundle)
-        && u64_path(bundle, &["query_runtime_preflight", "failed_probe_count"]) == Some(0)
-        && query_runtime_preflight_route_coverage_ready(bundle)
-        && query_runtime_preflight_probe_details_ready(bundle)
+pub fn query_runtime_preflight_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> QueryRuntimePreflightCutoverReadiness {
+    QueryRuntimePreflightCutoverReadiness {
+        protocol_matches: str_path(bundle, &["query_runtime_preflight", "protocol"])
+            == Some(SKEIN_NOWLEDGE_QUERY_RUNTIME_PREFLIGHT_PROTOCOL),
+        ready: bool_path(bundle, &["query_runtime_preflight", "ready"]) == Some(true),
+        database_opened: bool_path(bundle, &["query_runtime_preflight", "database_opened"])
+            == Some(true),
+        probe_count_present: u64_path(bundle, &["query_runtime_preflight", "probe_count"])
+            .is_some_and(|value| value > 0),
+        probe_counts_match: query_runtime_preflight_counts_match(bundle),
+        failed_probe_count_zero: u64_path(
+            bundle,
+            &["query_runtime_preflight", "failed_probe_count"],
+        ) == Some(0),
+        route_coverage_ready: query_runtime_preflight_route_coverage_ready(bundle),
+        route_catalog_version_matches: str_path(
+            bundle,
+            &["query_runtime_preflight", "route_catalog_version"],
+        ) == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
+        route_catalog_digest_present: str_path(
+            bundle,
+            &["query_runtime_preflight", "route_catalog_digest"],
+        )
+        .is_some(),
+        probe_details_ready: query_runtime_preflight_probe_details_ready(bundle),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[
+                &["query_runtime_preflight", "blocker_codes"][..],
+                &["query_runtime_preflight", "failed_checks"][..],
+                &["query_runtime_preflight", "route_coverage_blocker_codes"][..],
+            ],
+        ),
+    }
+}
+
+fn query_runtime_preflight_cutover_conditions(
+    readiness: &QueryRuntimePreflightCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "query_runtime_preflight.protocol",
+            readiness.protocol_matches,
+        ),
+        ("query_runtime_preflight.ready", readiness.ready),
+        (
+            "query_runtime_preflight.database_opened",
+            readiness.database_opened,
+        ),
+        (
+            "query_runtime_preflight.probe_count",
+            readiness.probe_count_present,
+        ),
+        (
+            "query_runtime_preflight.passed_probe_count",
+            readiness.probe_counts_match,
+        ),
+        (
+            "query_runtime_preflight.failed_probe_count",
+            readiness.failed_probe_count_zero,
+        ),
+        (
+            "query_runtime_preflight.route_coverage",
+            readiness.route_coverage_ready,
+        ),
+        (
+            "query_runtime_preflight.route_catalog_version",
+            readiness.route_catalog_version_matches,
+        ),
+        (
+            "query_runtime_preflight.route_catalog_digest",
+            readiness.route_catalog_digest_present,
+        ),
+        (
+            "query_runtime_preflight.probes",
+            readiness.probe_details_ready,
+        ),
+    ]
 }
 
 fn query_runtime_preflight_counts_match(bundle: &serde_json::Value) -> bool {
@@ -5309,6 +5378,40 @@ mod tests {
             .unwrap()
             .iter()
             .any(|action| action["action"] == "attach_query_runtime_preflight_evidence"));
+    }
+
+    #[test]
+    fn exposes_typed_query_runtime_preflight_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::query_runtime_preflight_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.ready);
+        assert!(typed.database_opened);
+        assert!(typed.probe_count_present);
+        assert!(typed.probe_counts_match);
+        assert!(typed.failed_probe_count_zero);
+        assert!(typed.route_coverage_ready);
+        assert!(typed.route_catalog_version_matches);
+        assert!(typed.route_catalog_digest_present);
+        assert!(typed.probe_details_ready);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_query_runtime_preflight_recomputes_probe_details() {
+        let mut bundle = ready_bundle();
+        bundle["query_runtime_preflight"]["probes"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("selected_plan_fingerprint");
+
+        let typed = super::query_runtime_preflight_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.probe_details_ready);
     }
 
     #[test]
