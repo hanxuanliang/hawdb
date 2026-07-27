@@ -50,6 +50,9 @@ query family, or cutover gate requires them.
   - [x] Redact final previous-wrapper preflight JSON input read and parse
     failures by default so local paths and raw payload fragments are not copied
     into command errors.
+  - [x] Redact integration-readiness bundle input read and parse failures by
+    default so final cutover diagnostics do not copy local paths or payload
+    fragments.
 
 ## P0: Concrete Cutover Blockers
 

@@ -1908,15 +1908,15 @@ fn next_action(
 }
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
-    let raw = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to read Nowledge Mem integration bundle: {error}",
-        ))
+    let raw = std::fs::read_to_string(path).map_err(|_| {
+        SkeinError::Execution(
+            "failed to read Nowledge Mem integration bundle: io_error".to_string(),
+        )
     })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to parse Nowledge Mem integration bundle: {error}",
-        ))
+    serde_json::from_str(&raw).map_err(|_| {
+        SkeinError::Execution(
+            "failed to parse Nowledge Mem integration bundle: invalid_json".to_string(),
+        )
     })
 }
 
@@ -5148,6 +5148,8 @@ mod tests {
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_SHADOW_ENGINE,
         NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn reports_ready_when_mem_integration_evidence_is_complete() {
@@ -5157,6 +5159,43 @@ mod tests {
         assert_eq!(report["failed_checks"], serde_json::json!([]));
         assert_eq!(report["blocker_codes"], serde_json::json!([]));
         assert_eq!(report["next_actions"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn integration_bundle_read_errors_are_redacted_by_default() {
+        let secret_path = unique_test_path("integration-secret-path-do-not-emit")
+            .join("missing-secret-bundle.json");
+
+        let error = super::read_json_file(&secret_path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "execution error: failed to read Nowledge Mem integration bundle: io_error"
+        );
+        assert!(!error.contains("integration-secret-path-do-not-emit"));
+        assert!(!error.contains("missing-secret-bundle"));
+    }
+
+    #[test]
+    fn integration_bundle_parse_errors_are_redacted_by_default() {
+        let root = unique_test_path("integration-parse-redaction");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("secret-bundle-path-do-not-emit.json");
+        std::fs::write(
+            &path,
+            "{ \"secret\": \"bundle-parse-secret-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "execution error: failed to parse Nowledge Mem integration bundle: invalid_json"
+        );
+        assert!(!error.contains("secret-bundle-path-do-not-emit"));
+        assert!(!error.contains("bundle-parse-secret-do-not-emit"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -9715,5 +9754,13 @@ mod tests {
                 "blocker_codes": []
             }
         })
+    }
+
+    fn unique_test_path(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein-{name}-{nanos}"))
     }
 }
