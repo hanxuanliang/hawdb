@@ -2168,38 +2168,48 @@ fn search_projection_probe_segment_document_pruning_report(
 fn search_projection_probe_segment_descriptor_field_summaries(
     descriptor: &SearchSegmentDescriptor,
 ) -> Vec<serde_json::Value> {
-    let mut fields = BTreeMap::<String, (usize, bool, bool, bool)>::new();
+    let mut fields = BTreeMap::<String, SearchProjectionProbeFieldSummary>::new();
     for segment in &descriptor.segments {
         for (field, summary) in &segment.metadata {
             let entry = fields.entry(field.clone()).or_default();
-            entry.0 += 1;
-            entry.1 |= !summary.values.is_empty();
-            entry.2 |= summary.numeric_range.is_some();
-            entry.3 |= summary.timestamp_range.is_some();
+            entry.segment_count += 1;
+            entry.present_document_count += summary.present_count;
+            if !summary.values.is_empty() {
+                entry.value_summary_segment_count += 1;
+            }
+            if summary.numeric_range.is_some() {
+                entry.numeric_range_segment_count += 1;
+            }
+            if summary.timestamp_range.is_some() {
+                entry.timestamp_range_segment_count += 1;
+            }
         }
     }
     fields
         .into_iter()
-        .map(
-            |(
-                field,
-                (
-                    segment_count,
-                    value_summary_used,
-                    numeric_range_summary_used,
-                    timestamp_range_summary_used,
-                ),
-            )| {
-                serde_json::json!({
-                    "field": field,
-                    "segment_count": segment_count,
-                    "value_summary_used": value_summary_used,
-                    "numeric_range_summary_used": numeric_range_summary_used,
-                    "timestamp_range_summary_used": timestamp_range_summary_used,
-                })
-            },
-        )
+        .map(|(field, summary)| {
+            serde_json::json!({
+                "field": field,
+                "segment_count": summary.segment_count,
+                "present_document_count": summary.present_document_count,
+                "value_summary_used": summary.value_summary_segment_count > 0,
+                "value_summary_segment_count": summary.value_summary_segment_count,
+                "numeric_range_summary_used": summary.numeric_range_segment_count > 0,
+                "numeric_range_segment_count": summary.numeric_range_segment_count,
+                "timestamp_range_summary_used": summary.timestamp_range_segment_count > 0,
+                "timestamp_range_segment_count": summary.timestamp_range_segment_count,
+            })
+        })
         .collect()
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct SearchProjectionProbeFieldSummary {
+    segment_count: usize,
+    present_document_count: usize,
+    value_summary_segment_count: usize,
+    numeric_range_segment_count: usize,
+    timestamp_range_segment_count: usize,
 }
 
 #[cfg(feature = "turbovec")]

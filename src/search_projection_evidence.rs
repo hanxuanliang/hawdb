@@ -841,9 +841,13 @@ fn ready_segment_descriptor_field_summary_template(
     serde_json::json!({
         "field": field,
         "segment_count": 1,
+        "present_document_count": 1,
         "value_summary_used": value_summary_used,
+        "value_summary_segment_count": usize::from(value_summary_used),
         "numeric_range_summary_used": numeric_range_summary_used,
+        "numeric_range_segment_count": usize::from(numeric_range_summary_used),
         "timestamp_range_summary_used": timestamp_range_summary_used,
+        "timestamp_range_segment_count": usize::from(timestamp_range_summary_used),
     })
 }
 
@@ -1157,13 +1161,40 @@ fn required_capability_missing_fields(
         .filter(|field| {
             !summaries.iter().any(|summary| {
                 str_path(summary, &["field"]) == Some(*field)
-                    && (bool_path(summary, &[capability]) == Some(true)
+                    && segment_descriptor_summary_base_ready(summary)
+                    && (segment_descriptor_summary_capability_ready(summary, capability)
                         || alternative_capability.is_some_and(|capability| {
-                            bool_path(summary, &[capability]) == Some(true)
+                            segment_descriptor_summary_capability_ready(summary, capability)
                         }))
             })
         })
         .collect()
+}
+
+fn segment_descriptor_summary_base_ready(summary: &serde_json::Value) -> bool {
+    u64_path(summary, &["segment_count"]).is_some_and(|count| count > 0)
+        && u64_path(summary, &["present_document_count"]).is_some()
+}
+
+fn segment_descriptor_summary_capability_ready(
+    summary: &serde_json::Value,
+    capability: &str,
+) -> bool {
+    bool_path(summary, &[capability]) == Some(true)
+        && segment_descriptor_summary_capability_count(summary, capability)
+            .is_some_and(|count| count > 0)
+}
+
+fn segment_descriptor_summary_capability_count(
+    summary: &serde_json::Value,
+    capability: &str,
+) -> Option<u64> {
+    match capability {
+        "value_summary_used" => u64_path(summary, &["value_summary_segment_count"]),
+        "numeric_range_summary_used" => u64_path(summary, &["numeric_range_segment_count"]),
+        "timestamp_range_summary_used" => u64_path(summary, &["timestamp_range_segment_count"]),
+        _ => None,
+    }
 }
 
 fn collect_probe_blockers(probe: &serde_json::Value, blockers: &mut BTreeSet<String>) {
@@ -1522,6 +1553,39 @@ mod tests {
         assert_eq!(
             report["predicate_pushdown"]["missing_numeric_range_fields"],
             serde_json::json!(["importance"])
+        );
+        assert!(report["blocker_codes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|code| code == "skein_predicate_pushdown_descriptor_not_ready"));
+    }
+
+    #[test]
+    fn skein_search_projection_evidence_requires_descriptor_summary_counts() {
+        let mut probe = ready_probe();
+        let summaries = probe["predicate_pushdown"]["segment_descriptor_field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        let lifecycle_state = summaries
+            .iter_mut()
+            .find(|summary| summary["field"] == "lifecycle_state")
+            .unwrap();
+        lifecycle_state["value_summary_used"] = serde_json::json!(true);
+        lifecycle_state["value_summary_segment_count"] = serde_json::json!(0);
+
+        let report = nowledge_search_projection_evidence_json(&probe);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(report["predicate_pushdown_ready"], true);
+        assert_eq!(report["skein_predicate_pushdown_ready"], false);
+        assert_eq!(
+            report["predicate_pushdown"]["segment_descriptor_capabilities_ready"],
+            false
+        );
+        assert_eq!(
+            report["predicate_pushdown"]["missing_value_summary_fields"],
+            serde_json::json!(["lifecycle_state"])
         );
         assert!(report["blocker_codes"]
             .as_array()
@@ -1936,9 +2000,13 @@ mod tests {
         serde_json::json!({
             "field": field,
             "segment_count": 1,
+            "present_document_count": 1,
             "value_summary_used": value_summary_used,
+            "value_summary_segment_count": usize::from(value_summary_used),
             "numeric_range_summary_used": numeric_range_summary_used,
+            "numeric_range_segment_count": usize::from(numeric_range_summary_used),
             "timestamp_range_summary_used": timestamp_range_summary_used,
+            "timestamp_range_segment_count": usize::from(timestamp_range_summary_used),
         })
     }
 }

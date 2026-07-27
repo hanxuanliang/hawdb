@@ -1535,13 +1535,44 @@ fn required_capability_missing_fields(
         .filter(|field| {
             !summaries.iter().any(|summary| {
                 json_get_str_path(summary, &["field"]) == Some(*field)
-                    && (json_get_bool_path(summary, &[capability]) == Some(true)
+                    && segment_descriptor_summary_base_ready(summary)
+                    && (segment_descriptor_summary_capability_ready(summary, capability)
                         || alternative_capability.is_some_and(|capability| {
-                            json_get_bool_path(summary, &[capability]) == Some(true)
+                            segment_descriptor_summary_capability_ready(summary, capability)
                         }))
             })
         })
         .collect()
+}
+
+fn segment_descriptor_summary_base_ready(summary: &serde_json::Value) -> bool {
+    json_get_u64_path(summary, &["segment_count"]).is_some_and(|count| count > 0)
+        && json_get_u64_path(summary, &["present_document_count"]).is_some()
+}
+
+fn segment_descriptor_summary_capability_ready(
+    summary: &serde_json::Value,
+    capability: &str,
+) -> bool {
+    json_get_bool_path(summary, &[capability]) == Some(true)
+        && segment_descriptor_summary_capability_count(summary, capability)
+            .is_some_and(|count| count > 0)
+}
+
+fn segment_descriptor_summary_capability_count(
+    summary: &serde_json::Value,
+    capability: &str,
+) -> Option<u64> {
+    match capability {
+        "value_summary_used" => json_get_u64_path(summary, &["value_summary_segment_count"]),
+        "numeric_range_summary_used" => {
+            json_get_u64_path(summary, &["numeric_range_segment_count"])
+        }
+        "timestamp_range_summary_used" => {
+            json_get_u64_path(summary, &["timestamp_range_segment_count"])
+        }
+        _ => None,
+    }
 }
 
 fn search_projection_shadow_blocker_codes_with_pushdown(
@@ -3588,6 +3619,53 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_recomputes_search_projection_shadow_descriptor_summary_counts() {
+        let mut bundle = production_ready_bundle();
+        bundle["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"] =
+            serde_json::json!(true);
+        bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_scan_filter_fields_ready"] = serde_json::json!(true);
+        let summaries = bundle["search_projection_shadow_evidence"]["pushdown_evidence"]
+            ["shadow_segment_descriptor_field_summaries"]
+            .as_array_mut()
+            .unwrap();
+        let unit_type = summaries
+            .iter_mut()
+            .find(|summary| summary["field"] == "unit_type")
+            .unwrap();
+        unit_type["value_summary_used"] = serde_json::json!(true);
+        unit_type["value_summary_segment_count"] = serde_json::json!(0);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["production_replacement_per_million"], 0);
+        assert_eq!(summary["search_projection_shadow_evidence"]["ready"], false);
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]["ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+                ["shadow_segment_descriptor_capabilities_ready"],
+            false
+        );
+        assert_eq!(
+            summary["search_projection_shadow_evidence"]["pushdown_evidence"]
+                ["missing_value_summary_fields"],
+            serde_json::json!(["unit_type"])
+        );
+        assert!(
+            summary["search_projection_shadow_evidence"]["blocker_codes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|code| code == SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING)
+        );
+    }
+
+    #[test]
     fn replacement_summary_recomputes_search_projection_shadow_document_pruning() {
         let mut bundle = production_ready_bundle();
         bundle["search_projection_shadow_evidence"]["ready"] = serde_json::json!(true);
@@ -5307,9 +5385,13 @@ mod tests {
         serde_json::json!({
             "field": field,
             "segment_count": 1,
+            "present_document_count": 1,
             "value_summary_used": value_summary_used,
+            "value_summary_segment_count": usize::from(value_summary_used),
             "numeric_range_summary_used": numeric_range_summary_used,
+            "numeric_range_segment_count": usize::from(numeric_range_summary_used),
             "timestamp_range_summary_used": timestamp_range_summary_used,
+            "timestamp_range_segment_count": usize::from(timestamp_range_summary_used),
         })
     }
 

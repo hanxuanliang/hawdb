@@ -156,6 +156,9 @@ contract.
     fail-closed readiness checks for missing field summaries.
   - Acceptance: replacement summary rejects search candidate cutover when
     pushed predicates lack segment-level pruning evidence.
+  - [x] Require search projection descriptor summaries to expose non-zero
+    summary counts for declared value, numeric-range, and timestamp-range scan
+    pruning capabilities.
 - [ ] PR 5: Close LanceDB candidate read replacement.
   - Scope: run FTS, vector, source chunk identity, embedding identity,
     fail-soft, rebuild marker, repair marker, and incremental watermark evidence

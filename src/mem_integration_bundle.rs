@@ -1669,12 +1669,23 @@ mod tests {
             .map(|field| {
                 serde_json::json!({
                     "field": field,
+                    "segment_count": 1,
+                    "present_document_count": 1,
                     "value_summary_used": true,
+                    "value_summary_segment_count": 1,
                     "numeric_range_summary_used": matches!(*field, "importance" | "confidence"),
+                    "numeric_range_segment_count": usize::from(matches!(
+                        *field,
+                        "importance" | "confidence"
+                    )),
                     "timestamp_range_summary_used": matches!(
                         *field,
                         "created_at" | "updated_at" | "event_start" | "event_end"
-                    )
+                    ),
+                    "timestamp_range_segment_count": usize::from(matches!(
+                        *field,
+                        "created_at" | "updated_at" | "event_start" | "event_end"
+                    )),
                 })
             })
             .collect::<Vec<_>>())
