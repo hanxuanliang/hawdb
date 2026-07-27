@@ -2103,6 +2103,12 @@ mod tests {
             "ready_area_count": 10,
             "blocked_area_count": 0,
             "blocker_codes": [],
+            "redaction": {
+                "ready": true,
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            },
             "open_report": {
                 "graph_opened": true,
                 "search_projection_opened": true

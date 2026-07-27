@@ -41,6 +41,8 @@ query family, or cutover gate requires them.
   - Expose raw local diagnostics only behind explicit debug flags.
   - [x] Expose a typed library-readiness redaction summary proving query text,
     parameters, and local paths are not copied into the default report.
+  - [x] Require integration readiness to validate library-readiness redaction
+    fields so copied query text, parameters, or local paths block cutover.
 
 ## P0: Concrete Cutover Blockers
 

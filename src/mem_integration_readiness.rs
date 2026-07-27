@@ -266,6 +266,10 @@ pub struct LibraryReadinessCutoverReadiness {
     pub ready: bool,
     pub ready_area_count_present: bool,
     pub blocked_area_count_zero: bool,
+    pub redaction_ready: bool,
+    pub query_text_redacted: bool,
+    pub parameters_redacted: bool,
+    pub local_paths_redacted: bool,
     pub graph_opened: bool,
     pub search_projection_opened: bool,
     pub graph_ready: bool,
@@ -578,6 +582,10 @@ impl LibraryReadinessCutoverReadiness {
             && self.ready
             && self.ready_area_count_present
             && self.blocked_area_count_zero
+            && self.redaction_ready
+            && self.query_text_redacted
+            && self.parameters_redacted
+            && self.local_paths_redacted
             && self.graph_opened
             && self.search_projection_opened
             && self.graph_ready
@@ -4451,6 +4459,20 @@ pub fn library_readiness_cutover_readiness(
             .is_some_and(|value| value > 0),
         blocked_area_count_zero: u64_path(bundle, &["library_readiness", "blocked_area_count"])
             == Some(0),
+        redaction_ready: bool_path(bundle, &["library_readiness", "redaction", "ready"])
+            == Some(true),
+        query_text_redacted: bool_path(
+            bundle,
+            &["library_readiness", "redaction", "query_text_copied"],
+        ) == Some(false),
+        parameters_redacted: bool_path(
+            bundle,
+            &["library_readiness", "redaction", "parameters_copied"],
+        ) == Some(false),
+        local_paths_redacted: bool_path(
+            bundle,
+            &["library_readiness", "redaction", "local_paths_copied"],
+        ) == Some(false),
         graph_opened: bool_path(
             bundle,
             &["library_readiness", "open_report", "graph_opened"],
@@ -4562,6 +4584,22 @@ fn library_readiness_cutover_conditions(
         (
             "library_readiness.blocked_area_count",
             readiness.blocked_area_count_zero,
+        ),
+        (
+            "library_readiness.redaction.ready",
+            readiness.redaction_ready,
+        ),
+        (
+            "library_readiness.redaction.query_text_copied",
+            readiness.query_text_redacted,
+        ),
+        (
+            "library_readiness.redaction.parameters_copied",
+            readiness.parameters_redacted,
+        ),
+        (
+            "library_readiness.redaction.local_paths_copied",
+            readiness.local_paths_redacted,
         ),
         (
             "library_readiness.open_report.graph_opened",
@@ -8273,6 +8311,10 @@ mod tests {
                 "library_readiness.ready",
                 "library_readiness.ready_area_count",
                 "library_readiness.blocked_area_count",
+                "library_readiness.redaction.ready",
+                "library_readiness.redaction.query_text_copied",
+                "library_readiness.redaction.parameters_copied",
+                "library_readiness.redaction.local_paths_copied",
                 "library_readiness.open_report.graph_opened",
                 "library_readiness.open_report.search_projection_opened",
                 "library_readiness.readiness_by_area.graph.ready",
@@ -8347,6 +8389,53 @@ mod tests {
                 "library_readiness.ready",
                 "library_readiness.blocked_area_count",
                 "library_readiness.readiness_by_area.search_projection.ready"
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_library_readiness_that_copies_sensitive_fields() {
+        let mut bundle = ready_bundle();
+        bundle["library_readiness"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["redaction"]["ready"] = serde_json::json!(false);
+        bundle["library_readiness"]["redaction"]["query_text_copied"] = serde_json::json!(true);
+        bundle["library_readiness"]["redaction"]["parameters_copied"] = serde_json::json!(true);
+        bundle["library_readiness"]["redaction"]["local_paths_copied"] = serde_json::json!(true);
+        bundle["library_readiness"]["blocker_codes"] =
+            serde_json::json!(["library_readiness_redaction_not_ready"]);
+
+        let typed = super::library_readiness_cutover_readiness(&bundle);
+        assert!(!typed.evidence_ready());
+        assert!(!typed.redaction_ready);
+        assert!(!typed.query_text_redacted);
+        assert!(!typed.parameters_redacted);
+        assert!(!typed.local_paths_redacted);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["library_readiness"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["library_readiness_redaction_not_ready"])
+        );
+        let library_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "library_readiness")
+            .unwrap();
+        assert_eq!(
+            library_check["failed_evidence_fields"],
+            serde_json::json!([
+                "library_readiness.ready",
+                "library_readiness.redaction.ready",
+                "library_readiness.redaction.query_text_copied",
+                "library_readiness.redaction.parameters_copied",
+                "library_readiness.redaction.local_paths_copied"
             ])
         );
     }
@@ -9331,6 +9420,12 @@ mod tests {
             "ready_area_count": 10,
             "blocked_area_count": 0,
             "blocker_codes": [],
+            "redaction": {
+                "ready": true,
+                "query_text_copied": false,
+                "parameters_copied": false,
+                "local_paths_copied": false
+            },
             "open_report": {
                 "protocol": "skein-nowledge-mem-open-report",
                 "mode": "shadow_read_only",
