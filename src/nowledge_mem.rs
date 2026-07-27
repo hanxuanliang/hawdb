@@ -201,6 +201,8 @@ pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/entities/{entity_id}/relationships",
     "/agent/evolves",
 ];
+pub const NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION: &str =
+    "nowledge-mem-graph-read-route-catalog-v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemGraphReadRouteOwner {
@@ -326,6 +328,33 @@ pub fn nowledge_mem_graph_read_route_specs_json() -> serde_json::Value {
         .collect::<Vec<_>>())
 }
 
+pub fn nowledge_mem_graph_read_route_catalog_digest() -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325u64;
+    for spec in NOWLEDGE_MEM_GRAPH_READ_ROUTE_SPECS {
+        fnv1a_update(&mut hash, spec.route.as_bytes());
+        fnv1a_update(&mut hash, spec.owner.as_str().as_bytes());
+        fnv1a_update(&mut hash, spec.required_evidence_kind.as_str().as_bytes());
+        fnv1a_update(
+            &mut hash,
+            if spec.stale_on_catalog_change {
+                b"true"
+            } else {
+                b"false"
+            },
+        );
+    }
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn fnv1a_update(hash: &mut u64, bytes: &[u8]) {
+    for byte in bytes {
+        *hash ^= u64::from(*byte);
+        *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    *hash ^= 0xff;
+    *hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+}
+
 pub fn nowledge_mem_required_query_families_for_route(route: &str) -> &'static [&'static str] {
     match route {
         "/communities"
@@ -433,6 +462,8 @@ pub struct NowledgeQueryRuntimePreflightReport {
     pub required_routes_covered: bool,
     pub unknown_routes: Vec<String>,
     pub duplicate_routes: Vec<String>,
+    pub route_catalog_version: String,
+    pub route_catalog_digest: String,
     pub route_coverage_ready: bool,
     pub route_coverage_blocker_codes: Vec<String>,
     pub blocker_codes: Vec<String>,
@@ -455,6 +486,8 @@ impl NowledgeQueryRuntimePreflightReport {
             "required_routes_covered": self.required_routes_covered,
             "unknown_routes": self.unknown_routes,
             "duplicate_routes": self.duplicate_routes,
+            "route_catalog_version": self.route_catalog_version,
+            "route_catalog_digest": self.route_catalog_digest,
             "route_coverage_ready": self.route_coverage_ready,
             "route_coverage_blocker_codes": self.route_coverage_blocker_codes,
             "blocker_codes": self.blocker_codes,
@@ -739,6 +772,8 @@ pub fn nowledge_mem_bounded_read_evidence_json_with_route_readiness(
         "covered_routes": covered_routes,
         "required_covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
         "missing_covered_routes": missing_covered_routes,
+        "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
         "route_primary_ready": route_primary_ready,
         "primary_ready_routes": primary_ready_routes,
         "route_query_plan_evidence_ready": route_query_plan_evidence_ready,
@@ -3376,6 +3411,8 @@ fn nowledge_query_runtime_preflight_report(
         required_routes_covered: route_coverage.required_routes_covered,
         unknown_routes: route_coverage.unknown_routes,
         duplicate_routes: route_coverage.duplicate_routes,
+        route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
+        route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
         route_coverage_ready: route_coverage.ready,
         route_coverage_blocker_codes: route_coverage.blocker_codes,
         blocker_codes,
@@ -3865,6 +3902,8 @@ fn nowledge_mem_graph_route_readiness_json(
             "primary_ready_route_count": 0,
             "primary_ready_routes": [],
             "missing_required_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+            "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+            "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
             "route_primary_ready": null,
             "route_query_plan_evidence_ready": null,
             "route_query_profile_evidence_ready": null,
@@ -3904,6 +3943,8 @@ fn nowledge_mem_graph_route_readiness_json(
         "primary_ready_route_count": summary.primary_ready_routes.len(),
         "primary_ready_routes": summary.primary_ready_routes,
         "missing_required_routes": missing_required_routes,
+        "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
         "route_primary_ready": summary.route_primary_ready,
         "route_query_plan_evidence_ready": summary.route_query_plan_evidence_ready,
         "route_query_profile_evidence_ready": summary.route_query_profile_evidence_ready,
@@ -4068,6 +4109,13 @@ fn bounded_read_readiness_blocker_codes(evidence: &serde_json::Value) -> Vec<Str
         .is_some_and(|routes| routes.is_empty())
     {
         blockers.insert("bounded_read_missing_covered_routes".to_string());
+    }
+    if evidence_string(evidence, "route_catalog_version")
+        != Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION)
+        || evidence_string(evidence, "route_catalog_digest")
+            != Some(nowledge_mem_graph_read_route_catalog_digest().as_str())
+    {
+        blockers.insert("bounded_read_route_catalog_stale".to_string());
     }
     if evidence_bool(evidence, "route_primary_ready") != Some(true)
         || evidence_bool(evidence, "route_query_plan_evidence_ready") != Some(true)

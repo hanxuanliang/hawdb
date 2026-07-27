@@ -1,6 +1,7 @@
 use crate::{
     graph_route_readiness::NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL,
-    nowledge_graph_route_readiness_summary, Result, SkeinError,
+    nowledge_graph_route_readiness_summary, nowledge_mem_graph_read_route_catalog_digest, Result,
+    SkeinError, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -602,6 +603,20 @@ fn bounded_read_alignment_json(
         bool_path(bounded_read_evidence, &["streaming"]) == bool_path(summary, &["streaming"]);
     let covered_routes_matches = string_set_path(bounded_read_evidence, &["covered_routes"])
         == string_set_path(summary, &["covered_routes"]);
+    let evidence_route_catalog_version_ready =
+        str_path(bounded_read_evidence, &["route_catalog_version"])
+            == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION);
+    let summary_route_catalog_version_ready = str_path(summary, &["route_catalog_version"])
+        == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION);
+    let evidence_route_catalog_digest_ready =
+        str_path(bounded_read_evidence, &["route_catalog_digest"])
+            == Some(nowledge_mem_graph_read_route_catalog_digest().as_str());
+    let summary_route_catalog_digest_ready = str_path(summary, &["route_catalog_digest"])
+        == Some(nowledge_mem_graph_read_route_catalog_digest().as_str());
+    let route_catalog_version_matches = str_path(bounded_read_evidence, &["route_catalog_version"])
+        == str_path(summary, &["route_catalog_version"]);
+    let route_catalog_digest_matches = str_path(bounded_read_evidence, &["route_catalog_digest"])
+        == str_path(summary, &["route_catalog_digest"]);
     let alignment = BoundedReadAlignment {
         evidence_present,
         summary_present,
@@ -616,6 +631,12 @@ fn bounded_read_alignment_json(
         payload_budget_exceeded_matches,
         streaming_matches,
         covered_routes_matches,
+        evidence_route_catalog_version_ready,
+        summary_route_catalog_version_ready,
+        evidence_route_catalog_digest_ready,
+        summary_route_catalog_digest_ready,
+        route_catalog_version_matches,
+        route_catalog_digest_matches,
     };
 
     serde_json::json!({
@@ -633,6 +654,12 @@ fn bounded_read_alignment_json(
         "payload_budget_exceeded_matches": alignment.payload_budget_exceeded_matches,
         "streaming_matches": alignment.streaming_matches,
         "covered_routes_matches": alignment.covered_routes_matches,
+        "evidence_route_catalog_version_ready": alignment.evidence_route_catalog_version_ready,
+        "summary_route_catalog_version_ready": alignment.summary_route_catalog_version_ready,
+        "evidence_route_catalog_digest_ready": alignment.evidence_route_catalog_digest_ready,
+        "summary_route_catalog_digest_ready": alignment.summary_route_catalog_digest_ready,
+        "route_catalog_version_matches": alignment.route_catalog_version_matches,
+        "route_catalog_digest_matches": alignment.route_catalog_digest_matches,
         "blocker_codes": alignment.blocker_codes()
     })
 }
@@ -652,6 +679,12 @@ struct BoundedReadAlignment {
     payload_budget_exceeded_matches: bool,
     streaming_matches: bool,
     covered_routes_matches: bool,
+    evidence_route_catalog_version_ready: bool,
+    summary_route_catalog_version_ready: bool,
+    evidence_route_catalog_digest_ready: bool,
+    summary_route_catalog_digest_ready: bool,
+    route_catalog_version_matches: bool,
+    route_catalog_digest_matches: bool,
 }
 
 impl BoundedReadAlignment {
@@ -669,6 +702,12 @@ impl BoundedReadAlignment {
             && self.payload_budget_exceeded_matches
             && self.streaming_matches
             && self.covered_routes_matches
+            && self.evidence_route_catalog_version_ready
+            && self.summary_route_catalog_version_ready
+            && self.evidence_route_catalog_digest_ready
+            && self.summary_route_catalog_digest_ready
+            && self.route_catalog_version_matches
+            && self.route_catalog_digest_matches
     }
 
     fn blocker_codes(&self) -> Vec<&'static str> {
@@ -711,6 +750,24 @@ impl BoundedReadAlignment {
         }
         if !self.covered_routes_matches {
             blockers.push("bounded_read_covered_routes_mismatch");
+        }
+        if !self.evidence_route_catalog_version_ready {
+            blockers.push("bounded_read_route_catalog_version_not_ready");
+        }
+        if !self.summary_route_catalog_version_ready {
+            blockers.push("replacement_summary_route_catalog_version_not_ready");
+        }
+        if !self.evidence_route_catalog_digest_ready {
+            blockers.push("bounded_read_route_catalog_digest_not_ready");
+        }
+        if !self.summary_route_catalog_digest_ready {
+            blockers.push("replacement_summary_route_catalog_digest_not_ready");
+        }
+        if !self.route_catalog_version_matches {
+            blockers.push("bounded_read_route_catalog_version_mismatch");
+        }
+        if !self.route_catalog_digest_matches {
+            blockers.push("bounded_read_route_catalog_digest_mismatch");
         }
         blockers
     }
@@ -1045,11 +1102,11 @@ fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a ser
 mod tests {
     use super::{nowledge_mem_integration_bundle_json, IntegrationBundleInputs};
     use crate::{
-        nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
-        nowledge_mem_integration_readiness_json,
+        nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
+        nowledge_mem_graph_read_route_specs_json, nowledge_mem_integration_readiness_json,
         nowledge_mem_search_candidate_shadow_evidence_json,
-        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS,
-        REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
 
     #[test]
@@ -1167,6 +1224,33 @@ mod tests {
         assert_eq!(
             bundle["replacement_summary_bounded_read_alignment"]["blocker_codes"],
             serde_json::json!(["bounded_read_payload_budget_exceeded_mismatch"])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(
+            readiness["failed_checks"],
+            serde_json::json!(["bounded_read_evidence_alignment"])
+        );
+    }
+
+    #[test]
+    fn generated_bundle_detects_stale_bounded_read_route_catalog() {
+        let mut inputs = ready_inputs();
+        inputs.bounded_read_evidence.as_mut().unwrap()["route_catalog_digest"] =
+            serde_json::json!("fnv1a64:stale");
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["replacement_summary_bounded_read_alignment"]["route_catalog_digest_matches"],
+            false
+        );
+        assert_eq!(
+            bundle["replacement_summary_bounded_read_alignment"]["blocker_codes"],
+            serde_json::json!([
+                "bounded_read_route_catalog_digest_not_ready",
+                "bounded_read_route_catalog_digest_mismatch"
+            ])
         );
         assert_eq!(readiness["ready"], false);
         assert_eq!(
@@ -1451,6 +1535,8 @@ mod tests {
             "streaming": false,
             "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
             "missing_covered_routes": [],
+            "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+            "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
             "blocker_codes": []
         })
     }
@@ -1682,6 +1768,8 @@ mod tests {
             "unknown_routes": [],
             "duplicate_routes": [],
             "required_routes_covered": true,
+            "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+            "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
             "route_coverage_ready": true,
             "route_coverage_blocker_codes": [],
             "blocker_codes": [],

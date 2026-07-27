@@ -1,6 +1,7 @@
 use crate::{
-    nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
-    nowledge_mem_required_query_families_for_route, Result, SkeinError,
+    nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
+    nowledge_mem_graph_read_route_specs_json, nowledge_mem_required_query_families_for_route,
+    Result, SkeinError, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
     NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -143,6 +144,8 @@ pub fn nowledge_graph_route_readiness_json(
         "required_routes_covered": route_coverage.required_routes_covered,
         "unknown_routes": route_coverage.unknown_routes,
         "duplicate_routes": route_coverage.duplicate_routes,
+        "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
         "route_coverage_ready": route_coverage.ready,
         "route_coverage_blocker_codes": route_coverage.blocker_codes,
         "evidence_route_coverage_present": evidence_route_coverage_present,
@@ -180,6 +183,8 @@ struct EvidenceRouteCoverage {
     required_routes_covered: Option<bool>,
     unknown_routes: Vec<String>,
     duplicate_routes: Vec<String>,
+    route_catalog_version: Option<String>,
+    route_catalog_digest: Option<String>,
     ready: Option<bool>,
     blocker_codes: Vec<String>,
 }
@@ -213,6 +218,8 @@ impl EvidenceRouteCoverage {
             required_routes_covered: bool_path(value, &["required_routes_covered"]),
             unknown_routes: string_array_path(value, &["unknown_routes"]),
             duplicate_routes: string_array_path(value, &["duplicate_routes"]),
+            route_catalog_version: str_path(value, &["route_catalog_version"]).map(str::to_string),
+            route_catalog_digest: str_path(value, &["route_catalog_digest"]).map(str::to_string),
             ready: bool_path(value, &["route_coverage_ready"]),
             blocker_codes: string_array_path(value, &["route_coverage_blocker_codes"]),
         })
@@ -226,6 +233,10 @@ impl EvidenceRouteCoverage {
             && self.required_routes_covered == Some(recomputed.required_routes_covered)
             && self.unknown_routes == recomputed.unknown_routes
             && self.duplicate_routes == recomputed.duplicate_routes
+            && self.route_catalog_version.as_deref()
+                == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION)
+            && self.route_catalog_digest.as_deref()
+                == Some(nowledge_mem_graph_read_route_catalog_digest().as_str())
             && self.ready == Some(recomputed.ready)
             && self.blocker_codes == recomputed.blocker_code_strings()
     }
@@ -1033,7 +1044,8 @@ fn value_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a ser
 mod tests {
     use super::nowledge_graph_route_readiness_json;
     use crate::{
-        nowledge_mem_graph_read_route_specs_json, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+        nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_specs_json,
+        NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
 
     #[test]
@@ -1655,6 +1667,14 @@ mod tests {
             (
                 "duplicate_routes".to_string(),
                 serde_json::json!(duplicate_routes),
+            ),
+            (
+                "route_catalog_version".to_string(),
+                serde_json::json!(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
+            ),
+            (
+                "route_catalog_digest".to_string(),
+                serde_json::json!(nowledge_mem_graph_read_route_catalog_digest()),
             ),
             (
                 "route_coverage_ready".to_string(),

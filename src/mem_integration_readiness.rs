@@ -4,9 +4,9 @@ use crate::{
         NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
     },
     nowledge_graph_route_readiness_summary, nowledge_mem_required_query_families_for_route, Result,
-    SkeinError, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE,
-    NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
+    SkeinError, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+    NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
+    NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE, NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE,
     NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
     NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
@@ -625,6 +625,23 @@ pub fn nowledge_mem_integration_readiness(
                     bundle,
                     &["replacement_summary", "bounded_read_evidence", "streaming"],
                 ) == Some(false),
+                str_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "route_catalog_version",
+                    ],
+                ) == Some(NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION),
+                str_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "route_catalog_digest",
+                    ],
+                )
+                .is_some(),
                 bounded_read_route_coverage_ready(bundle),
             ],
             [
@@ -641,6 +658,8 @@ pub fn nowledge_mem_integration_readiness(
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
                 "replacement_summary.bounded_read_evidence.blocking_operator_count",
                 "replacement_summary.bounded_read_evidence.streaming",
+                "replacement_summary.bounded_read_evidence.route_catalog_version",
+                "replacement_summary.bounded_read_evidence.route_catalog_digest",
                 "replacement_summary.bounded_read_evidence.covered_routes",
             ],
             blocker_codes(
@@ -716,6 +735,48 @@ pub fn nowledge_mem_integration_readiness(
                         "covered_routes_matches",
                     ],
                 ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "evidence_route_catalog_version_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "summary_route_catalog_version_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "evidence_route_catalog_digest_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "summary_route_catalog_digest_ready",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "route_catalog_version_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "route_catalog_digest_matches",
+                    ],
+                ) == Some(true),
             ],
             [
                 "bounded_read_evidence.ready",
@@ -731,6 +792,12 @@ pub fn nowledge_mem_integration_readiness(
                 "replacement_summary_bounded_read_alignment.payload_budget_exceeded_matches",
                 "replacement_summary_bounded_read_alignment.streaming_matches",
                 "replacement_summary_bounded_read_alignment.covered_routes_matches",
+                "replacement_summary_bounded_read_alignment.evidence_route_catalog_version_ready",
+                "replacement_summary_bounded_read_alignment.summary_route_catalog_version_ready",
+                "replacement_summary_bounded_read_alignment.evidence_route_catalog_digest_ready",
+                "replacement_summary_bounded_read_alignment.summary_route_catalog_digest_ready",
+                "replacement_summary_bounded_read_alignment.route_catalog_version_matches",
+                "replacement_summary_bounded_read_alignment.route_catalog_digest_matches",
             ],
             blocker_codes(
                 bundle,
@@ -3345,10 +3412,11 @@ fn json_get_path<'a>(value: &'a serde_json::Value, path: &[&str]) -> Option<&'a 
 mod tests {
     use super::nowledge_mem_integration_readiness_json;
     use crate::{
-        nowledge_mem_graph_read_route_spec, nowledge_mem_graph_read_route_specs_json,
+        nowledge_mem_graph_read_route_catalog_digest, nowledge_mem_graph_read_route_spec,
+        nowledge_mem_graph_read_route_specs_json,
         nowledge_mem_search_candidate_shadow_evidence_json,
-        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE,
-        NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
+        NowledgeMemSearchCandidateShadowAccumulator, NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+        NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE, NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_ENGINE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_EVIDENCE_SOURCE,
         NOWLEDGE_MEM_SEARCH_CANDIDATE_TRACE_PRIMARY_ENGINE,
@@ -5816,6 +5884,8 @@ mod tests {
                 "blocking_operator_count": 0,
                 "streaming": false,
                 "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
+                "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+                "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
                 "blocker_codes": []
             },
             "replacement_summary_bounded_read_alignment": {
@@ -5833,6 +5903,12 @@ mod tests {
                 "payload_budget_exceeded_matches": true,
                 "streaming_matches": true,
                 "covered_routes_matches": true,
+                "evidence_route_catalog_version_ready": true,
+                "summary_route_catalog_version_ready": true,
+                "evidence_route_catalog_digest_ready": true,
+                "summary_route_catalog_digest_ready": true,
+                "route_catalog_version_matches": true,
+                "route_catalog_digest_matches": true,
                 "blocker_codes": []
             },
             "replacement_summary": {
@@ -5911,6 +5987,8 @@ mod tests {
                     "streaming": false,
                     "covered_routes": REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
                     "missing_covered_routes": [],
+                    "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+                    "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
                     "blocker_codes": []
                 },
                 "cutover_evidence": {

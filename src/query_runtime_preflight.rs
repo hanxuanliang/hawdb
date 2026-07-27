@@ -1,6 +1,7 @@
 use crate::{
-    DatabaseConfig, NowledgeMemEmbeddedStore, NowledgeMemGraph, NowledgeQueryRuntimePreflightProbe,
-    Result, SkeinError, Value,
+    nowledge_mem_graph_read_route_catalog_digest, DatabaseConfig, NowledgeMemEmbeddedStore,
+    NowledgeMemGraph, NowledgeQueryRuntimePreflightProbe, Result, SkeinError, Value,
+    NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -76,6 +77,8 @@ pub fn query_runtime_preflight_json(
                 "required_routes_covered": false,
                 "unknown_routes": [],
                 "duplicate_routes": [],
+                "route_catalog_version": NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION,
+                "route_catalog_digest": nowledge_mem_graph_read_route_catalog_digest(),
                 "route_coverage_ready": false,
                 "route_coverage_blocker_codes": [],
                 "blocker_codes": database_open_blocker_codes(

@@ -120,6 +120,10 @@ contract.
     kind, and stale-evidence invalidation rule.
   - Acceptance: replacement summary fails closed when a route is missing,
     renamed, or not covered by evidence.
+  - [x] Add a shared graph read route catalog version and stable digest to
+    query-runtime preflight, graph-route readiness, bounded-read evidence, and
+    integration bundle alignment so stale route evidence fails closed after a
+    catalog change.
 - [ ] PR 2: Remove direct Kuzu reads from one low-risk graph read route.
   - Scope: move one existing read route to the embedded query runtime with
     `legacy`/`skein` selection controlled by configuration.
