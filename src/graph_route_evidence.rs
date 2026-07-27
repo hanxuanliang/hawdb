@@ -3,6 +3,7 @@ use crate::{
     NowledgeMemQueryReportOptions, Result, SkeinError, Value,
     NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
     NOWLEDGE_MEM_GRAPH_NODE_DETAILS_MEMORY_QUERY, NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
+    NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE, NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY,
     NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
     REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES, REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES,
 };
@@ -517,6 +518,34 @@ pub fn nowledge_mem_graph_community_members_route_query(
     })
 }
 
+pub fn nowledge_mem_graph_orphans_route_query(limit: usize) -> Result<RouteQuery> {
+    let limit = i64::try_from(limit).map_err(|_| {
+        SkeinError::Semantic(
+            "graph orphans route evidence limit exceeds supported range".to_string(),
+        )
+    })?;
+    if limit <= 0 {
+        return Err(SkeinError::Semantic(
+            "graph orphans route evidence limit must be greater than zero".to_string(),
+        ));
+    }
+    Ok(RouteQuery {
+        route: NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE.to_string(),
+        shadow_compare_ready: false,
+        primary_read_routing_enabled: true,
+        primary_ready: false,
+        blocker_codes: Vec::new(),
+        queries: vec![RouteCypherQuery {
+            name: "orphan-entity-relationship-exclusion".to_string(),
+            query_family: Some("graph_traversal".to_string()),
+            require_scan_pruning: false,
+            require_pruned: false,
+            cypher: NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY.to_string(),
+            parameters: BTreeMap::from([("limit".to_string(), Value::Int(limit))]),
+        }],
+    })
+}
+
 pub fn parse_route_query_inventory(value: &serde_json::Value) -> Result<Vec<RouteQuery>> {
     let routes = if value.is_array() {
         value.as_array()
@@ -870,9 +899,9 @@ fn error_class(error: &SkeinError) -> &'static str {
 mod tests {
     use super::{
         nowledge_graph_route_evidence_json, nowledge_mem_graph_community_members_route_query,
-        nowledge_mem_graph_node_details_route_query, nowledge_mem_graph_overview_route_query,
-        parse_route_parity_evidence, parse_route_query_inventory, query_requirement_blockers,
-        RouteCypherQuery,
+        nowledge_mem_graph_node_details_route_query, nowledge_mem_graph_orphans_route_query,
+        nowledge_mem_graph_overview_route_query, parse_route_parity_evidence,
+        parse_route_query_inventory, query_requirement_blockers, RouteCypherQuery,
     };
     use crate::{
         nowledge_graph_route_readiness_json, Database, NowledgeMemGraph, NowledgeMemGraphMode,
@@ -1144,6 +1173,55 @@ mod tests {
             readiness["routes"][0]["query_reports"][0]["scan_pruning_reports_present"],
             true
         );
+    }
+
+    #[test]
+    fn orphans_route_query_helper_feeds_route_execution_evidence() {
+        let mut db = Database::new();
+        db.query("CREATE (:Entity {id: 'orphan-route-entity', name: 'Orphan Route Entity', entity_type: 'concept'})")
+            .unwrap();
+        db.query("CREATE (:Entity {id: 'mentioned-route-entity', name: 'Mentioned Route Entity', entity_type: 'concept'})")
+            .unwrap();
+        db.query("CREATE (:Memory {id: 'orphan-route-memory', title: 'Blocking Memory'})")
+            .unwrap();
+        db.query("MATCH (m:Memory {id: 'orphan-route-memory'}), (e:Entity {id: 'mentioned-route-entity'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let route_queries = vec![nowledge_mem_graph_orphans_route_query(10).unwrap()];
+        let route_parity = ready_route_parity_for(&["/graph/orphans"]);
+
+        let evidence = nowledge_graph_route_evidence_json(
+            &mut graph,
+            &route_queries,
+            NowledgeMemQueryReportOptions {
+                capture_physical_plan: true,
+                slow_log_threshold_micros: None,
+            },
+            Some(&route_parity),
+        );
+
+        assert_eq!(evidence["routes"][0]["route"], "/graph/orphans");
+        assert_eq!(evidence["routes"][0]["primary_ready"], true);
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_name"],
+            "orphan-entity-relationship-exclusion"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["query_family"],
+            "graph_traversal"
+        );
+        assert_eq!(
+            evidence["routes"][0]["query_reports"][0]["require_scan_pruning"],
+            false
+        );
+        assert_eq!(
+            evidence["routes"][0]["blocker_codes"],
+            serde_json::json!([])
+        );
+        let readiness = nowledge_graph_route_readiness_json(&evidence).unwrap();
+        assert_eq!(readiness["routes"][0]["query_runtime_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_plan_evidence_ready"], true);
+        assert_eq!(readiness["routes"][0]["query_profile_evidence_ready"], true);
     }
 
     #[test]

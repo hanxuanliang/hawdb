@@ -167,6 +167,9 @@ contract.
   - [x] Add a library-first `/graph/community-members/{community_id}` Memory
     member ranking runtime and route-query evidence helper with exact
     `community_id` scan-pruning evidence.
+  - [x] Add a library-first `/graph/orphans` orphan Entity runtime and
+    route-query evidence helper for Nowledge's relationship-exclusion cleanup
+    query shape.
 - [ ] PR 4: Add search projection scan-pruning evidence for production filters.
   - Scope: prove search projection segment descriptors prune `unit_type`,
     lifecycle state, metadata keys, `importance`, `confidence`, and timestamps

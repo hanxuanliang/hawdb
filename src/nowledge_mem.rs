@@ -132,6 +132,8 @@ pub const NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-node-details-route-report-v1";
 pub const NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-graph-community-members-route-report-v1";
+pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL: &str =
+    "skein-nowledge-mem-graph-orphans-route-report-v1";
 pub const NOWLEDGE_MEM_RETRIEVAL_REPORT_PROTOCOL: &str = "skein-nowledge-mem-retrieval-report";
 pub const NOWLEDGE_MEM_SEARCH_CANDIDATE_REPORT_PROTOCOL: &str =
     "skein-nowledge-mem-search-candidate-report-v1";
@@ -242,6 +244,23 @@ m.event_start AS event_start, \
 m.event_end AS event_end, \
 m.importance AS importance \
 ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
+LIMIT $limit";
+pub const NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE: &str = "/graph/orphans";
+pub const NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY: &str = "\
+MATCH (e:Entity) \
+WHERE NOT (e)<-[:MENTIONS]-(:Memory) \
+AND NOT (e)-[:RELATES_TO]-() \
+AND NOT (e)-[:HAS_LABEL]-() \
+RETURN e.id AS entity_id, \
+id(e) AS node_id, \
+COALESCE(e.name, e.id) AS label, \
+e.name AS name, \
+e.entity_type AS entity_type, \
+e.description AS description, \
+e.community_id AS community_id, \
+e.confidence AS confidence, \
+e.pagerank_score AS pagerank_score \
+ORDER BY e.id ASC \
 LIMIT $limit";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/communities",
@@ -1802,6 +1821,90 @@ impl NowledgeMemGraphCommunityMembersOutput {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NowledgeMemGraphOrphansOptions {
+    pub limit: usize,
+    pub read_options: NowledgeMemReadOptions,
+}
+
+impl Default for NowledgeMemGraphOrphansOptions {
+    fn default() -> Self {
+        Self {
+            limit: 64,
+            read_options: NowledgeMemReadOptions::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphOrphanEntityRow {
+    pub entity_id: Option<String>,
+    pub node_id: u64,
+    pub label: Option<String>,
+    pub name: Option<String>,
+    pub entity_type: Option<String>,
+    pub description: Option<String>,
+    pub community_id: Option<Value>,
+    pub confidence: Option<Value>,
+    pub pagerank_score: Option<Value>,
+}
+
+impl NowledgeMemGraphOrphanEntityRow {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "entity_id": self.entity_id,
+            "node_id": self.node_id,
+            "label": self.label,
+            "name": self.name,
+            "entity_type": self.entity_type,
+            "description": self.description,
+            "community_id": self.community_id.as_ref().map(nowledge_value_json),
+            "confidence": self.confidence.as_ref().map(nowledge_value_json),
+            "pagerank_score": self.pagerank_score.as_ref().map(nowledge_value_json),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphOrphansRouteReport {
+    pub protocol: String,
+    pub route: String,
+    pub read_engine: crate::route_ownership::NowledgeMemRouteReadEngine,
+    pub route_catalog_version: String,
+    pub route_catalog_digest: String,
+    pub row_count: usize,
+    pub read_report: NowledgeMemReadReport,
+}
+
+impl NowledgeMemGraphOrphansRouteReport {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "protocol": self.protocol,
+            "route": self.route,
+            "read_engine": self.read_engine.as_str(),
+            "route_catalog_version": self.route_catalog_version,
+            "route_catalog_digest": self.route_catalog_digest,
+            "row_count": self.row_count,
+            "read_report": self.read_report.json(),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NowledgeMemGraphOrphansOutput {
+    pub rows: Vec<NowledgeMemGraphOrphanEntityRow>,
+    pub report: NowledgeMemGraphOrphansRouteReport,
+}
+
+impl NowledgeMemGraphOrphansOutput {
+    pub fn json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "rows": self.rows.iter().map(NowledgeMemGraphOrphanEntityRow::json).collect::<Vec<_>>(),
+            "report": self.report.json(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NowledgeMemQueryExecutionPath {
     FastPath,
@@ -2986,6 +3089,42 @@ impl NowledgeMemGraph {
         };
         Ok(NowledgeMemGraphCommunityMembersOutput { rows, report })
     }
+
+    pub fn read_graph_orphans(
+        &mut self,
+        options: &NowledgeMemGraphOrphansOptions,
+    ) -> Result<NowledgeMemGraphOrphansOutput> {
+        let limit = i64::try_from(options.limit).map_err(|_| {
+            SkeinError::Semantic("graph orphans limit exceeds supported range".to_string())
+        })?;
+        if limit <= 0 {
+            return Err(SkeinError::Semantic(
+                "graph orphans limit must be greater than zero".to_string(),
+            ));
+        }
+        let parameters = BTreeMap::from([("limit".to_string(), Value::Int(limit))]);
+        let read = self.read_query_with_params(
+            NOWLEDGE_MEM_GRAPH_ORPHAN_ENTITIES_QUERY,
+            &parameters,
+            &graph_orphans_read_options(options),
+        )?;
+        let rows = read
+            .output
+            .rows
+            .iter()
+            .map(decode_graph_orphan_entity_row)
+            .collect::<Result<Vec<_>>>()?;
+        let report = NowledgeMemGraphOrphansRouteReport {
+            protocol: NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL.to_string(),
+            route: NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE.to_string(),
+            read_engine: crate::route_ownership::NowledgeMemRouteReadEngine::Skein,
+            route_catalog_version: NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION.to_string(),
+            route_catalog_digest: nowledge_mem_graph_read_route_catalog_digest(),
+            row_count: rows.len(),
+            read_report: read.report,
+        };
+        Ok(NowledgeMemGraphOrphansOutput { rows, report })
+    }
 }
 
 fn graph_overview_read_options(
@@ -3013,6 +3152,15 @@ fn graph_node_details_read_options(
 fn graph_community_members_read_options(
     options: &NowledgeMemGraphCommunityMembersOptions,
 ) -> NowledgeMemReadOptions {
+    let mut read_options = options.read_options.clone();
+    read_options.max_rows = Some(match read_options.max_rows {
+        Some(max_rows) => max_rows.min(options.limit),
+        None => options.limit,
+    });
+    read_options
+}
+
+fn graph_orphans_read_options(options: &NowledgeMemGraphOrphansOptions) -> NowledgeMemReadOptions {
     let mut read_options = options.read_options.clone();
     read_options.max_rows = Some(match read_options.max_rows {
         Some(max_rows) => max_rows.min(options.limit),
@@ -3063,6 +3211,22 @@ fn decode_graph_node_details_row(
         confidence: optional_value_field(row, "confidence"),
         is_latest: optional_bool_field(row, "is_latest")?,
         is_deleted: optional_bool_field(row, "is_deleted")?,
+    })
+}
+
+fn decode_graph_orphan_entity_row(
+    row: &BTreeMap<String, Value>,
+) -> Result<NowledgeMemGraphOrphanEntityRow> {
+    Ok(NowledgeMemGraphOrphanEntityRow {
+        entity_id: optional_string_field(row, "entity_id")?,
+        node_id: required_u64_field(row, "node_id")?,
+        label: optional_string_field(row, "label")?,
+        name: optional_string_field(row, "name")?,
+        entity_type: optional_string_field(row, "entity_type")?,
+        description: optional_string_field(row, "description")?,
+        community_id: optional_value_field(row, "community_id"),
+        confidence: optional_value_field(row, "confidence"),
+        pagerank_score: optional_value_field(row, "pagerank_score"),
     })
 }
 
@@ -3345,6 +3509,13 @@ impl NowledgeMemEmbeddedStoreHandle {
         options: &NowledgeMemGraphCommunityMembersOptions,
     ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
         self.lock_store()?.read_graph_community_members(options)
+    }
+
+    pub fn read_graph_orphans(
+        &self,
+        options: &NowledgeMemGraphOrphansOptions,
+    ) -> Result<NowledgeMemGraphOrphansOutput> {
+        self.lock_store()?.read_graph_orphans(options)
     }
 
     pub fn search_candidates(
@@ -3742,6 +3913,13 @@ impl NowledgeMemEmbeddedStore {
         options: &NowledgeMemGraphCommunityMembersOptions,
     ) -> Result<NowledgeMemGraphCommunityMembersOutput> {
         self.graph.read_graph_community_members(options)
+    }
+
+    pub fn read_graph_orphans(
+        &mut self,
+        options: &NowledgeMemGraphOrphansOptions,
+    ) -> Result<NowledgeMemGraphOrphansOutput> {
+        self.graph.read_graph_orphans(options)
     }
 
     pub fn background_maintenance_summary(
@@ -5598,18 +5776,20 @@ mod tests {
         nowledge_mem_search_candidate_shadow_evidence_json, required_u64_field,
         NowledgeMemEmbeddedStore, NowledgeMemEmbeddedStoreHandle, NowledgeMemGraph,
         NowledgeMemGraphCommunityMembersOptions, NowledgeMemGraphMode,
-        NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOverviewOptions,
-        NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath, NowledgeMemQueryReportOptions,
-        NowledgeMemReadOptions, NowledgeMemReadReport, NowledgeMemReadinessAreaSummary,
-        NowledgeMemReadinessDashboard, NowledgeMemReadinessOptions,
-        NowledgeMemRouteReadinessSummary, NowledgeMemSearchCandidateReadinessOptions,
-        NowledgeMemSearchCandidateRequest, NowledgeMemSearchCandidateShadowAccumulator,
-        NowledgeMemSearchCandidateShadowEvidence, NowledgeMemSearchProjection,
-        NowledgeMemStorageRecoveryReport, NowledgeQueryRuntimePreflightProbe,
-        NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL, NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
+        NowledgeMemGraphNodeDetailsOptions, NowledgeMemGraphOrphansOptions,
+        NowledgeMemGraphOverviewOptions, NowledgeMemOpenOptions, NowledgeMemQueryExecutionPath,
+        NowledgeMemQueryReportOptions, NowledgeMemReadOptions, NowledgeMemReadReport,
+        NowledgeMemReadinessAreaSummary, NowledgeMemReadinessDashboard,
+        NowledgeMemReadinessOptions, NowledgeMemRouteReadinessSummary,
+        NowledgeMemSearchCandidateReadinessOptions, NowledgeMemSearchCandidateRequest,
+        NowledgeMemSearchCandidateShadowAccumulator, NowledgeMemSearchCandidateShadowEvidence,
+        NowledgeMemSearchProjection, NowledgeMemStorageRecoveryReport,
+        NowledgeQueryRuntimePreflightProbe, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
+        NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE,
         NOWLEDGE_MEM_GRAPH_COMMUNITY_MEMBERS_ROUTE_REPORT_PROTOCOL,
         NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE,
-        NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
+        NOWLEDGE_MEM_GRAPH_NODE_DETAILS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE,
+        NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
         NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
         NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
         NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,
@@ -5890,6 +6070,55 @@ mod tests {
             .unwrap();
         assert!(missing.rows.is_empty());
         assert_eq!(missing.report.row_count, 0);
+    }
+
+    #[test]
+    fn graph_orphans_route_runs_through_bounded_query_runtime() {
+        let db = Database::new();
+        let mut graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        seed_graph_orphan_entities(&mut graph);
+
+        let output = graph
+            .read_graph_orphans(&NowledgeMemGraphOrphansOptions {
+                limit: 10,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].entity_id.as_deref(), Some("orphan-entity"));
+        assert_eq!(output.rows[0].label.as_deref(), Some("Orphan Entity"));
+        assert_eq!(output.rows[0].entity_type.as_deref(), Some("concept"));
+        assert_eq!(
+            output.report.protocol,
+            NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE_REPORT_PROTOCOL
+        );
+        assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE);
+        assert_eq!(output.report.row_count, 1);
+        assert_eq!(output.report.read_report.row_count, 1);
+        assert!(output.report.read_report.row_limit_enforced_before_output);
+        assert_eq!(output.json()["report"]["read_engine"], "skein");
+        assert_eq!(output.json()["rows"][0]["entity_id"], "orphan-entity");
+    }
+
+    #[test]
+    fn embedded_store_handle_exposes_graph_orphans_route() {
+        let db = Database::new();
+        let graph = NowledgeMemGraph::from_database(db, NowledgeMemGraphMode::WritableCutover);
+        let mut store = NowledgeMemEmbeddedStore::new(graph, None);
+        seed_graph_orphan_entities(store.graph_mut());
+        let handle = NowledgeMemEmbeddedStoreHandle::new(store);
+
+        let output = handle
+            .read_graph_orphans(&NowledgeMemGraphOrphansOptions {
+                limit: 1,
+                read_options: NowledgeMemReadOptions::default(),
+            })
+            .unwrap();
+
+        assert_eq!(output.rows.len(), 1);
+        assert_eq!(output.rows[0].entity_id.as_deref(), Some("orphan-entity"));
+        assert_eq!(output.report.route, NOWLEDGE_MEM_GRAPH_ORPHANS_ROUTE);
     }
 
     #[test]
@@ -8682,6 +8911,39 @@ mod tests {
             .unwrap();
         graph
             .query("CREATE (:Memory {id: 'community-memory-other', title: 'Community Other', content: 'other body', pagerank_score: 10.0, community_id: 7, space_id: 'default', created_at: 103, updated_at: 203, source: 'community'})")
+            .unwrap();
+    }
+
+    fn seed_graph_orphan_entities(graph: &mut NowledgeMemGraph) {
+        graph
+            .query("CREATE (:Entity {id: 'orphan-entity', name: 'Orphan Entity', entity_type: 'concept', description: 'orphan'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'mentioned-entity', name: 'Mentioned Entity', entity_type: 'concept'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Memory {id: 'orphan-blocking-memory', title: 'Blocking Memory'})")
+            .unwrap();
+        graph
+            .query("MATCH (m:Memory {id: 'orphan-blocking-memory'}), (e:Entity {id: 'mentioned-entity'}) CREATE (m)-[:MENTIONS]->(e)")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'related-entity', name: 'Related Entity', entity_type: 'concept'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'related-peer', name: 'Related Peer', entity_type: 'concept'})")
+            .unwrap();
+        graph
+            .query("MATCH (a:Entity {id: 'related-entity'}), (b:Entity {id: 'related-peer'}) CREATE (a)-[:RELATES_TO]->(b)")
+            .unwrap();
+        graph
+            .query("CREATE (:Entity {id: 'labeled-entity', name: 'Labeled Entity', entity_type: 'concept'})")
+            .unwrap();
+        graph
+            .query("CREATE (:Label {id: 'orphan-blocking-label', name: 'Blocking Label'})")
+            .unwrap();
+        graph
+            .query("MATCH (e:Entity {id: 'labeled-entity'}), (l:Label {id: 'orphan-blocking-label'}) CREATE (e)-[:HAS_LABEL]->(l)")
             .unwrap();
     }
 
