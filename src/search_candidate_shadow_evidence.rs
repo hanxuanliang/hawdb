@@ -260,10 +260,10 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             error.kind()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse search candidate shadow probe JSON: {error}"
-        ))
+    serde_json::from_str(&content).map_err(|_| {
+        SkeinError::Semantic(
+            "failed to parse search candidate shadow probe JSON: invalid_json".to_string(),
+        )
     })
 }
 
@@ -319,6 +319,26 @@ mod tests {
             NOWLEDGE_SEARCH_PROJECTION_SCAN_FILTER_FIELDS.len()
         );
         assert_eq!(evidence["blocker_codes"], serde_json::json!([]));
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn search_candidate_shadow_probe_parse_errors_are_redacted_by_default() {
+        let path = unique_test_file("search_candidate_secret_probe_path_do_not_emit");
+        std::fs::write(
+            &path,
+            "{ \"primary_candidate_ids\": [\"secret-candidate-do-not-emit\"], \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse search candidate shadow probe JSON: invalid_json"
+        );
+        assert!(!error.contains("search_candidate_secret_probe_path_do_not_emit"));
+        assert!(!error.contains("secret-candidate-do-not-emit"));
         std::fs::remove_file(path).unwrap();
     }
 
