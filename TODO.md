@@ -204,6 +204,8 @@ contract.
     adapters, and production config selects read engine explicitly.
   - Acceptance: a Mem integration test can initialize Skein as a library and
     evaluate cutover gates without invoking Skein CLI tools.
+  - [x] Expose typed library-readiness area summaries in the Rust report so Mem
+    can evaluate area gates without parsing readiness JSON.
 - [ ] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration
