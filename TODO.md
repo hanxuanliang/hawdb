@@ -455,6 +455,9 @@ contract.
   - [x] Require background-maintenance cutover evidence to include a passing
     foreground admission probe so user reads are not throttled by background
     QoS limits.
+  - [x] Expose a compact typed local QoS snapshot that proves foreground
+    admission stays open while background work is enabled, bounded, and within
+    total and per-class operation budgets.
 
 ## P0: Search Projection Replacement
 

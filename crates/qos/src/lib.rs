@@ -107,6 +107,38 @@ pub struct RankedBackgroundWork {
     pub decision: BackgroundWorkDecision,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalQosSnapshot {
+    pub ready: bool,
+    pub foreground_admitted: bool,
+    pub background_enabled: bool,
+    pub background_bounded: bool,
+    pub running_background_operations: usize,
+    pub max_total_background_operations: Option<usize>,
+    pub remaining_total_background_operations: Option<usize>,
+    pub total_background_over_budget: bool,
+    pub class_snapshots: [LocalQosClassSnapshot; WORK_CLASS_COUNT],
+    pub blocker_codes: Vec<QosSnapshotBlockerCode>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LocalQosClassSnapshot {
+    pub class: WorkClass,
+    pub running_background_operations: usize,
+    pub max_background_operations: Option<usize>,
+    pub remaining_background_operations: Option<usize>,
+    pub over_budget: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QosSnapshotBlockerCode {
+    ForegroundAdmissionBlocked,
+    BackgroundDisabled,
+    BackgroundUnbounded,
+    TotalBackgroundOverBudget,
+    ClassBackgroundOverBudget,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundWorkReasonCode {
     ForegroundNotRanked,
@@ -134,6 +166,18 @@ impl BackgroundWorkReasonCode {
             BackgroundWorkReasonCode::FreshnessSlo => "freshness_slo",
             BackgroundWorkReasonCode::AdmissionDeferred => "admission_deferred",
             BackgroundWorkReasonCode::AdmissionRejected => "admission_rejected",
+        }
+    }
+}
+
+impl QosSnapshotBlockerCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            QosSnapshotBlockerCode::ForegroundAdmissionBlocked => "foreground_admission_blocked",
+            QosSnapshotBlockerCode::BackgroundDisabled => "background_disabled",
+            QosSnapshotBlockerCode::BackgroundUnbounded => "background_unbounded",
+            QosSnapshotBlockerCode::TotalBackgroundOverBudget => "total_background_over_budget",
+            QosSnapshotBlockerCode::ClassBackgroundOverBudget => "class_background_over_budget",
         }
     }
 }
@@ -388,6 +432,56 @@ impl BackgroundWorkPlan {
 }
 
 impl LocalQosPolicy {
+    pub fn snapshot(&self, state: &LocalQosState) -> LocalQosSnapshot {
+        let foreground_admission = self.admit(
+            state,
+            &WorkRequest::foreground(WorkClass::Query, usize::MAX),
+        );
+        let foreground_admitted = matches!(foreground_admission, QosAdmission::Admit);
+        let background_bounded = self.max_background_operations.is_some()
+            || self.max_total_background_operations.is_some()
+            || self
+                .max_background_operations_by_class
+                .iter()
+                .any(Option::is_some);
+        let total_background_over_budget = self
+            .max_total_background_operations
+            .is_some_and(|limit| state.running_background_operations > limit);
+        let class_snapshots = local_qos_class_snapshots(self, state);
+        let class_background_over_budget =
+            class_snapshots.iter().any(|snapshot| snapshot.over_budget);
+        let mut blocker_codes = Vec::new();
+        if !foreground_admitted {
+            blocker_codes.push(QosSnapshotBlockerCode::ForegroundAdmissionBlocked);
+        }
+        if !self.background_enabled {
+            blocker_codes.push(QosSnapshotBlockerCode::BackgroundDisabled);
+        }
+        if !background_bounded {
+            blocker_codes.push(QosSnapshotBlockerCode::BackgroundUnbounded);
+        }
+        if total_background_over_budget {
+            blocker_codes.push(QosSnapshotBlockerCode::TotalBackgroundOverBudget);
+        }
+        if class_background_over_budget {
+            blocker_codes.push(QosSnapshotBlockerCode::ClassBackgroundOverBudget);
+        }
+        LocalQosSnapshot {
+            ready: blocker_codes.is_empty(),
+            foreground_admitted,
+            background_enabled: self.background_enabled,
+            background_bounded,
+            running_background_operations: state.running_background_operations,
+            max_total_background_operations: self.max_total_background_operations,
+            remaining_total_background_operations: self
+                .max_total_background_operations
+                .map(|limit| limit.saturating_sub(state.running_background_operations)),
+            total_background_over_budget,
+            class_snapshots,
+            blocker_codes,
+        }
+    }
+
     pub fn admit(&self, state: &LocalQosState, request: &WorkRequest) -> QosAdmission {
         match request.priority {
             WorkPriority::Foreground => QosAdmission::Admit,
@@ -598,6 +692,10 @@ impl LocalQosScheduler {
         self.policy.rank_background_work(&self.state, plans)
     }
 
+    pub fn snapshot(&self) -> LocalQosSnapshot {
+        self.policy.snapshot(&self.state)
+    }
+
     pub fn try_start(
         &mut self,
         request: WorkRequest,
@@ -634,12 +732,46 @@ impl LocalQosScheduler {
     }
 }
 
+fn local_qos_class_snapshots(
+    policy: &LocalQosPolicy,
+    state: &LocalQosState,
+) -> [LocalQosClassSnapshot; WORK_CLASS_COUNT] {
+    [
+        local_qos_class_snapshot(policy, state, WorkClass::Query),
+        local_qos_class_snapshot(policy, state, WorkClass::Mutation),
+        local_qos_class_snapshot(policy, state, WorkClass::Projection),
+        local_qos_class_snapshot(policy, state, WorkClass::Import),
+        local_qos_class_snapshot(policy, state, WorkClass::Analytics),
+        local_qos_class_snapshot(policy, state, WorkClass::Shadow),
+    ]
+}
+
+fn local_qos_class_snapshot(
+    policy: &LocalQosPolicy,
+    state: &LocalQosState,
+    class: WorkClass,
+) -> LocalQosClassSnapshot {
+    let running_background_operations =
+        state.running_background_operations_by_class[class.as_index()];
+    let max_background_operations = policy.max_background_operations_by_class[class.as_index()]
+        .or(policy.max_background_operations);
+    LocalQosClassSnapshot {
+        class,
+        running_background_operations,
+        max_background_operations,
+        remaining_background_operations: max_background_operations
+            .map(|limit| limit.saturating_sub(running_background_operations)),
+        over_budget: max_background_operations
+            .is_some_and(|limit| running_background_operations > limit),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         BackgroundWorkHint, BackgroundWorkPlan, BackgroundWorkReasonCode, LocalQosPolicy,
-        LocalQosScheduler, LocalQosState, QosAdmission, QosAdmissionCode, WorkClass, WorkPriority,
-        WorkRequest,
+        LocalQosScheduler, LocalQosState, QosAdmission, QosAdmissionCode, QosSnapshotBlockerCode,
+        WorkClass, WorkPriority, WorkRequest,
     };
 
     #[test]
@@ -1272,6 +1404,81 @@ mod tests {
         assert_eq!(
             policy.admit(&LocalQosState::default(), &request),
             QosAdmission::Admit
+        );
+    }
+
+    #[test]
+    fn qos_snapshot_reports_foreground_first_bounded_background_state() {
+        let mut class_limits = [None; super::WORK_CLASS_COUNT];
+        class_limits[WorkClass::Projection.as_index()] = Some(4);
+        let mut scheduler = LocalQosScheduler::new(LocalQosPolicy {
+            max_background_operations: Some(8),
+            max_total_background_operations: Some(12),
+            max_background_operations_by_class: class_limits,
+            ..LocalQosPolicy::default()
+        });
+        let permit = scheduler
+            .try_start(WorkRequest::background(WorkClass::Projection, 3))
+            .unwrap();
+
+        let snapshot = scheduler.snapshot();
+
+        assert!(snapshot.ready);
+        assert!(snapshot.foreground_admitted);
+        assert!(snapshot.background_enabled);
+        assert!(snapshot.background_bounded);
+        assert_eq!(snapshot.running_background_operations, 3);
+        assert_eq!(snapshot.remaining_total_background_operations, Some(9));
+        assert!(!snapshot.total_background_over_budget);
+        assert!(snapshot.blocker_codes.is_empty());
+        let projection = snapshot.class_snapshots[WorkClass::Projection.as_index()];
+        assert_eq!(projection.class, WorkClass::Projection);
+        assert_eq!(projection.running_background_operations, 3);
+        assert_eq!(projection.max_background_operations, Some(4));
+        assert_eq!(projection.remaining_background_operations, Some(1));
+        assert!(!projection.over_budget);
+
+        scheduler.finish(permit);
+    }
+
+    #[test]
+    fn qos_snapshot_fails_closed_for_unbounded_or_over_budget_background() {
+        let unbounded = LocalQosPolicy {
+            max_background_operations: None,
+            max_total_background_operations: None,
+            max_background_operations_by_class: [None; super::WORK_CLASS_COUNT],
+            background_enabled: true,
+        }
+        .snapshot(&LocalQosState::default());
+        assert!(!unbounded.ready);
+        assert_eq!(
+            unbounded.blocker_codes,
+            vec![QosSnapshotBlockerCode::BackgroundUnbounded]
+        );
+        assert_eq!(unbounded.blocker_codes[0].as_str(), "background_unbounded");
+
+        let mut class_limits = [None; super::WORK_CLASS_COUNT];
+        class_limits[WorkClass::Projection.as_index()] = Some(2);
+        let over_budget = LocalQosPolicy {
+            max_background_operations: Some(8),
+            max_total_background_operations: Some(4),
+            max_background_operations_by_class: class_limits,
+            background_enabled: true,
+        }
+        .snapshot(&LocalQosState {
+            running_background_operations: 5,
+            running_background_operations_by_class: [0, 0, 3, 0, 0, 0],
+        });
+
+        assert!(!over_budget.ready);
+        assert!(over_budget.total_background_over_budget);
+        assert!(over_budget.class_snapshots[WorkClass::Projection.as_index()].over_budget);
+        assert_eq!(
+            over_budget.blocker_codes,
+            vec![
+                QosSnapshotBlockerCode::TotalBackgroundOverBudget,
+                QosSnapshotBlockerCode::ClassBackgroundOverBudget
+            ]
         );
     }
 }
