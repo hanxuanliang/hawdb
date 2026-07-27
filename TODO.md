@@ -664,7 +664,7 @@ contract.
 
 ## P1: Performance From Architecture
 
-- [ ] Improve statistics maintenance.
+- [x] Improve statistics maintenance.
   - Prefer incremental label, relationship, distinct-value, and degree summaries
     once correctness is proven.
   - Keep full rebuild as a validation and repair tool.
@@ -677,7 +677,7 @@ contract.
   - [x] Expose a typed distinct-value statistics consistency report that
     compares incrementally maintained property indexes against full recompute
     counts for node and relationship property filters.
-- [ ] Improve adjacency and index layout for read-heavy local workloads.
+- [x] Improve adjacency and index layout for read-heavy local workloads.
   - Optimize for bounded memory and predictable read amplification.
   - Keep row-oriented canonical records and add projection/index layouts only
     where route evidence proves value.
@@ -687,7 +687,7 @@ contract.
   - [x] Expose a compact property-index consistency report that validates
     maintained node and relationship property indexes against full recompute
     samples before relying on them for read-heavy scan pruning.
-- [ ] Add workload fixtures based on real Nowledge routes before low-level
+- [x] Add workload fixtures based on real Nowledge routes before low-level
   tuning.
   - Benchmark graph reads, bounded expansions, metadata-filtered search, and
     mixed foreground/background workloads.
