@@ -462,7 +462,7 @@ Skein-side error with the shadow engine name.
 Before running the full Nowledge migration gate, a wrapper can be checked with:
 
 ```text
-skein external-shadow-adapter-smoke [--require-previous-wrapper] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <shadow-name> <program> [args...]
+SKEIN_ENABLE_COMPATIBILITY_TOOLS=1 skein external-shadow-adapter-smoke [--require-previous-wrapper] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] <shadow-name> <program> [args...]
 ```
 
 The smoke command sends `ready`, then runs a minimal fixture that exercises
@@ -477,13 +477,16 @@ wrapper. This rejects protocol-only self-shadow adapters whose `ready`
 is allowed in this smoke command so early wrapper integration can prove request
 routing before projection metadata parity exists. The production cutover gate
 below still treats primary-only projected graph checks as blockers.
+This command is a quarantined developer/preflight tool. Production serving and
+read routing must use embedded library APIs and typed readiness reports instead
+of invoking the `skein` binary.
 
 ## Gate Command
 
 The current migration-gate entry point is:
 
 ```text
-skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] <root> <shadow-name> <program> [args...]
+SKEIN_ENABLE_COMPATIBILITY_TOOLS=1 skein nowledge-cypher-migration-gate [--require-ready] [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready] [--shadow-trace <path>] [--shadow-timeout-ms <ms>] [--require-rollback-evidence] [--rollback-evidence <text>] [--require-storage-recovery-evidence] [--storage-recovery-report-json <path>] [--require-background-maintenance-evidence] [--background-maintenance-report-json <path>] <root> <shadow-name> <program> [args...]
 ```
 
 It scans the Nowledge source tree, runs the public Nowledge compatibility
@@ -715,9 +718,12 @@ The CLI does not execute search; it only compiles already-observed LanceDB and
 Skein candidate IDs plus filter-pushdown fields into fail-closed evidence.
 
 `--require-cutover-evidence` runs the same `ready` preflight and exits with an
-error unless `cutover_evidence.eligible` is true. Use it for production cutover
-automation that must reject self-shadow smoke runs, missing shadow parity
-evidence, or blocked migration gates with one stable command-line gate.
+error unless `cutover_evidence.eligible` is true. Use it for isolated release or
+nightly evidence generation that must reject self-shadow smoke runs, missing
+shadow parity evidence, or blocked migration gates. Production cutover
+automation should consume the resulting artifacts through
+`nowledge_mem_final_cutover_preflight` and other typed Rust library APIs rather
+than shelling out to this command.
 
 `--shadow-ready` sends the same `ready` preflight without requiring the final
 migration gate decision to be `ready`. Use it for previous-wrapper adapter

@@ -123,9 +123,10 @@ shows full per-query-family replacement readiness. Migration bundles also expose
 check counts and primary-only counts for release automation; replacement summary
 copies that evidence and fails production readiness when present but not ready.
 Adapter bring-up should use
-`skein external-shadow-adapter-smoke --require-previous-wrapper ...` first to
-validate `ready`, `execute_session`, and `project_graph` wiring, but smoke
-output does not count as production cutover evidence.
+`SKEIN_ENABLE_COMPATIBILITY_TOOLS=1 skein external-shadow-adapter-smoke
+--require-previous-wrapper ...` first to validate `ready`, `execute_session`,
+and `project_graph` wiring, but smoke output does not count as production
+cutover evidence.
 Production replacement is a side-by-side cutover signal, not an old-store
 deletion signal. Nowledge Mem must keep the existing Kuzu/Ladybug database
 available while Skein is introduced as a sibling graph store through explicit

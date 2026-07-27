@@ -482,7 +482,8 @@ and migration gate report helpers; their `decision` fields are lowercase
 `assess_compatibility_migration_gate_bundle`
 packages the four reports into one result, and
 `compatibility_migration_gate_bundle_to_json` preserves the same structure for
-artifact upload. The `nowledge-cypher-migration-gate [--require-ready]
+artifact upload. The `SKEIN_ENABLE_COMPATIBILITY_TOOLS=1
+nowledge-cypher-migration-gate [--require-ready]
 [--require-cutover-evidence] [--allow-self-shadow] [--shadow-ready]
 [--shadow-trace <path>] [--shadow-timeout-ms <ms>]
 [--require-rollback-evidence] [--rollback-evidence <text>]
@@ -497,7 +498,9 @@ have to match semantic fixture names, and prints the same migration-gate bundle
 JSON. With `--require-ready`, the command exits with an error when the migration
 gate decision is blocked. With `--require-cutover-evidence`, the command also
 runs the ready preflight and requires previous-wrapper shadow evidence, making it
-suitable as a production cutover gate.
+suitable for isolated release or nightly cutover evidence generation. Production
+Mem should consume typed Rust library gates such as
+`nowledge_mem_final_cutover_preflight` instead of invoking this CLI path.
 External shadow adapter smoke reports include a `dual_engine_evidence` object
 that records the Skein primary side, the previous-wrapper shadow side, matched
 check count, primary-only count, and readiness. Preflight consumes this field

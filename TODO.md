@@ -296,7 +296,7 @@ contract.
   - [x] Expose a typed final cutover preflight report through Rust library APIs
     with compact redacted diagnostics over integration readiness and replacement
     summary production cutover evidence.
-- [ ] PR 10: Remove or quarantine obsolete compatibility paths.
+- [x] PR 10: Remove or quarantine obsolete compatibility paths.
   - Scope: after gates are satisfied, remove unused CLI-only, Python-only, and
     request-time shadow compare code from the production path.
   - Deliverables: deleted or nightly-only compatibility entrypoints and updated
@@ -307,6 +307,9 @@ contract.
   - [x] Quarantine command-backed previous-wrapper and request-time shadow
     compatibility CLI tools behind an explicit developer/preflight opt-in while
     keeping production integration on typed Rust library APIs.
+  - [x] Update external shadow, replacement matrix, and architecture docs so CLI
+    compatibility commands are described as isolated evidence generators, not
+    production serving or cutover-decision paths.
 
 ## P0: Graph Kernel Compatibility
 
