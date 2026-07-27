@@ -359,10 +359,10 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             error.kind()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!(
-            "failed to parse nowledge mem library readiness JSON: {error}"
-        ))
+    serde_json::from_str(&content).map_err(|_| {
+        SkeinError::Semantic(
+            "failed to parse nowledge mem library readiness JSON: invalid_json".to_string(),
+        )
     })
 }
 
@@ -486,6 +486,28 @@ mod tests {
         assert!(error
             .to_string()
             .contains("nowledge-mem-library-readiness requires"));
+    }
+
+    #[test]
+    fn library_readiness_input_parse_errors_are_redacted_by_default() {
+        let root = unique_test_dir("library-readiness-parse-redaction");
+        let path = root.join("secret-library-readiness-path-do-not-emit.json");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            &path,
+            "{ \"secret\": \"library-readiness-parse-secret-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse nowledge mem library readiness JSON: invalid_json"
+        );
+        assert!(!error.contains("secret-library-readiness-path-do-not-emit"));
+        assert!(!error.contains("library-readiness-parse-secret-do-not-emit"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

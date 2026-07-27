@@ -58,6 +58,8 @@ query family, or cutover gate requires them.
     errors.
   - [x] Redact query-runtime preflight probe JSON parse failures by default so
     Cypher text and parameters are not copied into command errors.
+  - [x] Redact library-readiness JSON parse failures by default so nested
+    evidence payload fragments are not copied into command errors.
 
 ## P0: Concrete Cutover Blockers
 
