@@ -239,17 +239,15 @@ fn read_json_arg(args: &mut impl Iterator<Item = String>) -> Result<serde_json::
 }
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
-    let raw = std::fs::read_to_string(path).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to read previous-wrapper preflight JSON '{}': {error}",
-            path.display()
-        ))
+    let raw = std::fs::read_to_string(path).map_err(|_| {
+        SkeinError::Execution(
+            "failed to read previous-wrapper preflight JSON: io_error".to_string(),
+        )
     })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        SkeinError::Execution(format!(
-            "failed to parse previous-wrapper preflight JSON '{}': {error}",
-            path.display()
-        ))
+    serde_json::from_str(&raw).map_err(|_| {
+        SkeinError::Execution(
+            "failed to parse previous-wrapper preflight JSON: invalid_json".to_string(),
+        )
     })
 }
 
@@ -4232,6 +4230,43 @@ mod tests {
         assert_eq!(report["ready"], true);
         assert_eq!(report["failed_checks"], serde_json::json!([]));
         std::fs::remove_dir_all(bundle_dir).unwrap();
+    }
+
+    #[test]
+    fn preflight_json_input_read_errors_are_redacted_by_default() {
+        let secret_path = unique_test_dir("previous-wrapper-secret-token-do-not-emit")
+            .join("missing-secret-file.json");
+
+        let error = super::read_json_file(&secret_path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "execution error: failed to read previous-wrapper preflight JSON: io_error"
+        );
+        assert!(!error.contains("secret-token-do-not-emit"));
+        assert!(!error.contains("missing-secret-file"));
+    }
+
+    #[test]
+    fn preflight_json_input_parse_errors_are_redacted_by_default() {
+        let root = unique_test_dir("previous-wrapper-parse-redaction");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("secret-json-path-do-not-emit.json");
+        std::fs::write(
+            &path,
+            "{ \"secret\": \"parse-secret-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "execution error: failed to parse previous-wrapper preflight JSON: invalid_json"
+        );
+        assert!(!error.contains("secret-json-path-do-not-emit"));
+        assert!(!error.contains("parse-secret-do-not-emit"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn unique_test_dir(name: &str) -> PathBuf {

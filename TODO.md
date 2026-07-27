@@ -47,6 +47,9 @@ query family, or cutover gate requires them.
     parameters, local paths, or raw errors block cutover.
   - [x] Require final previous-wrapper preflight to validate query-runtime and
     library redaction evidence before release summaries can pass.
+  - [x] Redact final previous-wrapper preflight JSON input read and parse
+    failures by default so local paths and raw payload fragments are not copied
+    into command errors.
 
 ## P0: Concrete Cutover Blockers
 
