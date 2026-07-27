@@ -175,6 +175,21 @@ pub struct SearchProjectionCutoverReadiness {
     pub blocker_codes: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SearchCandidateCutoverReadiness {
+    pub protocol_matches: bool,
+    pub evidence_source_matches: bool,
+    pub route_matches: bool,
+    pub ready: bool,
+    pub primary_engine_matches: bool,
+    pub candidate_count_parity: bool,
+    pub candidate_identity_ready: bool,
+    pub filter_pushdown_ready: bool,
+    pub filter_pushdown_field_summary_present: bool,
+    pub filter_pushdown_required_fields_ready: bool,
+    pub blocker_codes: Vec<String>,
+}
+
 impl LibraryReadinessCutoverReadiness {
     pub fn evidence_ready(&self) -> bool {
         self.protocol_matches
@@ -225,6 +240,21 @@ impl SearchProjectionCutoverReadiness {
             && self.primary_scan_filter_fields_ready
             && self.shadow_scan_filter_fields_ready
             && self.shadow_descriptor_field_summaries_ready
+    }
+}
+
+impl SearchCandidateCutoverReadiness {
+    pub fn evidence_ready(&self) -> bool {
+        self.protocol_matches
+            && self.evidence_source_matches
+            && self.route_matches
+            && self.ready
+            && self.primary_engine_matches
+            && self.candidate_count_parity
+            && self.candidate_identity_ready
+            && self.filter_pushdown_ready
+            && self.filter_pushdown_field_summary_present
+            && self.filter_pushdown_required_fields_ready
     }
 }
 
@@ -301,6 +331,7 @@ pub fn nowledge_mem_integration_readiness(
     let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
     let library_readiness = library_readiness_cutover_readiness(bundle);
     let search_projection_readiness = search_projection_cutover_readiness(bundle);
+    let search_candidate_readiness = search_candidate_cutover_readiness(bundle);
     let storage_recovery_readiness = storage_recovery_cutover_readiness(bundle);
     let background_maintenance_readiness = background_maintenance_cutover_readiness(bundle);
     let checks = vec![
@@ -461,38 +492,10 @@ pub fn nowledge_mem_integration_readiness(
             search_projection_cutover_conditions(&search_projection_readiness),
             search_projection_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "search_candidate_primary_evidence",
-            [
-                str_path(bundle, &["search_candidate_shadow_evidence", "protocol"])
-                    == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL),
-                search_candidate_evidence_source_ready(bundle),
-                str_path(bundle, &["search_candidate_shadow_evidence", "route"])
-                    == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE),
-                bool_path(bundle, &["search_candidate_shadow_evidence", "ready"]) == Some(true),
-                search_candidate_engine_identity_ready(bundle),
-                search_candidate_parity_ready(bundle),
-                search_candidate_identity_ready(bundle),
-                search_candidate_filter_pushdown_flag_ready(bundle),
-                search_candidate_filter_pushdown_field_summary_ready(bundle),
-                search_candidate_filter_pushdown_required_fields_ready(bundle),
-            ],
-            [
-                "search_candidate_shadow_evidence.protocol",
-                "search_candidate_shadow_evidence.evidence_source",
-                "search_candidate_shadow_evidence.route",
-                "search_candidate_shadow_evidence.ready",
-                "search_candidate_shadow_evidence.candidate_primary_engine",
-                "search_candidate_shadow_evidence.candidate_counts",
-                "search_candidate_shadow_evidence.candidate_identity.ready",
-                "search_candidate_shadow_evidence.filter_pushdown.ready",
-                "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
-                "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields",
-            ],
-            blocker_codes(
-                bundle,
-                &[&["search_candidate_shadow_evidence", "blocker_codes"][..]],
-            ),
+            search_candidate_cutover_conditions(&search_candidate_readiness),
+            search_candidate_readiness.blocker_codes.clone(),
         ),
         check(
             "bounded_read_evidence",
@@ -1405,11 +1408,14 @@ pub fn nowledge_mem_integration_readiness(
         next_actions: next_actions(
             bundle,
             ready,
-            &library_readiness,
-            &search_projection_readiness,
-            &blackbox_readiness,
-            &storage_recovery_readiness,
-            &background_maintenance_readiness,
+            IntegrationGateReadiness {
+                library: &library_readiness,
+                search_projection: &search_projection_readiness,
+                search_candidate: &search_candidate_readiness,
+                blackbox: &blackbox_readiness,
+                storage_recovery: &storage_recovery_readiness,
+                background_maintenance: &background_maintenance_readiness,
+            },
         ),
     }
 }
@@ -1462,14 +1468,19 @@ fn check_named_conditions(
     }
 }
 
+struct IntegrationGateReadiness<'a> {
+    library: &'a LibraryReadinessCutoverReadiness,
+    search_projection: &'a SearchProjectionCutoverReadiness,
+    search_candidate: &'a SearchCandidateCutoverReadiness,
+    blackbox: &'a BlackboxReadinessReport,
+    storage_recovery: &'a StorageRecoveryCutoverReadiness,
+    background_maintenance: &'a BackgroundMaintenanceCutoverReadiness,
+}
+
 fn next_actions(
     bundle: &serde_json::Value,
     ready: bool,
-    library_readiness: &LibraryReadinessCutoverReadiness,
-    search_projection_readiness: &SearchProjectionCutoverReadiness,
-    blackbox_readiness: &BlackboxReadinessReport,
-    storage_recovery_readiness: &StorageRecoveryCutoverReadiness,
-    background_maintenance_readiness: &BackgroundMaintenanceCutoverReadiness,
+    readiness: IntegrationGateReadiness<'_>,
 ) -> Vec<NowledgeMemIntegrationNextAction> {
     if ready {
         return Vec::new();
@@ -1581,7 +1592,7 @@ fn next_actions(
             ],
         ));
     }
-    if !search_projection_readiness.evidence_ready() {
+    if !readiness.search_projection.evidence_ready() {
         actions.push(next_action(
             "attach_search_projection_replacement_evidence",
             "LanceDB replacement evidence must prove FTS, vector, incremental, predicate pushdown, compressed projection, and shadow parity",
@@ -1604,7 +1615,7 @@ fn next_actions(
             ],
         ));
     }
-    if !search_candidate_primary_evidence_ready(bundle) {
+    if !readiness.search_candidate.evidence_ready() {
         actions.push(next_action(
             "enable_skein_search_candidate_primary_reads",
             "LanceDB replacement must prove memory-hybrid candidate reads are served by Skein before Mem cutover",
@@ -1759,7 +1770,7 @@ fn next_actions(
             ],
         ));
     }
-    if !library_readiness.evidence_ready() {
+    if !readiness.library.evidence_ready() {
         actions.push(next_action(
             "attach_library_readiness_evidence",
             "Nowledge Mem cutover requires the Skein Rust library to open graph, search projection, and required evidence areas",
@@ -1773,7 +1784,7 @@ fn next_actions(
             ],
         ));
     }
-    if !blackbox_readiness.redaction_ready {
+    if !readiness.blackbox.redaction_ready {
         actions.push(next_action(
             "attach_blackbox_redaction_report",
             "Nowledge Mem cutover requires redacted blackbox evidence before diagnostics can be retained",
@@ -1789,7 +1800,7 @@ fn next_actions(
             ],
         ));
     }
-    if !blackbox_readiness.operational_evidence_ready {
+    if !readiness.blackbox.operational_evidence_ready {
         actions.push(next_action(
             "attach_blackbox_operational_evidence",
             "Nowledge Mem cutover requires blackbox slow-query and background QoS operational evidence",
@@ -1801,7 +1812,7 @@ fn next_actions(
             ],
         ));
     }
-    if !storage_recovery_readiness.evidence_ready() {
+    if !readiness.storage_recovery.evidence_ready() {
         actions.push(next_action(
             "attach_storage_recovery_report",
             "storage recovery evidence must prove durable bounded WAL replay before Mem cutover",
@@ -1817,7 +1828,7 @@ fn next_actions(
             ],
         ));
     }
-    if !background_maintenance_readiness.evidence_ready() {
+    if !readiness.background_maintenance.evidence_ready() {
         actions.push(next_action(
             "attach_background_maintenance_report",
             "background maintenance QoS and search-projection graph-delta evidence must be ready before Mem cutover",
@@ -2245,114 +2256,106 @@ fn search_projection_cutover_conditions(
     ]
 }
 
-fn search_candidate_primary_evidence_ready(bundle: &serde_json::Value) -> bool {
-    str_path(bundle, &["search_candidate_shadow_evidence", "protocol"])
-        == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL)
-        && search_candidate_evidence_source_ready(bundle)
-        && str_path(bundle, &["search_candidate_shadow_evidence", "route"])
-            == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE)
-        && bool_path(bundle, &["search_candidate_shadow_evidence", "ready"]) == Some(true)
-        && search_candidate_engine_identity_ready(bundle)
-        && search_candidate_parity_ready(bundle)
-        && search_candidate_identity_ready(bundle)
-        && search_candidate_filter_pushdown_ready(bundle)
-}
-
-fn search_candidate_evidence_source(bundle: &serde_json::Value) -> Option<&str> {
-    str_path(
-        bundle,
-        &["search_candidate_shadow_evidence", "evidence_source"],
-    )
-}
-
-fn search_candidate_evidence_source_ready(bundle: &serde_json::Value) -> bool {
-    search_candidate_evidence_source(bundle) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
-}
-
-fn search_candidate_bridge_evidence(bundle: &serde_json::Value) -> bool {
-    search_candidate_evidence_source(bundle) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE)
-}
-
-fn search_candidate_unsupported_evidence_source_present(bundle: &serde_json::Value) -> bool {
-    search_candidate_evidence_source(bundle).is_some() && !search_candidate_bridge_evidence(bundle)
-}
-
-fn search_candidate_engine_identity_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_unsupported_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_bridge_evidence(bundle)
-        && str_path(
+pub fn search_candidate_cutover_readiness(
+    bundle: &serde_json::Value,
+) -> SearchCandidateCutoverReadiness {
+    SearchCandidateCutoverReadiness {
+        protocol_matches: str_path(bundle, &["search_candidate_shadow_evidence", "protocol"])
+            == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_SHADOW_EVIDENCE_PROTOCOL),
+        evidence_source_matches: str_path(
+            bundle,
+            &["search_candidate_shadow_evidence", "evidence_source"],
+        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_SOURCE),
+        route_matches: str_path(bundle, &["search_candidate_shadow_evidence", "route"])
+            == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_EVIDENCE_ROUTE),
+        ready: bool_path(bundle, &["search_candidate_shadow_evidence", "ready"]) == Some(true),
+        primary_engine_matches: str_path(
             bundle,
             &[
                 "search_candidate_shadow_evidence",
                 "candidate_primary_engine",
             ],
-        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE)
-}
-
-fn search_candidate_parity_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_unsupported_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_bridge_evidence(bundle) && search_candidate_shadow_counts_ready(bundle)
-}
-
-fn search_candidate_identity_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_unsupported_evidence_source_present(bundle) {
-        return true;
-    }
-    search_candidate_bridge_evidence(bundle)
-        && bool_path(
+        ) == Some(NOWLEDGE_MEM_SEARCH_CANDIDATE_PRIMARY_ENGINE),
+        candidate_count_parity: search_candidate_shadow_counts_ready(bundle),
+        candidate_identity_ready: bool_path(
             bundle,
             &[
                 "search_candidate_shadow_evidence",
                 "candidate_identity",
                 "ready",
             ],
-        ) == Some(true)
-}
-
-fn search_candidate_filter_pushdown_ready(bundle: &serde_json::Value) -> bool {
-    search_candidate_bridge_evidence(bundle)
-        && search_candidate_filter_pushdown_flag_ready(bundle)
-        && search_candidate_filter_pushdown_field_summary_ready(bundle)
-        && search_candidate_filter_pushdown_required_fields_ready(bundle)
-}
-
-fn search_candidate_filter_pushdown_flag_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_unsupported_evidence_source_present(bundle) {
-        return true;
+        ) == Some(true),
+        filter_pushdown_ready: bool_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "filter_pushdown",
+                "ready",
+            ],
+        ) == Some(true),
+        filter_pushdown_field_summary_present: u64_path(
+            bundle,
+            &[
+                "search_candidate_shadow_evidence",
+                "filter_pushdown",
+                "field_summary_count",
+            ],
+        )
+        .is_some_and(|count| count > 0),
+        filter_pushdown_required_fields_ready:
+            search_candidate_filter_pushdown_required_fields_ready(bundle),
+        blocker_codes: blocker_codes(
+            bundle,
+            &[&["search_candidate_shadow_evidence", "blocker_codes"][..]],
+        ),
     }
-    bool_path(
-        bundle,
-        &[
-            "search_candidate_shadow_evidence",
-            "filter_pushdown",
-            "ready",
-        ],
-    ) == Some(true)
 }
 
-fn search_candidate_filter_pushdown_field_summary_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_unsupported_evidence_source_present(bundle) {
-        return true;
-    }
-    u64_path(
-        bundle,
-        &[
-            "search_candidate_shadow_evidence",
-            "filter_pushdown",
-            "field_summary_count",
-        ],
-    )
-    .is_some_and(|count| count > 0)
+fn search_candidate_cutover_conditions(
+    readiness: &SearchCandidateCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        (
+            "search_candidate_shadow_evidence.protocol",
+            readiness.protocol_matches,
+        ),
+        (
+            "search_candidate_shadow_evidence.evidence_source",
+            readiness.evidence_source_matches,
+        ),
+        (
+            "search_candidate_shadow_evidence.route",
+            readiness.route_matches,
+        ),
+        ("search_candidate_shadow_evidence.ready", readiness.ready),
+        (
+            "search_candidate_shadow_evidence.candidate_primary_engine",
+            readiness.primary_engine_matches,
+        ),
+        (
+            "search_candidate_shadow_evidence.candidate_counts",
+            readiness.candidate_count_parity,
+        ),
+        (
+            "search_candidate_shadow_evidence.candidate_identity.ready",
+            readiness.candidate_identity_ready,
+        ),
+        (
+            "search_candidate_shadow_evidence.filter_pushdown.ready",
+            readiness.filter_pushdown_ready,
+        ),
+        (
+            "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
+            readiness.filter_pushdown_field_summary_present,
+        ),
+        (
+            "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields",
+            readiness.filter_pushdown_required_fields_ready,
+        ),
+    ]
 }
 
 fn search_candidate_filter_pushdown_required_fields_ready(bundle: &serde_json::Value) -> bool {
-    if search_candidate_unsupported_evidence_source_present(bundle) {
-        return true;
-    }
     let path = &[
         "search_candidate_shadow_evidence",
         "filter_pushdown",
@@ -4237,8 +4240,48 @@ mod tests {
             .unwrap();
         assert_eq!(
             candidate_check["failed_evidence_fields"],
-            serde_json::json!(["search_candidate_shadow_evidence.evidence_source"])
+            serde_json::json!([
+                "search_candidate_shadow_evidence.evidence_source",
+                "search_candidate_shadow_evidence.candidate_primary_engine",
+                "search_candidate_shadow_evidence.candidate_counts",
+                "search_candidate_shadow_evidence.candidate_identity.ready",
+                "search_candidate_shadow_evidence.filter_pushdown.ready",
+                "search_candidate_shadow_evidence.filter_pushdown.field_summary_count",
+                "search_candidate_shadow_evidence.filter_pushdown.missing_required_fields"
+            ])
         );
+    }
+
+    #[test]
+    fn exposes_typed_search_candidate_cutover_readiness() {
+        let bundle = ready_bundle();
+
+        let typed = super::search_candidate_cutover_readiness(&bundle);
+
+        assert!(typed.evidence_ready());
+        assert!(typed.protocol_matches);
+        assert!(typed.evidence_source_matches);
+        assert!(typed.route_matches);
+        assert!(typed.primary_engine_matches);
+        assert!(typed.candidate_count_parity);
+        assert!(typed.candidate_identity_ready);
+        assert!(typed.filter_pushdown_ready);
+        assert!(typed.filter_pushdown_field_summary_present);
+        assert!(typed.filter_pushdown_required_fields_ready);
+        assert!(typed.blocker_codes.is_empty());
+    }
+
+    #[test]
+    fn typed_search_candidate_cutover_requires_rust_bridge_evidence() {
+        let mut bundle = ready_bundle();
+        bundle["search_candidate_shadow_evidence"] = ready_search_candidate_trace_evidence();
+
+        let typed = super::search_candidate_cutover_readiness(&bundle);
+
+        assert!(!typed.evidence_ready());
+        assert!(!typed.evidence_source_matches);
+        assert!(!typed.primary_engine_matches);
+        assert!(!typed.candidate_count_parity);
     }
 
     #[test]
