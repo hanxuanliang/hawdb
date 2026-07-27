@@ -88,8 +88,8 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             error.kind()
         ))
     })?;
-    serde_json::from_str(&content).map_err(|error| {
-        SkeinError::Semantic(format!("failed to parse query family JSON: {error}"))
+    serde_json::from_str(&content).map_err(|_| {
+        SkeinError::Semantic("failed to parse query family JSON: invalid_json".to_string())
     })
 }
 
@@ -131,6 +131,26 @@ mod tests {
                 .len(),
             REQUIRED_NOWLEDGE_REPLACEMENT_QUERY_FAMILIES.len()
         );
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn query_family_parse_errors_are_redacted_by_default() {
+        let path = unique_test_file("query_family_secret_path_do_not_emit");
+        std::fs::write(
+            &path,
+            "{ \"query_family\": \"secret-family-do-not-emit\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse query family JSON: invalid_json"
+        );
+        assert!(!error.contains("query_family_secret_path_do_not_emit"));
+        assert!(!error.contains("secret-family-do-not-emit"));
         std::fs::remove_file(path).unwrap();
     }
 

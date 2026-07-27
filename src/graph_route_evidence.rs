@@ -1088,8 +1088,8 @@ fn read_json_file(path: &Path) -> Result<serde_json::Value> {
             error.kind()
         ))
     })?;
-    serde_json::from_str(&raw).map_err(|error| {
-        SkeinError::Semantic(format!("failed to parse graph route query JSON: {error}"))
+    serde_json::from_str(&raw).map_err(|_| {
+        SkeinError::Semantic("failed to parse graph route query JSON: invalid_json".to_string())
     })
 }
 
@@ -1184,6 +1184,8 @@ mod tests {
         NowledgeMemQueryReportOptions, Value, REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES,
     };
     use std::collections::BTreeMap;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn route_evidence_runs_queries_through_nowledge_runtime() {
@@ -1280,6 +1282,28 @@ mod tests {
             evidence["routes"][0]["required_query_families"],
             serde_json::json!(["memory_lookup"])
         );
+    }
+
+    #[test]
+    fn graph_route_query_json_parse_errors_are_redacted_by_default() {
+        let root = unique_test_dir("graph_route_secret_path_do_not_emit");
+        std::fs::create_dir_all(&root).unwrap();
+        let path = root.join("secret-route-inventory-path-do-not-emit.json");
+        std::fs::write(
+            &path,
+            "{ \"cypher\": \"MATCH (m {id: 'secret-route-query-do-not-emit'})\", \"unterminated\": ",
+        )
+        .unwrap();
+
+        let error = super::read_json_file(&path).unwrap_err().to_string();
+
+        assert_eq!(
+            error,
+            "semantic error: failed to parse graph route query JSON: invalid_json"
+        );
+        assert!(!error.contains("secret-route-inventory-path-do-not-emit"));
+        assert!(!error.contains("secret-route-query-do-not-emit"));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -2390,5 +2414,13 @@ mod tests {
                 .collect::<Vec<_>>()
         }))
         .unwrap()
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("skein_{name}_{}_{nanos}", std::process::id()))
     }
 }
