@@ -71,6 +71,12 @@ query family, or cutover gate requires them.
   - [x] Redact Nowledge inventory filesystem failures by default so migration
     coverage diagnostics do not copy local paths or source payload fragments
     into command errors.
+  - [x] Redact blackbox manifest and event JSON serialization failures by
+    default so retained production diagnostics expose stable error classes
+    instead of serde internals.
+  - [x] Redact shared CLI JSON file parse failures by default so nightly
+    diagnostics do not copy local paths or payload fragments into command
+    errors.
 
 ## P0: Concrete Cutover Blockers
 

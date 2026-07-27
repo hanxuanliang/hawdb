@@ -3013,12 +3013,8 @@ fn publish_graph_lightning_staging_catalog_with_options(
     let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
     let catalog_bytes = fs::read(&catalog_path)?;
     let catalog_checksum = checksum_bytes(&catalog_bytes);
-    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes).map_err(|error| {
-        SkeinError::Execution(format!(
-            "invalid JSON at {}: {error}",
-            catalog_path.display()
-        ))
-    })?;
+    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes)
+        .map_err(|_| SkeinError::Execution("invalid JSON file: invalid_json".to_string()))?;
     let manifest = read_staging_artifact_json(&catalog, staging_dir, "manifest")?;
     let publish_preflight = graph_lightning_publish_preflight(staging_dir, &manifest, &options)?;
     let pointer = serde_json::json!({
@@ -3214,12 +3210,8 @@ fn verify_graph_lightning_published_manifest(
                 "recovered_commit_epoch_matches_manifest": false,
             })
         });
-    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes).map_err(|error| {
-        SkeinError::Execution(format!(
-            "invalid JSON at {}: {error}",
-            catalog_path.display()
-        ))
-    })?;
+    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes)
+        .map_err(|_| SkeinError::Execution("invalid JSON file: invalid_json".to_string()))?;
     let manifest = read_staging_artifact_json(&catalog, staging_dir, "manifest")?;
     let pointer_matches_manifest = published.get("graph_commit_epoch")
         == manifest.get("graph_commit_epoch")
@@ -3305,12 +3297,8 @@ fn graph_lightning_gc_staging_report(
     let publish_dir = publish_dir.as_ref();
     let catalog_path = staging_dir.join("graph_lightning_staging_catalog.json");
     let catalog_bytes = fs::read(&catalog_path)?;
-    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes).map_err(|error| {
-        SkeinError::Execution(format!(
-            "invalid JSON at {}: {error}",
-            catalog_path.display()
-        ))
-    })?;
+    let catalog = serde_json::from_slice::<serde_json::Value>(&catalog_bytes)
+        .map_err(|_| SkeinError::Execution("invalid JSON file: invalid_json".to_string()))?;
     let candidates = graph_lightning_staging_gc_candidates(&catalog, &catalog_bytes)?;
     let published_path = publish_dir.join("graph_lightning_published_manifest.json");
     let mut errors = Vec::new();
@@ -4347,9 +4335,8 @@ fn same_published_manifest_identity(left: &serde_json::Value, right: &serde_json
 
 fn read_json_file(path: &Path) -> Result<serde_json::Value> {
     let bytes = fs::read(path)?;
-    serde_json::from_slice(&bytes).map_err(|error| {
-        SkeinError::Execution(format!("invalid JSON at {}: {error}", path.display()))
-    })
+    serde_json::from_slice(&bytes)
+        .map_err(|_| SkeinError::Execution("invalid JSON file: invalid_json".to_string()))
 }
 
 fn write_staging_artifact(
@@ -4772,8 +4759,9 @@ mod tests {
         parse_max_blockers, parse_max_family_items, parse_max_wal_replay_entries,
         parse_parameters_json, parse_positive_usize, parse_shadow_timeout_ms,
         publish_graph_lightning_staging_catalog,
-        publish_graph_lightning_staging_catalog_with_options, should_run_shadow_ready,
-        stable_identity_audit_json, stage_graph_lightning_bootstrap_export,
+        publish_graph_lightning_staging_catalog_with_options, read_json_file,
+        should_run_shadow_ready, stable_identity_audit_json,
+        stage_graph_lightning_bootstrap_export,
         stage_graph_lightning_bootstrap_export_with_storage_recovery, storage_recovery_report_json,
         validate_canonical_snapshot_usage, value_json, verify_graph_lightning_published_manifest,
         verify_graph_lightning_staging_catalog, BackgroundMaintenanceReportOptions,
@@ -6171,6 +6159,21 @@ mod tests {
         assert!(error
             .to_string()
             .contains("--params-json must be a JSON object"));
+    }
+
+    #[test]
+    fn cli_json_file_parse_errors_are_redacted_by_default() {
+        let path = unique_json_file("secret-cli-json-path-do-not-emit");
+        std::fs::write(&path, "{\"secret\":\"cli-json-payload-do-not-emit\",").unwrap();
+
+        let error = read_json_file(&path).unwrap_err();
+        let message = error.to_string();
+
+        assert_eq!(message, "execution error: invalid JSON file: invalid_json");
+        assert!(!message.contains(path.to_str().unwrap()));
+        assert!(!message.contains("secret-cli-json-path-do-not-emit"));
+        assert!(!message.contains("cli-json-payload-do-not-emit"));
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]

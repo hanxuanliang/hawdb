@@ -602,8 +602,9 @@ pub fn write_blackbox_report_typed(options: &BlackboxReportOptions) -> Result<Bl
     let manifest = blackbox_report(options)?;
     write_blackbox_events(&options.output_dir.join("events.jsonl"), &manifest.events())?;
     let manifest_json = manifest.json();
-    let manifest_bytes = serde_json::to_vec_pretty(&manifest_json)
-        .map_err(|error| SkeinError::Execution(format!("blackbox manifest JSON error: {error}")))?;
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest_json).map_err(|_| {
+        SkeinError::Execution("blackbox manifest JSON error: serialization_error".to_string())
+    })?;
     fs::write(options.output_dir.join("manifest.json"), manifest_bytes)?;
     Ok(manifest)
 }
@@ -913,8 +914,8 @@ fn blackbox_json_nested_str<'a>(value: &'a serde_json::Value, path: &[&str]) -> 
 fn write_blackbox_events(events_path: &Path, events: &[BlackboxEventReport]) -> Result<()> {
     let mut file = fs::File::create(events_path)?;
     for event in events {
-        let event_line = serde_json::to_string(&event.json()).map_err(|error| {
-            SkeinError::Execution(format!("blackbox event JSON error: {error}"))
+        let event_line = serde_json::to_string(&event.json()).map_err(|_| {
+            SkeinError::Execution("blackbox event JSON error: serialization_error".to_string())
         })?;
         writeln!(file, "{event_line}")?;
     }
