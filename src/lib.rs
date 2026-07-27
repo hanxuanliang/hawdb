@@ -125,8 +125,9 @@ pub use error::{Result, SkeinError};
 pub use executor::ReadExecutionProfile;
 pub use graph_route_evidence::{
     nowledge_graph_route_evidence_json, nowledge_graph_route_evidence_usage,
-    parse_route_parity_evidence, parse_route_query_inventory, run_nowledge_graph_route_evidence,
-    RouteCypherQuery, RouteParityEvidence, RouteParityEvidenceRoute, RouteQuery,
+    nowledge_mem_graph_overview_route_query, parse_route_parity_evidence,
+    parse_route_query_inventory, run_nowledge_graph_route_evidence, RouteCypherQuery,
+    RouteParityEvidence, RouteParityEvidenceRoute, RouteQuery,
     NMEM_GRAPH_ROUTE_PARITY_EVIDENCE_PROTOCOL,
 };
 pub use graph_route_readiness::{
@@ -218,7 +219,8 @@ pub use nowledge_mem::{
     NowledgeMemSlowQueryRecord, NowledgeMemSlowQueryReport, NowledgeMemStorageRecoveryReport,
     NowledgeQueryRuntimePreflightProbe, NowledgeQueryRuntimePreflightProbeReport,
     NowledgeQueryRuntimePreflightReport, NOWLEDGE_MEM_BOUNDED_READ_EVIDENCE_PROTOCOL,
-    NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL,
+    NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY, NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE,
+    NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE_REPORT_PROTOCOL,
     NOWLEDGE_MEM_GRAPH_READ_ROUTE_CATALOG_VERSION, NOWLEDGE_MEM_LIBRARY_READINESS_PROTOCOL,
     NOWLEDGE_MEM_OPEN_REPORT_PROTOCOL, NOWLEDGE_MEM_QUERY_REPORT_PROTOCOL,
     NOWLEDGE_MEM_READINESS_DASHBOARD_PROTOCOL, NOWLEDGE_MEM_READ_REPORT_PROTOCOL,

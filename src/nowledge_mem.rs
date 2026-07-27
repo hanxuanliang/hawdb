@@ -176,6 +176,24 @@ const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_MISSING: &str =
 const SKEIN_SEARCH_PROJECTION_SEGMENT_DESCRIPTOR_FIELDS_MISSING: &str =
     "skein_search_projection_segment_descriptor_fields_missing";
 pub const NOWLEDGE_MEM_GRAPH_OVERVIEW_ROUTE: &str = "/graph/overview";
+pub const NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY: &str = "\
+MATCH (m:Memory) \
+RETURN m.id AS memory_id, \
+id(m) AS node_id, \
+COALESCE(m.title, LEFT(m.content, 60)) AS label, \
+m.title AS title, \
+LEFT(COALESCE(m.content, ''), 200) AS content_preview, \
+COALESCE(m.pagerank_score, m.importance, 0.5) AS score, \
+m.community_id AS community_id, \
+m.space_id AS raw_space_id, \
+m.created_at AS created_at, \
+m.updated_at AS updated_at, \
+m.source AS source, \
+m.event_start AS event_start, \
+m.event_end AS event_end, \
+m.importance AS importance \
+ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
+LIMIT $limit";
 pub const REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES: &[&str] = &[
     "/communities",
     "/communities/{community_id}",
@@ -2668,7 +2686,7 @@ impl NowledgeMemGraph {
         let mut parameters = BTreeMap::new();
         parameters.insert("limit".to_string(), Value::Int(limit));
         let read = self.read_query_with_params(
-            GRAPH_OVERVIEW_MEMORY_RANKING_QUERY,
+            NOWLEDGE_MEM_GRAPH_OVERVIEW_MEMORY_RANKING_QUERY,
             &parameters,
             &graph_overview_read_options(options),
         )?;
@@ -2690,25 +2708,6 @@ impl NowledgeMemGraph {
         Ok(NowledgeMemGraphOverviewOutput { rows, report })
     }
 }
-
-const GRAPH_OVERVIEW_MEMORY_RANKING_QUERY: &str = "\
-MATCH (m:Memory) \
-RETURN m.id AS memory_id, \
-id(m) AS node_id, \
-COALESCE(m.title, LEFT(m.content, 60)) AS label, \
-m.title AS title, \
-LEFT(COALESCE(m.content, ''), 200) AS content_preview, \
-COALESCE(m.pagerank_score, m.importance, 0.5) AS score, \
-m.community_id AS community_id, \
-m.space_id AS raw_space_id, \
-m.created_at AS created_at, \
-m.updated_at AS updated_at, \
-m.source AS source, \
-m.event_start AS event_start, \
-m.event_end AS event_end, \
-m.importance AS importance \
-ORDER BY COALESCE(m.pagerank_score, m.importance, 0.5) DESC \
-LIMIT $limit";
 
 fn graph_overview_read_options(
     options: &NowledgeMemGraphOverviewOptions,

@@ -150,6 +150,9 @@ contract.
   - [x] Add a library-first Skein read runtime entrypoint for the low-risk
     `/graph/overview` memory ranking shape, returning typed rows and bounded
     route execution evidence without request-time dual-read compare.
+  - [x] Provide a typed `/graph/overview` route-query evidence helper that reuses
+    the shared overview Cypher contract and feeds graph-route readiness without
+    production request-time dual-read compare.
 - [ ] PR 3: Repeat route runtime migration for the remaining graph-first reads.
   - Scope: migrate overview, node details, expansion, shortest path,
     communities, PageRank plan, augmentation state, orphans, and related
