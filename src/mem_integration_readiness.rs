@@ -1,5 +1,5 @@
 use crate::{
-    blackbox::BLACKBOX_REPORT_PROTOCOL,
+    blackbox::{blackbox_readiness_from_manifest_json, BlackboxReadinessReport},
     graph_route_readiness::{
         NMEM_GRAPH_ROUTE_EVIDENCE_PROTOCOL, NMEM_GRAPH_ROUTE_READINESS_PROTOCOL,
     },
@@ -135,6 +135,10 @@ pub fn nowledge_mem_integration_readiness_json(bundle: &serde_json::Value) -> se
 pub fn nowledge_mem_integration_readiness(
     bundle: &serde_json::Value,
 ) -> NowledgeMemIntegrationReadinessReport {
+    let blackbox_manifest = bundle
+        .get("blackbox_manifest")
+        .unwrap_or(&serde_json::Value::Null);
+    let blackbox_readiness = blackbox_readiness_from_manifest_json(blackbox_manifest);
     let checks = vec![
         check(
             "integration_bundle_protocol",
@@ -1642,30 +1646,14 @@ pub fn nowledge_mem_integration_readiness(
         check(
             "blackbox_redaction",
             [
-                str_path(bundle, &["blackbox_manifest", "protocol"]) == Some(BLACKBOX_REPORT_PROTOCOL),
-                bool_path(
-                    bundle,
-                    &["blackbox_manifest", "artifact_dir_present"],
-                ) == Some(true),
-                u64_path(bundle, &["blackbox_manifest", "artifact_count"])
-                    .is_some_and(|value| value > 0),
-                str_path(bundle, &["blackbox_manifest", "events_path"]) == Some("events.jsonl"),
-                bool_path(
-                    bundle,
-                    &["blackbox_manifest", "redaction", "raw_query_text_copied"],
-                ) == Some(false),
-                bool_path(
-                    bundle,
-                    &["blackbox_manifest", "redaction", "raw_parameters_copied"],
-                ) == Some(false),
-                bool_path(
-                    bundle,
-                    &["blackbox_manifest", "redaction", "raw_artifact_payloads_copied"],
-                ) == Some(false),
-                bool_path(
-                    bundle,
-                    &["blackbox_manifest", "redaction", "artifact_paths_are_relative"],
-                ) == Some(true),
+                blackbox_readiness.protocol_ready,
+                blackbox_readiness.artifact_dir_present,
+                blackbox_readiness.artifact_count_present,
+                blackbox_readiness.events_path_ready,
+                blackbox_readiness.raw_query_text_redacted,
+                blackbox_readiness.raw_parameters_redacted,
+                blackbox_readiness.raw_artifact_payloads_redacted,
+                blackbox_readiness.artifact_paths_relative,
             ],
             [
                 "blackbox_manifest.protocol",
@@ -1677,15 +1665,15 @@ pub fn nowledge_mem_integration_readiness(
                 "blackbox_manifest.redaction.raw_artifact_payloads_copied",
                 "blackbox_manifest.redaction.artifact_paths_are_relative",
             ],
-            blocker_codes(bundle, &[&["blackbox_manifest", "blocker_codes"][..]]),
+            blackbox_readiness.blocker_codes.clone(),
         ),
         check(
             "blackbox_operational_evidence",
             [
-                blackbox_artifact_present(bundle, "slow-query-log.jsonl"),
-                blackbox_jsonl_artifact_summary_present(bundle, "slow-query-log.jsonl"),
-                blackbox_artifact_present(bundle, "background-maintenance.json"),
-                blackbox_background_qos_summary_ready(bundle),
+                blackbox_readiness.slow_query_log_present,
+                blackbox_readiness.slow_query_log_jsonl_summary_present,
+                blackbox_readiness.background_maintenance_present,
+                blackbox_readiness.background_qos_summary_ready,
             ],
             [
                 "blackbox_manifest.artifacts.slow-query-log.jsonl",
@@ -1693,7 +1681,7 @@ pub fn nowledge_mem_integration_readiness(
                 "blackbox_manifest.artifacts.background-maintenance.json",
                 "blackbox_manifest.artifacts.background-maintenance.json.background_qos",
             ],
-            blocker_codes(bundle, &[&["blackbox_manifest", "blocker_codes"][..]]),
+            blackbox_readiness.blocker_codes.clone(),
         ),
     ];
     let ready = checks.iter().all(|check| check.ready);
@@ -1714,7 +1702,7 @@ pub fn nowledge_mem_integration_readiness(
         failed_checks,
         checks,
         blocker_codes,
-        next_actions: next_actions(bundle, ready),
+        next_actions: next_actions(bundle, ready, &blackbox_readiness),
     }
 }
 
@@ -1743,7 +1731,11 @@ fn check(
     }
 }
 
-fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<NowledgeMemIntegrationNextAction> {
+fn next_actions(
+    bundle: &serde_json::Value,
+    ready: bool,
+    blackbox_readiness: &BlackboxReadinessReport,
+) -> Vec<NowledgeMemIntegrationNextAction> {
     if ready {
         return Vec::new();
     }
@@ -2046,7 +2038,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<NowledgeMemInteg
             ],
         ));
     }
-    if !blackbox_redaction_ready(bundle) {
+    if !blackbox_readiness.redaction_ready {
         actions.push(next_action(
             "attach_blackbox_redaction_report",
             "Nowledge Mem cutover requires redacted blackbox evidence before diagnostics can be retained",
@@ -2062,7 +2054,7 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<NowledgeMemInteg
             ],
         ));
     }
-    if !blackbox_operational_evidence_ready(bundle) {
+    if !blackbox_readiness.operational_evidence_ready {
         actions.push(next_action(
             "attach_blackbox_operational_evidence",
             "Nowledge Mem cutover requires blackbox slow-query and background QoS operational evidence",
@@ -3258,100 +3250,6 @@ fn library_readiness_area_ready(bundle: &serde_json::Value, area: &str) -> bool 
     )
     .and_then(serde_json::Value::as_bool)
         == Some(true)
-}
-
-fn blackbox_redaction_ready(bundle: &serde_json::Value) -> bool {
-    str_path(bundle, &["blackbox_manifest", "protocol"]) == Some(BLACKBOX_REPORT_PROTOCOL)
-        && bool_path(bundle, &["blackbox_manifest", "artifact_dir_present"]) == Some(true)
-        && u64_path(bundle, &["blackbox_manifest", "artifact_count"]).is_some_and(|value| value > 0)
-        && str_path(bundle, &["blackbox_manifest", "events_path"]) == Some("events.jsonl")
-        && bool_path(
-            bundle,
-            &["blackbox_manifest", "redaction", "raw_query_text_copied"],
-        ) == Some(false)
-        && bool_path(
-            bundle,
-            &["blackbox_manifest", "redaction", "raw_parameters_copied"],
-        ) == Some(false)
-        && bool_path(
-            bundle,
-            &[
-                "blackbox_manifest",
-                "redaction",
-                "raw_artifact_payloads_copied",
-            ],
-        ) == Some(false)
-        && bool_path(
-            bundle,
-            &[
-                "blackbox_manifest",
-                "redaction",
-                "artifact_paths_are_relative",
-            ],
-        ) == Some(true)
-}
-
-fn blackbox_operational_evidence_ready(bundle: &serde_json::Value) -> bool {
-    blackbox_artifact_present(bundle, "slow-query-log.jsonl")
-        && blackbox_jsonl_artifact_summary_present(bundle, "slow-query-log.jsonl")
-        && blackbox_artifact_present(bundle, "background-maintenance.json")
-        && blackbox_background_qos_summary_ready(bundle)
-}
-
-fn blackbox_artifact_present(bundle: &serde_json::Value, name: &str) -> bool {
-    blackbox_artifact(bundle, name).is_some()
-}
-
-fn blackbox_jsonl_artifact_summary_present(bundle: &serde_json::Value, name: &str) -> bool {
-    let Some(artifact) = blackbox_artifact(bundle, name) else {
-        return false;
-    };
-    str_path(artifact, &["format"]) == Some("jsonl")
-        && u64_path(artifact, &["jsonl", "line_count"]).is_some()
-        && u64_path(artifact, &["jsonl", "nonempty_line_count"]).is_some()
-}
-
-fn blackbox_background_qos_summary_ready(bundle: &serde_json::Value) -> bool {
-    let Some(artifact) = blackbox_artifact(bundle, "background-maintenance.json") else {
-        return false;
-    };
-    str_path(artifact, &["format"]) == Some("json")
-        && str_path(artifact, &["background_qos", "protocol"])
-            == Some("skein-background-maintenance-report")
-        && bool_path(artifact, &["background_qos", "ready"]).is_some()
-        && u64_path(artifact, &["background_qos", "total_candidates"]).is_some()
-        && u64_path(artifact, &["background_qos", "admitted_count"]).is_some()
-        && u64_path(artifact, &["background_qos", "deferred_count"]).is_some()
-        && u64_path(artifact, &["background_qos", "rejected_count"]).is_some()
-        && u64_path(
-            artifact,
-            &[
-                "background_qos",
-                "executable_search_projection_graph_delta_count",
-            ],
-        )
-        .is_some()
-        && u64_path(
-            artifact,
-            &[
-                "background_qos",
-                "admitted_search_projection_graph_delta_count",
-            ],
-        )
-        .is_some()
-        && json_get_path(artifact, &["background_qos", "blocker_codes"])
-            .and_then(serde_json::Value::as_array)
-            .is_some()
-}
-
-fn blackbox_artifact<'a>(
-    bundle: &'a serde_json::Value,
-    name: &str,
-) -> Option<&'a serde_json::Value> {
-    json_get_path(bundle, &["blackbox_manifest", "artifacts"])?
-        .as_array()?
-        .iter()
-        .find(|artifact| str_path(artifact, &["name"]) == Some(name))
 }
 
 fn replacement_summary_storage_recovery_ready(bundle: &serde_json::Value) -> bool {

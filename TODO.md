@@ -209,6 +209,9 @@ contract.
   - [x] Expose typed blackbox readiness summaries over redaction, slow-query
     JSONL, and background QoS evidence so Mem can gate diagnostics without
     shelling out to manifest JSON glue.
+  - [x] Consume typed blackbox readiness in integration readiness so blackbox
+    redaction and operational evidence gates no longer duplicate JSON-path
+    rules.
 - [ ] PR 9: Add the final cutover preflight bundle gate.
   - Scope: combine route coverage, graph evidence, LanceDB projection evidence,
     storage recovery, background QoS, redaction, and library-only integration
