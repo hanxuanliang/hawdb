@@ -221,6 +221,8 @@ contract.
   - [x] Consume typed library-readiness cutover summaries in integration
     readiness so Mem can gate library startup and required areas without
     duplicating readiness JSON-path checks.
+  - [x] Route the library-readiness integration check through typed conditions
+    so field-level failures and next actions consume the same Rust gate summary.
   - [x] Expose and consume typed search-projection cutover readiness so Mem can
     gate LanceDB projection replacement without duplicating replacement-summary
     JSON-path checks.

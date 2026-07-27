@@ -841,44 +841,9 @@ pub fn nowledge_mem_integration_readiness(
             ),
             query_runtime_alignment_readiness.blocker_codes.clone(),
         ),
-        check(
+        check_named_conditions(
             "library_readiness",
-            [
-                library_readiness.protocol_matches,
-                library_readiness.present,
-                library_readiness.ready,
-                library_readiness.ready_area_count_present,
-                library_readiness.blocked_area_count_zero,
-                library_readiness.graph_opened,
-                library_readiness.search_projection_opened,
-                library_readiness.graph_ready,
-                library_readiness.query_ready,
-                library_readiness.storage_ready,
-                library_readiness.background_ready,
-                library_readiness.query_family_ready,
-                library_readiness.graph_route_ready,
-                library_readiness.search_projection_ready,
-                library_readiness.search_projection_shadow_ready,
-                library_readiness.search_candidate_shadow_ready,
-            ],
-            [
-                "library_readiness.protocol",
-                "library_readiness.present",
-                "library_readiness.ready",
-                "library_readiness.ready_area_count",
-                "library_readiness.blocked_area_count",
-                "library_readiness.open_report.graph_opened",
-                "library_readiness.open_report.search_projection_opened",
-                "library_readiness.readiness_by_area.graph.ready",
-                "library_readiness.readiness_by_area.query.ready",
-                "library_readiness.readiness_by_area.storage.ready",
-                "library_readiness.readiness_by_area.background.ready",
-                "library_readiness.readiness_by_area.query_family.ready",
-                "library_readiness.readiness_by_area.graph_route.ready",
-                "library_readiness.readiness_by_area.search_projection.ready",
-                "library_readiness.readiness_by_area.search_projection_shadow.ready",
-                "library_readiness.readiness_by_area.search_candidate_shadow.ready",
-            ],
+            library_readiness_cutover_conditions(&library_readiness),
             library_readiness.blocker_codes.clone(),
         ),
         check(
@@ -3651,6 +3616,68 @@ pub fn library_readiness_cutover_readiness(
             ],
         ),
     }
+}
+
+fn library_readiness_cutover_conditions(
+    readiness: &LibraryReadinessCutoverReadiness,
+) -> Vec<(&'static str, bool)> {
+    vec![
+        ("library_readiness.protocol", readiness.protocol_matches),
+        ("library_readiness.present", readiness.present),
+        ("library_readiness.ready", readiness.ready),
+        (
+            "library_readiness.ready_area_count",
+            readiness.ready_area_count_present,
+        ),
+        (
+            "library_readiness.blocked_area_count",
+            readiness.blocked_area_count_zero,
+        ),
+        (
+            "library_readiness.open_report.graph_opened",
+            readiness.graph_opened,
+        ),
+        (
+            "library_readiness.open_report.search_projection_opened",
+            readiness.search_projection_opened,
+        ),
+        (
+            "library_readiness.readiness_by_area.graph.ready",
+            readiness.graph_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.query.ready",
+            readiness.query_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.storage.ready",
+            readiness.storage_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.background.ready",
+            readiness.background_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.query_family.ready",
+            readiness.query_family_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.graph_route.ready",
+            readiness.graph_route_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.search_projection.ready",
+            readiness.search_projection_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.search_projection_shadow.ready",
+            readiness.search_projection_shadow_ready,
+        ),
+        (
+            "library_readiness.readiness_by_area.search_candidate_shadow.ready",
+            readiness.search_candidate_shadow_ready,
+        ),
+    ]
 }
 
 fn library_readiness_area_ready(bundle: &serde_json::Value, area: &str) -> bool {
