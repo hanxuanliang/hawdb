@@ -589,6 +589,15 @@ fn bounded_read_alignment_json(
     let mode_matches = str_path(bounded_read_evidence, &["mode"]) == str_path(summary, &["mode"]);
     let max_rows_matches =
         u64_path(bounded_read_evidence, &["max_rows"]) == u64_path(summary, &["max_rows"]);
+    let estimated_payload_bytes_matches =
+        u64_path(bounded_read_evidence, &["estimated_payload_bytes"])
+            == u64_path(summary, &["estimated_payload_bytes"]);
+    let max_estimated_payload_bytes_matches =
+        u64_path(bounded_read_evidence, &["max_estimated_payload_bytes"])
+            == u64_path(summary, &["max_estimated_payload_bytes"]);
+    let payload_budget_exceeded_matches =
+        bool_path(bounded_read_evidence, &["payload_budget_exceeded"])
+            == bool_path(summary, &["payload_budget_exceeded"]);
     let streaming_matches =
         bool_path(bounded_read_evidence, &["streaming"]) == bool_path(summary, &["streaming"]);
     let covered_routes_matches = string_set_path(bounded_read_evidence, &["covered_routes"])
@@ -602,6 +611,9 @@ fn bounded_read_alignment_json(
         readiness_matches,
         mode_matches,
         max_rows_matches,
+        estimated_payload_bytes_matches,
+        max_estimated_payload_bytes_matches,
+        payload_budget_exceeded_matches,
         streaming_matches,
         covered_routes_matches,
     };
@@ -616,6 +628,9 @@ fn bounded_read_alignment_json(
         "readiness_matches": alignment.readiness_matches,
         "mode_matches": alignment.mode_matches,
         "max_rows_matches": alignment.max_rows_matches,
+        "estimated_payload_bytes_matches": alignment.estimated_payload_bytes_matches,
+        "max_estimated_payload_bytes_matches": alignment.max_estimated_payload_bytes_matches,
+        "payload_budget_exceeded_matches": alignment.payload_budget_exceeded_matches,
         "streaming_matches": alignment.streaming_matches,
         "covered_routes_matches": alignment.covered_routes_matches,
         "blocker_codes": alignment.blocker_codes()
@@ -632,6 +647,9 @@ struct BoundedReadAlignment {
     readiness_matches: bool,
     mode_matches: bool,
     max_rows_matches: bool,
+    estimated_payload_bytes_matches: bool,
+    max_estimated_payload_bytes_matches: bool,
+    payload_budget_exceeded_matches: bool,
     streaming_matches: bool,
     covered_routes_matches: bool,
 }
@@ -646,6 +664,9 @@ impl BoundedReadAlignment {
             && self.readiness_matches
             && self.mode_matches
             && self.max_rows_matches
+            && self.estimated_payload_bytes_matches
+            && self.max_estimated_payload_bytes_matches
+            && self.payload_budget_exceeded_matches
             && self.streaming_matches
             && self.covered_routes_matches
     }
@@ -675,6 +696,15 @@ impl BoundedReadAlignment {
         }
         if !self.max_rows_matches {
             blockers.push("bounded_read_max_rows_mismatch");
+        }
+        if !self.estimated_payload_bytes_matches {
+            blockers.push("bounded_read_estimated_payload_bytes_mismatch");
+        }
+        if !self.max_estimated_payload_bytes_matches {
+            blockers.push("bounded_read_max_estimated_payload_bytes_mismatch");
+        }
+        if !self.payload_budget_exceeded_matches {
+            blockers.push("bounded_read_payload_budget_exceeded_mismatch");
         }
         if !self.streaming_matches {
             blockers.push("bounded_read_streaming_mismatch");
@@ -1122,6 +1152,30 @@ mod tests {
     }
 
     #[test]
+    fn generated_bundle_detects_bounded_read_payload_alignment_mismatch() {
+        let mut inputs = ready_inputs();
+        inputs.bounded_read_evidence.as_mut().unwrap()["payload_budget_exceeded"] =
+            serde_json::json!(true);
+
+        let bundle = nowledge_mem_integration_bundle_json(inputs).unwrap();
+        let readiness = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(
+            bundle["replacement_summary_bounded_read_alignment"]["payload_budget_exceeded_matches"],
+            false
+        );
+        assert_eq!(
+            bundle["replacement_summary_bounded_read_alignment"]["blocker_codes"],
+            serde_json::json!(["bounded_read_payload_budget_exceeded_mismatch"])
+        );
+        assert_eq!(readiness["ready"], false);
+        assert_eq!(
+            readiness["failed_checks"],
+            serde_json::json!(["bounded_read_evidence_alignment"])
+        );
+    }
+
+    #[test]
     fn generated_bundle_detects_query_runtime_alignment_mismatch() {
         let mut inputs = ready_inputs();
         inputs.query_runtime_preflight.as_mut().unwrap()["probes"]
@@ -1388,6 +1442,9 @@ mod tests {
             "mode": "shadow_read_only",
             "max_rows": 512,
             "execution_row_cap": 513,
+            "estimated_payload_bytes": 128,
+            "max_estimated_payload_bytes": 4194304,
+            "payload_budget_exceeded": false,
             "row_limit_enforced_before_output": true,
             "operator_row_cap_enabled": true,
             "blocking_operator_count": 0,

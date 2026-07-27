@@ -299,6 +299,9 @@ pub fn nowledge_replacement_summary_json_with_options(
             "mode": bounded_read_evidence.mode,
             "max_rows": bounded_read_evidence.max_rows,
             "execution_row_cap": bounded_read_evidence.execution_row_cap,
+            "estimated_payload_bytes": bounded_read_evidence.estimated_payload_bytes,
+            "max_estimated_payload_bytes": bounded_read_evidence.max_estimated_payload_bytes,
+            "payload_budget_exceeded": bounded_read_evidence.payload_budget_exceeded,
             "row_limit_enforced_before_output": bounded_read_evidence.row_limit_enforced_before_output,
             "operator_row_cap_enabled": bounded_read_evidence.operator_row_cap_enabled,
             "streaming": bounded_read_evidence.streaming,
@@ -657,6 +660,9 @@ struct BoundedReadEvidenceSummary<'a> {
     mode: Option<&'a str>,
     max_rows: Option<u64>,
     execution_row_cap: Option<u64>,
+    estimated_payload_bytes: Option<u64>,
+    max_estimated_payload_bytes: Option<u64>,
+    payload_budget_exceeded: Option<bool>,
     row_limit_enforced_before_output: Option<bool>,
     operator_row_cap_enabled: Option<bool>,
     streaming: Option<bool>,
@@ -1482,6 +1488,12 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
     let mode = json_get_str_path_from_dynamic(bundle, path, "mode");
     let max_rows = json_get_u64_path_from_dynamic(bundle, path, "max_rows");
     let execution_row_cap = json_get_u64_path_from_dynamic(bundle, path, "execution_row_cap");
+    let estimated_payload_bytes =
+        json_get_u64_path_from_dynamic(bundle, path, "estimated_payload_bytes");
+    let max_estimated_payload_bytes =
+        json_get_u64_path_from_dynamic(bundle, path, "max_estimated_payload_bytes");
+    let payload_budget_exceeded =
+        json_get_bool_path_from_dynamic(bundle, path, "payload_budget_exceeded");
     let row_limit_enforced_before_output =
         json_get_bool_path_from_dynamic(bundle, path, "row_limit_enforced_before_output");
     let operator_row_cap_enabled =
@@ -1532,6 +1544,9 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         && mode == Some("shadow_read_only")
         && max_rows.is_some_and(|value| value > 0)
         && execution_row_cap == max_rows.and_then(|value| value.checked_add(1))
+        && estimated_payload_bytes.is_some()
+        && max_estimated_payload_bytes.is_some_and(|value| value > 0)
+        && payload_budget_exceeded == Some(false)
         && row_limit_enforced_before_output == Some(true)
         && operator_row_cap_enabled == Some(true)
         && missing_covered_routes.is_empty()
@@ -1549,6 +1564,9 @@ fn bounded_read_evidence_summary(bundle: &serde_json::Value) -> BoundedReadEvide
         mode,
         max_rows,
         execution_row_cap,
+        estimated_payload_bytes,
+        max_estimated_payload_bytes,
+        payload_budget_exceeded,
         row_limit_enforced_before_output,
         operator_row_cap_enabled,
         streaming,
@@ -2220,6 +2238,9 @@ fn nowledge_replacement_next_actions(
                 "bounded_read_evidence.mode",
                 "bounded_read_evidence.max_rows",
                 "bounded_read_evidence.execution_row_cap",
+                "bounded_read_evidence.estimated_payload_bytes",
+                "bounded_read_evidence.max_estimated_payload_bytes",
+                "bounded_read_evidence.payload_budget_exceeded",
                 "bounded_read_evidence.row_limit_enforced_before_output",
                 "bounded_read_evidence.operator_row_cap_enabled",
                 "bounded_read_evidence.blocking_operator_count",
@@ -3741,6 +3762,44 @@ mod tests {
     }
 
     #[test]
+    fn replacement_summary_blocks_payload_budget_exceeded_bounded_read_evidence() {
+        let mut bundle = production_ready_bundle();
+        bundle["bounded_read_evidence"]["ready"] = serde_json::json!(false);
+        bundle["bounded_read_evidence"]["estimated_payload_bytes"] = serde_json::json!(8192);
+        bundle["bounded_read_evidence"]["max_estimated_payload_bytes"] = serde_json::json!(4096);
+        bundle["bounded_read_evidence"]["payload_budget_exceeded"] = serde_json::json!(true);
+        bundle["bounded_read_evidence"]["blocker_codes"] =
+            serde_json::json!(["payload_budget_exceeded"]);
+
+        let summary = nowledge_replacement_summary_json(&bundle);
+
+        assert_eq!(summary["production_cutover_ready"], false);
+        assert_eq!(summary["bounded_read_evidence"]["ready"], false);
+        assert_eq!(
+            summary["bounded_read_evidence"]["estimated_payload_bytes"],
+            8192
+        );
+        assert_eq!(
+            summary["bounded_read_evidence"]["max_estimated_payload_bytes"],
+            4096
+        );
+        assert_eq!(
+            summary["bounded_read_evidence"]["payload_budget_exceeded"],
+            true
+        );
+        assert!(summary["blocking_categories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence"));
+        assert!(summary["missing_evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item == "bounded_read_evidence_ready"));
+    }
+
+    #[test]
     fn replacement_summary_requires_bounded_read_route_coverage() {
         let mut bundle = production_ready_bundle();
         let covered_routes = REQUIRED_NOWLEDGE_MEM_BOUNDED_READ_ROUTES
@@ -4723,6 +4782,9 @@ mod tests {
                         "bounded_read_evidence.mode",
                         "bounded_read_evidence.max_rows",
                         "bounded_read_evidence.execution_row_cap",
+                        "bounded_read_evidence.estimated_payload_bytes",
+                        "bounded_read_evidence.max_estimated_payload_bytes",
+                        "bounded_read_evidence.payload_budget_exceeded",
                         "bounded_read_evidence.row_limit_enforced_before_output",
                         "bounded_read_evidence.operator_row_cap_enabled",
                         "bounded_read_evidence.blocking_operator_count",
@@ -4987,6 +5049,9 @@ mod tests {
                 "mode": "shadow_read_only",
                 "max_rows": 512,
                 "execution_row_cap": 513,
+                "estimated_payload_bytes": 128,
+                "max_estimated_payload_bytes": 4194304,
+                "payload_budget_exceeded": false,
                 "row_limit_enforced_before_output": true,
                 "operator_row_cap_enabled": true,
                 "streaming": false,

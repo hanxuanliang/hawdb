@@ -571,6 +571,32 @@ pub fn nowledge_mem_integration_readiness(
                     &["replacement_summary", "bounded_read_evidence", "mode"],
                 ) == Some("shadow_read_only"),
                 bounded_read_execution_cap_matches(bundle),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "estimated_payload_bytes",
+                    ],
+                )
+                .is_some(),
+                u64_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "max_estimated_payload_bytes",
+                    ],
+                )
+                .is_some_and(|value| value > 0),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary",
+                        "bounded_read_evidence",
+                        "payload_budget_exceeded",
+                    ],
+                ) == Some(false),
                 bool_path(
                     bundle,
                     &[
@@ -608,6 +634,9 @@ pub fn nowledge_mem_integration_readiness(
                 "replacement_summary.bounded_read_evidence.max_rows",
                 "replacement_summary.bounded_read_evidence.mode",
                 "replacement_summary.bounded_read_evidence.execution_row_cap",
+                "replacement_summary.bounded_read_evidence.estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.max_estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.payload_budget_exceeded",
                 "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
                 "replacement_summary.bounded_read_evidence.blocking_operator_count",
@@ -657,6 +686,27 @@ pub fn nowledge_mem_integration_readiness(
                 ) == Some(true),
                 bool_path(
                     bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "estimated_payload_bytes_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "max_estimated_payload_bytes_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
+                    &[
+                        "replacement_summary_bounded_read_alignment",
+                        "payload_budget_exceeded_matches",
+                    ],
+                ) == Some(true),
+                bool_path(
+                    bundle,
                     &["replacement_summary_bounded_read_alignment", "streaming_matches"],
                 ) == Some(true),
                 bool_path(
@@ -676,6 +726,9 @@ pub fn nowledge_mem_integration_readiness(
                 "replacement_summary_bounded_read_alignment.readiness_matches",
                 "replacement_summary_bounded_read_alignment.mode_matches",
                 "replacement_summary_bounded_read_alignment.max_rows_matches",
+                "replacement_summary_bounded_read_alignment.estimated_payload_bytes_matches",
+                "replacement_summary_bounded_read_alignment.max_estimated_payload_bytes_matches",
+                "replacement_summary_bounded_read_alignment.payload_budget_exceeded_matches",
                 "replacement_summary_bounded_read_alignment.streaming_matches",
                 "replacement_summary_bounded_read_alignment.covered_routes_matches",
             ],
@@ -1650,6 +1703,9 @@ fn next_actions(bundle: &serde_json::Value, ready: bool) -> Vec<NowledgeMemInteg
                 "replacement_summary.bounded_read_evidence.mode",
                 "replacement_summary.bounded_read_evidence.max_rows",
                 "replacement_summary.bounded_read_evidence.execution_row_cap",
+                "replacement_summary.bounded_read_evidence.estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.max_estimated_payload_bytes",
+                "replacement_summary.bounded_read_evidence.payload_budget_exceeded",
                 "replacement_summary.bounded_read_evidence.row_limit_enforced_before_output",
                 "replacement_summary.bounded_read_evidence.operator_row_cap_enabled",
                 "replacement_summary.bounded_read_evidence.blocking_operator_count",
@@ -2150,6 +2206,32 @@ fn replacement_summary_bounded_read_ready(bundle: &serde_json::Value) -> bool {
             &["replacement_summary", "bounded_read_evidence", "mode"],
         ) == Some("shadow_read_only")
         && bounded_read_execution_cap_matches(bundle)
+        && u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "estimated_payload_bytes",
+            ],
+        )
+        .is_some()
+        && u64_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "max_estimated_payload_bytes",
+            ],
+        )
+        .is_some_and(|value| value > 0)
+        && bool_path(
+            bundle,
+            &[
+                "replacement_summary",
+                "bounded_read_evidence",
+                "payload_budget_exceeded",
+            ],
+        ) == Some(false)
         && bool_path(
             bundle,
             &[
@@ -2205,6 +2287,18 @@ fn bounded_read_alignment_ready(bundle: &serde_json::Value) -> bool {
             &[
                 "replacement_summary_bounded_read_alignment",
                 "max_rows_matches",
+            ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "estimated_payload_bytes_matches",
+            ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "max_estimated_payload_bytes_matches",
+            ][..],
+            &[
+                "replacement_summary_bounded_read_alignment",
+                "payload_budget_exceeded_matches",
             ][..],
             &[
                 "replacement_summary_bounded_read_alignment",
@@ -4158,6 +4252,45 @@ mod tests {
     }
 
     #[test]
+    fn requires_bounded_read_payload_budget() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary"]["bounded_read_evidence"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary"]["bounded_read_evidence"]["estimated_payload_bytes"] =
+            serde_json::json!(8192);
+        bundle["replacement_summary"]["bounded_read_evidence"]["max_estimated_payload_bytes"] =
+            serde_json::json!(4096);
+        bundle["replacement_summary"]["bounded_read_evidence"]["payload_budget_exceeded"] =
+            serde_json::json!(true);
+        bundle["replacement_summary"]["bounded_read_evidence"]["blocker_codes"] =
+            serde_json::json!(["payload_budget_exceeded"]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence"])
+        );
+        assert_eq!(
+            report["blocker_codes"],
+            serde_json::json!(["payload_budget_exceeded"])
+        );
+        let read_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence")
+            .unwrap();
+        assert_eq!(
+            read_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary.bounded_read_evidence.ready",
+                "replacement_summary.bounded_read_evidence.payload_budget_exceeded"
+            ])
+        );
+    }
+
+    #[test]
     fn requires_bounded_read_route_coverage() {
         let mut bundle = ready_bundle();
         bundle["replacement_summary"]["bounded_read_evidence"]["covered_routes"] =
@@ -4261,6 +4394,43 @@ mod tests {
             serde_json::json!([
                 "replacement_summary_bounded_read_alignment.ready",
                 "replacement_summary_bounded_read_alignment.covered_routes_matches"
+            ])
+        );
+    }
+
+    #[test]
+    fn rejects_stale_bounded_read_summary_when_payload_budget_differs() {
+        let mut bundle = ready_bundle();
+        bundle["replacement_summary_bounded_read_alignment"]["ready"] = serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["estimated_payload_bytes_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["payload_budget_exceeded_matches"] =
+            serde_json::json!(false);
+        bundle["replacement_summary_bounded_read_alignment"]["blocker_codes"] =
+            serde_json::json!([
+                "bounded_read_estimated_payload_bytes_mismatch",
+                "bounded_read_payload_budget_exceeded_mismatch"
+            ]);
+
+        let report = nowledge_mem_integration_readiness_json(&bundle);
+
+        assert_eq!(report["ready"], false);
+        assert_eq!(
+            report["failed_checks"],
+            serde_json::json!(["bounded_read_evidence_alignment"])
+        );
+        let alignment_check = report["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|check| check["name"] == "bounded_read_evidence_alignment")
+            .unwrap();
+        assert_eq!(
+            alignment_check["failed_evidence_fields"],
+            serde_json::json!([
+                "replacement_summary_bounded_read_alignment.ready",
+                "replacement_summary_bounded_read_alignment.estimated_payload_bytes_matches",
+                "replacement_summary_bounded_read_alignment.payload_budget_exceeded_matches"
             ])
         );
     }
@@ -5630,6 +5800,9 @@ mod tests {
                 "mode": "shadow_read_only",
                 "max_rows": 512,
                 "execution_row_cap": 513,
+                "estimated_payload_bytes": 128,
+                "max_estimated_payload_bytes": 4194304,
+                "payload_budget_exceeded": false,
                 "row_limit_enforced_before_output": true,
                 "operator_row_cap_enabled": true,
                 "blocking_operator_count": 0,
@@ -5647,6 +5820,9 @@ mod tests {
                 "readiness_matches": true,
                 "mode_matches": true,
                 "max_rows_matches": true,
+                "estimated_payload_bytes_matches": true,
+                "max_estimated_payload_bytes_matches": true,
+                "payload_budget_exceeded_matches": true,
                 "streaming_matches": true,
                 "covered_routes_matches": true,
                 "blocker_codes": []
@@ -5718,6 +5894,9 @@ mod tests {
                     "mode": "shadow_read_only",
                     "max_rows": 512,
                     "execution_row_cap": 513,
+                    "estimated_payload_bytes": 128,
+                    "max_estimated_payload_bytes": 4194304,
+                    "payload_budget_exceeded": false,
                     "row_limit_enforced_before_output": true,
                     "operator_row_cap_enabled": true,
                     "blocking_operator_count": 0,
