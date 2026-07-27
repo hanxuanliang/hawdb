@@ -27,10 +27,11 @@ use crate::search::{
     SearchRetrieverCandidateSetReport, SearchTruncationReasonCode,
 };
 use crate::store::{
-    AdjacencyDirection, AdjacencyLayout, DurabilityPolicy, GraphMutation, GraphStore, NodeId,
-    NodeRecord, ProjectedGraphStatus, PropertyIndexProjectionRebuildAction, RecoveryMode,
-    RelRecord, ScanPruningReport, ScanPruningStrategy, SchemaMaintenanceAction,
-    StorageReclamationWatermark, StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
+    AdjacencyDirection, AdjacencyLayout, BasicStatisticsConsistencyReport, DurabilityPolicy,
+    GraphMutation, GraphStore, NodeId, NodeRecord, ProjectedGraphStatus,
+    PropertyIndexProjectionRebuildAction, RecoveryMode, RelRecord, ScanPruningReport,
+    ScanPruningStrategy, SchemaMaintenanceAction, StorageReclamationWatermark,
+    StorageRecoveryReport, StoreStableIdMapping, WalReplayConfig,
 };
 use crate::value::Value;
 use plan_cache::{CachedPlan, PlanCache, PlanCacheKey, DEFAULT_PLAN_CACHE_MAX_ENTRIES};
@@ -6339,6 +6340,10 @@ impl Database {
 
     pub fn basic_statistics(&self) -> BasicGraphStatistics {
         self.store.basic_statistics()
+    }
+
+    pub fn basic_statistics_consistency_report(&self) -> BasicStatisticsConsistencyReport {
+        self.store.basic_statistics_consistency_report()
     }
 
     pub fn property_indexes(&self) -> Vec<IndexDescriptor> {

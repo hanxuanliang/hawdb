@@ -576,6 +576,43 @@ pub struct StorageRecoveryReport {
     pub recovered_commit_epoch: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BasicStatisticsConsistencyReport {
+    pub ready: bool,
+    pub computed_at_commit_epoch: u64,
+    pub incremental: BasicGraphStatistics,
+    pub recomputed: BasicGraphStatistics,
+    pub mismatched_fields: Vec<String>,
+}
+
+impl BasicStatisticsConsistencyReport {
+    fn new(incremental: BasicGraphStatistics, recomputed: BasicGraphStatistics) -> Self {
+        let mut mismatched_fields = Vec::new();
+        if incremental.computed_at_commit_epoch != recomputed.computed_at_commit_epoch {
+            mismatched_fields.push("computed_at_commit_epoch".to_string());
+        }
+        if incremental.node_count != recomputed.node_count {
+            mismatched_fields.push("node_count".to_string());
+        }
+        if incremental.relationship_count != recomputed.relationship_count {
+            mismatched_fields.push("relationship_count".to_string());
+        }
+        if incremental.label_counts != recomputed.label_counts {
+            mismatched_fields.push("label_counts".to_string());
+        }
+        if incremental.rel_type_counts != recomputed.rel_type_counts {
+            mismatched_fields.push("rel_type_counts".to_string());
+        }
+        Self {
+            ready: mismatched_fields.is_empty(),
+            computed_at_commit_epoch: incremental.computed_at_commit_epoch,
+            incremental,
+            recomputed,
+            mismatched_fields,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoreStableIdMapping {
     pub node_stable_ids: BTreeMap<NodeId, Value>,
@@ -4439,6 +4476,13 @@ impl GraphStore {
         let mut statistics = self.basic_statistics.clone();
         statistics.computed_at_commit_epoch = self.commit_epoch;
         statistics
+    }
+
+    pub fn basic_statistics_consistency_report(&self) -> BasicStatisticsConsistencyReport {
+        BasicStatisticsConsistencyReport::new(
+            self.basic_statistics(),
+            compute_basic_statistics(&self.nodes, &self.relationships, self.commit_epoch),
+        )
     }
 
     pub fn snapshot(&self) -> Self {
@@ -11972,6 +12016,89 @@ mod tests {
         assert_eq!(histogram.len(), 512);
         assert_eq!(histogram.first(), Some(&Value::Int(0)));
         assert_eq!(histogram.last(), Some(&Value::Int(4_999)));
+    }
+
+    #[test]
+    fn incremental_basic_statistics_match_full_recompute_after_mutations() {
+        let mut catalog = Catalog::default();
+        let mut store = GraphStore::in_memory();
+        let source = store
+            .create_node(
+                &mut catalog,
+                "Memory",
+                properties([("id", Value::String("stat-source".to_string()))]),
+            )
+            .unwrap();
+        let target = store
+            .create_node(
+                &mut catalog,
+                "Entity",
+                properties([("id", Value::String("stat-target".to_string()))]),
+            )
+            .unwrap();
+        store
+            .create_relationship(
+                &mut catalog,
+                source,
+                target,
+                "MENTIONS",
+                properties([("confidence", Value::Float(0.9))]),
+            )
+            .unwrap();
+
+        let report = store.basic_statistics_consistency_report();
+        assert!(report.ready);
+        assert!(report.mismatched_fields.is_empty());
+        assert_eq!(report.incremental, report.recomputed);
+        assert_eq!(report.incremental.node_count, 2);
+        assert_eq!(report.incremental.relationship_count, 1);
+        assert_eq!(
+            report
+                .incremental
+                .label_counts
+                .get(&catalog.label_id("Memory").unwrap()),
+            Some(&1)
+        );
+        assert_eq!(
+            report
+                .incremental
+                .label_counts
+                .get(&catalog.label_id("Entity").unwrap()),
+            Some(&1)
+        );
+        assert_eq!(
+            report
+                .incremental
+                .rel_type_counts
+                .get(&catalog.rel_type_id("MENTIONS").unwrap()),
+            Some(&1)
+        );
+
+        store
+            .delete_nodes(
+                &mut catalog,
+                "Memory",
+                Some(&PropertyFilter::Eq {
+                    property: "id".to_string(),
+                    value: Value::String("stat-source".to_string()),
+                }),
+                true,
+            )
+            .unwrap();
+        let report = store.basic_statistics_consistency_report();
+        assert!(report.ready);
+        assert!(report.mismatched_fields.is_empty());
+        assert_eq!(report.incremental, report.recomputed);
+        assert_eq!(report.incremental.node_count, 1);
+        assert_eq!(report.incremental.relationship_count, 0);
+        assert!(!report
+            .incremental
+            .label_counts
+            .contains_key(&catalog.label_id("Memory").unwrap()));
+        assert!(!report
+            .incremental
+            .rel_type_counts
+            .contains_key(&catalog.rel_type_id("MENTIONS").unwrap()));
     }
 
     #[test]

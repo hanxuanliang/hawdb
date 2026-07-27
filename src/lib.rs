@@ -353,9 +353,9 @@ pub use storage_recovery_evidence::{
     run_nowledge_storage_recovery_evidence,
 };
 pub use store::{
-    AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, DurabilityPolicy,
-    OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark, StorageRecoveryReport,
-    WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
+    AdjacencyDirection, AdjacencyGroupStats, AdjacencyLayout, BasicStatisticsConsistencyReport,
+    DurabilityPolicy, OrderedAdjacencyEntry, RecoveryMode, StorageReclamationWatermark,
+    StorageRecoveryReport, WalReplayConfig, DENSE_ADJACENCY_DEGREE_THRESHOLD,
 };
 pub use value::Value;
 

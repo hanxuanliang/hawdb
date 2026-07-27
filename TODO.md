@@ -649,6 +649,9 @@ contract.
   - Prefer incremental label, relationship, distinct-value, and degree summaries
     once correctness is proven.
   - Keep full rebuild as a validation and repair tool.
+  - [x] Expose a typed basic-statistics consistency report that compares
+    incrementally maintained node, label, relationship, and relationship-type
+    counts against a full recompute after mutations.
 - [ ] Improve adjacency and index layout for read-heavy local workloads.
   - Optimize for bounded memory and predictable read amplification.
   - Keep row-oriented canonical records and add projection/index layouts only
